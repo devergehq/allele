@@ -1,0 +1,43 @@
+[package]
+name = "cc-multiplex"
+version = "0.1.0"
+edition = "2021"
+description = "Claude Code session manager — centralised terminal multiplexer with APFS clone management"
+
+[dependencies]
+# GPUI — pinned to specific Zed commit (same rev Termy uses, known working)
+gpui = { git = "https://github.com/zed-industries/zed", rev = "83de8a25e0ef71a8d762a148459bc863adaeb7e3", package = "gpui" }
+
+# Terminal emulation — pinned to specific Alacritty commit
+alacritty_terminal = { git = "https://github.com/alacritty/alacritty", rev = "4225cea231432fb23442b1da2463b4ec9dfd726c" }
+
+# Event channels (PTY ↔ UI)
+flume = "0.11"
+
+# Error handling
+anyhow = "1"
+
+# State management
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# File watching (for hook events)
+notify = "7"
+
+# APFS COW cloning
+# clonetree or direct libc FFI — evaluate during Phase 1
+
+[target.'cfg(unix)'.dependencies]
+rustix-openpty = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-text = "=21.0.0"  # Pin to avoid core-graphics version conflict with GPUI
+cocoa = "0.26"
+objc = "0.2"
+
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", rev = "83de8a25e0ef71a8d762a148459bc863adaeb7e3", package = "gpui", features = ["test-support"] }
