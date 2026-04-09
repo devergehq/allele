@@ -33,7 +33,7 @@ pub struct TerminalView {
     pub focus_handle: FocusHandle,
     cell_width: f32,
     cell_height: f32,
-    scroll_offset: i32, // 0 = bottom (showing latest), negative = scrolled up into history
+    scroll_dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // FPS tracking
     frame_count: u32,
     last_fps_time: Instant,
@@ -50,21 +50,15 @@ impl TerminalView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        // Measure actual monospace character width from the font
-        let cell_width = {
-            let text_system = window.text_system();
-            let font = Font {
-                family: FONT_FAMILY.into(),
-                ..Default::default()
-            };
-            let font_id = text_system.resolve_font(&font);
-            let font_size = px(FONT_SIZE);
-            text_system.em_advance(font_id, font_size)
-                .map(|px_val| f32::from(px_val))
-                .unwrap_or(DEFAULT_CELL_WIDTH)
-        };
+        // Cell width for terminal grid calculation.
+        //
+        // GPUI's text system reports JetBrains Mono advance width as 10.83px at 13px,
+        // but GPUI's div-based text rendering compresses glyphs tighter than the
+        // declared advance width. The actual rendered width per character is ~7.8px.
+        // This is an empirical value — proper fix requires GPUI's Element trait with
+        // per-cell positioned rendering (as Termy's grid.rs does).
+        let cell_width = 7.8_f32;
         let cell_height = LINE_HEIGHT;
-        eprintln!("Measured cell dimensions: {cell_width}px x {cell_height}px");
 
         let terminal = match PtyTerminal::spawn(TermSize::default(), command, working_dir) {
             Ok(t) => Some(t),
@@ -78,7 +72,7 @@ impl TerminalView {
                     focus_handle,
                     cell_width,
                     cell_height,
-                    scroll_offset: 0,
+                    scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     frame_count: 0,
                     last_fps_time: Instant::now(),
                     current_fps: 0,
@@ -98,11 +92,14 @@ impl TerminalView {
 
                 let should_redraw = this
                     .update(cx, |this: &mut Self, _cx: &mut Context<Self>| {
-                        if let Some(ref mut terminal) = this.terminal {
+                        let pty_events = if let Some(ref mut terminal) = this.terminal {
                             terminal.drain_events()
                         } else {
                             false
-                        }
+                        };
+                        // Also check if scroll happened
+                        let scrolled = this.scroll_dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
+                        pty_events || scrolled
                     })
                     .unwrap_or(false);
 
@@ -149,7 +146,7 @@ impl TerminalView {
             focus_handle,
             cell_width,
             cell_height,
-            scroll_offset: 0,
+            scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             frame_count: 0,
             last_fps_time: Instant::now(),
             current_fps: 0,
@@ -489,14 +486,19 @@ impl Render for TerminalView {
             // doesn't accept cx.listener pattern at this GPUI rev
             .on_scroll_wheel({
                 let term = self.terminal.as_ref().map(|t| t.term.clone());
+                let scroll_dirty = self.scroll_dirty.clone();
                 let cell_h = self.cell_height;
                 move |event: &ScrollWheelEvent, _window: &mut Window, _cx: &mut App| {
                     let Some(ref term) = term else { return };
                     let delta = event.delta.pixel_delta(px(cell_h));
-                    let lines = (f32::from(delta.y) / cell_h) as i32;
+                    // Convert pixel delta to line count
+                    // Positive delta.y = scroll up (natural scrolling) = show history
+                    // Scroll::Delta(positive) = scroll up in alacritty
+                    let lines = (f32::from(delta.y) / cell_h).round() as i32;
                     if lines != 0 {
                         use alacritty_terminal::grid::Scroll;
                         term.lock().scroll_display(Scroll::Delta(lines));
+                        scroll_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             })
