@@ -7,8 +7,10 @@ use gpui::*;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-const CELL_WIDTH: f32 = 7.6; // Approximate monospace char width at 13px
-const CELL_HEIGHT: f32 = 18.0; // Line height
+const FONT_FAMILY: &str = "JetBrains Mono";
+const FONT_SIZE: f32 = 13.0;
+const LINE_HEIGHT: f32 = 18.0;
+const DEFAULT_CELL_WIDTH: f32 = 7.6; // Fallback if measurement fails
 const MIN_COLS: u16 = 20;
 const MIN_ROWS: u16 = 4;
 
@@ -29,6 +31,9 @@ pub struct TerminalView {
     last_cols: u16,
     last_rows: u16,
     pub focus_handle: FocusHandle,
+    cell_width: f32,
+    cell_height: f32,
+    scroll_offset: i32, // 0 = bottom (showing latest), negative = scrolled up into history
     // FPS tracking
     frame_count: u32,
     last_fps_time: Instant,
@@ -45,6 +50,22 @@ impl TerminalView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
+        // Measure actual monospace character width from the font
+        let cell_width = {
+            let text_system = window.text_system();
+            let font = Font {
+                family: FONT_FAMILY.into(),
+                ..Default::default()
+            };
+            let font_id = text_system.resolve_font(&font);
+            let font_size = px(FONT_SIZE);
+            text_system.em_advance(font_id, font_size)
+                .map(|px_val| f32::from(px_val))
+                .unwrap_or(DEFAULT_CELL_WIDTH)
+        };
+        let cell_height = LINE_HEIGHT;
+        eprintln!("Measured cell dimensions: {cell_width}px x {cell_height}px");
+
         let terminal = match PtyTerminal::spawn(TermSize::default(), command, working_dir) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -55,6 +76,9 @@ impl TerminalView {
                     last_cols: 80,
                     last_rows: 24,
                     focus_handle,
+                    cell_width,
+                    cell_height,
+                    scroll_offset: 0,
                     frame_count: 0,
                     last_fps_time: Instant::now(),
                     current_fps: 0,
@@ -103,6 +127,8 @@ impl TerminalView {
                 let new_size = Self::compute_size(
                     f32::from(available_width),
                     f32::from(available_height),
+                    this.cell_width,
+                    this.cell_height,
                 );
                 if new_size.cols != this.last_cols || new_size.rows != this.last_rows {
                     this.last_cols = new_size.cols;
@@ -121,6 +147,9 @@ impl TerminalView {
             last_cols: 80,
             last_rows: 24,
             focus_handle,
+            cell_width,
+            cell_height,
+            scroll_offset: 0,
             frame_count: 0,
             last_fps_time: Instant::now(),
             current_fps: 0,
@@ -220,14 +249,14 @@ impl TerminalView {
     }
 
     /// Compute terminal grid size from pixel dimensions
-    fn compute_size(width_px: f32, height_px: f32) -> TermSize {
-        let cols = (width_px / CELL_WIDTH).floor() as u16;
-        let rows = (height_px / CELL_HEIGHT).floor() as u16;
+    fn compute_size(width_px: f32, height_px: f32, cell_w: f32, cell_h: f32) -> TermSize {
+        let cols = (width_px / cell_w).floor() as u16;
+        let rows = (height_px / cell_h).floor() as u16;
         TermSize {
             cols: cols.max(MIN_COLS),
             rows: rows.max(MIN_ROWS),
-            cell_width: CELL_WIDTH as u16,
-            cell_height: CELL_HEIGHT as u16,
+            cell_width: cell_w as u16,
+            cell_height: cell_h as u16,
         }
     }
 }
@@ -383,9 +412,9 @@ impl Render for TerminalView {
             .id("terminal")
             .size_full()
             .bg(rgb(0x1e1e2e))
-            .font_family("JetBrains Mono")
-            .text_size(px(13.0))
-            .line_height(px(CELL_HEIGHT))
+            .font_family(FONT_FAMILY)
+            .text_size(px(FONT_SIZE))
+            .line_height(px(self.cell_height))
             .overflow_hidden()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
@@ -456,6 +485,21 @@ impl Render for TerminalView {
                     terminal.write(key_char.as_bytes());
                 }
             }))
+            // Scroll wheel handling — uses raw closure since on_scroll_wheel
+            // doesn't accept cx.listener pattern at this GPUI rev
+            .on_scroll_wheel({
+                let term = self.terminal.as_ref().map(|t| t.term.clone());
+                let cell_h = self.cell_height;
+                move |event: &ScrollWheelEvent, _window: &mut Window, _cx: &mut App| {
+                    let Some(ref term) = term else { return };
+                    let delta = event.delta.pixel_delta(px(cell_h));
+                    let lines = (f32::from(delta.y) / cell_h) as i32;
+                    if lines != 0 {
+                        use alacritty_terminal::grid::Scroll;
+                        term.lock().scroll_display(Scroll::Delta(lines));
+                    }
+                }
+            })
             .children(row_elements)
             .into_any_element()
     }

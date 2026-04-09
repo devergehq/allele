@@ -1,6 +1,6 @@
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
@@ -207,6 +207,11 @@ impl PtyTerminal {
         self.size = new_size;
         let _ = self.pty_tx.0.send(Msg::Resize(new_size.into()));
         self.term.lock().resize(new_size);
+    }
+
+    /// Scroll the terminal display
+    pub fn scroll(&self, delta: i32) {
+        self.term.lock().scroll_display(Scroll::Delta(delta));
     }
 
     /// Drain pending events (call regularly to process PTY output)

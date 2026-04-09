@@ -277,6 +277,7 @@ impl Render for AppState {
                                 div()
                                     .text_size(px(10.0))
                                     .text_color(rgb(0x585b70))
+                                    .min_w(px(45.0))  // Fixed min width to prevent jumping
                                     .child(elapsed),
                             )
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, window, cx| {
