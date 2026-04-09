@@ -18,6 +18,7 @@ pub struct TerminalView {
     error: Option<String>,
     last_cols: u16,
     last_rows: u16,
+    pub focus_handle: FocusHandle,
     // FPS tracking
     frame_count: u32,
     last_fps_time: Instant,
@@ -32,6 +33,8 @@ impl TerminalView {
         command: Option<ShellCommand>,
         working_dir: Option<PathBuf>,
     ) -> Self {
+        let focus_handle = cx.focus_handle();
+
         let terminal = match PtyTerminal::spawn(TermSize::default(), command, working_dir) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -41,12 +44,16 @@ impl TerminalView {
                     error: Some(format!("Failed to create PTY: {e}")),
                     last_cols: 80,
                     last_rows: 24,
+                    focus_handle,
                     frame_count: 0,
                     last_fps_time: Instant::now(),
                     current_fps: 0,
                 };
             }
         };
+
+        // Auto-focus this terminal on creation
+        focus_handle.focus(window, cx);
 
         // Poll for PTY events on a timer and re-render
         cx.spawn_in(window, async |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
@@ -57,7 +64,7 @@ impl TerminalView {
 
                 let should_redraw = this
                     .update(cx, |this: &mut Self, _cx: &mut Context<Self>| {
-                        if let Some(ref terminal) = this.terminal {
+                        if let Some(ref mut terminal) = this.terminal {
                             terminal.drain_events()
                         } else {
                             false
@@ -75,11 +82,35 @@ impl TerminalView {
         })
         .detach();
 
+        // Observe window bounds changes for resize
+        cx.observe_window_bounds(window, |this: &mut Self, window, _cx| {
+            let viewport = window.viewport_size();
+            let sidebar_width = px(240.0);
+            let available_width = viewport.width - sidebar_width;
+            let available_height = viewport.height;
+
+            if available_width > px(100.0) && available_height > px(100.0) {
+                let new_size = Self::compute_size(
+                    f32::from(available_width),
+                    f32::from(available_height),
+                );
+                if new_size.cols != this.last_cols || new_size.rows != this.last_rows {
+                    this.last_cols = new_size.cols;
+                    this.last_rows = new_size.rows;
+                    if let Some(ref mut terminal) = this.terminal {
+                        terminal.resize(new_size);
+                    }
+                }
+            }
+        })
+        .detach();
+
         Self {
             terminal,
             error: None,
             last_cols: 80,
             last_rows: 24,
+            focus_handle,
             frame_count: 0,
             last_fps_time: Instant::now(),
             current_fps: 0,
@@ -166,6 +197,16 @@ impl TerminalView {
         let g = ((rgba_val >> 8) & 0xFF) as f32 / 255.0;
         let b = (rgba_val & 0xFF) as f32 / 255.0;
         Hsla::from(Rgba { r, g, b, a: 1.0 })
+    }
+
+    /// Focus this terminal view
+    pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        self.focus_handle.focus(window, cx);
+    }
+
+    /// Check if the PTY process has exited
+    pub fn has_exited(&self) -> bool {
+        self.terminal.as_ref().map_or(true, |t| t.exited)
     }
 
     /// Compute terminal grid size from pixel dimensions
@@ -336,7 +377,7 @@ impl Render for TerminalView {
             .text_size(px(13.0))
             .line_height(px(CELL_HEIGHT))
             .overflow_hidden()
-            .focusable()
+            .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, _cx| {
                 let Some(ref terminal) = this.terminal else { return };
                 let key = event.keystroke.key.as_str();
@@ -387,28 +428,6 @@ impl Render for TerminalView {
                 // For regular character input, use key_char
                 if let Some(ref key_char) = event.keystroke.key_char {
                     terminal.write(key_char.as_bytes());
-                }
-            }))
-            // Resize detection — fires when the terminal div is laid out
-            .on_mouse_move(cx.listener(move |this: &mut Self, _event: &MouseMoveEvent, window, _cx| {
-                // Use mouse move as a proxy to check bounds — lightweight resize detection
-                let viewport = window.viewport_size();
-                let sidebar_width = px(240.0);
-                let available_width = viewport.width - sidebar_width;
-                let available_height = viewport.height;
-
-                if available_width > px(100.0) && available_height > px(100.0) {
-                    let new_size = Self::compute_size(
-                        f32::from(available_width),
-                        f32::from(available_height),
-                    );
-                    if new_size.cols != this.last_cols || new_size.rows != this.last_rows {
-                        this.last_cols = new_size.cols;
-                        this.last_rows = new_size.rows;
-                        if let Some(ref mut terminal) = this.terminal {
-                            terminal.resize(new_size);
-                        }
-                    }
                 }
             }))
             .children(row_elements)

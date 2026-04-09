@@ -122,6 +122,15 @@ fn main() {
 
 impl Render for AppState {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Update session statuses from PTY state
+        for session in &mut self.sessions {
+            if session.status == SessionStatus::Running {
+                if session.terminal_view.read(cx).has_exited() {
+                    session.status = SessionStatus::Done;
+                }
+            }
+        }
+
         // Build sidebar session list
         let mut session_items: Vec<AnyElement> = Vec::new();
 
@@ -155,8 +164,13 @@ impl Render for AppState {
                             .text_color(if is_active { rgb(0xcdd6f4) } else { rgb(0x9399b2) })
                             .child(label),
                     )
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, window, cx| {
                         this.active_session_idx = idx;
+                        // Focus the newly selected terminal
+                        if let Some(session) = this.sessions.get(idx) {
+                            let focus_handle = session.terminal_view.read(cx).focus_handle.clone();
+                            focus_handle.focus(window, cx);
+                        }
                         cx.notify();
                     }))
                     .into_any_element(),

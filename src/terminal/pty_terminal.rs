@@ -101,6 +101,7 @@ pub struct PtyTerminal {
     pub pty_tx: Notifier,
     pub events_rx: Receiver<AlacEvent>,
     pub size: TermSize,
+    pub exited: bool,
 }
 
 impl PtyTerminal {
@@ -169,6 +170,7 @@ impl PtyTerminal {
             pty_tx,
             events_rx,
             size,
+            exited: false,
         })
     }
 
@@ -208,10 +210,20 @@ impl PtyTerminal {
     }
 
     /// Drain pending events (call regularly to process PTY output)
-    pub fn drain_events(&self) -> bool {
+    /// Returns true if there were events (meaning terminal needs redraw)
+    pub fn drain_events(&mut self) -> bool {
         let mut had_events = false;
-        while let Ok(_event) = self.events_rx.try_recv() {
+        while let Ok(event) = self.events_rx.try_recv() {
             had_events = true;
+            match event {
+                AlacEvent::ChildExit(_status) => {
+                    self.exited = true;
+                }
+                AlacEvent::Exit => {
+                    self.exited = true;
+                }
+                _ => {}
+            }
         }
         had_events
     }
