@@ -1,5 +1,6 @@
 use gpui::*;
 use crate::terminal::TerminalView;
+use std::path::PathBuf;
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -36,6 +37,9 @@ pub struct Session {
     pub terminal_view: Entity<TerminalView>,
     pub status: SessionStatus,
     pub started_at: Instant,
+    /// APFS clone path for this session (None for standalone sessions).
+    /// When the session is closed, this clone is deleted from the filesystem.
+    pub clone_path: Option<PathBuf>,
 }
 
 impl Session {
@@ -46,7 +50,13 @@ impl Session {
             terminal_view,
             status: SessionStatus::Running,
             started_at: Instant::now(),
+            clone_path: None,
         }
+    }
+
+    pub fn with_clone(mut self, clone_path: PathBuf) -> Self {
+        self.clone_path = Some(clone_path);
+        self
     }
 
     /// Format elapsed time as a human-readable string

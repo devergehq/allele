@@ -14,12 +14,30 @@ use super::pty_terminal::JsonEventListener;
 /// Each character occupies exactly one cell (cell_width × cell_height pixels).
 /// Characters are shaped and painted at exact pixel coordinates, bypassing
 /// GPUI's text flow layout which compresses monospace glyphs.
+/// Selection range in alacritty line coordinates.
+/// `anchor` and `extent` are (line_offset, col) where line_offset is
+/// alacritty's Line value (negative for history, 0..screen_lines for visible).
+#[derive(Clone, Copy)]
+pub struct GridSelection {
+    pub anchor: (i32, usize),
+    pub extent: (i32, usize),
+}
+
 pub struct TerminalGridElement {
     term: Arc<FairMutex<Term<JsonEventListener>>>,
     font: Font,
     font_size: Pixels,
     cell_width: Pixels,
     cell_height: Pixels,
+    cursor_visible: bool,
+    scrollbar_opacity: f32,
+    selection: Option<GridSelection>,
+    search_matches: Vec<(i32, usize, usize)>, // (line_offset, col_start, col_end) — alacritty Line value
+    search_current_idx: usize,
+    hovered_url: Option<(usize, usize, usize)>, // (row, col_start, col_end)
+    // Shared atomic origin — updated during paint so mouse handlers can translate coords
+    origin_x_out: Option<Arc<std::sync::atomic::AtomicI32>>,
+    origin_y_out: Option<Arc<std::sync::atomic::AtomicI32>>,
 }
 
 impl TerminalGridElement {
@@ -36,7 +54,51 @@ impl TerminalGridElement {
             font_size,
             cell_width,
             cell_height,
+            cursor_visible: true,
+            scrollbar_opacity: 0.0,
+            selection: None,
+            search_matches: Vec::new(),
+            search_current_idx: 0,
+            hovered_url: None,
+            origin_x_out: None,
+            origin_y_out: None,
         }
+    }
+
+    pub fn cursor_visible(mut self, visible: bool) -> Self {
+        self.cursor_visible = visible;
+        self
+    }
+
+    pub fn scrollbar_opacity(mut self, opacity: f32) -> Self {
+        self.scrollbar_opacity = opacity;
+        self
+    }
+
+    pub fn selection(mut self, sel: Option<GridSelection>) -> Self {
+        self.selection = sel;
+        self
+    }
+
+    pub fn search_matches(mut self, matches: Vec<(i32, usize, usize)>, current_idx: usize) -> Self {
+        self.search_matches = matches;
+        self.search_current_idx = current_idx;
+        self
+    }
+
+    pub fn hovered_url(mut self, url: Option<(usize, usize, usize)>) -> Self {
+        self.hovered_url = url;
+        self
+    }
+
+    pub fn origin_out(
+        mut self,
+        x: Arc<std::sync::atomic::AtomicI32>,
+        y: Arc<std::sync::atomic::AtomicI32>,
+    ) -> Self {
+        self.origin_x_out = Some(x);
+        self.origin_y_out = Some(y);
+        self
     }
 
     /// Measure cell dimensions from the font. Call once and reuse.
@@ -78,11 +140,21 @@ struct TextSpan {
     shaped: ShapedLine,
 }
 
+/// Cursor shape read from alacritty's grid state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CursorShape {
+    Block,
+    Underline,
+    Beam,
+    HollowBlock,
+    Hidden,
+}
+
 /// State computed during prepaint, passed to paint.
 pub struct GridPrepaintState {
     rows: Vec<PreparedRow>,
-    #[allow(dead_code)]
-    cursor_point: Option<(usize, usize)>, // (row, col) — used for cursor painting
+    cursor_point: Option<(usize, usize)>, // (row, col) in visible coords
+    cursor_shape: CursorShape,
     // Scroll state for scrollbar
     display_offset: usize,
     total_lines: usize,
@@ -156,11 +228,20 @@ impl Element for TerminalGridElement {
     ) -> Self::PrepaintState {
 
         let term = self.term.lock();
+        let cursor_shape_raw = term.cursor_style().shape;
         let grid = term.grid();
         let cursor_point = grid.cursor.point;
         let num_lines = grid.screen_lines();
         let num_cols = grid.columns();
         let display_offset = grid.display_offset() as i32;
+
+        let cursor_shape = match cursor_shape_raw {
+            alacritty_terminal::vte::ansi::CursorShape::Block => CursorShape::Block,
+            alacritty_terminal::vte::ansi::CursorShape::Underline => CursorShape::Underline,
+            alacritty_terminal::vte::ansi::CursorShape::Beam => CursorShape::Beam,
+            alacritty_terminal::vte::ansi::CursorShape::HollowBlock => CursorShape::HollowBlock,
+            alacritty_terminal::vte::ansi::CursorShape::Hidden => CursorShape::Hidden,
+        };
 
         let default_bg = ansi_to_hsla(&AnsiColor::Named(NamedColor::Background));
         let default_fg = ansi_to_hsla(&AnsiColor::Named(NamedColor::Foreground));
@@ -181,12 +262,19 @@ impl Element for TerminalGridElement {
 
             for col_idx in 0..num_cols {
                 let cell = &grid[grid_line][Column(col_idx)];
-                let is_cursor = display_offset == 0
+                // Track cursor position regardless of shape/visibility for paint pass.
+                let at_cursor = display_offset == 0
                     && line_idx == cursor_point.line.0 as usize
                     && col_idx == cursor_point.column.0;
-
-                let cell_bg = if is_cursor {
+                if at_cursor {
                     cursor_pos = Some((line_idx, col_idx));
+                }
+                // Only invert cell bg for block cursor shape (when visible)
+                let is_block_cursor = at_cursor
+                    && self.cursor_visible
+                    && cursor_shape == CursorShape::Block;
+
+                let cell_bg = if is_block_cursor {
                     ansi_to_hsla(&AnsiColor::Named(NamedColor::Foreground))
                 } else {
                     ansi_to_hsla(&cell.bg)
@@ -231,11 +319,13 @@ impl Element for TerminalGridElement {
                     continue;
                 }
 
-                let is_cursor = display_offset == 0
+                let is_block_cursor = self.cursor_visible
+                    && cursor_shape == CursorShape::Block
+                    && display_offset == 0
                     && line_idx == cursor_point.line.0 as usize
                     && col_idx == cursor_point.column.0;
 
-                let cell_fg = if is_cursor {
+                let cell_fg = if is_block_cursor {
                     ansi_to_hsla(&AnsiColor::Named(NamedColor::Background))
                 } else {
                     ansi_to_hsla(&cell.fg)
@@ -321,6 +411,7 @@ impl Element for TerminalGridElement {
         GridPrepaintState {
             rows: prepared_rows,
             cursor_point: cursor_pos,
+            cursor_shape,
             display_offset: offset,
             total_lines: total,
             screen_lines: screen,
@@ -341,6 +432,12 @@ impl Element for TerminalGridElement {
         let cell_h = layout_state.cell_height;
         let origin = bounds.origin;
 
+        // Publish origin so mouse handlers can translate window coordinates.
+        if let (Some(ox), Some(oy)) = (&self.origin_x_out, &self.origin_y_out) {
+            ox.store(f32::from(origin.x) as i32, std::sync::atomic::Ordering::Relaxed);
+            oy.store(f32::from(origin.y) as i32, std::sync::atomic::Ordering::Relaxed);
+        }
+
         // Paint backgrounds
         for (row_idx, row) in prepaint_state.rows.iter().enumerate() {
             let y = origin.y + cell_h * row_idx as f32;
@@ -351,6 +448,60 @@ impl Element for TerminalGridElement {
                 window.paint_quad(fill(
                     Bounds::new(point(x, y), size(w, cell_h)),
                     span.color,
+                ));
+            }
+        }
+
+        // Paint selection highlight.
+        // Selection is stored in alacritty line coordinates, so it scrolls
+        // with the content — not with the screen.
+        if let Some(sel) = &self.selection {
+            let (start_line, start_col, end_line, end_col) = normalise_selection(
+                sel.anchor, sel.extent,
+            );
+            let sel_bg = hsla(210.0 / 360.0, 0.6, 0.4, 0.5);
+            let display_offset = prepaint_state.display_offset as i32;
+            let num_rows = prepaint_state.rows.len() as i32;
+            let num_cols = layout_state.cols;
+
+            // Iterate over the line range, translating each to visible row.
+            for line in start_line..=end_line {
+                let visible_row = line + display_offset;
+                if visible_row < 0 || visible_row >= num_rows { continue; }
+                let row_idx = visible_row as usize;
+                let y = origin.y + cell_h * row_idx as f32;
+                let col_start = if line == start_line { start_col } else { 0 };
+                let col_end = if line == end_line { end_col + 1 } else { num_cols };
+                let x = origin.x + cell_w * col_start as f32;
+                let w = cell_w * (col_end - col_start) as f32;
+                window.paint_quad(fill(
+                    Bounds::new(point(x, y), size(w, cell_h)),
+                    sel_bg,
+                ));
+            }
+        }
+
+        // Paint search match highlights.
+        // Matches are stored as alacritty line offsets (negative = history, 0+ = screen).
+        // Translate to visible row index using display_offset.
+        let display_offset = prepaint_state.display_offset as i32;
+        let num_rows = prepaint_state.rows.len() as i32;
+        for (i, &(line_offset, col_start, col_end)) in self.search_matches.iter().enumerate() {
+            // visible_row = line_offset + display_offset, but only if 0..num_rows
+            let visible_row = line_offset + display_offset;
+            if visible_row >= 0 && visible_row < num_rows {
+                let row_idx = visible_row as usize;
+                let y = origin.y + cell_h * row_idx as f32;
+                let x = origin.x + cell_w * col_start as f32;
+                let w = cell_w * (col_end - col_start + 1) as f32;
+                let bg = if i == self.search_current_idx {
+                    hsla(30.0 / 360.0, 0.8, 0.5, 0.6) // current match: orange
+                } else {
+                    hsla(50.0 / 360.0, 0.7, 0.5, 0.3) // other matches: yellow
+                };
+                window.paint_quad(fill(
+                    Bounds::new(point(x, y), size(w, cell_h)),
+                    bg,
                 ));
             }
         }
@@ -372,12 +523,80 @@ impl Element for TerminalGridElement {
             }
         }
 
+        // Paint non-block cursor shapes (beam/underline/hollow-block)
+        if self.cursor_visible {
+            if let Some((cursor_row, cursor_col)) = prepaint_state.cursor_point {
+                let cursor_color = ansi_to_hsla(&AnsiColor::Named(NamedColor::Foreground));
+                let cx_x = origin.x + cell_w * cursor_col as f32;
+                let cy_y = origin.y + cell_h * cursor_row as f32;
+                match prepaint_state.cursor_shape {
+                    CursorShape::Block => {
+                        // Already painted via cell bg inversion
+                    }
+                    CursorShape::Beam => {
+                        // Vertical bar at left edge of cell
+                        window.paint_quad(fill(
+                            Bounds::new(point(cx_x, cy_y), size(px(2.0), cell_h)),
+                            cursor_color,
+                        ));
+                    }
+                    CursorShape::Underline => {
+                        // Horizontal bar at bottom of cell
+                        let bar_h = px(2.0);
+                        let y = cy_y + cell_h - bar_h;
+                        window.paint_quad(fill(
+                            Bounds::new(point(cx_x, y), size(cell_w, bar_h)),
+                            cursor_color,
+                        ));
+                    }
+                    CursorShape::HollowBlock => {
+                        // 1px border rectangle
+                        let bw = px(1.0);
+                        // Top
+                        window.paint_quad(fill(
+                            Bounds::new(point(cx_x, cy_y), size(cell_w, bw)),
+                            cursor_color,
+                        ));
+                        // Bottom
+                        window.paint_quad(fill(
+                            Bounds::new(point(cx_x, cy_y + cell_h - bw), size(cell_w, bw)),
+                            cursor_color,
+                        ));
+                        // Left
+                        window.paint_quad(fill(
+                            Bounds::new(point(cx_x, cy_y), size(bw, cell_h)),
+                            cursor_color,
+                        ));
+                        // Right
+                        window.paint_quad(fill(
+                            Bounds::new(point(cx_x + cell_w - bw, cy_y), size(bw, cell_h)),
+                            cursor_color,
+                        ));
+                    }
+                    CursorShape::Hidden => {}
+                }
+            }
+        }
+
+        // Paint URL underline on hover
+        if let Some((row, col_start, col_end)) = self.hovered_url {
+            if row < prepaint_state.rows.len() {
+                let y = origin.y + cell_h * (row as f32 + 1.0) - px(1.5);
+                let x = origin.x + cell_w * col_start as f32;
+                let w = cell_w * (col_end - col_start + 1) as f32;
+                window.paint_quad(fill(
+                    Bounds::new(point(x, y), size(w, px(1.0))),
+                    hsla(210.0 / 360.0, 0.8, 0.7, 0.8),
+                ));
+            }
+        }
+
         // Paint scrollbar when there's history to scroll through
         let total = prepaint_state.total_lines;
         let screen = prepaint_state.screen_lines;
         let history = total.saturating_sub(screen);
 
-        if history > 0 {
+        if history > 0 && self.scrollbar_opacity > 0.01 {
             let scrollbar_width = px(6.0);
             let scrollbar_margin = px(2.0);
             let viewport_height = bounds.size.height;
@@ -403,7 +622,7 @@ impl Element for TerminalGridElement {
                         size(scrollbar_width, viewport_height),
                     ),
                     px(3.0), // corner radius
-                    hsla(0.0, 0.0, 1.0, 0.05), // very subtle track
+                    hsla(0.0, 0.0, 1.0, 0.05 * self.scrollbar_opacity), // very subtle track
                     px(0.0),
                     hsla(0.0, 0.0, 0.0, 0.0),
                     BorderStyle::default(),
@@ -418,7 +637,7 @@ impl Element for TerminalGridElement {
                         size(scrollbar_width, thumb_height),
                     ),
                     px(3.0), // corner radius
-                    hsla(0.0, 0.0, 1.0, 0.3), // visible but not distracting
+                    hsla(0.0, 0.0, 1.0, 0.3 * self.scrollbar_opacity), // visible but not distracting
                     px(0.0),
                     hsla(0.0, 0.0, 0.0, 0.0),
                     BorderStyle::default(),
@@ -526,6 +745,18 @@ fn ansi_to_hsla(color: &AnsiColor) -> Hsla {
     let g = ((rgba_val >> 8) & 0xFF) as f32 / 255.0;
     let b = (rgba_val & 0xFF) as f32 / 255.0;
     Hsla::from(Rgba { r, g, b, a: 1.0 })
+}
+
+/// Normalise selection so start <= end (top-left to bottom-right).
+fn normalise_selection(
+    anchor: (i32, usize),
+    extent: (i32, usize),
+) -> (i32, usize, i32, usize) {
+    if anchor.0 < extent.0 || (anchor.0 == extent.0 && anchor.1 <= extent.1) {
+        (anchor.0, anchor.1, extent.0, extent.1)
+    } else {
+        (extent.0, extent.1, anchor.0, anchor.1)
+    }
 }
 
 /// Helper to create a DefiniteLength from Pixels for style sizing.

@@ -5,6 +5,38 @@ use std::fs;
 /// Base directory for all workspace clones
 const CLONE_BASE: &str = ".cc-multiplex/workspaces";
 
+/// Create a clone for a session: uses a short unique session ID as the workspace name.
+/// Returns the clone path.
+pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str) -> anyhow::Result<PathBuf> {
+    let home = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let clone_dir = home.join(CLONE_BASE).join(project_name);
+    fs::create_dir_all(&clone_dir)?;
+
+    // Short session ID — first 8 chars of UUID
+    let short_id: String = session_id.chars().take(8).collect();
+    let clone_path = clone_dir.join(&short_id);
+
+    if clone_path.exists() {
+        // Unlikely with UUIDs but handle by appending a random suffix
+        return create_clone(source, &format!("{short_id}-alt"));
+    }
+
+    let src_cstr = CString::new(source.to_string_lossy().as_bytes())?;
+    let dst_cstr = CString::new(clone_path.to_string_lossy().as_bytes())?;
+
+    let result = unsafe {
+        libc::clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), 0)
+    };
+
+    if result != 0 {
+        let err = std::io::Error::last_os_error();
+        anyhow::bail!("clonefile() failed: {err}");
+    }
+
+    Ok(clone_path)
+}
+
 /// Create an APFS copy-on-write clone of a directory.
 ///
 /// Uses the macOS `clonefile(2)` syscall — near-instant, zero disk cost

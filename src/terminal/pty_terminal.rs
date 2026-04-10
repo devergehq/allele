@@ -102,6 +102,12 @@ pub struct PtyTerminal {
     pub events_rx: Receiver<AlacEvent>,
     pub size: TermSize,
     pub exited: bool,
+    /// Set to true when Bell event is received, cleared by consumer.
+    pub bell_pending: bool,
+    /// Alt screen state — true when terminal is in alternate screen buffer.
+    pub in_alt_screen: bool,
+    /// Title set by terminal apps via OSC sequences.
+    pub title: Option<String>,
 }
 
 impl PtyTerminal {
@@ -171,6 +177,9 @@ impl PtyTerminal {
             events_rx,
             size,
             exited: false,
+            bell_pending: false,
+            in_alt_screen: false,
+            title: None,
         })
     }
 
@@ -226,6 +235,15 @@ impl PtyTerminal {
                 }
                 AlacEvent::Exit => {
                     self.exited = true;
+                }
+                AlacEvent::Bell => {
+                    self.bell_pending = true;
+                }
+                AlacEvent::Title(title) => {
+                    self.title = Some(title);
+                }
+                AlacEvent::ResetTitle => {
+                    self.title = None;
                 }
                 _ => {}
             }
