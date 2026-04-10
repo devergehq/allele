@@ -893,6 +893,16 @@ impl Render for TerminalView {
                             }
                             return;
                         }
+                        "backspace" => {
+                            // Cmd+Backspace = macOS "delete to start of line".
+                            // Map to Ctrl+U (0x15), which readline (and
+                            // Claude Code's input editor) treats as
+                            // backward-kill-line.
+                            if let Some(ref terminal) = this.terminal {
+                                terminal.write(&[0x15]);
+                            }
+                            return;
+                        }
                         "n" => { cx.emit(TerminalEvent::NewSession); return; }
                         "w" => { cx.emit(TerminalEvent::CloseSession); return; }
                         "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
@@ -939,6 +949,15 @@ impl Render for TerminalView {
                         terminal.write(&[byte]);
                         return;
                     }
+                }
+
+                // Opt+Backspace = macOS "delete previous word".
+                // Send ESC+DEL (Meta-Backspace), which readline and Claude
+                // Code's input editor interpret as backward-kill-word.
+                // Must be checked BEFORE the plain-backspace branch below.
+                if mods.alt && key == "backspace" {
+                    terminal.write(b"\x1b\x7f");
+                    return;
                 }
 
                 // Handle special keys BEFORE key_char — enter, backspace, etc.

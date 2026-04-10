@@ -10,10 +10,10 @@ use gpui::*;
 use project::Project;
 use session::{Session, SessionStatus};
 use settings::{ProjectSave, Settings};
+use state::{PersistedSession, PersistedState};
 use terminal::{ShellCommand, TerminalEvent, TerminalView};
 use terminal::pty_terminal::PtyTerminal;
 use std::path::PathBuf;
-use std::time::Duration;
 
 #[derive(Debug)]
 enum PendingAction {
@@ -23,7 +23,14 @@ enum PendingAction {
     OpenProjectAtPath(PathBuf),
     AddSessionToProject(usize), // project index
     RemoveProject(usize),
-    RemoveSession { project_idx: usize, session_idx: usize },
+    /// Kill the PTY, keep the clone, mark Suspended. Next click cold-resumes.
+    CloseSessionKeepClone { project_idx: usize, session_idx: usize },
+    /// Ask for confirmation before discarding — sets `confirming_discard`.
+    RequestDiscardSession { project_idx: usize, session_idx: usize },
+    /// Cancel an in-flight discard confirmation.
+    CancelDiscard,
+    /// Permanently delete the clone and remove the session from state.
+    DiscardSession { project_idx: usize, session_idx: usize },
     SelectSession { project_idx: usize, session_idx: usize },
 }
 
@@ -42,6 +49,10 @@ struct AppState {
     // Sidebar resize state
     sidebar_width: f32,
     sidebar_resizing: bool,
+    /// Inline confirmation gate for the Discard action. When `Some(cursor)`
+    /// the sidebar row at that cursor shows a confirm/cancel prompt instead
+    /// of the usual buttons.
+    confirming_discard: Option<SessionCursor>,
 }
 
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
@@ -72,6 +83,24 @@ impl AppState {
             }).collect(),
         };
         settings.save();
+    }
+
+    /// Persist every session across every project to `~/.cc-multiplex/state.json`.
+    /// Called after any mutation that creates, removes, or transitions a session.
+    /// Errors are logged but not surfaced — losing a state write is survivable,
+    /// the orphan sweep will clean up any mismatch on next startup.
+    fn save_state(&self) {
+        let mut persisted = PersistedState::default();
+        for project in &self.projects {
+            for session in &project.sessions {
+                persisted
+                    .sessions
+                    .push(PersistedSession::from_session(session, &project.id));
+            }
+        }
+        if let Err(e) = persisted.save() {
+            eprintln!("Failed to save state.json: {e}");
+        }
     }
 
     /// Open the native folder picker and queue an action to create a project.
@@ -123,12 +152,27 @@ impl AppState {
         let session_count = project.sessions.len() + project.loading_sessions.len() + 1;
 
         let session_id = uuid::Uuid::new_v4().to_string();
-        let command = self.claude_path.as_ref().map(|p| ShellCommand::new(p.clone()));
-        let display_label = if command.is_some() {
+        let display_label = if self.claude_path.is_some() {
             format!("Claude {session_count}")
         } else {
             format!("Shell {session_count}")
         };
+
+        // Build the claude command with --session-id + --name so our internal
+        // UUID *is* Claude's session ID. This is what enables cold-resume later:
+        // `claude --resume <same-uuid>` picks up the conversation in the same
+        // clone path.
+        let command = self.claude_path.as_ref().map(|path| {
+            ShellCommand::with_args(
+                path.clone(),
+                vec![
+                    "--session-id".to_string(),
+                    session_id.clone(),
+                    "--name".to_string(),
+                    display_label.clone(),
+                ],
+            )
+        });
 
         // Add a loading placeholder immediately so the user sees feedback
         project.loading_sessions.push(project::LoadingSession {
@@ -140,7 +184,11 @@ impl AppState {
         // Spawn the clone on a background task, then finish on the main thread
         let source_for_task = source_path.clone();
         let project_name_for_task = project_name.clone();
-        let session_id_for_task = session_id.clone();
+        // Two copies: one moves into the background clonefile closure (where
+        // it's used as the short-ID source), the other is captured by the
+        // main-thread update_in closure to set Session.id.
+        let session_id_for_clone = session_id.clone();
+        let session_id_for_session = session_id.clone();
         let display_label_for_task = display_label.clone();
 
         cx.spawn_in(window, async move |this, cx| {
@@ -148,7 +196,7 @@ impl AppState {
             let clone_result = cx
                 .background_executor()
                 .spawn(async move {
-                    clone::create_session_clone(&source_for_task, &project_name_for_task, &session_id_for_task)
+                    clone::create_session_clone(&source_for_task, &project_name_for_task, &session_id_for_clone)
                 })
                 .await;
 
@@ -210,20 +258,148 @@ impl AppState {
                     }
                 }).detach();
 
-                let session = Session::new(display_label_for_task, terminal_view).with_clone(clone_path);
+                let session = Session::new_with_id(
+                    session_id_for_session,
+                    display_label_for_task,
+                    terminal_view,
+                )
+                .with_clone(clone_path);
                 let Some(project) = this.projects.get_mut(project_idx) else { return; };
                 project.sessions.push(session);
                 let session_idx = project.sessions.len() - 1;
                 this.active = Some(SessionCursor { project_idx, session_idx });
+                this.save_state();
                 cx.notify();
             });
         })
         .detach();
     }
 
-    /// Remove a session at the given cursor. The session is immediately
-    /// removed from the sidebar and replaced with a "Deleting…" placeholder,
-    /// while the APFS clone is deleted on a background task.
+    /// Close a session without deleting its clone.
+    ///
+    /// The PTY is killed (dropping the terminal_view entity triggers
+    /// `PtyTerminal::drop` → `Msg::Shutdown`), the clone stays on disk,
+    /// the session stays in `state.json` with status `Suspended`, and the
+    /// sidebar row stays visible with a ⏸ icon. A later click on that row
+    /// cold-resumes via `claude --resume <id>`.
+    fn close_session_keep_clone(
+        &mut self,
+        cursor: SessionCursor,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.get_mut(cursor.project_idx) else { return; };
+        let Some(session) = project.sessions.get_mut(cursor.session_idx) else { return; };
+
+        // Drop the terminal_view — Drop impl on PtyTerminal sends Msg::Shutdown,
+        // killing the subprocess. The clone on disk is untouched.
+        session.terminal_view = None;
+        session.status = SessionStatus::Suspended;
+        session.last_active = std::time::SystemTime::now();
+
+        // If this was the active session, clear the active cursor — the main
+        // area will show the "No active session" placeholder until the user
+        // clicks something else.
+        if self.active == Some(cursor) {
+            self.active = None;
+        }
+
+        self.save_state();
+        cx.notify();
+    }
+
+    /// Resume a Suspended session by spawning a fresh PTY with
+    /// `claude --resume <id>` inside the stored clone_path.
+    ///
+    /// The session retains its original `id` — Claude picks up the
+    /// conversation from its jsonl history.
+    fn resume_session(
+        &mut self,
+        cursor: SessionCursor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.get(cursor.project_idx) else { return; };
+        let Some(session) = project.sessions.get(cursor.session_idx) else { return; };
+        let Some(clone_path) = session.clone_path.clone() else {
+            eprintln!(
+                "Cannot resume session {} — no clone_path on record",
+                session.id
+            );
+            return;
+        };
+
+        if !clone_path.exists() {
+            eprintln!(
+                "Cannot resume session {} — clone_path is missing on disk: {}",
+                session.id,
+                clone_path.display()
+            );
+            return;
+        }
+
+        let session_id = session.id.clone();
+        let label = session.label.clone();
+
+        let command = self.claude_path.as_ref().map(|path| {
+            ShellCommand::with_args(
+                path.clone(),
+                vec![
+                    "--resume".to_string(),
+                    session_id.clone(),
+                    "--name".to_string(),
+                    label.clone(),
+                ],
+            )
+        });
+
+        // Build the new TerminalView on the main thread with window access.
+        let terminal_view = cx.new(|cx| {
+            TerminalView::new(window, cx, command, Some(clone_path.clone()))
+        });
+
+        // Subscribe to terminal events so the resumed session wires up the
+        // same shortcut actions (NewSession, CloseSession, SwitchSession)
+        // as freshly-created ones.
+        cx.subscribe(&terminal_view, |this: &mut Self, _tv: Entity<TerminalView>, event: &TerminalEvent, cx: &mut Context<Self>| {
+            match event {
+                TerminalEvent::NewSession => {
+                    this.pending_action = Some(PendingAction::NewSessionInActiveProject);
+                    cx.notify();
+                }
+                TerminalEvent::CloseSession => {
+                    this.pending_action = Some(PendingAction::CloseActiveSession);
+                    cx.notify();
+                }
+                TerminalEvent::SwitchSession(_) => {
+                    // Existing session switching is handled elsewhere; ignore here.
+                }
+            }
+        }).detach();
+
+        // Attach the new PTY to the existing session entry.
+        if let Some(session) = self
+            .projects
+            .get_mut(cursor.project_idx)
+            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+        {
+            session.terminal_view = Some(terminal_view);
+            session.status = SessionStatus::Running;
+            session.last_active = std::time::SystemTime::now();
+            self.active = Some(cursor);
+            self.pending_action = Some(PendingAction::FocusActive);
+        }
+
+        self.save_state();
+        cx.notify();
+    }
+
+    /// Discard a session — kill the PTY, delete the APFS clone, remove from
+    /// the sidebar, and drop the corresponding entry from `state.json`.
+    ///
+    /// This is the *destructive* path, reached only through the explicit
+    /// Discard action with confirmation. The plain Close action uses
+    /// `close_session_keep_clone` instead.
     fn remove_session(
         &mut self,
         cursor: SessionCursor,
@@ -237,8 +413,10 @@ impl AppState {
         let removed = project.sessions.remove(cursor.session_idx);
         let clone_path = removed.clone_path.clone();
         let removed_label = removed.label.clone();
-        // Drop the Session — this frees the terminal_view entity, which in turn
-        // kills the PTY via the Drop impl on PtyTerminal.
+        // Drop the Session — this frees the terminal_view entity (if any),
+        // which in turn kills the PTY via the Drop impl on PtyTerminal.
+        // Suspended sessions have `terminal_view = None` so there's no PTY
+        // to kill; only the clone needs cleanup.
         drop(removed);
 
         // Show a "Deleting…" placeholder if there's a clone to clean up
@@ -278,6 +456,8 @@ impl AppState {
             }
         }
 
+        // Persist the updated session list now that the entry is gone.
+        self.save_state();
         cx.notify();
 
         // Spawn the filesystem cleanup on a background task
@@ -344,6 +524,7 @@ impl AppState {
         };
 
         self.save_settings();
+        self.save_state();
         cx.notify();
 
         // Spawn background cleanup for all clones
@@ -433,6 +614,26 @@ fn main() {
             loaded_settings.sidebar_width, loaded_settings.font_size
         );
 
+        // Load persisted session state (may be empty on first run).
+        let loaded_state = PersistedState::load();
+        eprintln!("Loaded persisted state: {} sessions", loaded_state.sessions.len());
+
+        // Conservative orphan sweep: move any on-disk clone not referenced by
+        // the loaded state into ~/.cc-multiplex/trash/, then purge trash
+        // entries older than TRASH_TTL_DAYS. This runs before the window
+        // opens so the user never sees stale placeholders.
+        let referenced = state::referenced_clone_paths(&loaded_state);
+        match clone::sweep_orphans(&referenced) {
+            Ok(0) => {}
+            Ok(n) => eprintln!("Orphan sweep trashed {n} unreferenced clone(s)"),
+            Err(e) => eprintln!("Orphan sweep failed: {e}"),
+        }
+        match clone::purge_trash_older_than_days(clone::TRASH_TTL_DAYS) {
+            Ok(0) => {}
+            Ok(n) => eprintln!("Trash purge removed {n} expired entry/entries"),
+            Err(e) => eprintln!("Trash purge failed: {e}"),
+        }
+
         let claude_path = PtyTerminal::find_claude()
             .map(|p| p.to_string_lossy().to_string());
 
@@ -458,6 +659,7 @@ fn main() {
         };
 
         let settings_for_window = loaded_settings.clone();
+        let loaded_state_for_window = loaded_state.clone();
 
         cx.open_window(
             WindowOptions {
@@ -490,12 +692,40 @@ fn main() {
                         settings.save();
                     }).detach();
 
-                    // Rehydrate projects from settings (without sessions — those are runtime-only)
-                    let projects: Vec<Project> = settings_for_window.projects.iter().map(|p| {
+                    // Rehydrate projects from settings.
+                    let mut projects: Vec<Project> = settings_for_window.projects.iter().map(|p| {
                         let mut proj = Project::new(p.name.clone(), p.source_path.clone());
                         proj.id = p.id.clone();
                         proj
                     }).collect();
+
+                    // Rehydrate sessions from state.json as Suspended entries
+                    // (no PTY, ⏸ icon). They show up in the sidebar immediately
+                    // and cold-resume on click via `claude --resume <id>`.
+                    // Sessions whose owning project no longer exists are
+                    // silently dropped — on the next save_state the entries
+                    // will be removed from disk too.
+                    for persisted in &loaded_state_for_window.sessions {
+                        let Some(project) = projects
+                            .iter_mut()
+                            .find(|p| p.id == persisted.project_id)
+                        else {
+                            eprintln!(
+                                "Dropping persisted session {} — owning project {} is gone",
+                                persisted.id, persisted.project_id
+                            );
+                            continue;
+                        };
+
+                        let session = Session::suspended_from_persisted(
+                            persisted.id.clone(),
+                            persisted.label.clone(),
+                            persisted.started_at,
+                            persisted.last_active,
+                            persisted.clone_path.clone(),
+                        );
+                        project.sessions.push(session);
+                    }
 
                     AppState {
                         projects,
@@ -505,6 +735,7 @@ fn main() {
                         sidebar_width: settings_for_window.sidebar_width
                             .max(SIDEBAR_MIN_WIDTH),
                         sidebar_resizing: false,
+                        confirming_discard: None,
                     }
                 })
             },
@@ -524,14 +755,18 @@ impl Render for AppState {
                     }
                 }
                 PendingAction::CloseActiveSession => {
+                    // Keyboard/menu "close" — preserve the clone so the user
+                    // can cold-resume later. Discard is an explicit gesture only.
                     if let Some(active) = self.active {
-                        self.remove_session(active, window, cx);
+                        self.close_session_keep_clone(active, window, cx);
                     }
                 }
                 PendingAction::FocusActive => {
                     if let Some(session) = self.active_session() {
-                        let fh = session.terminal_view.read(cx).focus_handle.clone();
-                        fh.focus(window, cx);
+                        if let Some(tv) = session.terminal_view.as_ref() {
+                            let fh = tv.read(cx).focus_handle.clone();
+                            fh.focus(window, cx);
+                        }
                     }
                 }
                 PendingAction::OpenProjectAtPath(path) => {
@@ -545,28 +780,75 @@ impl Render for AppState {
                 PendingAction::RemoveProject(project_idx) => {
                     self.remove_project(project_idx, window, cx);
                 }
-                PendingAction::RemoveSession { project_idx, session_idx } => {
-                    self.remove_session(SessionCursor { project_idx, session_idx }, window, cx);
+                PendingAction::CloseSessionKeepClone { project_idx, session_idx } => {
+                    self.close_session_keep_clone(
+                        SessionCursor { project_idx, session_idx },
+                        window,
+                        cx,
+                    );
+                }
+                PendingAction::RequestDiscardSession { project_idx, session_idx } => {
+                    // Arm the inline confirmation gate. The sidebar row will
+                    // render Confirm/Cancel buttons on the next frame.
+                    self.confirming_discard = Some(SessionCursor { project_idx, session_idx });
+                    cx.notify();
+                }
+                PendingAction::CancelDiscard => {
+                    self.confirming_discard = None;
+                    cx.notify();
+                }
+                PendingAction::DiscardSession { project_idx, session_idx } => {
+                    self.confirming_discard = None;
+                    self.remove_session(
+                        SessionCursor { project_idx, session_idx },
+                        window,
+                        cx,
+                    );
                 }
                 PendingAction::SelectSession { project_idx, session_idx } => {
-                    self.active = Some(SessionCursor { project_idx, session_idx });
-                    if let Some(session) = self.active_session() {
-                        let fh = session.terminal_view.read(cx).focus_handle.clone();
-                        fh.focus(window, cx);
+                    let cursor = SessionCursor { project_idx, session_idx };
+                    // Clicking a Suspended session cold-resumes it; clicking
+                    // any other session just makes it the active one.
+                    let is_suspended = self
+                        .projects
+                        .get(project_idx)
+                        .and_then(|p| p.sessions.get(session_idx))
+                        .map(|s| s.status == SessionStatus::Suspended)
+                        .unwrap_or(false);
+
+                    if is_suspended {
+                        self.resume_session(cursor, window, cx);
+                    } else {
+                        self.active = Some(cursor);
+                        if let Some(session) = self.active_session() {
+                            if let Some(tv) = session.terminal_view.as_ref() {
+                                let fh = tv.read(cx).focus_handle.clone();
+                                fh.focus(window, cx);
+                            }
+                        }
                     }
                 }
             }
         }
 
-        // Update session statuses from PTY state
+        // Update session statuses from PTY state.
+        // Only sessions with an attached PTY can transition Running → Done;
+        // Suspended sessions have no terminal_view and stay Suspended until
+        // explicitly resumed.
+        let mut state_dirty = false;
         for project in &mut self.projects {
             for session in &mut project.sessions {
-                if session.status == SessionStatus::Running
-                    && session.terminal_view.read(cx).has_exited()
-                {
+                if session.status != SessionStatus::Running { continue; }
+                let Some(tv) = session.terminal_view.as_ref() else { continue; };
+                if tv.read(cx).has_exited() {
                     session.status = SessionStatus::Done;
+                    session.last_active = std::time::SystemTime::now();
+                    state_dirty = true;
                 }
             }
+        }
+        if state_dirty {
+            self.save_state();
         }
 
         // Build sidebar items: for each project, a header then its sessions
@@ -693,85 +975,182 @@ impl Render for AppState {
                 let is_active = active_cursor
                     .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
                     .unwrap_or(false);
+                let is_suspended = session.status == SessionStatus::Suspended;
                 let status_color = session.status.color();
                 let status_icon = session.status.icon();
+                // Title only exists if a PTY is attached; for Suspended
+                // sessions we always fall back to the stored label.
                 let label = session
                     .terminal_view
-                    .read(cx)
-                    .title()
+                    .as_ref()
+                    .and_then(|tv| tv.read(cx).title())
                     .filter(|s| !s.is_empty())
                     .unwrap_or_else(|| session.label.clone());
                 let elapsed = session.elapsed_display();
+                let is_confirming = self.confirming_discard
+                    == Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
 
-                sidebar_items.push(
-                    div()
-                        .id(SharedString::from(format!("session-{p_idx}-{s_idx}")))
-                        .pl(px(24.0))
-                        .pr(px(12.0))
-                        .py(px(5.0))
-                        .bg(if is_active { rgb(0x313244) } else { rgb(0x181825) })
-                        .hover(|s| s.bg(rgb(0x313244)))
-                        .cursor_pointer()
-                        .flex()
-                        .flex_row()
-                        .gap(px(8.0))
-                        .items_center()
-                        .justify_between()
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
-                            this.pending_action = Some(PendingAction::SelectSession {
-                                project_idx: p_idx,
-                                session_idx: s_idx,
-                            });
-                            cx.notify();
-                        }))
-                        .child(
-                            div()
-                                .flex_1()
-                                .flex()
-                                .flex_row()
-                                .gap(px(6.0))
-                                .items_center()
-                                .child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .text_color(rgb(status_color))
-                                        .child(status_icon.to_string()),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(if is_active { rgb(0xcdd6f4) } else { rgb(0x9399b2) })
-                                        .child(label),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .text_color(rgb(0x585b70))
-                                        .min_w(px(60.0))
-                                        .child(elapsed),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("close-{p_idx}-{s_idx}")))
-                                .cursor_pointer()
-                                .px(px(4.0))
-                                .text_size(px(11.0))
-                                .text_color(rgb(0x45475a))
-                                .hover(|s| s.text_color(rgb(0xf38ba8)))
-                                .child("✕")
-                                .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
-                                    // Stop the row's click handler from overriding us
-                                    cx.stop_propagation();
-                                    this.pending_action = Some(PendingAction::RemoveSession {
-                                        project_idx: p_idx,
-                                        session_idx: s_idx,
-                                    });
-                                    cx.notify();
-                                })),
-                        )
-                        .into_any_element(),
-                );
+                let label_color = if is_suspended {
+                    rgb(0x6c7086) // greyed out for Suspended
+                } else if is_active {
+                    rgb(0xcdd6f4)
+                } else {
+                    rgb(0x9399b2)
+                };
+
+                let row_bg = if is_confirming {
+                    rgb(0x3b1f28) // subtle red tint while confirming discard
+                } else if is_active {
+                    rgb(0x313244)
+                } else {
+                    rgb(0x181825)
+                };
+
+                let mut row = div()
+                    .id(SharedString::from(format!("session-{p_idx}-{s_idx}")))
+                    .pl(px(24.0))
+                    .pr(px(12.0))
+                    .py(px(5.0))
+                    .bg(row_bg)
+                    .hover(|s| s.bg(rgb(0x313244)))
+                    .cursor_pointer()
+                    .flex()
+                    .flex_row()
+                    .gap(px(8.0))
+                    .items_center()
+                    .justify_between()
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        this.pending_action = Some(PendingAction::SelectSession {
+                            project_idx: p_idx,
+                            session_idx: s_idx,
+                        });
+                        cx.notify();
+                    }))
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_row()
+                            .gap(px(6.0))
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(status_color))
+                                    .child(status_icon.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(label_color)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0x585b70))
+                                    .min_w(px(60.0))
+                                    .child(elapsed),
+                            ),
+                    );
+
+                if is_confirming {
+                    // Replace the normal buttons with a two-button confirm
+                    // prompt: Discard (destructive) + Cancel.
+                    row = row.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(4.0))
+                            .items_center()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("confirm-discard-{p_idx}-{s_idx}")))
+                                    .cursor_pointer()
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(3.0))
+                                    .bg(rgb(0x45475a))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0xf38ba8))
+                                    .hover(|s| s.bg(rgb(0x58303a)))
+                                    .child("Discard")
+                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.pending_action = Some(PendingAction::DiscardSession {
+                                            project_idx: p_idx,
+                                            session_idx: s_idx,
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("cancel-discard-{p_idx}-{s_idx}")))
+                                    .cursor_pointer()
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(3.0))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0x9399b2))
+                                    .hover(|s| s.text_color(rgb(0xcdd6f4)))
+                                    .child("Cancel")
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.pending_action = Some(PendingAction::CancelDiscard);
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+                } else {
+                    // Normal state: a Close button (keeps clone) and a
+                    // Discard button (opens the confirmation prompt).
+                    row = row.child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(2.0))
+                            .items_center()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("close-{p_idx}-{s_idx}")))
+                                    .cursor_pointer()
+                                    .px(px(4.0))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(0x45475a))
+                                    .hover(|s| s.text_color(rgb(0x89b4fa)))
+                                    .child("✕")
+                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.pending_action = Some(PendingAction::CloseSessionKeepClone {
+                                            project_idx: p_idx,
+                                            session_idx: s_idx,
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("discard-{p_idx}-{s_idx}")))
+                                    .cursor_pointer()
+                                    .px(px(4.0))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(0x45475a))
+                                    .hover(|s| s.text_color(rgb(0xf38ba8)))
+                                    .child("🗑")
+                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.pending_action = Some(PendingAction::RequestDiscardSession {
+                                            project_idx: p_idx,
+                                            session_idx: s_idx,
+                                        });
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+                }
+
+                sidebar_items.push(row.into_any_element());
             }
         }
 
@@ -784,7 +1163,8 @@ impl Render for AppState {
             .count();
 
         let fps = self.active_session()
-            .map(|s| s.terminal_view.read(cx).current_fps)
+            .and_then(|s| s.terminal_view.as_ref())
+            .map(|tv| tv.read(cx).current_fps)
             .unwrap_or(0);
 
         let active_is_done = self.active_session()
@@ -888,8 +1268,8 @@ impl Render for AppState {
                     .h_full()
                     .relative();
 
-                if let Some(session) = self.active_session() {
-                    main_area = main_area.child(session.terminal_view.clone());
+                if let Some(tv) = self.active_session().and_then(|s| s.terminal_view.clone()) {
+                    main_area = main_area.child(tv);
                 } else {
                     // Empty-state placeholder
                     main_area = main_area.child(
