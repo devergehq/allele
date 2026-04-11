@@ -1,6 +1,7 @@
 mod terminal;
 mod sidebar;
 mod clone;
+mod git;
 mod hooks;
 mod project;
 mod session;

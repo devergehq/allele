@@ -110,6 +110,7 @@ dependencies = [
  "rustix-openpty",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "uuid",
  "which 7.0.3",
