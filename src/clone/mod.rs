@@ -5,11 +5,11 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 /// Base directory for all workspace clones
-const CLONE_BASE: &str = ".cc-multiplex/workspaces";
+const CLONE_BASE: &str = ".allele/workspaces";
 
 /// Base directory for the trash — orphaned clones are moved here rather
 /// than deleted outright, so accidental sweeps are recoverable.
-const TRASH_BASE: &str = ".cc-multiplex/trash";
+const TRASH_BASE: &str = ".allele/trash";
 
 /// Number of days a trashed clone may sit before being purged on startup.
 /// Single source of truth — do not scatter copies of this value.
@@ -158,10 +158,10 @@ pub fn trash_base() -> anyhow::Result<PathBuf> {
 ///
 /// The trash entry is named `<project>-<basename>-<epoch-seconds>` so
 /// that collisions are impossible and the original provenance is legible
-/// when a user pokes around in `~/.cc-multiplex/trash/`.
+/// when a user pokes around in `~/.allele/trash/`.
 ///
 /// Safety: refuses to operate on any path outside
-/// `~/.cc-multiplex/workspaces/`.
+/// `~/.allele/workspaces/`.
 pub fn trash_clone(clone_path: &Path) -> anyhow::Result<PathBuf> {
     if !clone_path.exists() {
         anyhow::bail!("trash_clone: path does not exist: {}", clone_path.display());
@@ -248,7 +248,7 @@ pub fn purge_trash_older_than_days(ttl_days: u64) -> anyhow::Result<usize> {
     Ok(purged)
 }
 
-/// Walk `~/.cc-multiplex/workspaces/<project>/*` and move any clone not
+/// Walk `~/.allele/workspaces/<project>/*` and move any clone not
 /// present in `referenced` into the trash. Conservative — never deletes.
 ///
 /// Returns the number of clones that were trashed.

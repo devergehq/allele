@@ -43,7 +43,7 @@ If that's not you, you're probably better served by tmux, iTerm2 split panes, or
 - **Terminal emulation:** [alacritty_terminal](https://crates.io/crates/alacritty_terminal) — the same VTE parser and terminal state machine that powers Alacritty.
 - **PTY:** `rustix-openpty` for subprocess PTY management.
 - **Workspace cloning:** Direct FFI to `clonefile(2)` via `libc`.
-- **Persistence:** JSON state file at `~/.cc-multiplex/state.json` (serde).
+- **Persistence:** JSON state file at `~/.allele/state.json` (serde).
 - **Async runtime:** tokio.
 
 See `SCOPE.md` and `PLAN.md` in the repo for the full technical scope and phased build plan.

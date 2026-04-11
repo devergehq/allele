@@ -98,7 +98,7 @@ impl AppState {
         settings.save();
     }
 
-    /// Persist every session across every project to `~/.cc-multiplex/state.json`.
+    /// Persist every session across every project to `~/.allele/state.json`.
     /// Called after any mutation that creates, removes, or transitions a session.
     /// Errors are logged but not surfaced — losing a state write is survivable,
     /// the orphan sweep will clean up any mismatch on next startup.
@@ -766,9 +766,9 @@ impl AppState {
 fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        // Log to ~/.config/cc-multiplex/crash.log
+        // Log to ~/.config/allele/crash.log
         if let Some(home) = dirs::home_dir() {
-            let log_dir = home.join(".config").join("cc-multiplex");
+            let log_dir = home.join(".config").join("allele");
             let _ = std::fs::create_dir_all(&log_dir);
             let log_path = log_dir.join("crash.log");
             let timestamp = std::time::SystemTime::now()
@@ -851,7 +851,7 @@ fn main() {
         };
 
         // Conservative orphan sweep: move any on-disk clone not referenced by
-        // the loaded state into ~/.cc-multiplex/trash/, then purge trash
+        // the loaded state into ~/.allele/trash/, then purge trash
         // entries older than TRASH_TTL_DAYS. This runs before the window
         // opens so the user never sees stale placeholders.
         let referenced = state::referenced_clone_paths(&loaded_state);
@@ -962,7 +962,7 @@ fn main() {
                     }
 
                     // Spawn the hook-event polling task. Runs for the life
-                    // of the app, reads ~/.cc-multiplex/events/*.jsonl every
+                    // of the app, reads ~/.allele/events/*.jsonl every
                     // 250ms, and routes each new event into apply_hook_event.
                     //
                     // Fast-forward existing files so we don't flood the user

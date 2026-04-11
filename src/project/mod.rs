@@ -10,7 +10,7 @@ pub struct LoadingSession {
 
 /// A project is a source directory that hosts zero or more sessions.
 /// Each session runs in an APFS clone of the source, stored under
-/// `~/.cc-multiplex/workspaces/<project-name>/<session-id>/`.
+/// `~/.allele/workspaces/<project-name>/<session-id>/`.
 pub struct Project {
     pub id: String,
     pub name: String,

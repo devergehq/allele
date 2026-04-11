@@ -129,7 +129,7 @@ extern "C" {
 ```
 1. User adds project (repo path)
 2. User clicks "New Workspace"
-3. App calls clonefile() → instant COW clone at ~/.cc-multiplex/workspaces/{project}/{workspace-name}/
+3. App calls clonefile() → instant COW clone at ~/.allele/workspaces/{project}/{workspace-name}/
 4. App launches `claude` inside the clone directory
 5. User works in the session
 6. When done: user can merge changes back (git diff + apply) or discard (rm -rf clone)
@@ -153,14 +153,14 @@ Claude Code supports hooks that fire on events. Configure a `postToolUse` or ses
   "hooks": {
     "postToolUse": [
       {
-        "command": "echo '{\"session_id\": \"$SESSION_ID\", \"status\": \"tool_used\", \"timestamp\": \"$(date -Iseconds)\"}' >> /tmp/cc-multiplex-events.jsonl"
+        "command": "echo '{\"session_id\": \"$SESSION_ID\", \"status\": \"tool_used\", \"timestamp\": \"$(date -Iseconds)\"}' >> /tmp/allele-events.jsonl"
       }
     ]
   }
 }
 ```
 
-The app watches `/tmp/cc-multiplex-events.jsonl` (or a Unix socket) for status updates.
+The app watches `/tmp/allele-events.jsonl` (or a Unix socket) for status updates.
 
 ### Approach 2: PTY Activity Monitoring
 
@@ -182,7 +182,7 @@ Check if the `claude` subprocess is still alive:
 
 ## 6. Session State Persistence
 
-Simple JSON file at `~/.cc-multiplex/state.json`:
+Simple JSON file at `~/.allele/state.json`:
 
 ```json
 {
@@ -195,7 +195,7 @@ Simple JSON file at `~/.cc-multiplex/state.json`:
         {
           "id": "uuid",
           "name": "feature-auth",
-          "clone_path": "/Users/patrick/.cc-multiplex/workspaces/my-project/feature-auth",
+          "clone_path": "/Users/patrick/.allele/workspaces/my-project/feature-auth",
           "created_at": "2026-04-09T12:00:00+10:00",
           "sessions": [
             {

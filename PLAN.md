@@ -67,7 +67,7 @@
 - [ ] Non-visible sessions continue running in background (PTY still reads)
 - [ ] Process exit detection → status updates to "done"
 - [ ] "New Session" button → spawns new claude instance
-- [ ] State persists to `~/.cc-multiplex/state.json` on change
+- [ ] State persists to `~/.allele/state.json` on change
 - [ ] State loads on app startup (reconnect to still-running PTYs if possible)
 - [ ] Add/remove projects via sidebar (path picker or manual input)
 
@@ -79,7 +79,7 @@
 
 - [ ] `clonefile()` FFI wrapper — clone directory tree atomically
 - [ ] Workspace model: `Workspace { name, clone_path, source_project }`
-- [ ] "New Workspace" action → creates APFS clone at `~/.cc-multiplex/workspaces/{project}/{name}/`
+- [ ] "New Workspace" action → creates APFS clone at `~/.allele/workspaces/{project}/{name}/`
 - [ ] Session launched in workspace runs `claude` with cwd set to clone path
 - [ ] "Delete Workspace" action → `rm -rf` clone (with confirmation)
 - [ ] Clone path shown in sidebar/status bar

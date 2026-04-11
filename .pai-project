@@ -1,0 +1,3 @@
+name: allele
+display: Allele
+description: Speculative workbench for parallel Claude Code experimentation (Rust/ratatui). Pronounced "uh-LEEL".

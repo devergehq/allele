@@ -1,7 +1,7 @@
 // Persistent session state — tracks sessions across app restarts so that
 // Claude Code conversations can be cold-resumed via `claude --resume <uuid>`.
 //
-// Stored at `~/.cc-multiplex/state.json`. Writes are atomic (temp + rename).
+// Stored at `~/.allele/state.json`. Writes are atomic (temp + rename).
 // Loads are defensive — a missing or unparseable file returns an empty state
 // rather than panicking.
 
@@ -56,12 +56,12 @@ pub struct PersistedState {
 }
 
 impl PersistedState {
-    /// Path to `~/.cc-multiplex/state.json`. Co-located with the workspaces
-    /// directory so a single `.cc-multiplex/` folder owns everything session-
+    /// Path to `~/.allele/state.json`. Co-located with the workspaces
+    /// directory so a single `.allele/` folder owns everything session-
     /// related (workspaces, trash, state).
     pub fn path() -> Option<PathBuf> {
         let home = dirs::home_dir()?;
-        Some(home.join(".cc-multiplex").join("state.json"))
+        Some(home.join(".allele").join("state.json"))
     }
 
     /// Load state from disk. Returns an empty state if:

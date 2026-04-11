@@ -4,7 +4,7 @@
 // `claude --settings <path>`. That settings file declares hooks for
 // Notification, Stop, UserPromptSubmit, SessionStart, and SessionEnd —
 // all pointing at a tiny shell receiver script that appends one JSONL
-// line per event to `~/.cc-multiplex/events/<session_id>.jsonl`.
+// line per event to `~/.allele/events/<session_id>.jsonl`.
 //
 // A background polling task in main.rs reads those files every 250ms,
 // parses new lines, and updates the matching session's status. The
@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 /// Canonical on-disk locations for the hook infrastructure.
 pub fn base_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".cc-multiplex"))
+    Some(dirs::home_dir()?.join(".allele"))
 }
 
 pub fn hooks_settings_path() -> Option<PathBuf> {
@@ -43,13 +43,13 @@ pub fn events_dir() -> Option<PathBuf> {
 /// - exits 0 on any error so hooks never block claude
 const RECEIVER_SCRIPT: &str = r#"#!/bin/bash
 # allele hook receiver — forwards Claude Code hook events to
-# per-session JSONL files under ~/.cc-multiplex/events/.
+# per-session JSONL files under ~/.allele/events/.
 # Managed by the Allele app. Do not edit by hand — it will be
 # regenerated on next launch.
 
 set -u
 kind="${1:-unknown}"
-events_dir="$HOME/.cc-multiplex/events"
+events_dir="$HOME/.allele/events"
 mkdir -p "$events_dir" 2>/dev/null || exit 0
 
 # Read the hook payload from stdin (non-blocking; claude always sends JSON)
@@ -229,7 +229,7 @@ impl EventWatcher {
         }
     }
 
-    /// Read every events file in `~/.cc-multiplex/events/`, parse new lines
+    /// Read every events file in `~/.allele/events/`, parse new lines
     /// since the last poll, and return the list of fresh events.
     ///
     /// The session_id is extracted from the filename (`<session_id>.jsonl`),
