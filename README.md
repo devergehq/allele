@@ -1,6 +1,10 @@
-# cc-multiplex
+# Allele
 
-> A native macOS terminal multiplexer for Claude Code sessions, with APFS copy-on-write workspace isolation.
+> A native macOS session manager for Claude Code, with APFS copy-on-write workspace isolation.
+
+## About the name
+
+**Allele** (pronounced "uh-LEEL") is a biology term for a variant of a gene at a shared locus. That's literally the model here: each Claude Code session is a variant of the same project at a shared locus (the trunk repo), running in its own APFS copy-on-write fork. You run N variants in parallel, let them diverge, then select the winner and cull the rest. The metaphor isn't decoration — *locus*, *variant*, *select*, and *cull* are the actual operations the tool performs on your workspaces.
 
 **Status:** Pre-alpha. Built primarily for the maintainer and a small group of friends who run a lot of parallel Claude Code sessions. If you're looking for a polished, supported product, this isn't it (yet).
 
@@ -8,7 +12,7 @@
 
 ## What it is
 
-cc-multiplex is a GPU-accelerated native macOS app that manages multiple Claude Code sessions side-by-side. It does three things that aren't well-served by existing tools:
+Allele is a GPU-accelerated native macOS app that manages multiple Claude Code sessions side-by-side. It does three things that aren't well-served by existing tools:
 
 1. **Embedded real terminals.** Each session runs the real `claude` CLI in a real PTY, rendered via GPUI + alacritty_terminal. No output interception, no JSON wrapping, no IPC boundary — what you see is exactly what Claude Code printed.
 2. **APFS copy-on-write workspaces.** Every session can run in an instant copy-on-write clone of your repo, created via macOS's `clonefile(2)` syscall. No waiting for `cp -r` on a 50k-file monorepo. No disk space used until files are modified.
@@ -18,7 +22,7 @@ cc-multiplex is a GPU-accelerated native macOS app that manages multiple Claude 
 
 - **Not cross-platform.** macOS only. The APFS copy-on-write feature is core to the value proposition and is Apple-specific.
 - **Not a Claude Code wrapper.** It does not intercept, reinterpret, or reformat Claude Code's output. It embeds the unmodified CLI.
-- **Not a general-purpose terminal emulator.** If you want iTerm2, Ghostty, or WezTerm, use those. cc-multiplex is narrowly focused on managing Claude Code sessions.
+- **Not a general-purpose terminal emulator.** If you want iTerm2, Ghostty, or WezTerm, use those. Allele is narrowly focused on managing Claude Code sessions.
 - **Not commercial software.** Apache 2.0 licensed, free forever. See [Licensing](#licensing) for nuance on contributor terms.
 
 ## Who it's for
@@ -56,10 +60,10 @@ Requirements:
 Build and run:
 
 ```sh
-git clone https://github.com/patrickdorival/cc-multiplex.git
-cd cc-multiplex
+git clone https://github.com/patrickdorival/allele.git
+cd allele
 cargo build --release
-./target/release/cc-multiplex
+./target/release/allele
 ```
 
 First build is slow (~5-10 minutes) because GPUI and alacritty_terminal are large crates. Incremental builds are fast.
@@ -69,7 +73,7 @@ First build is slow (~5-10 minutes) because GPUI and alacritty_terminal are larg
 Currently source-only. Pre-built binaries are not provided, and the project is not signed or notarised. If you build it yourself, macOS Gatekeeper will treat it as an unsigned local binary (which is fine for local use). If you receive a build from someone else, you may need to clear the quarantine attribute:
 
 ```sh
-xattr -d com.apple.quarantine ./cc-multiplex
+xattr -d com.apple.quarantine ./allele
 ```
 
 ## Project status
@@ -104,11 +108,11 @@ Response times are side-project pace (days to weeks). If you need faster, please
 
 ## Licensing
 
-cc-multiplex is licensed under the **[Apache License 2.0](LICENSE)**. You are free to use, modify, distribute, and (if you wish) commercialise it, subject to the terms of that licence.
+Allele is licensed under the **[Apache License 2.0](LICENSE)**. You are free to use, modify, distribute, and (if you wish) commercialise it, subject to the terms of that licence.
 
 Contributors grant an additional broad licence via the [CLA](CLA.md) that preserves the maintainer's right to dual-licence the project in the future. Contributors retain copyright to their contributions and can continue to use them in other projects under any licence they choose.
 
-The maintainer currently has no plans to dual-licence or monetise cc-multiplex. The CLA exists solely to keep that option open if circumstances change.
+The maintainer currently has no plans to dual-licence or monetise Allele. The CLA exists solely to keep that option open if circumstances change.
 
 ## Acknowledgements
 

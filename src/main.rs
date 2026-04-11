@@ -54,7 +54,7 @@ struct AppState {
     /// the sidebar row at that cursor shows a confirm/cancel prompt instead
     /// of the usual buttons.
     confirming_discard: Option<SessionCursor>,
-    /// Absolute path to the cc-multiplex hooks.json, passed to claude via
+    /// Absolute path to the Allele hooks.json, passed to claude via
     /// `--settings <path>` at every spawn. `None` if install_if_missing
     /// failed — in that case hooks are silently disabled and the app still
     /// functions normally.
@@ -174,7 +174,7 @@ impl AppState {
         // Build the claude command with --session-id + --name so our internal
         // UUID *is* Claude's session ID. This is what enables cold-resume later:
         // `claude --resume <same-uuid>` picks up the conversation in the same
-        // clone path. --settings injects cc-multiplex's attention-routing
+        // clone path. --settings injects Allele's attention-routing
         // hooks so the Notification/Stop events flow back into the sidebar.
         let hooks_path_str = self
             .hooks_settings_path
@@ -801,7 +801,7 @@ fn install_panic_hook() {
                     f.write_all(entry.as_bytes())
                 });
 
-            eprintln!("\n*** cc-multiplex crashed ***");
+            eprintln!("\n*** allele crashed ***");
             eprintln!("{entry}");
             eprintln!("Crash log: {}", log_path.display());
         }
@@ -836,16 +836,16 @@ fn main() {
         let loaded_state = PersistedState::load();
         eprintln!("Loaded persisted state: {} sessions", loaded_state.sessions.len());
 
-        // Install the cc-multiplex hook receiver and settings file so every
+        // Install the Allele hook receiver and settings file so every
         // claude spawn can route attention signals back into the UI. Failure
         // is non-fatal — the app still runs, it just won't get hook events.
         let hooks_settings_path: Option<PathBuf> = match hooks::install_if_missing() {
             Ok(path) => {
-                eprintln!("Installed cc-multiplex hooks at {}", path.display());
+                eprintln!("Installed Allele hooks at {}", path.display());
                 Some(path)
             }
             Err(e) => {
-                eprintln!("Failed to install cc-multiplex hooks: {e} (attention routing disabled)");
+                eprintln!("Failed to install Allele hooks: {e} (attention routing disabled)");
                 None
             }
         };
@@ -897,7 +897,7 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("CC Multiplex".into()),
+                    title: Some("Allele".into()),
                     ..Default::default()
                 }),
                 window_min_size: Some(size(px(800.0), px(600.0))),
@@ -1493,7 +1493,7 @@ impl Render for AppState {
                                 div()
                                     .text_size(px(13.0))
                                     .font_weight(FontWeight::BOLD)
-                                    .child("CC Multiplex"),
+                                    .child("Allele"),
                             )
                             .child(
                                 // "Open project" button

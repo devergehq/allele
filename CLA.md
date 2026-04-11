@@ -1,10 +1,10 @@
 # Contributor Licence Agreement
 
-**Project:** cc-multiplex
+**Project:** Allele
 **Version:** 1.0
 **Effective date:** 2026-04-11
 
-Thank you for your interest in contributing to cc-multiplex (the "Project"), maintained by Patrick D'Orival ("the Maintainer"). This Contributor Licence Agreement ("Agreement") sets out the terms under which You contribute code, documentation, or other materials to the Project. It is designed to be lightweight, to protect both You and the Project, and to preserve flexibility in how the Project may be licensed in the future.
+Thank you for your interest in contributing to Allele (the "Project"), maintained by Patrick D'Orival ("the Maintainer"). This Contributor Licence Agreement ("Agreement") sets out the terms under which You contribute code, documentation, or other materials to the Project. It is designed to be lightweight, to protect both You and the Project, and to preserve flexibility in how the Project may be licensed in the future.
 
 By signing this Agreement (via the CLA Assistant bot on a pull request, or by any other means the Maintainer accepts), You accept and agree to the following terms for Your present and future Contributions submitted to the Project.
 
@@ -80,6 +80,6 @@ This Agreement is governed by the laws of Australia, without regard to conflict-
 
 ## How to sign
 
-When You open Your first pull request against the cc-multiplex repository, the CLA Assistant bot will automatically post a comment asking You to sign this Agreement. Signing is a single click and records Your agreement against Your GitHub identity. Subsequent pull requests from the same GitHub account do not require re-signing.
+When You open Your first pull request against the Allele repository, the CLA Assistant bot will automatically post a comment asking You to sign this Agreement. Signing is a single click and records Your agreement against Your GitHub identity. Subsequent pull requests from the same GitHub account do not require re-signing.
 
 If You prefer to sign outside of GitHub, contact the Maintainer directly.

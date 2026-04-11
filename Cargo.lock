@@ -94,6 +94,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "allele"
+version = "0.1.0"
+dependencies = [
+ "alacritty_terminal",
+ "anyhow",
+ "cocoa 0.26.0",
+ "core-text",
+ "dirs 6.0.0",
+ "flume",
+ "gpui",
+ "libc",
+ "notify",
+ "objc",
+ "rustix-openpty",
+ "serde",
+ "serde_json",
+ "tokio",
+ "uuid",
+ "which 7.0.3",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -817,28 +839,6 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
-]
-
-[[package]]
-name = "cc-multiplex"
-version = "0.1.0"
-dependencies = [
- "alacritty_terminal",
- "anyhow",
- "cocoa 0.26.0",
- "core-text",
- "dirs 6.0.0",
- "flume",
- "gpui",
- "libc",
- "notify",
- "objc",
- "rustix-openpty",
- "serde",
- "serde_json",
- "tokio",
- "uuid",
- "which 7.0.3",
 ]
 
 [[package]]

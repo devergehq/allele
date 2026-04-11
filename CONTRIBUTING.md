@@ -1,6 +1,6 @@
-# Contributing to cc-multiplex
+# Contributing to Allele
 
-Thanks for your interest. cc-multiplex is a small personal project primarily built for the maintainer and a handful of friends who run lots of Claude Code sessions. Contributions are welcome, but please read this document first so we're on the same page about expectations.
+Thanks for your interest. Allele is a small personal project primarily built for the maintainer and a handful of friends who run lots of Claude Code sessions. Contributions are welcome, but please read this document first so we're on the same page about expectations.
 
 ## Expectations
 
@@ -36,10 +36,10 @@ Requirements:
 Clone and build:
 
 ```sh
-git clone https://github.com/patrickdorival/cc-multiplex.git
-cd cc-multiplex
+git clone https://github.com/patrickdorival/allele.git
+cd allele
 cargo build --release
-./target/release/cc-multiplex
+./target/release/allele
 ```
 
 First build is slow because GPUI and alacritty_terminal are large. Incremental builds are fast.

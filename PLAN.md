@@ -1,4 +1,4 @@
-# CC Multiplex — POC Build Plan
+# Allele — POC Build Plan
 
 **Goal:** Prove the GPUI + alacritty_terminal architecture works for a Claude Code session manager. Each phase produces a runnable checkpoint — if any phase reveals a blocker, we have a clear fallback to Swift/AppKit.
 
@@ -12,7 +12,7 @@
 - [ ] GPUI window opens on macOS with Metal rendering
 - [ ] Sidebar panel (240px, dark background) renders on the left
 - [ ] Main content area fills remaining space
-- [ ] Window title shows "CC Multiplex"
+- [ ] Window title shows "Allele"
 
 **Risk gate:** If GPUI fails to compile or the API has changed from the pinned rev, we stop and evaluate. This phase should take <1 day. If it takes longer, that's a signal.
 
@@ -52,7 +52,7 @@
 - [ ] Ctrl+C sends SIGINT correctly
 - [ ] Terminal scrollback works (scroll up to see history)
 
-**Validation:** Run the same PAI workflow in both native terminal and CC Multiplex. Compare output line-by-line. Any discrepancy is a bug.
+**Validation:** Run the same PAI workflow in both native terminal and Allele. Compare output line-by-line. Any discrepancy is a bug.
 
 ---
 

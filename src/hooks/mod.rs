@@ -1,6 +1,6 @@
 // Attention routing via Claude Code's hook system.
 //
-// cc-multiplex injects its own settings file at claude spawn time via
+// Allele injects its own settings file at claude spawn time via
 // `claude --settings <path>`. That settings file declares hooks for
 // Notification, Stop, UserPromptSubmit, SessionStart, and SessionEnd —
 // all pointing at a tiny shell receiver script that appends one JSONL
@@ -42,9 +42,9 @@ pub fn events_dir() -> Option<PathBuf> {
 /// - appends one JSONL line (ts + kind) to the per-session events file
 /// - exits 0 on any error so hooks never block claude
 const RECEIVER_SCRIPT: &str = r#"#!/bin/bash
-# cc-multiplex hook receiver — forwards Claude Code hook events to
+# allele hook receiver — forwards Claude Code hook events to
 # per-session JSONL files under ~/.cc-multiplex/events/.
-# Managed by the cc-multiplex app. Do not edit by hand — it will be
+# Managed by the Allele app. Do not edit by hand — it will be
 # regenerated on next launch.
 
 set -u
@@ -70,7 +70,7 @@ printf '{"ts":%s,"kind":"%s"}\n' "$ts" "$kind" >> "$out"
 exit 0
 "#;
 
-/// Generate the settings JSON that cc-multiplex passes to `claude --settings`.
+/// Generate the settings JSON that Allele passes to `claude --settings`.
 /// Uses an absolute receiver-script path so the hook works regardless of the
 /// session's cwd (each session runs in its own APFS clone).
 fn build_hooks_json(receiver: &str) -> serde_json::Value {
@@ -86,7 +86,7 @@ fn build_hooks_json(receiver: &str) -> serde_json::Value {
     };
 
     serde_json::json!({
-        "_cc_multiplex_version": 2,
+        "_allele_version": 2,
         "hooks": {
             "Notification":        [make_hook("notification")],
             "Stop":                [make_hook("stop")],

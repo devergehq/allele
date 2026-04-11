@@ -29,7 +29,7 @@ jobs:
           PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
         with:
           # Path to the CLA document in this repository.
-          path-to-document: "https://github.com/patrickdorival/cc-multiplex/blob/main/CLA.md"
+          path-to-document: "https://github.com/patrickdorival/allele/blob/main/CLA.md"
 
           # Branch where signatures are stored (created automatically if missing).
           branch: "main"
@@ -42,7 +42,7 @@ jobs:
 
           # Message posted on first PR from an unsigned contributor.
           custom-notsigned-prcomment: |
-            Thank you for your contribution to **cc-multiplex**! Before we can merge your pull request, we need you to sign our [Contributor Licence Agreement](https://github.com/patrickdorival/cc-multiplex/blob/main/CLA.md).
+            Thank you for your contribution to **Allele**! Before we can merge your pull request, we need you to sign our [Contributor Licence Agreement](https://github.com/patrickdorival/allele/blob/main/CLA.md).
 
             The CLA is lightweight: you keep copyright to your contributions, but grant the project a broad licence (including the right to sublicence) so we retain the option to dual-licence in the future.
 

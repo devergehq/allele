@@ -1,8 +1,8 @@
 [package]
-name = "cc-multiplex"
+name = "allele"
 version = "0.1.0"
 edition = "2021"
-description = "Claude Code session manager — centralised terminal multiplexer with APFS clone management"
+description = "Claude Code session manager — APFS clone management for parallel variant workflows"
 
 [dependencies]
 # GPUI — pinned to specific Zed commit (same rev Termy uses, known working)
