@@ -1,0 +1,58 @@
+name: CLA Assistant
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+# Required permissions for CLA Assistant to post comments and manage PRs.
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  CLAssistant:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "CLA Assistant"
+        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        uses: contributor-assistant/github-action@v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PERSONAL_ACCESS_TOKEN is needed if you want to store signatures
+          # in a separate repository. For a single-repo setup, GITHUB_TOKEN
+          # is sufficient. Create one at https://github.com/settings/tokens
+          # with "repo" scope and add as a repo secret named PERSONAL_ACCESS_TOKEN.
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.PERSONAL_ACCESS_TOKEN }}
+        with:
+          # Path to the CLA document in this repository.
+          path-to-document: "https://github.com/patrickdorival/cc-multiplex/blob/main/CLA.md"
+
+          # Branch where signatures are stored (created automatically if missing).
+          branch: "main"
+
+          # File where signatures are recorded (created automatically).
+          path-to-signatures: ".github/cla-signatures.json"
+
+          # Users who do not need to sign (maintainers, bots).
+          allowlist: "patrickdorival,dependabot[bot]"
+
+          # Message posted on first PR from an unsigned contributor.
+          custom-notsigned-prcomment: |
+            Thank you for your contribution to **cc-multiplex**! Before we can merge your pull request, we need you to sign our [Contributor Licence Agreement](https://github.com/patrickdorival/cc-multiplex/blob/main/CLA.md).
+
+            The CLA is lightweight: you keep copyright to your contributions, but grant the project a broad licence (including the right to sublicence) so we retain the option to dual-licence in the future.
+
+            **To sign**, please post the following comment in this pull request:
+
+          custom-pr-sign-comment: "I have read the CLA Document and I hereby sign the CLA"
+
+          custom-allsigned-prcomment: |
+            All contributors have signed the CLA. Thank you!
+
+          # Require signature to be matched against the exact PR author.
+          lock-pullrequest-aftermerge: false
+          use-dco-flag: false

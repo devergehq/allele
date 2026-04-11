@@ -1,0 +1,21 @@
+cc-multiplex
+Copyright 2026 Patrick D'Orival and contributors
+
+This product includes software developed as part of the cc-multiplex project
+(https://github.com/patrickdorival/cc-multiplex).
+
+Licensed under the Apache License, Version 2.0. See LICENSE for details.
+
+This product bundles the following third-party software:
+
+  - JetBrains Mono font (SIL Open Font License 1.1)
+    https://github.com/JetBrains/JetBrainsMono
+
+This product depends on the following third-party software at build time:
+
+  - GPUI — Apache 2.0 (https://github.com/zed-industries/zed)
+  - alacritty_terminal — Apache 2.0 (https://github.com/alacritty/alacritty)
+  - Other dependencies as listed in Cargo.toml and Cargo.lock
+
+Full dependency licence information is available via `cargo about` or by
+inspecting Cargo.lock.
