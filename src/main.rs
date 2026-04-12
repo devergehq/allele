@@ -489,6 +489,19 @@ impl AppState {
 
         session.status = new_status;
 
+        // --- Auto-naming: gather data while we still hold the session borrow ---
+        let auto_name_data = if event.kind == HookKind::UserPromptSubmit {
+            let is_placeholder = session.label.starts_with("Claude ")
+                || session.label.starts_with("Shell ");
+            if is_placeholder {
+                Some((session.id.clone(), session.clone_path.clone()))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Capture the label for notifications BEFORE we drop the borrow.
         let session_label = session.label.clone();
         let project_name = self
@@ -539,6 +552,148 @@ impl AppState {
         }
 
         cx.notify();
+
+        // Trigger auto-naming after all borrows are released.
+        if let Some((session_id, clone_path)) = auto_name_data {
+            let claude_path = self.claude_path.clone();
+            self.trigger_auto_naming(session_id, clone_path, claude_path, cx);
+        }
+    }
+
+    /// Spawn a background task that reads the first prompt from the hook
+    /// events directory, calls `claude -p --model haiku --bare` to summarise
+    /// it into a 3-5 word slug, then updates the session label and renames
+    /// the git branch. No-ops silently on any failure.
+    fn trigger_auto_naming(
+        &self,
+        session_id: String,
+        clone_path: Option<PathBuf>,
+        claude_path: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(claude_bin) = claude_path else { return; };
+        let Some(events_dir) = hooks::events_dir() else { return; };
+
+        cx.spawn(async move |this, cx| {
+            // Read the .prompt file (written by the hook receiver).
+            // Retry a few times with short delays — the hook script runs
+            // asynchronously and the file may not exist yet.
+            let prompt_path = events_dir.join(format!("{session_id}.prompt"));
+            let mut prompt_text = None;
+            for _ in 0..6 {
+                if let Ok(text) = std::fs::read_to_string(&prompt_path) {
+                    if !text.trim().is_empty() {
+                        prompt_text = Some(text);
+                        break;
+                    }
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(500))
+                    .await;
+            }
+
+            let Some(prompt) = prompt_text else {
+                eprintln!("auto-naming: no prompt file for {session_id}");
+                return;
+            };
+
+            // Truncate prompt to first 200 chars to keep the LLM call cheap.
+            let truncated: String = prompt.chars().take(200).collect();
+
+            // Call claude to summarise.
+            let summary_prompt = format!(
+                "Summarise this user request in exactly 3-5 lowercase words separated by hyphens, \
+                 suitable as a git branch name. Output ONLY the slug, nothing else.\n\n\
+                 Request: {truncated}"
+            );
+
+            let result = cx.background_executor().spawn(async move {
+                std::process::Command::new(&claude_bin)
+                    .arg("-p")
+                    .arg("--model")
+                    .arg("haiku")
+                    .arg("--bare")
+                    .arg(&summary_prompt)
+                    .output()
+            }).await;
+
+            let slug_raw = match result {
+                Ok(output) if output.status.success() => {
+                    String::from_utf8_lossy(&output.stdout).trim().to_string()
+                }
+                Ok(output) => {
+                    eprintln!(
+                        "auto-naming: claude summarise failed: {}",
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    );
+                    return;
+                }
+                Err(e) => {
+                    eprintln!("auto-naming: failed to spawn claude: {e}");
+                    return;
+                }
+            };
+
+            if slug_raw.is_empty() {
+                eprintln!("auto-naming: empty slug from claude");
+                return;
+            }
+
+            let slug = git::slugify(&slug_raw, 50);
+            if slug.is_empty() {
+                return;
+            }
+
+            // Human-readable label: replace hyphens with spaces, title case,
+            // capped at 40 chars for sidebar display.
+            let full_label: String = slug
+                .split('-')
+                .map(|word| {
+                    let mut chars = word.chars();
+                    match chars.next() {
+                        Some(c) => {
+                            let upper: String = c.to_uppercase().collect();
+                            format!("{upper}{}", chars.as_str())
+                        }
+                        None => String::new(),
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+            let display_label = if full_label.len() > 40 {
+                let mut truncated = full_label[..40].to_string();
+                // Avoid cutting mid-word — trim back to last space.
+                if let Some(last_space) = truncated.rfind(' ') {
+                    truncated.truncate(last_space);
+                }
+                truncated
+            } else {
+                full_label
+            };
+
+            // Rename the git branch in the background (non-blocking).
+            if let Some(ref cp) = clone_path {
+                if let Err(e) = git::rename_session_branch(cp, &session_id, &slug) {
+                    eprintln!("auto-naming: branch rename failed: {e}");
+                    // Continue — label update is still valuable
+                }
+            }
+
+            // Update session label on the main thread.
+            let _ = this.update(cx, |this: &mut AppState, cx| {
+                for project in &mut this.projects {
+                    for session in &mut project.sessions {
+                        if session.id == session_id {
+                            session.label = display_label.clone();
+                            break;
+                        }
+                    }
+                }
+                this.save_state();
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Cycle the active session pointer across all non-Suspended sessions
@@ -1216,6 +1371,7 @@ impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Process pending actions
         if let Some(action) = self.pending_action.take() {
+            let mut skip_refocus = false;
             match action {
                 PendingAction::NewSessionInActiveProject => {
                     if let Some(active) = self.active {
@@ -1278,13 +1434,23 @@ impl Render for AppState {
                         if let Some(entry) = project.archives.get(archive_idx) {
                             let session_id = entry.id.clone();
                             match git::merge_archive(&project.source_path, &session_id) {
-                                Ok(()) => {
+                                Ok(git::MergeResult::Merged) => {
                                     let _ = git::delete_ref(
                                         &project.source_path,
                                         &git::archive_ref_name(&session_id),
                                     );
                                     project.archives.remove(archive_idx);
                                     eprintln!("Merged archive {session_id} into canonical");
+                                }
+                                Ok(git::MergeResult::AlreadyUpToDate) => {
+                                    let _ = git::delete_ref(
+                                        &project.source_path,
+                                        &git::archive_ref_name(&session_id),
+                                    );
+                                    project.archives.remove(archive_idx);
+                                    eprintln!(
+                                        "Archive {session_id} had no new commits — nothing to merge (already up to date)"
+                                    );
                                 }
                                 Err(e) => {
                                     eprintln!(
@@ -1336,6 +1502,7 @@ impl Render for AppState {
                     }
                 }
                 PendingAction::ToggleDrawer => {
+                    skip_refocus = true;
                     self.drawer_visible = !self.drawer_visible;
                     if self.drawer_visible {
                         // Lazily spawn the drawer terminal for the active session
@@ -1435,6 +1602,18 @@ impl Render for AppState {
                 PendingAction::CancelDirtySession => {
                     self.confirming_dirty_session = None;
                     cx.notify();
+                }
+            }
+
+            // After any sidebar-triggered action, re-focus the active
+            // terminal so keyboard input goes back to Claude Code.
+            // ToggleDrawer manages its own focus, so skip it.
+            if !skip_refocus {
+                if let Some(session) = self.active_session() {
+                    if let Some(tv) = session.terminal_view.as_ref() {
+                        let fh = tv.read(cx).focus_handle.clone();
+                        fh.focus(window, cx);
+                    }
                 }
             }
         }

@@ -225,6 +225,15 @@ impl TerminalView {
                                         .map(|d| d.as_millis())
                                         .unwrap_or(0),
                                 );
+                                // Clear scrollback before sending SIGWINCH.
+                                // CC's ink re-renders the full conversation on resize —
+                                // that repaint IS the correct canonical state at the new
+                                // terminal width. Clear old (stale-width) scrollback so
+                                // the repaint lands as fresh content, not duplicates.
+                                if let Some(ref terminal) = this.terminal {
+                                    terminal.term.lock().grid_mut().clear_history();
+                                    eprintln!("[RESIZE-DIAG] CLEAR scrollback before SIGWINCH");
+                                }
                                 this.last_cols = pending_size.cols;
                                 this.last_rows = pending_size.rows;
                                 if let Some(ref mut terminal) = this.terminal {
@@ -1199,6 +1208,22 @@ impl Render for TerminalView {
                     let was_selecting = this.selecting;
                     this.scrollbar_dragging = false;
                     this.selecting = false;
+                    // If the selection is trivially small (same cell or adjacent),
+                    // clear it — single clicks shouldn't leave a highlight.
+                    if let (Some(a), Some(e)) = (this.selection_anchor, this.selection_extent) {
+                        let span = if a.0 == e.0 {
+                            (e.1 as isize - a.1 as isize).unsigned_abs()
+                        } else {
+                            // Multi-line selection is always meaningful
+                            usize::MAX
+                        };
+                        if span < 2 {
+                            this.selection_anchor = None;
+                            this.selection_extent = None;
+                            cx.notify();
+                            return;
+                        }
+                    }
                     // Copy on select (macOS convention: implicit copy after mouse-up from drag)
                     if was_selecting {
                         if let Some(text) = this.get_selected_text() {
@@ -1215,6 +1240,20 @@ impl Render for TerminalView {
                     let was_selecting = this.selecting;
                     this.scrollbar_dragging = false;
                     this.selecting = false;
+                    // Clear trivially small selections on mouse-up-out too.
+                    if let (Some(a), Some(e)) = (this.selection_anchor, this.selection_extent) {
+                        let span = if a.0 == e.0 {
+                            (e.1 as isize - a.1 as isize).unsigned_abs()
+                        } else {
+                            usize::MAX
+                        };
+                        if span < 2 {
+                            this.selection_anchor = None;
+                            this.selection_extent = None;
+                            cx.notify();
+                            return;
+                        }
+                    }
                     if was_selecting {
                         if let Some(text) = this.get_selected_text() {
                             if !text.is_empty() {

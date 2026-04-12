@@ -67,6 +67,21 @@ fi
 ts=$(date +%s)
 out="$events_dir/$session_id.jsonl"
 printf '{"ts":%s,"kind":"%s"}\n' "$ts" "$kind" >> "$out"
+
+# Capture the first user prompt for session auto-naming.
+# Writes to a .prompt sidecar file (first prompt only — skip if exists).
+if [ "$kind" = "user_prompt_submit" ]; then
+    prompt_file="$events_dir/$session_id.prompt"
+    if [ ! -f "$prompt_file" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            prompt=$(printf '%s' "$payload" | jq -r '.prompt // empty' 2>/dev/null)
+        else
+            prompt=$(printf '%s' "$payload" | sed -n 's/.*"prompt"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+        fi
+        [ -n "$prompt" ] && printf '%s' "$prompt" > "$prompt_file"
+    fi
+fi
+
 exit 0
 "#;
 
@@ -86,7 +101,7 @@ fn build_hooks_json(receiver: &str) -> serde_json::Value {
     };
 
     serde_json::json!({
-        "_allele_version": 2,
+        "_allele_version": 3,
         "hooks": {
             "Notification":        [make_hook("notification")],
             "Stop":                [make_hook("stop")],
