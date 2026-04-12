@@ -225,8 +225,32 @@ pub fn fetch_session_branch(
     Ok(())
 }
 
+/// If the clone's working tree has uncommitted changes, stage everything
+/// and create a commit so the work is captured on the session branch
+/// before archiving. Returns `true` if a commit was created.
+pub fn auto_commit_if_dirty(clone: &Path) -> anyhow::Result<bool> {
+    if !is_working_tree_dirty(clone) {
+        return Ok(false);
+    }
+    let mut add = git_cmd(Some(clone));
+    add.arg("add").arg("-A");
+    run_git(add, "add -A (auto-commit)")?;
+
+    let mut commit = git_cmd(Some(clone));
+    commit
+        .arg("commit")
+        .arg("--no-verify")
+        .arg("-m")
+        .arg("allele: auto-commit uncommitted work before archive");
+    run_git(commit, "commit (auto-commit)")?;
+    Ok(true)
+}
+
 /// Archive a clone's session work back into canonical by fetching the
 /// session branch as `refs/allele/archive/<session-id>`.
+///
+/// Automatically commits any uncommitted changes in the clone first so
+/// they are not lost when the clone is deleted.
 ///
 /// Returns the fetch result — callers typically log it and proceed to
 /// delete/trash the clone regardless of outcome.
@@ -235,6 +259,10 @@ pub fn archive_session(
     clone: &Path,
     session_id: &str,
 ) -> anyhow::Result<()> {
+    // Capture any uncommitted work before fetching the branch.
+    if let Err(e) = auto_commit_if_dirty(clone) {
+        eprintln!("auto_commit_if_dirty failed for {session_id}: {e}");
+    }
     fetch_session_branch(canonical, clone, session_id)
 }
 
@@ -353,15 +381,34 @@ pub fn list_archive_refs(canonical: &Path) -> anyhow::Result<Vec<ArchiveEntry>> 
     Ok(entries)
 }
 
+/// Result of a merge attempt — distinguishes actual merges from no-ops.
+#[derive(Debug, PartialEq)]
+pub enum MergeResult {
+    /// New merge commit created — work was integrated.
+    Merged,
+    /// Archive ref was already an ancestor of HEAD — nothing to merge.
+    AlreadyUpToDate,
+}
+
 /// Merge an archived session ref into canonical's current branch.
 /// Uses `--no-ff --no-edit` to preserve the merge as a distinct commit.
+/// Returns `MergeResult::AlreadyUpToDate` if the archive ref is already
+/// an ancestor of HEAD (i.e. no new work to merge).
 /// Returns an error if there are merge conflicts or the working tree is
 /// dirty — the caller should display the error and let the user resolve
 /// conflicts manually.
-pub fn merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<()> {
+pub fn merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<MergeResult> {
     if !is_git_repo(canonical) {
         anyhow::bail!("merge_archive: not a git repo: {}", canonical.display());
     }
+
+    // Record HEAD before merge to detect no-ops.
+    let head_before = {
+        let mut cmd = git_cmd(Some(canonical));
+        cmd.arg("rev-parse").arg("HEAD");
+        run_git_stdout(cmd, "rev-parse HEAD (pre-merge)")?
+    };
+
     let ref_name = archive_ref_name(session_id);
     let mut cmd = git_cmd(Some(canonical));
     cmd.arg("merge")
@@ -369,7 +416,19 @@ pub fn merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<()> {
         .arg("--no-edit")
         .arg(&ref_name);
     run_git(cmd, "merge archive")?;
-    Ok(())
+
+    // Check if HEAD actually moved.
+    let head_after = {
+        let mut cmd = git_cmd(Some(canonical));
+        cmd.arg("rev-parse").arg("HEAD");
+        run_git_stdout(cmd, "rev-parse HEAD (post-merge)")?
+    };
+
+    if head_before == head_after {
+        Ok(MergeResult::AlreadyUpToDate)
+    } else {
+        Ok(MergeResult::Merged)
+    }
 }
 
 // --- Branch introspection -----------------------------------------------
@@ -850,7 +909,8 @@ mod tests {
         assert_eq!(archive.as_deref(), Some(session_head.as_str()));
 
         // 7. Merge the archive into canonical
-        merge_archive(&canonical, "e2e01").unwrap();
+        let result = merge_archive(&canonical, "e2e01").unwrap();
+        assert_eq!(result, MergeResult::Merged);
 
         // 8. Verify: session work file is in canonical's HEAD
         let files = ls_tree(&canonical, "HEAD");
@@ -977,5 +1037,80 @@ mod tests {
         // Archive ref should exist and point at the session work
         let archive_target = resolve_ref(&canonical, &archive_ref_name("archrename01"));
         assert_eq!(archive_target.as_deref(), Some(work_commit.as_str()));
+    }
+
+    #[test]
+    fn merge_archive_detects_noop_when_no_new_commits() {
+        // Session branch with no new commits → merge is "Already up to date"
+        let (_cdir, canonical) = make_canonical("base");
+        let clone_dir = TempDir::new().unwrap();
+        let clone_path = clone_dir.path().to_path_buf();
+        let mut cmd = git_cmd(None);
+        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        run_git(cmd, "git clone --local (test)").unwrap();
+
+        create_session_branch(&clone_path, "noop01").unwrap();
+        // No commits — session branch is identical to master
+
+        archive_session(&canonical, &clone_path, "noop01").unwrap();
+        let result = merge_archive(&canonical, "noop01").unwrap();
+        assert_eq!(result, MergeResult::AlreadyUpToDate);
+    }
+
+    #[test]
+    fn auto_commit_if_dirty_captures_uncommitted_work() {
+        let (_cdir, canonical) = make_canonical("base");
+        let clone_dir = TempDir::new().unwrap();
+        let clone_path = clone_dir.path().to_path_buf();
+        let mut cmd = git_cmd(None);
+        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        run_git(cmd, "git clone --local (test)").unwrap();
+
+        create_session_branch(&clone_path, "dirty01").unwrap();
+        let head_before = head_commit(&clone_path);
+
+        // Simulate uncommitted work
+        fs::write(clone_path.join("unsaved.txt"), "important work").unwrap();
+        assert!(is_working_tree_dirty(&clone_path));
+
+        let committed = auto_commit_if_dirty(&clone_path).unwrap();
+        assert!(committed);
+        assert!(!is_working_tree_dirty(&clone_path));
+
+        let head_after = head_commit(&clone_path);
+        assert_ne!(head_before, head_after);
+
+        // Archive and merge should now find actual work
+        archive_session(&canonical, &clone_path, "dirty01").unwrap();
+        let result = merge_archive(&canonical, "dirty01").unwrap();
+        assert_eq!(result, MergeResult::Merged);
+
+        let files = ls_tree(&canonical, "HEAD");
+        assert!(files.contains(&"unsaved.txt".to_string()));
+    }
+
+    #[test]
+    fn archive_session_auto_commits_dirty_clone() {
+        // End-to-end: dirty clone → archive_session auto-commits → merge finds work
+        let (_cdir, canonical) = make_canonical("base");
+        let clone_dir = TempDir::new().unwrap();
+        let clone_path = clone_dir.path().to_path_buf();
+        let mut cmd = git_cmd(None);
+        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        run_git(cmd, "git clone --local (test)").unwrap();
+
+        create_session_branch(&clone_path, "autocommit01").unwrap();
+
+        // Only uncommitted changes — no manual commit
+        fs::write(clone_path.join("work.txt"), "session edits").unwrap();
+
+        // archive_session should auto-commit before fetching
+        archive_session(&canonical, &clone_path, "autocommit01").unwrap();
+
+        let result = merge_archive(&canonical, "autocommit01").unwrap();
+        assert_eq!(result, MergeResult::Merged);
+
+        let files = ls_tree(&canonical, "HEAD");
+        assert!(files.contains(&"work.txt".to_string()));
     }
 }

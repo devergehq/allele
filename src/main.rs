@@ -1371,6 +1371,7 @@ impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Process pending actions
         if let Some(action) = self.pending_action.take() {
+            let mut skip_refocus = false;
             match action {
                 PendingAction::NewSessionInActiveProject => {
                     if let Some(active) = self.active {
@@ -1433,13 +1434,23 @@ impl Render for AppState {
                         if let Some(entry) = project.archives.get(archive_idx) {
                             let session_id = entry.id.clone();
                             match git::merge_archive(&project.source_path, &session_id) {
-                                Ok(()) => {
+                                Ok(git::MergeResult::Merged) => {
                                     let _ = git::delete_ref(
                                         &project.source_path,
                                         &git::archive_ref_name(&session_id),
                                     );
                                     project.archives.remove(archive_idx);
                                     eprintln!("Merged archive {session_id} into canonical");
+                                }
+                                Ok(git::MergeResult::AlreadyUpToDate) => {
+                                    let _ = git::delete_ref(
+                                        &project.source_path,
+                                        &git::archive_ref_name(&session_id),
+                                    );
+                                    project.archives.remove(archive_idx);
+                                    eprintln!(
+                                        "Archive {session_id} had no new commits — nothing to merge (already up to date)"
+                                    );
                                 }
                                 Err(e) => {
                                     eprintln!(
@@ -1491,6 +1502,7 @@ impl Render for AppState {
                     }
                 }
                 PendingAction::ToggleDrawer => {
+                    skip_refocus = true;
                     self.drawer_visible = !self.drawer_visible;
                     if self.drawer_visible {
                         // Lazily spawn the drawer terminal for the active session
@@ -1590,6 +1602,18 @@ impl Render for AppState {
                 PendingAction::CancelDirtySession => {
                     self.confirming_dirty_session = None;
                     cx.notify();
+                }
+            }
+
+            // After any sidebar-triggered action, re-focus the active
+            // terminal so keyboard input goes back to Claude Code.
+            // ToggleDrawer manages its own focus, so skip it.
+            if !skip_refocus {
+                if let Some(session) = self.active_session() {
+                    if let Some(tv) = session.terminal_view.as_ref() {
+                        let fh = tv.read(cx).focus_handle.clone();
+                        fh.focus(window, cx);
+                    }
                 }
             }
         }
