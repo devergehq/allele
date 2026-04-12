@@ -407,6 +407,34 @@ pub fn prune_archive_refs(canonical: &Path, ttl_days: u64) -> anyhow::Result<usi
     Ok(pruned)
 }
 
+// --- Branch introspection -----------------------------------------------
+
+/// Read the current branch name (short form, e.g. `main` or
+/// `allele/session/abc12345`). Returns `None` if the repo isn't a git
+/// repo or HEAD is detached.
+pub fn current_branch(repo: &Path) -> Option<String> {
+    if !is_git_repo(repo) {
+        return None;
+    }
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("symbolic-ref").arg("--short").arg("HEAD");
+    cmd.output().ok().and_then(|o| {
+        if o.status.success() {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        } else {
+            None
+        }
+    })
+}
+
+/// Extract the session ID from a branch name like `allele/session/<id>`.
+/// Returns `None` if the branch doesn't follow the Allele session naming
+/// convention.
+pub fn session_id_from_branch(branch: &str) -> Option<&str> {
+    branch.strip_prefix("allele/session/")
+}
+
 // --- Ref name helpers ---------------------------------------------------
 
 /// `refs/allele/base/<session-id>` — synthetic base commit in canonical.

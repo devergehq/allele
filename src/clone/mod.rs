@@ -1,8 +1,10 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+
+use crate::git;
 
 /// Base directory for all workspace clones
 const CLONE_BASE: &str = ".allele/workspaces";
@@ -261,8 +263,17 @@ pub fn purge_trash_older_than_days(ttl_days: u64) -> anyhow::Result<usize> {
 /// Walk `~/.allele/workspaces/<project>/*` and move any clone not
 /// present in `referenced` into the trash. Conservative — never deletes.
 ///
+/// `project_sources` maps project names to their canonical source paths.
+/// If the clone has an `allele/session/<id>` branch and the owning
+/// project is in the map, `git::archive_session` runs before trashing
+/// to preserve the orphan's session work in canonical. Archive failure
+/// is logged and non-blocking — the clone is trashed regardless.
+///
 /// Returns the number of clones that were trashed.
-pub fn sweep_orphans(referenced: &HashSet<PathBuf>) -> anyhow::Result<usize> {
+pub fn sweep_orphans(
+    referenced: &HashSet<PathBuf>,
+    project_sources: &HashMap<String, PathBuf>,
+) -> anyhow::Result<usize> {
     let home = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     let workspace_base = home.join(CLONE_BASE);
@@ -281,6 +292,11 @@ pub fn sweep_orphans(referenced: &HashSet<PathBuf>) -> anyhow::Result<usize> {
         }
 
         let proj_dir = proj_entry.path();
+        let proj_name = proj_entry
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+
         let Ok(iter) = fs::read_dir(&proj_dir) else { continue; };
 
         for clone_entry in iter {
@@ -295,6 +311,23 @@ pub fn sweep_orphans(referenced: &HashSet<PathBuf>) -> anyhow::Result<usize> {
 
             if referenced.contains(&canonical) || referenced.contains(&clone_path) {
                 continue;
+            }
+
+            // Archive the orphan's session work into canonical before
+            // trashing. Resolve canonical from the project name, and
+            // session ID from the clone's current branch. Both must
+            // succeed for the archive to run; otherwise skip silently.
+            if let Some(source_path) = project_sources.get(&proj_name) {
+                if let Some(session_id) = git::current_branch(&clone_path)
+                    .as_deref()
+                    .and_then(git::session_id_from_branch)
+                {
+                    if let Err(e) = git::archive_session(source_path, &clone_path, session_id) {
+                        eprintln!(
+                            "Orphan sweep: archive_session failed for {session_id}: {e}"
+                        );
+                    }
+                }
             }
 
             match trash_clone(&clone_path) {

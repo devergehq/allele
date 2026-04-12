@@ -16,6 +16,7 @@ use settings::{ProjectSave, Settings};
 use state::{PersistedSession, PersistedState};
 use terminal::{ShellCommand, TerminalEvent, TerminalView};
 use terminal::pty_terminal::PtyTerminal;
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 #[derive(Debug)]
@@ -962,9 +963,16 @@ fn main() {
         // Conservative orphan sweep: move any on-disk clone not referenced by
         // the loaded state into ~/.allele/trash/, then purge trash
         // entries older than TRASH_TTL_DAYS. This runs before the window
-        // opens so the user never sees stale placeholders.
+        // opens so the user never sees stale placeholders. The project
+        // sources map lets sweep_orphans archive orphan session work into
+        // canonical before trashing.
         let referenced = state::referenced_clone_paths(&loaded_state);
-        match clone::sweep_orphans(&referenced) {
+        let project_sources: HashMap<String, PathBuf> = loaded_settings
+            .projects
+            .iter()
+            .map(|p| (p.name.clone(), p.source_path.clone()))
+            .collect();
+        match clone::sweep_orphans(&referenced, &project_sources) {
             Ok(0) => {}
             Ok(n) => eprintln!("Orphan sweep trashed {n} unreferenced clone(s)"),
             Err(e) => eprintln!("Orphan sweep failed: {e}"),
