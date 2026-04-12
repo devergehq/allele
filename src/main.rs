@@ -42,6 +42,8 @@ enum PendingAction {
     DeleteArchive { project_idx: usize, archive_idx: usize },
     /// Toggle the bottom drawer terminal panel.
     ToggleDrawer,
+    /// Source path missing — open folder picker so the user can relocate.
+    RelocateProject(usize),
 }
 
 /// Position of a session in the project tree.
@@ -194,6 +196,19 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let Some(project) = self.projects.get_mut(project_idx) else { return; };
+
+        // Guard: if the source directory no longer exists (e.g. repo was
+        // moved), prompt the user to relocate rather than failing mid-clone.
+        if !project.source_path.exists() {
+            eprintln!(
+                "Project source path missing: {} — prompting for relocation",
+                project.source_path.display()
+            );
+            self.pending_action = Some(PendingAction::RelocateProject(project_idx));
+            cx.notify();
+            return;
+        }
+
         let source_path = project.source_path.clone();
         let project_name = project.name.clone();
         let session_count = project.sessions.len() + project.loading_sessions.len() + 1;
@@ -1394,6 +1409,36 @@ impl Render for AppState {
                         }
                     }
                     self.save_settings();
+                }
+                PendingAction::RelocateProject(project_idx) => {
+                    let paths = cx.prompt_for_paths(PathPromptOptions {
+                        files: false,
+                        directories: true,
+                        multiple: false,
+                        prompt: Some("Relocate project folder".into()),
+                    });
+
+                    cx.spawn(async move |this, cx| {
+                        if let Ok(Ok(Some(paths))) = paths.await {
+                            if let Some(new_path) = paths.into_iter().next() {
+                                let _ = this.update(cx, |this: &mut Self, cx| {
+                                    if let Some(project) = this.projects.get_mut(project_idx) {
+                                        eprintln!(
+                                            "Relocated project '{}': {} -> {}",
+                                            project.name,
+                                            project.source_path.display(),
+                                            new_path.display()
+                                        );
+                                        project.source_path = new_path;
+                                        project.name = Project::name_from_path(&project.source_path);
+                                        this.save_settings();
+                                    }
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    })
+                    .detach();
                 }
             }
         }
