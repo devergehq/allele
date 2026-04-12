@@ -27,24 +27,34 @@ pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str)
     let short_id: String = session_id.chars().take(8).collect();
     let clone_path = clone_dir.join(&short_id);
 
-    if clone_path.exists() {
+    let final_path = if clone_path.exists() {
         // Unlikely with UUIDs but handle by appending a random suffix
-        return create_clone(source, &format!("{short_id}-alt"));
-    }
+        create_clone(source, &format!("{short_id}-alt"))?
+    } else {
+        let src_cstr = CString::new(source.to_string_lossy().as_bytes())?;
+        let dst_cstr = CString::new(clone_path.to_string_lossy().as_bytes())?;
 
-    let src_cstr = CString::new(source.to_string_lossy().as_bytes())?;
-    let dst_cstr = CString::new(clone_path.to_string_lossy().as_bytes())?;
+        let result = unsafe {
+            libc::clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), 0)
+        };
 
-    let result = unsafe {
-        libc::clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), 0)
+        if result != 0 {
+            let err = std::io::Error::last_os_error();
+            anyhow::bail!("clonefile() failed: {err}");
+        }
+
+        clone_path
     };
 
-    if result != 0 {
-        let err = std::io::Error::last_os_error();
-        anyhow::bail!("clonefile() failed: {err}");
+    // Pre-register the clone as a trusted workspace in ~/.claude.json so
+    // Claude Code does not prompt on first entry. Non-fatal: a failure
+    // here just means the user sees the trust dialog once, which is the
+    // current baseline behaviour.
+    if let Err(e) = crate::trust::trust_workspace(&final_path) {
+        eprintln!("trust_workspace({}) failed: {e}", final_path.display());
     }
 
-    Ok(clone_path)
+    Ok(final_path)
 }
 
 /// Create an APFS copy-on-write clone of a directory.
