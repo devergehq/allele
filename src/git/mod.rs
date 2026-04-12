@@ -209,7 +209,10 @@ pub fn fetch_session_branch(
         );
     }
 
-    let src = session_branch_name(session_id);
+    // Use the clone's actual current branch — after auto-naming it may be
+    // `allele/session/<uuid>/<slug>` rather than the original `allele/session/<uuid>`.
+    let src = current_branch(clone)
+        .unwrap_or_else(|| session_branch_name(session_id));
     let dst = archive_ref_name(session_id);
 
     let mut cmd = git_cmd(Some(canonical));
@@ -390,11 +393,14 @@ pub fn current_branch(repo: &Path) -> Option<String> {
     })
 }
 
-/// Extract the session ID from a branch name like `allele/session/<id>`.
+/// Extract the session ID from a branch name like `allele/session/<id>`
+/// or `allele/session/<id>/<slug>` (after auto-naming).
 /// Returns `None` if the branch doesn't follow the Allele session naming
 /// convention.
 pub fn session_id_from_branch(branch: &str) -> Option<&str> {
-    branch.strip_prefix("allele/session/")
+    let rest = branch.strip_prefix("allele/session/")?;
+    // After rename, rest might be "<uuid>/<slug>" — take only the UUID part
+    Some(rest.split('/').next().unwrap_or(rest))
 }
 
 // --- Ref name helpers ---------------------------------------------------
@@ -409,6 +415,60 @@ pub fn archive_ref_name(session_id: &str) -> String {
     format!("refs/allele/archive/{session_id}")
 }
 
+
+// --- Session auto-naming ------------------------------------------------
+
+/// Sanitise a string for use as a git branch name segment.
+/// Lowercase, hyphens only, max length, no leading/trailing hyphens.
+pub fn slugify(input: &str, max_len: usize) -> String {
+    let slug: String = input
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    let truncated = if slug.len() > max_len {
+        &slug[..max_len]
+    } else {
+        &slug
+    };
+    truncated.trim_end_matches('-').to_string()
+}
+
+/// Rename a session branch from `allele/session/<id>` to
+/// `allele/session/<id>/<slug>`. Idempotent — returns `Ok(())` if the
+/// old branch doesn't exist (already renamed or detached HEAD).
+pub fn rename_session_branch(
+    clone: &Path,
+    session_id: &str,
+    slug: &str,
+) -> anyhow::Result<()> {
+    if !is_git_repo(clone) {
+        anyhow::bail!(
+            "rename_session_branch: not a git repo: {}",
+            clone.display()
+        );
+    }
+
+    let old_branch = session_branch_name(session_id);
+    let new_branch = format!("allele/session/{session_id}/{slug}");
+
+    // Check current branch — if already renamed, skip.
+    if let Some(current) = current_branch(clone) {
+        if current == new_branch || current != old_branch {
+            return Ok(());
+        }
+    }
+
+    let mut cmd = git_cmd(Some(clone));
+    cmd.arg("branch").arg("-m").arg(&old_branch).arg(&new_branch);
+    run_git(cmd, "branch -m (session rename)")?;
+
+    Ok(())
+}
 
 // --- Tests --------------------------------------------------------------
 
@@ -806,5 +866,116 @@ mod tests {
         // 10. Verify: current_branch + session_id_from_branch work on the clone
         let branch = current_branch(&clone_path).unwrap();
         assert_eq!(session_id_from_branch(&branch), Some("e2e01"));
+    }
+
+    // --- Auto-naming tests -------------------------------------------------
+
+    #[test]
+    fn session_id_from_branch_with_slug() {
+        assert_eq!(
+            session_id_from_branch("allele/session/855fa03e/fix-login-bug"),
+            Some("855fa03e")
+        );
+    }
+
+    #[test]
+    fn session_id_from_branch_uuid_only() {
+        // Original format still works
+        assert_eq!(
+            session_id_from_branch("allele/session/855fa03e"),
+            Some("855fa03e")
+        );
+    }
+
+    #[test]
+    fn session_id_from_branch_full_uuid_with_slug() {
+        assert_eq!(
+            session_id_from_branch("allele/session/855fa03e-5cc7-477a-b1e6-4e9d127923b6/refactor-auth"),
+            Some("855fa03e-5cc7-477a-b1e6-4e9d127923b6")
+        );
+    }
+
+    #[test]
+    fn slugify_basic() {
+        assert_eq!(slugify("Fix the login bug", 50), "fix-the-login-bug");
+    }
+
+    #[test]
+    fn slugify_special_chars() {
+        assert_eq!(slugify("Can you help me?!", 50), "can-you-help-me");
+    }
+
+    #[test]
+    fn slugify_truncates() {
+        assert_eq!(slugify("this is a very long prompt that should be truncated", 20), "this-is-a-very-long");
+    }
+
+    #[test]
+    fn slugify_no_trailing_hyphens() {
+        assert_eq!(slugify("hello world ---", 50), "hello-world");
+    }
+
+    #[test]
+    fn slugify_collapses_multiple_hyphens() {
+        assert_eq!(slugify("fix   the   bug", 50), "fix-the-bug");
+    }
+
+    #[test]
+    fn rename_session_branch_works() {
+        let (_dir, path) = make_canonical("hello");
+        create_session_branch(&path, "rename01").unwrap();
+
+        rename_session_branch(&path, "rename01", "fix-login-bug").unwrap();
+
+        let branch = current_branch(&path).unwrap();
+        assert_eq!(branch, "allele/session/rename01/fix-login-bug");
+        // session_id extraction still works
+        assert_eq!(session_id_from_branch(&branch), Some("rename01"));
+    }
+
+    #[test]
+    fn rename_session_branch_is_idempotent() {
+        let (_dir, path) = make_canonical("hello");
+        create_session_branch(&path, "rename02").unwrap();
+
+        rename_session_branch(&path, "rename02", "fix-bug").unwrap();
+        // Second rename should be a no-op
+        rename_session_branch(&path, "rename02", "fix-bug").unwrap();
+
+        let branch = current_branch(&path).unwrap();
+        assert_eq!(branch, "allele/session/rename02/fix-bug");
+    }
+
+    #[test]
+    fn archive_after_rename_works() {
+        let (_cdir, canonical) = make_canonical("base");
+
+        let clone_dir = TempDir::new().unwrap();
+        let clone_path = clone_dir.path().to_path_buf();
+        let mut cmd = git_cmd(None);
+        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        run_git(cmd, "git clone --local (test)").unwrap();
+
+        create_session_branch(&clone_path, "archrename01").unwrap();
+
+        // Do work
+        fs::write(clone_path.join("work.txt"), "session work").unwrap();
+        let mut cmd = git_cmd(Some(&clone_path));
+        cmd.arg("add").arg("-A");
+        run_git(cmd, "add (test)").unwrap();
+        let mut cmd = git_cmd(Some(&clone_path));
+        cmd.arg("commit").arg("--no-verify").arg("-m").arg("work");
+        run_git(cmd, "commit (test)").unwrap();
+        let work_commit = head_commit(&clone_path);
+
+        // Rename the branch (simulating auto-naming)
+        rename_session_branch(&clone_path, "archrename01", "fix-auth").unwrap();
+
+        // Archive should still work — uses current_branch to find the ref
+        archive_session(&canonical, &clone_path, "archrename01").unwrap();
+
+        // Archive ref should exist and point at the session work
+        let archive_target = resolve_ref(&canonical, &archive_ref_name("archrename01"));
+        assert_eq!(archive_target.as_deref(), Some(work_commit.as_str()));
     }
 }
