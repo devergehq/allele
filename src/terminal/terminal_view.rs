@@ -12,6 +12,10 @@ const MIN_FONT_SIZE: f32 = 8.0;
 const MAX_FONT_SIZE: f32 = 32.0;
 const MIN_COLS: u16 = 20;
 const MIN_ROWS: u16 = 4;
+/// Milliseconds the desired terminal size must be stable before we commit
+/// the resize to the PTY (sends SIGWINCH). Prevents rapid size oscillation
+/// from cascading through CC's TUI re-render and duplicating scrollback.
+const RESIZE_DEBOUNCE_MS: u64 = 80;
 
 /// Events emitted by the terminal view to the parent
 #[derive(Debug, Clone)]
@@ -69,6 +73,9 @@ pub struct TerminalView {
     search_current_idx: usize,
     // URL detection
     hovered_url: Option<(usize, usize, usize, String)>, // (row, col_start, col_end, url)
+    // Resize debounce — record desired size + timestamp, only commit
+    // the resize to the PTY once the size has been stable for RESIZE_DEBOUNCE_MS.
+    pending_resize: Option<(TermSize, Instant)>,
     // Bell flash state
     bell_flash_start: Option<Instant>,
     // FPS tracking
@@ -133,6 +140,7 @@ impl TerminalView {
                     search_matches: Vec::new(),
                     search_current_idx: 0,
                     hovered_url: None,
+                    pending_resize: None,
                     bell_flash_start: None,
                     frame_count: 0,
                     last_fps_time: Instant::now(),
@@ -199,6 +207,20 @@ impl TerminalView {
                             blink_changed = true;
                         }
 
+                        // Commit pending resize if stable for RESIZE_DEBOUNCE_MS.
+                        let mut resize_committed = false;
+                        if let Some((pending_size, recorded_at)) = this.pending_resize {
+                            if recorded_at.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS) {
+                                this.last_cols = pending_size.cols;
+                                this.last_rows = pending_size.rows;
+                                if let Some(ref mut terminal) = this.terminal {
+                                    terminal.resize(pending_size);
+                                }
+                                this.pending_resize = None;
+                                resize_committed = true;
+                            }
+                        }
+
                         // Scrollbar fade: fade in on scroll, fade out after 1.5s
                         let scroll_age = now.duration_since(this.last_scroll_time).as_secs_f32();
                         let target_opacity = if this.scrollbar_dragging || scroll_age < 1.5 {
@@ -215,7 +237,7 @@ impl TerminalView {
                             opacity_changed = true;
                         }
 
-                        pty_events || scrolled || blink_changed || opacity_changed || bell || bell_expired
+                        pty_events || scrolled || blink_changed || opacity_changed || bell || bell_expired || resize_committed
                     })
                     .unwrap_or(false);
 
@@ -229,36 +251,11 @@ impl TerminalView {
         })
         .detach();
 
-        // Observe window bounds changes for resize.
-        // Uses the actual terminal element origin (set by grid_element during
-        // paint) when available, falling back to a sensible estimate on first run.
-        cx.observe_window_bounds(window, |this: &mut Self, window, _cx| {
-            let viewport = window.viewport_size();
-            let origin_x = this.element_origin_x.load(std::sync::atomic::Ordering::Relaxed) as f32;
-            let origin_y = this.element_origin_y.load(std::sync::atomic::Ordering::Relaxed) as f32;
-
-            // Use actual origin when painted at least once, else fall back to default
-            let sidebar_estimate = if origin_x > 0.0 { origin_x } else { 240.0 };
-            let available_width = f32::from(viewport.width) - sidebar_estimate;
-            let available_height = f32::from(viewport.height) - origin_y;
-
-            if available_width > 100.0 && available_height > 100.0 {
-                let new_size = Self::compute_size(
-                    available_width,
-                    available_height,
-                    this.cell_width,
-                    this.cell_height,
-                );
-                if new_size.cols != this.last_cols || new_size.rows != this.last_rows {
-                    this.last_cols = new_size.cols;
-                    this.last_rows = new_size.rows;
-                    if let Some(ref mut terminal) = this.terminal {
-                        terminal.resize(new_size);
-                    }
-                }
-            }
-        })
-        .detach();
+        // Resize is handled exclusively in render() using fresh origin
+        // values from the last paint pass. An earlier observe_window_bounds
+        // handler was removed because it raced with render() and used stale
+        // origin values, causing spurious resize oscillation that made CC
+        // re-render its entire TUI and duplicate scrollback content.
 
 
         Self {
@@ -288,6 +285,7 @@ impl TerminalView {
             search_matches: Vec::new(),
             search_current_idx: 0,
             hovered_url: None,
+            pending_resize: None,
             bell_flash_start: None,
             frame_count: 0,
             last_fps_time: Instant::now(),
@@ -716,7 +714,9 @@ impl TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Opportunistic PTY resize: if the visible terminal area changed since
-        // last render (e.g. sidebar was dragged), update the PTY size.
+        // last render (e.g. sidebar was dragged), record the desired size.
+        // The actual resize is debounced — committed by the poll loop once
+        // the size has been stable for RESIZE_DEBOUNCE_MS.
         {
             let viewport = window.viewport_size();
             let origin_x = self.element_origin_x.load(std::sync::atomic::Ordering::Relaxed) as f32;
@@ -730,10 +730,16 @@ impl Render for TerminalView {
                         self.cell_width, self.cell_height,
                     );
                     if new_size.cols != self.last_cols || new_size.rows != self.last_rows {
-                        self.last_cols = new_size.cols;
-                        self.last_rows = new_size.rows;
-                        if let Some(ref mut terminal) = self.terminal {
-                            terminal.resize(new_size);
+                        // Check if the pending resize already matches — only
+                        // reset the debounce timer if the desired size changed.
+                        let should_record = match self.pending_resize {
+                            Some((pending, _)) => {
+                                pending.cols != new_size.cols || pending.rows != new_size.rows
+                            }
+                            None => true,
+                        };
+                        if should_record {
+                            self.pending_resize = Some((new_size, Instant::now()));
                         }
                     }
                 }

@@ -212,23 +212,6 @@ impl PtyTerminal {
 
     /// Resize the terminal
     pub fn resize(&mut self, new_size: TermSize) {
-        // Debug: log every resize with caller context
-        let caller = if cfg!(debug_assertions) {
-            let bt = std::backtrace::Backtrace::force_capture();
-            // Extract just the first allele frame
-            let bt_str = bt.to_string();
-            bt_str.lines()
-                .find(|l| l.contains("terminal_view") || l.contains("main"))
-                .unwrap_or("unknown")
-                .trim()
-                .to_string()
-        } else {
-            String::new()
-        };
-        eprintln!(
-            "PTY resize: {}x{} -> {}x{} [{}]",
-            self.size.cols, self.size.rows, new_size.cols, new_size.rows, caller
-        );
         self.size = new_size;
         let _ = self.pty_tx.0.send(Msg::Resize(new_size.into()));
         self.term.lock().resize(new_size);
