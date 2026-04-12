@@ -7,6 +7,7 @@ mod project;
 mod session;
 mod settings;
 mod state;
+mod trust;
 
 use gpui::*;
 use project::Project;
