@@ -956,21 +956,11 @@ impl Render for TerminalView {
                         AppAction::PrevSession => cx.emit(TerminalEvent::PrevSession),
                         AppAction::NextSession => cx.emit(TerminalEvent::NextSession),
                         AppAction::SwitchSession(idx) => cx.emit(TerminalEvent::SwitchSession(idx)),
+                        AppAction::ToggleDrawer => cx.emit(TerminalEvent::ToggleDrawer),
                         AppAction::SendBytes(bytes) => {
                             if let Some(ref terminal) = this.terminal {
                                 terminal.write(bytes);
                             }
-                        }
-                        "n" => { cx.emit(TerminalEvent::NewSession); return; }
-                        "w" => { cx.emit(TerminalEvent::CloseSession); return; }
-                        "[" => { cx.emit(TerminalEvent::PrevSession); return; }
-                        "]" => { cx.emit(TerminalEvent::NextSession); return; }
-                        "j" => { cx.emit(TerminalEvent::ToggleDrawer); return; }
-                        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
-                            if let Ok(num) = key.parse::<usize>() {
-                                cx.emit(TerminalEvent::SwitchSession(num - 1));
-                            }
-                            return;
                         }
                         _ => {}
                     }
