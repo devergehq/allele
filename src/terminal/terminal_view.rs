@@ -1,4 +1,5 @@
 use super::grid_element::TerminalGridElement;
+use super::keymap::{self, AppAction, KeymapConfig};
 use super::pty_terminal::{PtyTerminal, ShellCommand, TermSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line};
@@ -69,6 +70,8 @@ pub struct TerminalView {
     frame_count: u32,
     last_fps_time: Instant,
     pub current_fps: u32,
+    // Keymap
+    keymap: KeymapConfig,
 }
 
 impl TerminalView {
@@ -130,6 +133,7 @@ impl TerminalView {
                     frame_count: 0,
                     last_fps_time: Instant::now(),
                     current_fps: 0,
+                    keymap: KeymapConfig::default(),
                 };
             }
         };
@@ -284,6 +288,7 @@ impl TerminalView {
             frame_count: 0,
             last_fps_time: Instant::now(),
             current_fps: 0,
+            keymap: KeymapConfig::default(),
         }
     }
 
@@ -850,15 +855,13 @@ impl Render for TerminalView {
                     return;
                 }
 
-                // Handle Cmd shortcuts (emit to parent)
-                if mods.platform {
-                    match key {
-                        "v" => {
-                            // Cmd+V: paste clipboard contents
+                // ── App-level shortcuts (Cmd key) ─────────────────────
+                if let Some(action) = keymap::app_action(key, mods) {
+                    match action {
+                        AppAction::Paste => {
                             if let Some(ref terminal) = this.terminal {
                                 if let Some(item) = cx.read_from_clipboard() {
                                     if let Some(text) = item.text() {
-                                        // Check if terminal is in bracketed paste mode
                                         let use_bracketed = terminal.term.lock().mode()
                                             .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE);
                                         if use_bracketed {
@@ -871,65 +874,8 @@ impl Render for TerminalView {
                                     }
                                 }
                             }
-                            return;
                         }
-                        "f" => {
-                            // Cmd+F: open search
-                            this.search_active = true;
-                            this.search_query.clear();
-                            this.search_matches.clear();
-                            this.search_current_idx = 0;
-                            cx.notify();
-                            return;
-                        }
-                        "=" | "+" => {
-                            // Cmd+= / Cmd++: zoom in
-                            let new_size = (this.font_size + 1.0).min(MAX_FONT_SIZE);
-                            if new_size != this.font_size {
-                                this.font_size = new_size;
-                                this.remeasure_cells(window);
-                                cx.notify();
-                            }
-                            return;
-                        }
-                        "-" | "_" => {
-                            // Cmd+-: zoom out
-                            let new_size = (this.font_size - 1.0).max(MIN_FONT_SIZE);
-                            if new_size != this.font_size {
-                                this.font_size = new_size;
-                                this.remeasure_cells(window);
-                                cx.notify();
-                            }
-                            return;
-                        }
-                        "0" => {
-                            // Cmd+0: reset font size
-                            if this.font_size != FONT_SIZE {
-                                this.font_size = FONT_SIZE;
-                                this.remeasure_cells(window);
-                                cx.notify();
-                            }
-                            return;
-                        }
-                        "g" => {
-                            // Cmd+G: next match (Cmd+Shift+G: previous)
-                            if !this.search_matches.is_empty() {
-                                if mods.shift {
-                                    this.search_current_idx = if this.search_current_idx == 0 {
-                                        this.search_matches.len() - 1
-                                    } else {
-                                        this.search_current_idx - 1
-                                    };
-                                } else {
-                                    this.search_current_idx =
-                                        (this.search_current_idx + 1) % this.search_matches.len();
-                                }
-                                cx.notify();
-                            }
-                            return;
-                        }
-                        "c" => {
-                            // Cmd+C: copy selection if any, else send Ctrl+C
+                        AppAction::Copy => {
                             if let Some(text) = this.get_selected_text() {
                                 if !text.is_empty() {
                                     cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -943,32 +889,69 @@ impl Render for TerminalView {
                             if let Some(ref terminal) = this.terminal {
                                 terminal.write(&[0x03]);
                             }
-                            return;
                         }
-                        "backspace" => {
-                            // Cmd+Backspace = macOS "delete to start of line".
-                            // Map to Ctrl+U (0x15), which readline (and
-                            // Claude Code's input editor) treats as
-                            // backward-kill-line.
+                        AppAction::OpenSearch => {
+                            this.search_active = true;
+                            this.search_query.clear();
+                            this.search_matches.clear();
+                            this.search_current_idx = 0;
+                            cx.notify();
+                        }
+                        AppAction::FindNext => {
+                            if !this.search_matches.is_empty() {
+                                this.search_current_idx =
+                                    (this.search_current_idx + 1) % this.search_matches.len();
+                                cx.notify();
+                            }
+                        }
+                        AppAction::FindPrevious => {
+                            if !this.search_matches.is_empty() {
+                                this.search_current_idx = if this.search_current_idx == 0 {
+                                    this.search_matches.len() - 1
+                                } else {
+                                    this.search_current_idx - 1
+                                };
+                                cx.notify();
+                            }
+                        }
+                        AppAction::ZoomIn => {
+                            let new_size = (this.font_size + 1.0).min(MAX_FONT_SIZE);
+                            if new_size != this.font_size {
+                                this.font_size = new_size;
+                                this.remeasure_cells(window);
+                                cx.notify();
+                            }
+                        }
+                        AppAction::ZoomOut => {
+                            let new_size = (this.font_size - 1.0).max(MIN_FONT_SIZE);
+                            if new_size != this.font_size {
+                                this.font_size = new_size;
+                                this.remeasure_cells(window);
+                                cx.notify();
+                            }
+                        }
+                        AppAction::ZoomReset => {
+                            if this.font_size != FONT_SIZE {
+                                this.font_size = FONT_SIZE;
+                                this.remeasure_cells(window);
+                                cx.notify();
+                            }
+                        }
+                        AppAction::NewSession => cx.emit(TerminalEvent::NewSession),
+                        AppAction::CloseSession => cx.emit(TerminalEvent::CloseSession),
+                        AppAction::PrevSession => cx.emit(TerminalEvent::PrevSession),
+                        AppAction::NextSession => cx.emit(TerminalEvent::NextSession),
+                        AppAction::SwitchSession(idx) => cx.emit(TerminalEvent::SwitchSession(idx)),
+                        AppAction::SendBytes(bytes) => {
                             if let Some(ref terminal) = this.terminal {
-                                terminal.write(&[0x15]);
+                                terminal.write(bytes);
                             }
-                            return;
                         }
-                        "n" => { cx.emit(TerminalEvent::NewSession); return; }
-                        "w" => { cx.emit(TerminalEvent::CloseSession); return; }
-                        "[" => { cx.emit(TerminalEvent::PrevSession); return; }
-                        "]" => { cx.emit(TerminalEvent::NextSession); return; }
-                        "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
-                            if let Ok(num) = key.parse::<usize>() {
-                                cx.emit(TerminalEvent::SwitchSession(num - 1));
-                            }
-                            return;
-                        }
-                        _ => {}
                     }
+                    return;
                 }
 
+                // ── Terminal input (policy-based) ─────────────────────
                 let Some(ref terminal) = this.terminal else { return };
 
                 // Clear selection on any input to terminal
@@ -988,59 +971,10 @@ impl Render for TerminalView {
                     }
                 }
 
-                // Handle control key combos
-                if mods.control {
-                    let ctrl_byte = match key {
-                        "a" => Some(0x01), "b" => Some(0x02), "c" => Some(0x03),
-                        "d" => Some(0x04), "e" => Some(0x05), "f" => Some(0x06),
-                        "g" => Some(0x07), "h" => Some(0x08), "k" => Some(0x0b),
-                        "l" => Some(0x0c), "n" => Some(0x0e), "o" => Some(0x0f),
-                        "p" => Some(0x10), "r" => Some(0x12), "t" => Some(0x14),
-                        "u" => Some(0x15), "w" => Some(0x17), "z" => Some(0x1a),
-                        _ => None,
-                    };
-                    if let Some(byte) = ctrl_byte {
-                        terminal.write(&[byte]);
-                        return;
-                    }
-                }
-
-                // Opt+Backspace = macOS "delete previous word".
-                // Send ESC+DEL (Meta-Backspace), which readline and Claude
-                // Code's input editor interpret as backward-kill-word.
-                // Must be checked BEFORE the plain-backspace branch below.
-                if mods.alt && key == "backspace" {
-                    terminal.write(b"\x1b\x7f");
-                    return;
-                }
-
-                // Handle special keys BEFORE key_char — enter, backspace, etc.
-                let special_bytes: Option<&[u8]> = match key {
-                    "enter" => Some(b"\r"),
-                    "backspace" => Some(b"\x7f"),
-                    "tab" => Some(b"\t"),
-                    "escape" => Some(b"\x1b"),
-                    "up" => Some(b"\x1b[A"),
-                    "down" => Some(b"\x1b[B"),
-                    "right" => Some(b"\x1b[C"),
-                    "left" => Some(b"\x1b[D"),
-                    "home" => Some(b"\x1b[H"),
-                    "end" => Some(b"\x1b[F"),
-                    "pageup" => Some(b"\x1b[5~"),
-                    "pagedown" => Some(b"\x1b[6~"),
-                    "delete" => Some(b"\x1b[3~"),
-                    "space" => Some(b" "),
-                    _ => None,
-                };
-
-                if let Some(bytes) = special_bytes {
-                    terminal.write(bytes);
-                    return;
-                }
-
-                // For regular character input, use key_char
-                if let Some(ref key_char) = event.keystroke.key_char {
-                    terminal.write(key_char.as_bytes());
+                // Resolve keystroke → bytes via keymap policy engine
+                let key_char = event.keystroke.key_char.as_deref();
+                if let Some(bytes) = this.keymap.resolve(key, mods, key_char) {
+                    terminal.write(&bytes);
                 }
             }))
             .on_mouse_down(
