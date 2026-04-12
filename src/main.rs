@@ -44,6 +44,12 @@ enum PendingAction {
     ToggleDrawer,
     /// Source path missing — open folder picker so the user can relocate.
     RelocateProject(usize),
+    /// Canonical has uncommitted changes — confirm before creating a session.
+    ConfirmDirtySession(usize),
+    /// Proceed with session creation despite dirty canonical.
+    ProceedDirtySession(usize),
+    /// Cancel dirty-state session creation.
+    CancelDirtySession,
 }
 
 /// Position of a session in the project tree.
@@ -65,6 +71,8 @@ struct AppState {
     /// the sidebar row at that cursor shows a confirm/cancel prompt instead
     /// of the usual buttons.
     confirming_discard: Option<SessionCursor>,
+    /// Project index awaiting dirty-state confirmation before session create.
+    confirming_dirty_session: Option<usize>,
     /// Absolute path to the Allele hooks.json, passed to claude via
     /// `--settings <path>` at every spawn. `None` if install_if_missing
     /// failed — in that case hooks are silently disabled and the app still
@@ -209,6 +217,17 @@ impl AppState {
             return;
         }
 
+        // If the working tree has uncommitted changes, prompt the user
+        // before creating a session. The user can choose to proceed (the
+        // dirty state will be present in the clone) or cancel to clean up.
+        if git::is_working_tree_dirty(&project.source_path) && self.confirming_dirty_session.is_none() {
+            self.confirming_dirty_session = Some(project_idx);
+            cx.notify();
+            return;
+        }
+        // Clear any prior dirty confirmation (user chose to proceed).
+        self.confirming_dirty_session = None;
+
         let source_path = project.source_path.clone();
         let project_name = project.name.clone();
         let session_count = project.sessions.len() + project.loading_sessions.len() + 1;
@@ -261,84 +280,47 @@ impl AppState {
         let display_label_for_task = display_label.clone();
 
         cx.spawn_in(window, async move |this, cx| {
-            // Capture canonical's state as a synthetic base commit BEFORE
-            // the COW clone so the clone's session branch can be rooted at
-            // a deterministic commit. If record_base_commit fails, the
-            // session still works — it just loses merge-back capability.
-            // If create_session_clone fails after we captured a base, we
-            // clean up the orphan ref before propagating the clone error.
             let clone_result = cx
                 .background_executor()
                 .spawn(async move {
-                    let base_commit = match git::record_base_commit(
-                        &source_for_task,
-                        &session_id_for_clone,
-                    ) {
-                        Ok(commit) => Some(commit),
-                        Err(e) => {
-                            eprintln!(
-                                "record_base_commit failed for {session_id_for_clone}: {e} \
-                                 (merge-back unavailable for this session)"
-                            );
-                            None
-                        }
-                    };
-                    match clone::create_session_clone(
+                    clone::create_session_clone(
                         &source_for_task,
                         &project_name_for_task,
                         &session_id_for_clone,
-                    ) {
-                        Ok(path) => Ok((path, base_commit)),
-                        Err(e) => {
-                            if base_commit.is_some() {
-                                let _ =
-                                    git::delete_base_ref(&source_for_task, &session_id_for_clone);
-                            }
-                            Err(e)
-                        }
-                    }
+                    )
                 })
                 .await;
 
             // Back on the main thread with window access
             let _ = this.update_in(cx, move |this: &mut Self, window, cx| {
-                // Resolve clone path + base commit (or fall back to source
-                // with no base on failure — we must NOT create a session
-                // branch in the source_path fallback).
-                let (clone_path, base_commit) = match clone_result {
-                    Ok((p, base)) => {
+                let clone_path = match clone_result {
+                    Ok(p) => {
                         eprintln!("Created APFS clone at: {}", p.display());
-                        (p, base)
+                        p
                     }
                     Err(e) => {
                         eprintln!("Failed to create APFS clone: {e}");
-                        (source_path.clone(), None)
+                        source_path.clone()
                     }
                 };
 
+                let clone_succeeded = clone_path != source_path;
+
                 // Find the project again (indices may have shifted if user removed projects)
                 let Some(project) = this.projects.get_mut(project_idx) else {
-                    // Project was removed while we were cloning — clean up
-                    // the clone and the orphan base ref (if any).
                     let _ = clone::delete_clone(&clone_path);
-                    if base_commit.is_some() {
-                        let _ = git::delete_base_ref(&source_path, &session_id_for_session);
-                    }
                     return;
                 };
 
                 // Remove the loading placeholder
                 project.loading_sessions.retain(|l| l.id != session_id);
 
-                // Create the session branch in the clone, rooted at the
-                // base commit captured pre-clone. The `base_commit.is_some()`
-                // guard is load-bearing: when the clone failed and we fell
-                // back to `source_path`, we must NOT create a branch in
-                // canonical — it would mutate canonical's HEAD.
-                if let Some(base) = base_commit.as_deref() {
+                // Create the session branch in the clone rooted at HEAD.
+                // Only do this when clonefile succeeded — when we fell back
+                // to source_path we must NOT mutate canonical's HEAD.
+                if clone_succeeded {
                     if let Err(e) = git::create_session_branch(
                         &clone_path,
-                        base,
                         &session_id_for_session,
                     ) {
                         eprintln!(
@@ -1215,6 +1197,7 @@ fn main() {
                             .max(SIDEBAR_MIN_WIDTH),
                         sidebar_resizing: false,
                         confirming_discard: None,
+                        confirming_dirty_session: None,
                         hooks_settings_path: hooks_settings_path_for_window,
                         drawer_visible: settings_for_window.drawer_visible,
                         drawer_height: settings_for_window.drawer_height
@@ -1440,6 +1423,19 @@ impl Render for AppState {
                     })
                     .detach();
                 }
+                PendingAction::ConfirmDirtySession(project_idx) => {
+                    self.confirming_dirty_session = Some(project_idx);
+                    cx.notify();
+                }
+                PendingAction::ProceedDirtySession(project_idx) => {
+                    // confirming_dirty_session stays Some so
+                    // add_session_to_project skips the dirty check.
+                    self.add_session_to_project(project_idx, window, cx);
+                }
+                PendingAction::CancelDirtySession => {
+                    self.confirming_dirty_session = None;
+                    cx.notify();
+                }
             }
         }
 
@@ -1544,6 +1540,66 @@ impl Render for AppState {
                     )
                     .into_any_element(),
             );
+
+            // Dirty-state confirmation prompt
+            if self.confirming_dirty_session == Some(p_idx) {
+                sidebar_items.push(
+                    div()
+                        .id(SharedString::from(format!("dirty-confirm-{p_idx}")))
+                        .pl(px(24.0))
+                        .pr(px(12.0))
+                        .py(px(5.0))
+                        .bg(rgb(0x3b2f1e)) // subtle amber tint
+                        .flex()
+                        .flex_row()
+                        .gap(px(8.0))
+                        .items_center()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_size(px(11.0))
+                                .text_color(rgb(0xf9e2af)) // yellow
+                                .child("Uncommitted changes — proceed?"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("dirty-proceed-{p_idx}")))
+                                .cursor_pointer()
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded(px(3.0))
+                                .bg(rgb(0xa6e3a1))
+                                .text_size(px(10.0))
+                                .text_color(rgb(0x1e1e2e))
+                                .hover(|s| s.bg(rgb(0x94e2d5)))
+                                .child("Proceed")
+                                .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.pending_action = Some(PendingAction::ProceedDirtySession(p_idx));
+                                    cx.notify();
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("dirty-cancel-{p_idx}")))
+                                .cursor_pointer()
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded(px(3.0))
+                                .bg(rgb(0x45475a))
+                                .text_size(px(10.0))
+                                .text_color(rgb(0xcdd6f4))
+                                .hover(|s| s.bg(rgb(0x585b70)))
+                                .child("Cancel")
+                                .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.pending_action = Some(PendingAction::CancelDirtySession);
+                                    cx.notify();
+                                })),
+                        )
+                        .into_any_element(),
+                );
+            }
 
             // Loading placeholders (sessions mid-clone)
             for loading in &project.loading_sessions {

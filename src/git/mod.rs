@@ -1,31 +1,23 @@
-//! Phase A of the clone/session merge-back playbook: a typed wrapper around
-//! subprocess `git` calls.
+//! Typed wrapper around subprocess `git` calls for the clone/session
+//! merge-back pipeline.
 //!
 //! ## Why shell out
 //!
 //! Allele is macOS-only and targets developer workstations where `git`
 //! is universally present (via the Xcode Command Line Tools). Every operation
-//! we need is a cheap one-shot — `init`, `read-tree`, `write-tree`,
-//! `commit-tree`, `update-ref`, `fetch`. Shelling out gives 100% correct
-//! git semantics with zero crate dependency bloat and follows the existing
-//! Allele pattern of shelling to `claude` and FFI'ing to `clonefile(2)`.
+//! we need is a cheap one-shot — `init`, `fetch`, `merge`, `status`.
+//! Shelling out gives 100% correct git semantics with zero crate dependency
+//! bloat and follows the existing Allele pattern of shelling to `claude`
+//! and FFI'ing to `clonefile(2)`.
 //!
 //! ## Ref namespace
 //!
-//! - `refs/allele/base/<session-id>`  — synthetic base commit capturing
-//!   canonical's on-disk state at session start. Created at session create,
-//!   deleted at session discard.
 //! - `refs/heads/allele/session/<session-id>` — session work branch in the
-//!   clone. Lives in the clone's own `.git/` until merged back.
+//!   clone, rooted at canonical's HEAD at clone time. Lives in the clone's
+//!   own `.git/` until archived back.
 //! - `refs/allele/archive/<session-id>` — session work fetched back into
 //!   canonical on discard. Pruned after [`TRASH_TTL_DAYS`] to match the
 //!   trash bin TTL.
-//!
-//! ## Synthetic base commit recipe
-//!
-//! The temp-`GIT_INDEX_FILE` plumbing recipe captures both tracked
-//! modifications AND untracked files without touching canonical's HEAD,
-//! index, or working tree. See [`record_base_commit`] for the implementation.
 //!
 
 use std::path::Path;
@@ -94,6 +86,20 @@ pub fn is_git_repo(path: &Path) -> bool {
     )
 }
 
+/// Return true if the working tree has uncommitted changes (staged,
+/// unstaged, or untracked files). Uses `git status --porcelain` — any
+/// non-empty output means dirty.
+pub fn is_working_tree_dirty(path: &Path) -> bool {
+    if !is_git_repo(path) {
+        return false;
+    }
+    let mut cmd = git_cmd(Some(path));
+    cmd.arg("status").arg("--porcelain");
+    cmd.output()
+        .map(|o| o.status.success() && !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
 /// Initialise `path` as a git repository and create an initial commit
 /// capturing the current on-disk state.
 ///
@@ -146,102 +152,13 @@ pub fn git_init(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Capture canonical's current on-disk state (tracked modifications AND
-/// untracked files) as a synthetic commit, anchored as `refs/allele/base/<id>`.
+/// Create `refs/heads/allele/session/<id>` in the clone, rooted at HEAD,
+/// and switch to it.
 ///
-/// Returns the commit hash.
-///
-/// ## Plumbing recipe
-///
-/// Uses a temporary `GIT_INDEX_FILE` so canonical's real HEAD, index, and
-/// working tree are untouched:
-///
-/// 1. `read-tree HEAD` into the temp index
-/// 2. `add -A` into the temp index (picks up all worktree state, tracked + untracked)
-/// 3. `write-tree` produces a tree object
-/// 4. `commit-tree -p HEAD` produces a commit object
-/// 5. `update-ref refs/allele/base/<id>` anchors the commit against GC
-/// 6. Temp index file is deleted
-///
-/// Experimentally verified to correctly snapshot dirty state in the
-/// investigation phase (PRD: `20260411-133557_clone-session-merge-back-investigation`).
-pub fn record_base_commit(canonical: &Path, session_id: &str) -> anyhow::Result<String> {
-    if !is_git_repo(canonical) {
-        anyhow::bail!(
-            "record_base_commit: not a git repo: {}",
-            canonical.display()
-        );
-    }
-
-    // Temp index file — keep it inside the .git/ dir of the canonical so we
-    // don't pollute /tmp and so it's cleaned up with the repo if something
-    // goes wrong. `.git/allele-base-<session>.idx` is a unique path.
-    let tmp_index = canonical
-        .join(".git")
-        .join(format!("allele-base-{session_id}.idx"));
-
-    // Ensure we clean up the temp file even on error paths.
-    let result = record_base_commit_inner(canonical, session_id, &tmp_index);
-
-    // Best-effort cleanup — ignore errors (the file may not exist if an
-    // early step failed before creating it).
-    let _ = std::fs::remove_file(&tmp_index);
-
-    result
-}
-
-fn record_base_commit_inner(
-    canonical: &Path,
-    session_id: &str,
-    tmp_index: &Path,
-) -> anyhow::Result<String> {
-    // Step 1: read-tree HEAD into temp index
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.env("GIT_INDEX_FILE", tmp_index);
-    cmd.arg("read-tree").arg("HEAD");
-    run_git(cmd, "read-tree (base)")?;
-
-    // Step 2: add -A into temp index
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.env("GIT_INDEX_FILE", tmp_index);
-    cmd.arg("add").arg("-A");
-    run_git(cmd, "add (base)")?;
-
-    // Step 3: write-tree
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.env("GIT_INDEX_FILE", tmp_index);
-    cmd.arg("write-tree");
-    let tree = run_git_stdout(cmd, "write-tree (base)")?;
-
-    // Step 4: commit-tree -p HEAD
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("commit-tree")
-        .arg(&tree)
-        .arg("-p")
-        .arg("HEAD")
-        .arg("-m")
-        .arg(format!("allele-base {session_id}"));
-    let commit = run_git_stdout(cmd, "commit-tree (base)")?;
-
-    // Step 5: update-ref
-    let ref_name = base_ref_name(session_id);
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("update-ref").arg(&ref_name).arg(&commit);
-    run_git(cmd, "update-ref (base)")?;
-
-    Ok(commit)
-}
-
-/// Create `refs/heads/allele/session/<id>` in the clone, rooted at
-/// `base_commit`, and switch HEAD to it.
-///
-/// After this call, the clone's working tree is unchanged (matches
-/// `base_commit`'s tree, which was captured from the exact state that
-/// COW'd into the clone), HEAD points at the new session branch, and any
+/// After this call, HEAD points at the new session branch and any
 /// subsequent commits in the clone extend that branch.
 pub fn create_session_branch(
     clone: &Path,
-    base_commit: &str,
     session_id: &str,
 ) -> anyhow::Result<()> {
     if !is_git_repo(clone) {
@@ -253,14 +170,14 @@ pub fn create_session_branch(
 
     let branch = session_branch_name(session_id);
 
-    // `git checkout -B <branch> <commit>` creates or resets the branch and
+    // `git checkout -B <branch> HEAD` creates or resets the branch and
     // checks it out. Safer than `checkout -b` because it's idempotent if
     // the branch already exists (e.g. on session resume).
     let mut cmd = git_cmd(Some(clone));
     cmd.arg("checkout")
         .arg("-B")
         .arg(&branch)
-        .arg(base_commit);
+        .arg("HEAD");
     run_git(cmd, "checkout -B (session)")?;
 
     Ok(())
@@ -305,23 +222,17 @@ pub fn fetch_session_branch(
     Ok(())
 }
 
-/// Archive a clone's session work back into canonical and clean up the
-/// synthetic base ref. Pairs [`fetch_session_branch`] with
-/// [`delete_base_ref`] in the one order that matters: fetch first (while
-/// the clone still exists on disk), then best-effort base-ref cleanup.
+/// Archive a clone's session work back into canonical by fetching the
+/// session branch as `refs/allele/archive/<session-id>`.
 ///
 /// Returns the fetch result — callers typically log it and proceed to
-/// delete/trash the clone regardless of outcome. The base-ref delete is
-/// always attempted and always silent (matches the Phase C cleanup
-/// pattern).
+/// delete/trash the clone regardless of outcome.
 pub fn archive_session(
     canonical: &Path,
     clone: &Path,
     session_id: &str,
 ) -> anyhow::Result<()> {
-    let fetch_result = fetch_session_branch(canonical, clone, session_id);
-    let _ = delete_base_ref(canonical, session_id);
-    fetch_result
+    fetch_session_branch(canonical, clone, session_id)
 }
 
 /// Delete a ref. Equivalent to `git update-ref -d <ref>`.
@@ -333,14 +244,6 @@ pub fn delete_ref(repo: &Path, ref_name: &str) -> anyhow::Result<()> {
     cmd.arg("update-ref").arg("-d").arg(ref_name);
     run_git(cmd, "update-ref -d")?;
     Ok(())
-}
-
-/// Delete the synthetic base ref `refs/allele/base/<session-id>` from a
-/// canonical repo. Thin wrapper around [`delete_ref`] that keeps the ref
-/// namespace encapsulated in this module — callers never need to spell
-/// `base_ref_name(...)` themselves.
-pub fn delete_base_ref(repo: &Path, session_id: &str) -> anyhow::Result<()> {
-    delete_ref(repo, &base_ref_name(session_id))
 }
 
 /// Prune `refs/allele/archive/*` refs whose committer date is older than
@@ -496,11 +399,6 @@ pub fn session_id_from_branch(branch: &str) -> Option<&str> {
 
 // --- Ref name helpers ---------------------------------------------------
 
-/// `refs/allele/base/<session-id>` — synthetic base commit in canonical.
-pub fn base_ref_name(session_id: &str) -> String {
-    format!("refs/allele/base/{session_id}")
-}
-
 /// `refs/heads/allele/session/<session-id>` — session branch in the clone.
 pub fn session_branch_name(session_id: &str) -> String {
     format!("allele/session/{session_id}")
@@ -567,13 +465,6 @@ mod tests {
         out.lines().map(|s| s.to_string()).collect()
     }
 
-    /// `git status --porcelain` output.
-    fn status(repo: &Path) -> String {
-        let mut cmd = git_cmd(Some(repo));
-        cmd.arg("status").arg("--porcelain");
-        run_git_stdout(cmd, "status (test)").expect("status")
-    }
-
     #[test]
     fn git_available_on_dev_machine() {
         // Dev machines running Allele's test suite always have git.
@@ -628,86 +519,30 @@ mod tests {
     }
 
     #[test]
-    fn record_base_commit_clean_canonical_tree_equals_head() {
+    fn is_working_tree_dirty_clean_repo() {
         let (_dir, path) = make_canonical("hello");
-        let head_tree = tree_of(&path, "HEAD");
-
-        let base_commit =
-            record_base_commit(&path, "testsession01").unwrap();
-        let base_tree = tree_of(&path, &base_commit);
-
-        assert_eq!(head_tree, base_tree);
+        assert!(!is_working_tree_dirty(&path));
     }
 
     #[test]
-    fn record_base_commit_dirty_canonical_captures_all_state() {
-        let (_dir, path) = make_canonical("base");
-        // Modify tracked file
-        fs::write(path.join("file.txt"), "base\nmodified").unwrap();
-        // Add untracked file
-        fs::write(path.join("untracked.txt"), "new stuff").unwrap();
-
-        let base_commit =
-            record_base_commit(&path, "testsession02").unwrap();
-        let files = ls_tree(&path, &base_commit);
-
-        assert!(files.contains(&"file.txt".to_string()));
-        assert!(files.contains(&"untracked.txt".to_string()));
-    }
-
-    #[test]
-    fn record_base_commit_leaves_head_unchanged() {
-        let (_dir, path) = make_canonical("base");
+    fn is_working_tree_dirty_with_modifications() {
+        let (_dir, path) = make_canonical("hello");
         fs::write(path.join("file.txt"), "modified").unwrap();
-        fs::write(path.join("untracked.txt"), "new").unwrap();
-
-        let head_before = head_commit(&path);
-        record_base_commit(&path, "testsession03").unwrap();
-        let head_after = head_commit(&path);
-
-        assert_eq!(head_before, head_after);
+        assert!(is_working_tree_dirty(&path));
     }
 
     #[test]
-    fn record_base_commit_leaves_working_tree_unchanged() {
-        let (_dir, path) = make_canonical("base");
-        fs::write(path.join("file.txt"), "modified").unwrap();
-        fs::write(path.join("untracked.txt"), "new").unwrap();
-
-        let status_before = status(&path);
-        record_base_commit(&path, "testsession04").unwrap();
-        let status_after = status(&path);
-
-        assert_eq!(status_before, status_after);
-        // Sanity: tracked mod + untracked file should both still show.
-        assert!(status_after.contains("file.txt"));
-        assert!(status_after.contains("untracked.txt"));
-    }
-
-    #[test]
-    fn record_base_commit_creates_base_ref() {
+    fn is_working_tree_dirty_with_untracked() {
         let (_dir, path) = make_canonical("hello");
-        let commit = record_base_commit(&path, "testsession05").unwrap();
-        let ref_target = resolve_ref(&path, &base_ref_name("testsession05"));
-        assert_eq!(ref_target.as_deref(), Some(commit.as_str()));
-    }
-
-    #[test]
-    fn record_base_commit_cleans_up_temp_index() {
-        let (_dir, path) = make_canonical("hello");
-        record_base_commit(&path, "testsession06").unwrap();
-        let tmp = path.join(".git").join("allele-base-testsession06.idx");
-        assert!(!tmp.exists(), "temp index file should be cleaned up");
+        fs::write(path.join("new.txt"), "untracked").unwrap();
+        assert!(is_working_tree_dirty(&path));
     }
 
     #[test]
     fn create_session_branch_creates_and_checks_out_branch() {
         let (_dir, path) = make_canonical("hello");
-        let base = record_base_commit(&path, "testsession07").unwrap();
+        create_session_branch(&path, "testsession07").unwrap();
 
-        create_session_branch(&path, &base, "testsession07").unwrap();
-
-        // The branch should exist and HEAD should point at it.
         let mut cmd = git_cmd(Some(&path));
         cmd.arg("symbolic-ref").arg("HEAD");
         let head_ref = run_git_stdout(cmd, "symbolic-ref HEAD (test)").unwrap();
@@ -715,38 +550,28 @@ mod tests {
     }
 
     #[test]
-    fn create_session_branch_points_at_base_commit() {
+    fn create_session_branch_points_at_head() {
         let (_dir, path) = make_canonical("hello");
-        let base = record_base_commit(&path, "testsession08").unwrap();
-
-        create_session_branch(&path, &base, "testsession08").unwrap();
-        let head = head_commit(&path);
-        assert_eq!(head, base);
+        let head_before = head_commit(&path);
+        create_session_branch(&path, "testsession08").unwrap();
+        let head_after = head_commit(&path);
+        assert_eq!(head_before, head_after);
     }
 
     #[test]
     fn fetch_session_branch_round_trip() {
-        // Build a canonical and a "clone" (really just a second repo
-        // sharing history — good enough for Phase A tests; the real
-        // integration with clonefile() happens in Phase C).
         let (_cdir, canonical) = make_canonical("base");
-        let base = record_base_commit(&canonical, "roundtrip01").unwrap();
+        let canonical_head = head_commit(&canonical);
 
-        // Second repo, seeded to look like a clone: init, fetch canonical's
-        // HEAD into it, check out a session branch, commit new work.
+        // Second repo seeded via git clone --local to share history.
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().to_path_buf();
-        git_init(&clone_path).unwrap();
+        let mut cmd = git_cmd(None);
+        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        run_git(cmd, "git clone --local (test)").unwrap();
 
-        // Fetch canonical's base commit into the clone.
-        let mut cmd = git_cmd(Some(&clone_path));
-        cmd.arg("fetch")
-            .arg(&canonical)
-            .arg(format!("{base}:refs/allele/base/roundtrip01"));
-        run_git(cmd, "fetch base into clone").unwrap();
-
-        // Create session branch in the clone from the fetched base.
-        create_session_branch(&clone_path, &base, "roundtrip01").unwrap();
+        // Create session branch in the clone rooted at HEAD.
+        create_session_branch(&clone_path, "roundtrip01").unwrap();
 
         // Do some "session work" in the clone.
         fs::write(clone_path.join("session-work.txt"), "work").unwrap();
@@ -761,17 +586,20 @@ mod tests {
         run_git(cmd, "commit session work").unwrap();
         let session_head = head_commit(&clone_path);
 
-        // Now fetch the session branch back into canonical.
+        // Session branch parent should be canonical's HEAD (no base commit).
+        let mut cmd = git_cmd(Some(&clone_path));
+        cmd.arg("rev-parse").arg(format!("{session_head}^"));
+        let parent = run_git_stdout(cmd, "rev-parse parent (test)").unwrap();
+        assert_eq!(parent, canonical_head);
+
+        // Fetch the session branch back into canonical.
         fetch_session_branch(&canonical, &clone_path, "roundtrip01").unwrap();
 
-        // Canonical should now have refs/allele/archive/roundtrip01 pointing
-        // at the session work commit.
         let archive_target =
             resolve_ref(&canonical, &archive_ref_name("roundtrip01"));
         assert_eq!(archive_target.as_deref(), Some(session_head.as_str()));
 
-        // And the session-work.txt file should be reachable from canonical's
-        // object database.
+        // Session work file reachable from canonical's object database.
         let mut cmd = git_cmd(Some(&canonical));
         cmd.arg("cat-file")
             .arg("-e")
@@ -782,11 +610,15 @@ mod tests {
     #[test]
     fn delete_ref_removes_target() {
         let (_dir, path) = make_canonical("hello");
-        record_base_commit(&path, "del01").unwrap();
-        assert!(resolve_ref(&path, &base_ref_name("del01")).is_some());
+        let head = head_commit(&path);
+        // Create a ref to test deletion against
+        let mut cmd = git_cmd(Some(&path));
+        cmd.arg("update-ref").arg("refs/test/del01").arg(&head);
+        run_git(cmd, "update-ref (test)").unwrap();
+        assert!(resolve_ref(&path, "refs/test/del01").is_some());
 
-        delete_ref(&path, &base_ref_name("del01")).unwrap();
-        assert!(resolve_ref(&path, &base_ref_name("del01")).is_none());
+        delete_ref(&path, "refs/test/del01").unwrap();
+        assert!(resolve_ref(&path, "refs/test/del01").is_none());
     }
 
     #[test]
@@ -892,33 +724,17 @@ mod tests {
     }
 
     #[test]
-    fn delete_base_ref_removes_existing() {
-        let (_dir, path) = make_canonical("hello");
-        record_base_commit(&path, "delbr01").unwrap();
-        assert!(resolve_ref(&path, &base_ref_name("delbr01")).is_some());
-
-        delete_base_ref(&path, "delbr01").unwrap();
-        assert!(resolve_ref(&path, &base_ref_name("delbr01")).is_none());
-    }
-
-    #[test]
-    fn archive_session_creates_archive_and_cleans_base() {
-        // Set up canonical + "clone" (second repo sharing history)
+    fn archive_session_creates_archive_ref() {
         let (_cdir, canonical) = make_canonical("base");
-        let base = record_base_commit(&canonical, "archtest01").unwrap();
 
-        // Create a second repo to act as the clone
+        // Clone via git clone --local to share history
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().to_path_buf();
-        git_init(&clone_path).unwrap();
+        let mut cmd = git_cmd(None);
+        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        run_git(cmd, "git clone --local (test)").unwrap();
 
-        // Fetch the base commit into the clone and create session branch
-        let mut cmd = git_cmd(Some(&clone_path));
-        cmd.arg("fetch")
-            .arg(&canonical)
-            .arg(format!("{base}:refs/allele/base/archtest01"));
-        run_git(cmd, "fetch base into clone (test)").unwrap();
-        create_session_branch(&clone_path, &base, "archtest01").unwrap();
+        create_session_branch(&clone_path, "archtest01").unwrap();
 
         // Do some work in the clone
         fs::write(clone_path.join("work.txt"), "session work").unwrap();
@@ -930,39 +746,33 @@ mod tests {
         run_git(cmd, "commit (test)").unwrap();
         let work_commit = head_commit(&clone_path);
 
-        // archive_session should fetch the session branch and clean up the base ref
         archive_session(&canonical, &clone_path, "archtest01").unwrap();
 
         // Archive ref should exist and point at the session work
         let archive_target = resolve_ref(&canonical, &archive_ref_name("archtest01"));
         assert_eq!(archive_target.as_deref(), Some(work_commit.as_str()));
-
-        // Base ref should be gone
-        assert!(resolve_ref(&canonical, &base_ref_name("archtest01")).is_none());
     }
 
     #[test]
-    fn full_round_trip_init_base_branch_archive() {
-        // End-to-end integration canary for the entire merge-back pipeline:
-        // init → record base → branch → commit → archive → verify.
+    fn full_round_trip_init_branch_archive_merge() {
+        // End-to-end: init → branch → commit → archive → merge → verify
+        // clean history (no synthetic base commit).
 
         // 1. Canonical with a file
         let (_cdir, canonical) = make_canonical("original content");
+        let canonical_head = head_commit(&canonical);
 
-        // 2. Record base commit (Phase C step 1)
-        let base = record_base_commit(&canonical, "e2e01").unwrap();
-
-        // 3. Simulate a clone (can't use clonefile in tests — use git clone --local)
+        // 2. Clone (simulates COW clonefile)
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().to_path_buf();
         let mut cmd = git_cmd(None);
         cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
         run_git(cmd, "git clone --local (test)").unwrap();
 
-        // 4. Create session branch in the clone (Phase C step 2)
-        create_session_branch(&clone_path, &base, "e2e01").unwrap();
+        // 3. Create session branch rooted at HEAD
+        create_session_branch(&clone_path, "e2e01").unwrap();
 
-        // 5. Do session work
+        // 4. Do session work
         fs::write(clone_path.join("session-notes.txt"), "important work").unwrap();
         let mut cmd = git_cmd(Some(&clone_path));
         cmd.arg("add").arg("-A");
@@ -972,20 +782,26 @@ mod tests {
         run_git(cmd, "commit session work (test)").unwrap();
         let session_head = head_commit(&clone_path);
 
-        // 6. Archive (Phase D) — fetch + delete base ref
+        // 5. Archive — fetch session branch into canonical
         archive_session(&canonical, &clone_path, "e2e01").unwrap();
 
-        // 7. Verify: archive ref exists and points at session work
+        // 6. Verify: archive ref exists
         let archive = resolve_ref(&canonical, &archive_ref_name("e2e01"));
         assert_eq!(archive.as_deref(), Some(session_head.as_str()));
 
-        // 8. Verify: base ref cleaned up
-        assert!(resolve_ref(&canonical, &base_ref_name("e2e01")).is_none());
+        // 7. Merge the archive into canonical
+        merge_archive(&canonical, "e2e01").unwrap();
 
-        // 9. Verify: session work file is reachable from canonical
+        // 8. Verify: session work file is in canonical's HEAD
+        let files = ls_tree(&canonical, "HEAD");
+        assert!(files.contains(&"session-notes.txt".to_string()));
+
+        // 9. Verify: the session work commit's parent is the original
+        // canonical HEAD — no synthetic base commit in between.
         let mut cmd = git_cmd(Some(&canonical));
-        cmd.arg("cat-file").arg("-e").arg(format!("{session_head}:session-notes.txt"));
-        run_git(cmd, "cat-file session-notes (test)").unwrap();
+        cmd.arg("rev-parse").arg(format!("{session_head}^"));
+        let parent = run_git_stdout(cmd, "rev-parse parent (test)").unwrap();
+        assert_eq!(parent, canonical_head);
 
         // 10. Verify: current_branch + session_id_from_branch work on the clone
         let branch = current_branch(&clone_path).unwrap();
