@@ -4,7 +4,6 @@ use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
-use alacritty_terminal::vte::ansi;
 use flume::{Receiver, Sender};
 use std::collections::HashMap;
 use std::path::PathBuf;
