@@ -38,6 +38,10 @@ pub struct TerminalView {
     cell_width: f32,
     cell_height: f32,
     scroll_dirty: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    // Sub-cell pixel remainder for trackpad (ScrollDelta::Pixels) scrolling.
+    // Accumulates fractional deltas across events so small continuous trackpad
+    // input produces fluid scrolling instead of staccato single-line ticks.
+    scroll_pixel_accumulator: std::sync::Arc<std::sync::Mutex<f32>>,
     // Element bounds — written by grid_element during paint, read by mouse handlers.
     // Stored as atomic i32 pixels for lock-free access.
     element_origin_x: std::sync::Arc<std::sync::atomic::AtomicI32>,
@@ -110,6 +114,7 @@ impl TerminalView {
                     cell_width,
                     cell_height,
                     scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                    scroll_pixel_accumulator: std::sync::Arc::new(std::sync::Mutex::new(0.0)),
                     element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
                     element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
                     scrollbar_dragging: false,
@@ -264,6 +269,7 @@ impl TerminalView {
             cell_width,
             cell_height,
             scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            scroll_pixel_accumulator: std::sync::Arc::new(std::sync::Mutex::new(0.0)),
             element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
             element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
             scrollbar_dragging: false,
@@ -1254,11 +1260,32 @@ impl Render for TerminalView {
             .on_scroll_wheel({
                 let term = self.terminal.as_ref().map(|t| t.term.clone());
                 let scroll_dirty = self.scroll_dirty.clone();
+                let accumulator = self.scroll_pixel_accumulator.clone();
                 let cell_h = self.cell_height;
                 move |event: &ScrollWheelEvent, _window: &mut Window, _cx: &mut App| {
                     let Some(ref term) = term else { return };
-                    let delta = event.delta.pixel_delta(px(cell_h));
-                    let lines = (f32::from(delta.y) / cell_h).round() as i32;
+                    // Trackpad (Pixels) delivers small sub-cell deltas per frame;
+                    // we must accumulate them to produce fluid scrolling. Mouse
+                    // wheel (Lines) delivers discrete line counts and must bypass
+                    // the accumulator so its precision isn't diluted by a stale
+                    // trackpad remainder.
+                    let lines = match event.delta {
+                        ScrollDelta::Pixels(delta_px) => {
+                            let mut acc = accumulator.lock().unwrap();
+                            *acc += f32::from(delta_px.y);
+                            let whole = (*acc / cell_h).trunc() as i32;
+                            if whole != 0 {
+                                *acc -= whole as f32 * cell_h;
+                            }
+                            whole
+                        }
+                        ScrollDelta::Lines(delta_ln) => {
+                            // Mouse wheel — reset any fractional trackpad remainder
+                            // so direction changes between devices feel immediate.
+                            *accumulator.lock().unwrap() = 0.0;
+                            delta_ln.y.round() as i32
+                        }
+                    };
                     if lines != 0 {
                         term.lock().scroll_display(Scroll::Delta(lines));
                         scroll_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
