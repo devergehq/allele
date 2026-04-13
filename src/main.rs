@@ -555,6 +555,7 @@ impl AppState {
 
         // Trigger auto-naming after all borrows are released.
         if let Some((session_id, clone_path)) = auto_name_data {
+            eprintln!("auto-naming: trigger fired for session {session_id}");
             let claude_path = self.claude_path.clone();
             self.trigger_auto_naming(session_id, clone_path, claude_path, cx);
         }
@@ -593,9 +594,13 @@ impl AppState {
             }
 
             let Some(prompt) = prompt_text else {
-                eprintln!("auto-naming: no prompt file for {session_id}");
+                eprintln!("auto-naming: no prompt file found after retries for {session_id}");
                 return;
             };
+            eprintln!(
+                "auto-naming: prompt file read for {session_id} ({} chars)",
+                prompt.len()
+            );
 
             // Truncate prompt to first 200 chars to keep the LLM call cheap.
             let truncated: String = prompt.chars().take(200).collect();
@@ -646,6 +651,7 @@ impl AppState {
                 }
             };
 
+            eprintln!("auto-naming: haiku returned slug_raw={slug_raw:?} for {session_id}");
             if slug_raw.is_empty() {
                 eprintln!("auto-naming: empty slug from claude");
                 return;
@@ -685,17 +691,25 @@ impl AppState {
 
             // Rename the git branch in the background (non-blocking).
             if let Some(ref cp) = clone_path {
+                eprintln!("auto-naming: renaming branch for {session_id} with slug={slug:?}");
                 if let Err(e) = git::rename_session_branch(cp, &session_id, &slug) {
                     eprintln!("auto-naming: branch rename failed: {e}");
                     // Continue — label update is still valuable
+                } else {
+                    eprintln!("auto-naming: branch rename succeeded for {session_id}");
                 }
             }
 
             // Update session label on the main thread.
+            eprintln!("auto-naming: updating label to {display_label:?} for {session_id}");
             let _ = this.update(cx, |this: &mut AppState, cx| {
                 for project in &mut this.projects {
                     for session in &mut project.sessions {
                         if session.id == session_id {
+                            eprintln!(
+                                "auto-naming: label updated {:?} -> {:?} for {session_id}",
+                                session.label, display_label
+                            );
                             session.label = display_label.clone();
                             break;
                         }
@@ -1843,14 +1857,22 @@ impl Render for AppState {
                 let is_suspended = session.status == SessionStatus::Suspended;
                 let status_color = session.status.color();
                 let status_icon = session.status.icon();
-                // Title only exists if a PTY is attached; for Suspended
-                // sessions we always fall back to the stored label.
-                let label = session
-                    .terminal_view
-                    .as_ref()
-                    .and_then(|tv| tv.read(cx).title())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| session.label.clone());
+                // Prefer the auto-named label once it's no longer a
+                // placeholder ("Claude N" / "Shell N").  Fall back to the
+                // terminal's OSC title only while waiting for auto-naming,
+                // and to the raw label as a last resort.
+                let is_placeholder = session.label.starts_with("Claude ")
+                    || session.label.starts_with("Shell ");
+                let label = if !is_placeholder {
+                    session.label.clone()
+                } else {
+                    session
+                        .terminal_view
+                        .as_ref()
+                        .and_then(|tv| tv.read(cx).title())
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| session.label.clone())
+                };
                 let elapsed = session.elapsed_display();
                 let is_confirming = self.confirming_discard
                     == Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });

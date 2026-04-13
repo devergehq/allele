@@ -1,6 +1,7 @@
 # Allele
 
 > A native macOS session manager for Claude Code, with APFS copy-on-write workspace isolation.
+> Built for fast, isolated experimentation.
 
 ## About the name
 
