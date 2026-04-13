@@ -40,6 +40,8 @@ enum PendingAction {
     MergeArchive { project_idx: usize, archive_idx: usize },
     /// Delete an archive ref without merging.
     DeleteArchive { project_idx: usize, archive_idx: usize },
+    /// Merge session work into canonical and close (archive + merge + delete clone).
+    MergeAndClose { project_idx: usize, session_idx: usize },
     /// Toggle the bottom drawer terminal panel.
     ToggleDrawer,
     /// Source path missing — open folder picker so the user can relocate.
@@ -906,22 +908,26 @@ impl AppState {
         let removed = project.sessions.remove(cursor.session_idx);
         let clone_path = removed.clone_path.clone();
         let removed_label = removed.label.clone();
+        let already_merged = removed.merged;
         // Captured before drop(removed) / end of &mut project borrow.
         let canonical_for_task = project.source_path.clone();
         let session_id_for_task = removed.id.clone();
 
         // Preserve the session's metadata in the archive list so the
-        // sidebar archive browser can show a human-readable label.
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        project.archives.push(ArchivedSession {
-            id: removed.id.clone(),
-            project_id: project.id.clone(),
-            label: removed_label.clone(),
-            archived_at: now,
-        });
+        // sidebar archive browser can show a human-readable label —
+        // but skip this if the session was already merged (work is in canonical).
+        if !already_merged {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            project.archives.push(ArchivedSession {
+                id: removed.id.clone(),
+                project_id: project.id.clone(),
+                label: removed_label.clone(),
+                archived_at: now,
+            });
+        }
 
         // Drop the Session — this frees the terminal_view entity (if any),
         // which in turn kills the PTY via the Drop impl on PtyTerminal.
@@ -1331,6 +1337,7 @@ fn main() {
                             persisted.started_at,
                             persisted.last_active,
                             persisted.clone_path.clone(),
+                            persisted.merged,
                         );
                         project.sessions.push(session);
                     }
@@ -1503,6 +1510,98 @@ impl Render for AppState {
                     }
                     self.save_state();
                     cx.notify();
+                }
+                PendingAction::MergeAndClose { project_idx, session_idx } => {
+                    let cursor = SessionCursor { project_idx, session_idx };
+                    if let Some(project) = self.projects.get_mut(cursor.project_idx) {
+                        if cursor.session_idx < project.sessions.len() {
+                            let session = &mut project.sessions[cursor.session_idx];
+                            let clone_path = session.clone_path.clone();
+                            let session_id = session.id.clone();
+                            let session_label = session.label.clone();
+                            let canonical = project.source_path.clone();
+
+                            // Mark merged before removal so remove_session skips archive entry.
+                            session.merged = true;
+
+                            // If no clone or clone == canonical, just remove (no git ops).
+                            let needs_git = clone_path.as_ref().map_or(false, |cp| *cp != canonical);
+
+                            if needs_git {
+                                let clone_path = clone_path.unwrap(); // safe: needs_git is true
+
+                                // Show a placeholder while the background pipeline runs.
+                                let placeholder_id = uuid::Uuid::new_v4().to_string();
+                                let project = self.projects.get_mut(cursor.project_idx).unwrap();
+                                project.loading_sessions.push(project::LoadingSession {
+                                    id: placeholder_id.clone(),
+                                    label: format!("{session_label} (merging)"),
+                                });
+
+                                // Remove the session from the list now (frees PTY).
+                                // merged=true means remove_session won't create an archive entry.
+                                self.remove_session(cursor, window, cx);
+
+                                // Spawn the archive → merge → delete pipeline on the background executor.
+                                let placeholder_id_for_task = placeholder_id.clone();
+                                let project_idx_for_task = cursor.project_idx;
+                                cx.spawn(async move |this, cx| {
+                                    let result = cx
+                                        .background_executor()
+                                        .spawn(async move {
+                                            // 1. Auto-commit + fetch session branch as archive ref
+                                            git::archive_session(&canonical, &clone_path, &session_id)?;
+
+                                            // 2. Merge the archive ref into canonical HEAD
+                                            let merge_result = git::merge_archive(&canonical, &session_id);
+
+                                            // 3. Always delete the archive ref (cleanup even on merge failure)
+                                            let _ = git::delete_ref(
+                                                &canonical,
+                                                &git::archive_ref_name(&session_id),
+                                            );
+
+                                            // 4. Delete the APFS clone
+                                            if let Err(e) = clone::delete_clone(&clone_path) {
+                                                eprintln!("Failed to delete clone after merge for {session_id}: {e}");
+                                            }
+
+                                            match merge_result {
+                                                Ok(git::MergeResult::Merged) => {
+                                                    eprintln!("Merged session {session_id} into canonical");
+                                                    Ok(())
+                                                }
+                                                Ok(git::MergeResult::AlreadyUpToDate) => {
+                                                    eprintln!("Session {session_id} already up to date — nothing to merge");
+                                                    Ok(())
+                                                }
+                                                Err(e) => {
+                                                    eprintln!("merge_archive failed for {session_id}: {e}");
+                                                    Err(e)
+                                                }
+                                            }
+                                        })
+                                        .await;
+
+                                    if let Err(e) = &result {
+                                        eprintln!("Merge-and-close pipeline error: {e}");
+                                    }
+
+                                    // Remove the placeholder on the main thread
+                                    let _ = this.update(cx, |this: &mut Self, cx| {
+                                        if let Some(project) = this.projects.get_mut(project_idx_for_task) {
+                                            project.loading_sessions.retain(|l| l.id != placeholder_id_for_task);
+                                        }
+                                        this.save_state();
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                            } else {
+                                self.remove_session(cursor, window, cx);
+                            }
+                        }
+                    }
                 }
                 PendingAction::SelectSession { project_idx, session_idx } => {
                     let cursor = SessionCursor { project_idx, session_idx };
@@ -1990,14 +2089,31 @@ impl Render for AppState {
                             ),
                     );
                 } else {
-                    // Normal state: a Close button (keeps clone) and a
-                    // Discard button (opens the confirmation prompt).
+                    // Normal state: Merge & Close, Close (keep clone), and Discard.
                     row = row.child(
                         div()
                             .flex()
                             .flex_row()
                             .gap(px(2.0))
                             .items_center()
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("merge-{p_idx}-{s_idx}")))
+                                    .cursor_pointer()
+                                    .px(px(4.0))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(0x45475a))
+                                    .hover(|s| s.text_color(rgb(0xa6e3a1)))
+                                    .child("✓")
+                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.pending_action = Some(PendingAction::MergeAndClose {
+                                            project_idx: p_idx,
+                                            session_idx: s_idx,
+                                        });
+                                        cx.notify();
+                                    })),
+                            )
                             .child(
                                 div()
                                     .id(SharedString::from(format!("close-{p_idx}-{s_idx}")))

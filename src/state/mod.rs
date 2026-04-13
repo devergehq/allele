@@ -33,6 +33,10 @@ pub struct PersistedSession {
     pub started_at: SystemTime,
     /// Wall-clock time we last observed activity on the session.
     pub last_active: SystemTime,
+    /// True if this session's work was already merged into canonical via
+    /// merge-and-close. When set, discard skips creating an archive entry.
+    #[serde(default)]
+    pub merged: bool,
 }
 
 impl PersistedSession {
@@ -45,6 +49,7 @@ impl PersistedSession {
             last_known_status: session.status,
             started_at: session.started_at,
             last_active: session.last_active,
+            merged: session.merged,
         }
     }
 }
