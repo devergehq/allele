@@ -611,12 +611,18 @@ impl AppState {
             // full environment (PATH, auth tokens, etc.). A bare
             // std::process::Command inherits Allele's .app bundle env which
             // is too stripped-down for `claude` to authenticate.
+            //
+            // We avoid --bare because it disables OAuth/keychain auth. Instead
+            // we use --tools "" (no tools) and --no-session-persistence to keep
+            // it lightweight, and --system-prompt to skip CLAUDE.md loading.
             let escaped_prompt = summary_prompt.replace('\'', "'\\''");
             let result = cx.background_executor().spawn(async move {
                 std::process::Command::new("/bin/bash")
                     .arg("-lc")
                     .arg(format!(
-                        "exec '{}' -p --model haiku --bare '{}'",
+                        "exec '{}' -p --model haiku --tools '' --no-session-persistence \
+                         --system-prompt 'Output only a short hyphenated slug. No explanation.' \
+                         '{}'",
                         claude_bin.replace('\'', "'\\''"),
                         escaped_prompt,
                     ))

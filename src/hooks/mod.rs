@@ -260,6 +260,12 @@ impl EventWatcher {
             let path = entry.path();
             if !path.is_file() { continue; }
 
+            // Only process .jsonl event files — skip .prompt sidecars and
+            // any other non-JSONL files in the events directory.
+            if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+                continue;
+            }
+
             // Derive session_id from the filename
             let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue; };
             let session_id = stem.to_string();
