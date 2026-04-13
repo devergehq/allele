@@ -32,8 +32,17 @@ if [[ ! -f "$PLIST" ]] || ! cmp -s "$SOURCE_PLIST" "$PLIST"; then
     cp "$SOURCE_PLIST" "$PLIST"
 fi
 
-# Symlink the binary (always update — it may have been recompiled)
-ln -sf "$BINARY" "$LINK"
+# Stderr log — macOS `open` launches a new process whose stderr is
+# disconnected from the calling terminal. Write a launcher script
+# inside the bundle that redirects stderr to a log file, then exec's
+# the real binary. This keeps eprintln! diagnostics accessible.
+ALLELE_LOG="${ALLELE_LOG:-/tmp/allele-stderr.log}"
+
+cat > "$LINK" <<LAUNCHER
+#!/usr/bin/env bash
+exec "$BINARY" "\$@" 2>>"$ALLELE_LOG"
+LAUNCHER
+chmod +x "$LINK"
 
 # Launch through the bundle. -W waits for exit so `cargo run` blocks.
 # -n opens a new instance even if one is already running.

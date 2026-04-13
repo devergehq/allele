@@ -225,14 +225,16 @@ impl TerminalView {
                                         .map(|d| d.as_millis())
                                         .unwrap_or(0),
                                 );
-                                // Clear scrollback before sending SIGWINCH.
+                                // Reset the entire grid before sending SIGWINCH.
                                 // CC's ink re-renders the full conversation on resize —
                                 // that repaint IS the correct canonical state at the new
-                                // terminal width. Clear old (stale-width) scrollback so
-                                // the repaint lands as fresh content, not duplicates.
+                                // terminal width. clear_history() alone leaves the visible
+                                // grid intact, so the old content persists as a single
+                                // ghost copy when CC repaints on top. reset() clears both
+                                // scrollback AND visible cells, giving CC a blank canvas.
                                 if let Some(ref terminal) = this.terminal {
-                                    terminal.term.lock().grid_mut().clear_history();
-                                    eprintln!("[RESIZE-DIAG] CLEAR scrollback before SIGWINCH");
+                                    terminal.term.lock().grid_mut().reset::<alacritty_terminal::vte::ansi::Color>();
+                                    eprintln!("[RESIZE-DIAG] RESET grid (scrollback + visible) before SIGWINCH");
                                 }
                                 this.last_cols = pending_size.cols;
                                 this.last_rows = pending_size.rows;
