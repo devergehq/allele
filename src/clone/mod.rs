@@ -42,6 +42,15 @@ pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str)
 
         if result != 0 {
             let err = std::io::Error::last_os_error();
+            if err.raw_os_error() == Some(libc::EXDEV) {
+                anyhow::bail!(
+                    "Cannot clone: source ({}) and destination ({}) are on different \
+                     volumes. Both must be on the same APFS volume for clonefile(2) to work. \
+                     Move your project or ~/.allele/ so they share a volume.",
+                    source.display(),
+                    clone_path.display(),
+                );
+            }
             anyhow::bail!("clonefile() failed: {err}");
         }
 
@@ -103,6 +112,15 @@ pub fn create_clone(source: &Path, workspace_name: &str) -> anyhow::Result<PathB
 
     if result != 0 {
         let err = std::io::Error::last_os_error();
+        if err.raw_os_error() == Some(libc::EXDEV) {
+            anyhow::bail!(
+                "Cannot clone: source ({}) and destination ({}) are on different \
+                 volumes. Both must be on the same APFS volume for clonefile(2) to work. \
+                 Move your project or ~/.allele/ so they share a volume.",
+                source.display(),
+                clone_path.display(),
+            );
+        }
         anyhow::bail!("clonefile() failed: {err}");
     }
 
@@ -215,7 +233,19 @@ pub fn trash_clone(clone_path: &Path) -> anyhow::Result<PathBuf> {
         suffix += 1;
     }
 
-    fs::rename(clone_path, &dest)?;
+    fs::rename(clone_path, &dest).map_err(|e| {
+        if e.raw_os_error() == Some(libc::EXDEV) {
+            anyhow::anyhow!(
+                "Cannot trash clone: source ({}) and trash directory ({}) are on different \
+                 volumes. Both must be on the same APFS volume. \
+                 Move ~/.allele/ so workspaces and trash share a volume.",
+                clone_path.display(),
+                dest.display(),
+            )
+        } else {
+            e.into()
+        }
+    })?;
     Ok(dest)
 }
 

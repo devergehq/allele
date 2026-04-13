@@ -95,6 +95,8 @@ struct AppState {
     right_sidebar_visible: bool,
     right_sidebar_width: f32,
     right_sidebar_resizing: bool,
+    /// When true, a quit confirmation banner is shown because running sessions exist.
+    confirming_quit: bool,
 }
 
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
@@ -1426,6 +1428,33 @@ fn main() {
                     })
                     .detach();
 
+                    // Register quit interception — block close when sessions are running.
+                    let quit_handle = cx.entity().downgrade();
+                    window.on_window_should_close(cx, move |_window, cx| {
+                        quit_handle
+                            .update(cx, |state: &mut AppState, cx| {
+                                let active_count = state
+                                    .projects
+                                    .iter()
+                                    .flat_map(|p| &p.sessions)
+                                    .filter(|s| {
+                                        matches!(
+                                            s.status,
+                                            SessionStatus::Running | SessionStatus::Idle
+                                        )
+                                    })
+                                    .count();
+                                if active_count > 0 {
+                                    state.confirming_quit = true;
+                                    cx.notify();
+                                    false // block the close
+                                } else {
+                                    true // allow close
+                                }
+                            })
+                            .unwrap_or(true)
+                    });
+
                     AppState {
                         projects,
                         active: None,
@@ -1446,6 +1475,7 @@ fn main() {
                         right_sidebar_width: settings_for_window.right_sidebar_width
                             .max(RIGHT_SIDEBAR_MIN_WIDTH),
                         right_sidebar_resizing: false,
+                        confirming_quit: false,
                         user_settings: settings_for_window.clone(),
                     }
                 })
@@ -2573,6 +2603,88 @@ impl Render for AppState {
                                                 cx.notify();
                                             }
                                         })),
+                                ),
+                        );
+                    }
+
+                    // --- Quit confirmation banner (absolute overlay at top) ---
+                    if self.confirming_quit {
+                        let active_count = self
+                            .projects
+                            .iter()
+                            .flat_map(|p| &p.sessions)
+                            .filter(|s| {
+                                matches!(
+                                    s.status,
+                                    SessionStatus::Running | SessionStatus::Idle
+                                )
+                            })
+                            .count();
+                        let label = if active_count == 1 {
+                            "1 session is still running — quit anyway?".to_string()
+                        } else {
+                            format!("{active_count} sessions are still running — quit anyway?")
+                        };
+                        main_area = main_area.child(
+                            div()
+                                .absolute()
+                                .top(px(0.0))
+                                .left(px(0.0))
+                                .right(px(0.0))
+                                .px(px(16.0))
+                                .py(px(10.0))
+                                .bg(rgb(0x3b1e1e)) // subtle red tint
+                                .border_b_1()
+                                .border_color(rgb(0xf38ba8))
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .text_color(rgb(0xf38ba8)) // red
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_row()
+                                        .gap(px(8.0))
+                                        .child(
+                                            div()
+                                                .id("quit-confirm-btn")
+                                                .cursor_pointer()
+                                                .px(px(10.0))
+                                                .py(px(4.0))
+                                                .rounded(px(4.0))
+                                                .bg(rgb(0xf38ba8))
+                                                .text_size(px(11.0))
+                                                .text_color(rgb(0x1e1e2e))
+                                                .hover(|s| s.bg(rgb(0xeba0ac)))
+                                                .child("Quit")
+                                                .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                                                    this.confirming_quit = false;
+                                                    cx.quit();
+                                                })),
+                                        )
+                                        .child(
+                                            div()
+                                                .id("quit-cancel-btn")
+                                                .cursor_pointer()
+                                                .px(px(10.0))
+                                                .py(px(4.0))
+                                                .rounded(px(4.0))
+                                                .bg(rgb(0x45475a))
+                                                .text_size(px(11.0))
+                                                .text_color(rgb(0xcdd6f4))
+                                                .hover(|s| s.bg(rgb(0x585b70)))
+                                                .child("Cancel")
+                                                .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                                                    this.confirming_quit = false;
+                                                    cx.notify();
+                                                })),
+                                        ),
                                 ),
                         );
                     }
