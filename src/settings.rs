@@ -25,11 +25,21 @@ pub struct Settings {
     #[serde(default)]
     pub projects: Vec<ProjectSave>,
 
+    // --- sidebar visibility -----------------------------------------------------
+    #[serde(default = "default_true")]
+    pub sidebar_visible: bool,
+
     // --- drawer terminal ------------------------------------------------------
     #[serde(default = "default_drawer_height")]
     pub drawer_height: f32,
     #[serde(default)]
     pub drawer_visible: bool,
+
+    // --- right sidebar --------------------------------------------------------
+    #[serde(default)]
+    pub right_sidebar_visible: bool,
+    #[serde(default = "default_right_sidebar_width")]
+    pub right_sidebar_width: f32,
 
     // --- attention routing -------------------------------------------------
     /// Play a sound when a session transitions to AwaitingInput.
@@ -57,6 +67,7 @@ pub struct Settings {
 fn default_sidebar_width() -> f32 { 240.0 }
 fn default_font_size() -> f32 { 13.0 }
 fn default_drawer_height() -> f32 { 200.0 }
+fn default_right_sidebar_width() -> f32 { 300.0 }
 fn default_true() -> bool { true }
 
 /// Built-in macOS sound for AwaitingInput. Used when the user hasn't set
@@ -70,6 +81,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             sidebar_width: default_sidebar_width(),
+            sidebar_visible: true,
             font_size: default_font_size(),
             window_x: None,
             window_y: None,
@@ -78,6 +90,8 @@ impl Default for Settings {
             projects: Vec::new(),
             drawer_height: default_drawer_height(),
             drawer_visible: false,
+            right_sidebar_visible: false,
+            right_sidebar_width: default_right_sidebar_width(),
             sound_on_awaiting_input: true,
             sound_on_response_ready: false,
             notifications_enabled: false,

@@ -36,6 +36,8 @@ pub enum AppAction {
     NextSession,
     SwitchSession(usize),
     ToggleDrawer,
+    ToggleSidebar,
+    ToggleRightSidebar,
     /// Send raw bytes to the PTY (for Cmd shortcuts that map to control
     /// characters, e.g. Cmd+Backspace → 0x15).
     SendBytes(&'static [u8]),
@@ -64,6 +66,8 @@ pub fn app_action(key: &str, mods: &Modifiers) -> Option<AppAction> {
         "[" => AppAction::PrevSession,
         "]" => AppAction::NextSession,
         "j" => AppAction::ToggleDrawer,
+        "b" if mods.alt => AppAction::ToggleRightSidebar,
+        "b" => AppAction::ToggleSidebar,
         "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" => {
             let idx = key.parse::<usize>().unwrap_or(1) - 1;
             AppAction::SwitchSession(idx)

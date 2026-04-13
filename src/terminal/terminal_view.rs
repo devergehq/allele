@@ -30,6 +30,10 @@ pub enum TerminalEvent {
     NextSession,
     /// Toggle the bottom drawer terminal panel.
     ToggleDrawer,
+    /// Toggle the left sidebar visibility.
+    ToggleSidebar,
+    /// Toggle the right sidebar visibility.
+    ToggleRightSidebar,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -991,12 +995,13 @@ impl Render for TerminalView {
                         AppAction::NextSession => cx.emit(TerminalEvent::NextSession),
                         AppAction::SwitchSession(idx) => cx.emit(TerminalEvent::SwitchSession(idx)),
                         AppAction::ToggleDrawer => cx.emit(TerminalEvent::ToggleDrawer),
+                        AppAction::ToggleSidebar => cx.emit(TerminalEvent::ToggleSidebar),
+                        AppAction::ToggleRightSidebar => cx.emit(TerminalEvent::ToggleRightSidebar),
                         AppAction::SendBytes(bytes) => {
                             if let Some(ref terminal) = this.terminal {
                                 terminal.write(bytes);
                             }
                         }
-                        _ => {}
                     }
                     return;
                 }

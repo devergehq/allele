@@ -42,6 +42,10 @@ enum PendingAction {
     DeleteArchive { project_idx: usize, archive_idx: usize },
     /// Toggle the bottom drawer terminal panel.
     ToggleDrawer,
+    /// Toggle the left sidebar visibility.
+    ToggleSidebar,
+    /// Toggle the right sidebar visibility.
+    ToggleRightSidebar,
     /// Source path missing — open folder picker so the user can relocate.
     RelocateProject(usize),
     /// Canonical has uncommitted changes — confirm before creating a session.
@@ -64,7 +68,8 @@ struct AppState {
     active: Option<SessionCursor>,
     claude_path: Option<String>,
     pending_action: Option<PendingAction>,
-    // Sidebar resize state
+    // Sidebar state
+    sidebar_visible: bool,
     sidebar_width: f32,
     sidebar_resizing: bool,
     /// Inline confirmation gate for the Discard action. When `Some(cursor)`
@@ -84,11 +89,17 @@ struct AppState {
     drawer_visible: bool,
     drawer_height: f32,
     drawer_resizing: bool,
+    // Right sidebar state
+    right_sidebar_visible: bool,
+    right_sidebar_width: f32,
+    right_sidebar_resizing: bool,
 }
 
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
 const SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 const DRAWER_MIN_HEIGHT: f32 = 100.0;
+const RIGHT_SIDEBAR_MIN_WIDTH: f32 = 160.0;
+const RIGHT_SIDEBAR_DEFAULT_WIDTH: f32 = 300.0;
 
 impl AppState {
     /// Get the currently active session, if any.
@@ -106,6 +117,7 @@ impl AppState {
         // override only the fields that the AppState is the source of truth
         // for (sidebar width, project list, etc.).
         let settings = Settings {
+            sidebar_visible: self.sidebar_visible,
             sidebar_width: self.sidebar_width,
             font_size: 13.0,
             window_x: None,
@@ -119,6 +131,8 @@ impl AppState {
             }).collect(),
             drawer_height: self.drawer_height,
             drawer_visible: self.drawer_visible,
+            right_sidebar_visible: self.right_sidebar_visible,
+            right_sidebar_width: self.right_sidebar_width,
             ..self.user_settings.clone()
         };
         settings.save();
@@ -368,6 +382,14 @@ impl AppState {
                         }
                         TerminalEvent::ToggleDrawer => {
                             this.pending_action = Some(PendingAction::ToggleDrawer);
+                            cx.notify();
+                        }
+                        TerminalEvent::ToggleSidebar => {
+                            this.pending_action = Some(PendingAction::ToggleSidebar);
+                            cx.notify();
+                        }
+                        TerminalEvent::ToggleRightSidebar => {
+                            this.pending_action = Some(PendingAction::ToggleRightSidebar);
                             cx.notify();
                         }
                     }
@@ -865,6 +887,14 @@ impl AppState {
                 }
                 TerminalEvent::ToggleDrawer => {
                     this.pending_action = Some(PendingAction::ToggleDrawer);
+                    cx.notify();
+                }
+                TerminalEvent::ToggleSidebar => {
+                    this.pending_action = Some(PendingAction::ToggleSidebar);
+                    cx.notify();
+                }
+                TerminalEvent::ToggleRightSidebar => {
+                    this.pending_action = Some(PendingAction::ToggleRightSidebar);
                     cx.notify();
                 }
             }
@@ -1374,6 +1404,7 @@ fn main() {
                         active: None,
                         claude_path: claude_path_clone,
                         pending_action: None,
+                        sidebar_visible: settings_for_window.sidebar_visible,
                         sidebar_width: settings_for_window.sidebar_width
                             .max(SIDEBAR_MIN_WIDTH),
                         sidebar_resizing: false,
@@ -1384,6 +1415,10 @@ fn main() {
                         drawer_height: settings_for_window.drawer_height
                             .max(DRAWER_MIN_HEIGHT),
                         drawer_resizing: false,
+                        right_sidebar_visible: settings_for_window.right_sidebar_visible,
+                        right_sidebar_width: settings_for_window.right_sidebar_width
+                            .max(RIGHT_SIDEBAR_MIN_WIDTH),
+                        right_sidebar_resizing: false,
                         user_settings: settings_for_window.clone(),
                     }
                 })
@@ -1584,6 +1619,14 @@ impl Render for AppState {
                             }
                         }
                     }
+                    self.save_settings();
+                }
+                PendingAction::ToggleSidebar => {
+                    self.sidebar_visible = !self.sidebar_visible;
+                    self.save_settings();
+                }
+                PendingAction::ToggleRightSidebar => {
+                    self.right_sidebar_visible = !self.right_sidebar_visible;
                     self.save_settings();
                 }
                 PendingAction::RelocateProject(project_idx) => {
@@ -2188,19 +2231,26 @@ impl Render for AppState {
             .unwrap_or(false);
 
         let sidebar_w = self.sidebar_width;
+        let sidebar_visible = self.sidebar_visible;
         let is_resizing = self.sidebar_resizing;
         let drawer_is_resizing = self.drawer_resizing;
+        let right_sidebar_visible = self.right_sidebar_visible;
+        let right_sidebar_w = self.right_sidebar_width;
+        let right_sidebar_resizing = self.right_sidebar_resizing;
 
         // Outer non-flex container that hosts the flex row AND the drag overlay.
         // Keeping the overlay OUTSIDE the flex container ensures Taffy's layout
         // engine doesn't try to allocate flex space to an absolutely-positioned element.
-        let flex_row = div()
+        let mut flex_row = div()
             .id("app-root")
             .flex()
             .size_full()
             .bg(rgb(0x1e1e2e))
-            .text_color(rgb(0xcdd6f4))
-            .child(
+            .text_color(rgb(0xcdd6f4));
+
+        // --- Left sidebar (conditional on sidebar_visible) ---
+        if sidebar_visible {
+            flex_row = flex_row.child(
                 // Sidebar
                 div()
                     .w(px(sidebar_w))
@@ -2253,9 +2303,6 @@ impl Render for AppState {
                             .children(sidebar_items),
                     )
                     // Status bar — attention summary lives here.
-                    // Counts are rendered as coloured children so the user
-                    // can glance at them and know which attention buckets
-                    // have something in them.
                     .child({
                         let mut bar = div()
                             .px(px(12.0))
@@ -2288,10 +2335,9 @@ impl Render for AppState {
                         }
                         bar
                     }),
-            )
+            );
             // Resize handle — 6px wide invisible hover zone over the sidebar border.
-            // Sits between sidebar and main area, captures drag events.
-            .child(
+            flex_row = flex_row.child(
                 div()
                     .id("sidebar-resize-handle")
                     .w(px(6.0))
@@ -2302,8 +2348,10 @@ impl Render for AppState {
                         this.sidebar_resizing = true;
                         cx.notify();
                     })),
-            )
-            .child({
+            );
+        }
+
+        flex_row = flex_row.child({
                 // Right-hand content column: main terminal + optional drawer
                 let mut content_col = div()
                     .flex_1()
@@ -2412,6 +2460,45 @@ impl Render for AppState {
                             })),
                     );
 
+                    // Drawer header bar
+                    content_col = content_col.child(
+                        div()
+                            .w_full()
+                            .flex_shrink_0()
+                            .px(px(12.0))
+                            .py(px(6.0))
+                            .bg(rgb(0x181825))
+                            .border_b_1()
+                            .border_color(rgb(0x313244))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(rgb(0xa6adc8))
+                                    .child("Terminal"),
+                            )
+                            .child(
+                                div()
+                                    .id("drawer-close-btn")
+                                    .cursor_pointer()
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .text_size(px(12.0))
+                                    .text_color(rgb(0x6c7086))
+                                    .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                                    .child("×")
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                                        this.pending_action = Some(PendingAction::ToggleDrawer);
+                                        cx.notify();
+                                    })),
+                            ),
+                    );
+
                     // Drawer content
                     let mut drawer_panel = div()
                         .w_full()
@@ -2438,6 +2525,79 @@ impl Render for AppState {
 
                 content_col
             });
+
+        // --- Right sidebar (conditional on right_sidebar_visible) ---
+        if right_sidebar_visible {
+            // Resize handle — 6px wide on left edge of right sidebar
+            flex_row = flex_row.child(
+                div()
+                    .id("right-sidebar-resize-handle")
+                    .w(px(6.0))
+                    .h_full()
+                    .cursor_col_resize()
+                    .hover(|s| s.bg(rgb(0x45475a)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                        this.right_sidebar_resizing = true;
+                        cx.notify();
+                    })),
+            );
+            flex_row = flex_row.child(
+                div()
+                    .w(px(right_sidebar_w))
+                    .flex_shrink_0()
+                    .h_full()
+                    .bg(rgb(0x181825))
+                    .border_l_1()
+                    .border_color(rgb(0x313244))
+                    .flex()
+                    .flex_col()
+                    // Header
+                    .child(
+                        div()
+                            .px(px(12.0))
+                            .py(px(10.0))
+                            .border_b_1()
+                            .border_color(rgb(0x313244))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child("Inspector"),
+                            )
+                            .child(
+                                div()
+                                    .id("right-sidebar-close-btn")
+                                    .cursor_pointer()
+                                    .px(px(6.0))
+                                    .py(px(2.0))
+                                    .rounded(px(4.0))
+                                    .text_size(px(14.0))
+                                    .text_color(rgb(0x6c7086))
+                                    .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                                    .child("×")
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                                        this.pending_action = Some(PendingAction::ToggleRightSidebar);
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    // Body placeholder
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .text_size(px(11.0))
+                            .text_color(rgb(0x45475a))
+                            .child("No inspector content"),
+                    ),
+            );
+        }
 
         // Outer wrapper: non-flex, relative-positioned container hosting both
         // the flex row and the optional drag overlay as siblings.
@@ -2469,6 +2629,36 @@ impl Render for AppState {
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
                         this.sidebar_resizing = false;
+                        this.save_settings();
+                        cx.notify();
+                    })),
+            );
+        }
+
+        // Right sidebar drag overlay
+        if right_sidebar_resizing {
+            outer = outer.child(
+                div()
+                    .id("right-sidebar-drag-overlay")
+                    .absolute()
+                    .top(px(0.0))
+                    .left(px(0.0))
+                    .right(px(0.0))
+                    .bottom(px(0.0))
+                    .cursor_col_resize()
+                    .on_mouse_move(cx.listener(|this: &mut Self, event: &MouseMoveEvent, window, cx| {
+                        let viewport_w = f32::from(window.viewport_size().width);
+                        let mouse_x = f32::from(event.position.x);
+                        // Right sidebar width = distance from right edge to mouse
+                        let new_width = (viewport_w - mouse_x).clamp(RIGHT_SIDEBAR_MIN_WIDTH, viewport_w - 200.0);
+                        if (new_width - this.right_sidebar_width).abs() > 0.5 {
+                            this.right_sidebar_width = new_width;
+                            window.refresh();
+                            cx.notify();
+                        }
+                    }))
+                    .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
+                        this.right_sidebar_resizing = false;
                         this.save_settings();
                         cx.notify();
                     })),
