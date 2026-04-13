@@ -1576,28 +1576,65 @@ impl Render for AppState {
                             let session_label = session.label.clone();
                             let canonical = project.source_path.clone();
 
-                            // Mark merged before removal so remove_session skips archive entry.
-                            session.merged = true;
+                            // Capture session metadata for potential restoration on failure
+                            // (must happen before the mutable borrow for loading_sessions).
+                            let restore_started = session.started_at;
+                            let restore_last_active = session.last_active;
 
                             // If no clone or clone == canonical, just remove (no git ops).
                             let needs_git = clone_path.as_ref().map_or(false, |cp| *cp != canonical);
 
                             if needs_git {
                                 let clone_path = clone_path.unwrap(); // safe: needs_git is true
+                                let restore_clone = clone_path.clone();
 
                                 // Show a placeholder while the background pipeline runs.
                                 let placeholder_id = uuid::Uuid::new_v4().to_string();
-                                let project = self.projects.get_mut(cursor.project_idx).unwrap();
-                                project.loading_sessions.push(project::LoadingSession {
-                                    id: placeholder_id.clone(),
-                                    label: format!("{session_label} (rebasing & merging)"),
-                                });
+                                {
+                                    let project = self.projects.get_mut(cursor.project_idx).unwrap();
+                                    project.loading_sessions.push(project::LoadingSession {
+                                        id: placeholder_id.clone(),
+                                        label: format!("{session_label} (rebasing & merging)"),
+                                    });
 
-                                // Remove the session from the list now (frees PTY).
-                                // merged=true means remove_session won't create an archive entry.
-                                self.remove_session(cursor, window, cx);
+                                    // Remove session from the list (frees PTY via Drop).
+                                    // We DON'T call remove_session() because its background
+                                    // task would delete the clone — we need the clone alive
+                                    // until we know the merge succeeded.
+                                    project.sessions.remove(cursor.session_idx);
+                                }
 
-                                // Spawn the archive → merge → delete pipeline on the background executor.
+                                // Update active cursor if it pointed at the removed session.
+                                if let Some(active) = self.active {
+                                    if active == cursor {
+                                        let project = &self.projects[cursor.project_idx];
+                                        self.active = if !project.sessions.is_empty() {
+                                            let new_idx = cursor.session_idx.min(project.sessions.len() - 1);
+                                            Some(SessionCursor { project_idx: cursor.project_idx, session_idx: new_idx })
+                                        } else {
+                                            self.projects.iter().enumerate().find_map(|(p_idx, p)| {
+                                                if !p.sessions.is_empty() {
+                                                    Some(SessionCursor { project_idx: p_idx, session_idx: 0 })
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                        };
+                                    } else if active.project_idx == cursor.project_idx && active.session_idx > cursor.session_idx {
+                                        self.active = Some(SessionCursor {
+                                            project_idx: active.project_idx,
+                                            session_idx: active.session_idx - 1,
+                                        });
+                                    }
+                                }
+                                self.save_state();
+                                cx.notify();
+
+                                // Clones for restoration on failure (originals move into the background task).
+                                let restore_id = session_id.clone();
+                                let restore_label = session_label.clone();
+
+                                // Spawn the archive → rebase → merge → delete pipeline on the background executor.
                                 let placeholder_id_for_task = placeholder_id.clone();
                                 let project_idx_for_task = cursor.project_idx;
                                 cx.spawn(async move |this, cx| {
@@ -1609,22 +1646,16 @@ impl Render for AppState {
 
                                             // 2. Fetch origin & rebase canonical onto remote tip
                                             if git::has_remote(&canonical, "origin") {
-                                                match git::fetch_and_rebase_onto_remote(&canonical, "origin") {
-                                                    Ok(true) => eprintln!("Rebased canonical onto origin for {session_id}"),
-                                                    Ok(false) => eprintln!("Canonical already up to date with origin for {session_id}"),
-                                                    Err(e) => {
-                                                        eprintln!("Rebase onto origin failed for {session_id}: {e}");
-                                                        // Clean up archive ref and clone before bailing
-                                                        let _ = git::delete_ref(
-                                                            &canonical,
-                                                            &git::archive_ref_name(&session_id),
-                                                        );
-                                                        if let Err(e) = clone::delete_clone(&clone_path) {
-                                                            eprintln!("Failed to delete clone after rebase failure for {session_id}: {e}");
-                                                        }
-                                                        anyhow::bail!("Rebase failed: {e}");
-                                                    }
+                                                if let Err(e) = git::fetch_and_rebase_onto_remote(&canonical, "origin") {
+                                                    eprintln!("Rebase onto origin failed for {session_id}: {e}");
+                                                    // Clean up the archive ref only — preserve the clone
+                                                    let _ = git::delete_ref(
+                                                        &canonical,
+                                                        &git::archive_ref_name(&session_id),
+                                                    );
+                                                    anyhow::bail!("Rebase failed — resolve conflicts in the session and merge again. {e}");
                                                 }
+                                                eprintln!("Rebased canonical onto origin for {session_id}");
                                             }
 
                                             // 3. Merge the archive ref into canonical HEAD
@@ -1636,43 +1667,69 @@ impl Render for AppState {
                                                 &git::archive_ref_name(&session_id),
                                             );
 
-                                            // 5. Delete the APFS clone
-                                            if let Err(e) = clone::delete_clone(&clone_path) {
-                                                eprintln!("Failed to delete clone after merge for {session_id}: {e}");
-                                            }
-
                                             match merge_result {
                                                 Ok(git::MergeResult::Merged) => {
                                                     eprintln!("Merged session {session_id} into canonical");
-                                                    Ok(())
                                                 }
                                                 Ok(git::MergeResult::AlreadyUpToDate) => {
                                                     eprintln!("Session {session_id} already up to date — nothing to merge");
-                                                    Ok(())
                                                 }
                                                 Err(e) => {
                                                     eprintln!("merge_archive failed for {session_id}: {e}");
-                                                    Err(e)
+                                                    // Preserve clone — don't delete it on merge failure
+                                                    anyhow::bail!("Merge failed — resolve conflicts in the session and merge again. {e}");
                                                 }
                                             }
+
+                                            // 5. Delete the APFS clone only on success
+                                            if let Err(e) = clone::delete_clone(&clone_path) {
+                                                eprintln!("Failed to delete clone after merge for {session_id}: {e}");
+                                            }
+                                            Ok(())
                                         })
                                         .await;
 
-                                    if let Err(e) = &result {
-                                        eprintln!("Merge-and-close pipeline error: {e}");
-                                    }
-
-                                    // Remove the placeholder on the main thread
+                                    // Update UI on the main thread
                                     let _ = this.update(cx, |this: &mut Self, cx| {
                                         if let Some(project) = this.projects.get_mut(project_idx_for_task) {
                                             project.loading_sessions.retain(|l| l.id != placeholder_id_for_task);
                                         }
+
+                                        if let Err(e) = &result {
+                                            eprintln!("Merge-and-close pipeline error: {e}");
+
+                                            // Restore the session so the user can fix conflicts and retry
+                                            let restored = Session::suspended_from_persisted(
+                                                restore_id.clone(),
+                                                restore_label.clone(),
+                                                restore_started,
+                                                restore_last_active,
+                                                Some(restore_clone.clone()),
+                                                false, // not merged — that's the point
+                                            );
+                                            if let Some(project) = this.projects.get_mut(project_idx_for_task) {
+                                                project.sessions.push(restored);
+                                            }
+
+                                            hooks::show_notification(
+                                                "Merge failed",
+                                                &format!("{restore_label}: resolve conflicts and merge again"),
+                                            );
+                                        }
+
                                         this.save_state();
                                         cx.notify();
                                     });
                                 })
                                 .detach();
                             } else {
+                                // No clone to manage — mark merged so remove_session
+                                // skips creating an archive entry.
+                                if let Some(project) = self.projects.get_mut(cursor.project_idx) {
+                                    if cursor.session_idx < project.sessions.len() {
+                                        project.sessions[cursor.session_idx].merged = true;
+                                    }
+                                }
                                 self.remove_session(cursor, window, cx);
                             }
                         }
