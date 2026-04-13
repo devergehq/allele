@@ -47,7 +47,7 @@ Build phases for the Allele POC. Each phase produces a runnable checkpoint.
 - [x] Session elapsed time display (live for running, frozen for done/suspended)
 - [ ] **Drag-and-drop project/session reorder**
 
-## Phase 4: APFS Clone Management — DONE (minor gap)
+## Phase 4: APFS Clone Management — DONE
 
 - [x] `clonefile(2)` FFI via `libc` — atomic COW clone
 - [x] Session launched in clone directory with `claude --session-id`
@@ -58,9 +58,9 @@ Build phases for the Allele POC. Each phase produces a runnable checkpoint.
 - [x] Orphan sweep (clones not referenced by any session → trashed)
 - [x] 14-day TTL auto-purge of trashed clones on startup
 - [x] Discard confirmation flow in sidebar
-- [ ] **User-friendly error message for cross-volume `EXDEV` failure**
+- [x] User-friendly error message for cross-volume `EXDEV` failure
 
-## Phase 5: Polish + Session Status — MOSTLY DONE
+## Phase 5: Polish + Session Status — DONE
 
 - [x] PTY activity monitoring → idle detection
 - [x] Claude Code hooks integration (7 hook types, auto-installed receiver script)
@@ -70,7 +70,7 @@ Build phases for the Allele POC. Each phase produces a runnable checkpoint.
 - [x] Session elapsed time display
 - [x] Sound alerts via `afplay` (configurable per attention type)
 - [x] Attention routing (AwaitingInput ⚠, ResponseReady ★)
-- [ ] **Graceful shutdown — warn about running sessions on quit**
+- [x] Graceful shutdown — warn about running sessions on quit
 
 ## Phase 6: Git Integration + Archive System — DONE
 
@@ -114,17 +114,12 @@ Added post-original-plan.
 
 Ordered by priority. These are the known gaps.
 
-### Must-have for daily-driver use
-
-1. **Graceful shutdown warning** — prompt when quitting with running sessions
-2. **Cross-volume `EXDEV` error handling** — detect and show a clear message when the source repo isn't on the same APFS volume as `~/.allele/`
-
 ### Nice-to-have
 
-3. **Drag-and-drop reorder** — projects and sessions in the sidebar
-4. **Right-click context menus** — project/session actions
-5. **Grid renderer caching** — row-level paint cache, damage tracking (see Termy's approach in `docs/grid-renderer.md`)
-6. **Box-drawing character sprites** — pixel-snapped geometric rendering for U+2500-U+257F
-7. **Split terminal views** — side-by-side sessions
-8. **Git status indicator per workspace**
-9. **Session templates** — pre-configured Claude args
+1. **Drag-and-drop reorder** — projects and sessions in the sidebar
+2. **Right-click context menus** — project/session actions
+3. **Grid renderer caching** — row-level paint cache, damage tracking (see Termy's approach in `docs/grid-renderer.md`)
+4. **Box-drawing character sprites** — pixel-snapped geometric rendering for U+2500-U+257F
+5. **Split terminal views** — side-by-side sessions
+6. **Git status indicator per workspace**
+7. **Session templates** — pre-configured Claude args
