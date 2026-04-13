@@ -158,6 +158,13 @@ impl KeymapConfig {
     /// `key_char` is the character representation from the OS (e.g. "a",
     /// "π"), if any.
     pub fn resolve(&self, key: &str, mods: &Modifiers, key_char: Option<&str>) -> Option<Vec<u8>> {
+        // 0. Shift+Enter → literal newline (\n) instead of carriage return.
+        //    Claude Code's input editor treats \n as "insert line break" and
+        //    \r as "submit", matching standard macOS text-input behaviour.
+        if mods.shift && key == "enter" {
+            return Some(b"\n".to_vec());
+        }
+
         // 1. Control key — algorithmic: letter → control byte
         if mods.control {
             if let Some(byte) = control_byte(key) {

@@ -607,13 +607,19 @@ impl AppState {
                  Request: {truncated}"
             );
 
+            // Spawn via login shell so the subprocess inherits the user's
+            // full environment (PATH, auth tokens, etc.). A bare
+            // std::process::Command inherits Allele's .app bundle env which
+            // is too stripped-down for `claude` to authenticate.
+            let escaped_prompt = summary_prompt.replace('\'', "'\\''");
             let result = cx.background_executor().spawn(async move {
-                std::process::Command::new(&claude_bin)
-                    .arg("-p")
-                    .arg("--model")
-                    .arg("haiku")
-                    .arg("--bare")
-                    .arg(&summary_prompt)
+                std::process::Command::new("/bin/bash")
+                    .arg("-lc")
+                    .arg(format!(
+                        "exec '{}' -p --model haiku --bare '{}'",
+                        claude_bin.replace('\'', "'\\''"),
+                        escaped_prompt,
+                    ))
                     .output()
             }).await;
 
