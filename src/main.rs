@@ -1214,7 +1214,8 @@ fn install_panic_hook() {
 /// Without this, a focused Allele window shows whatever menu the previously
 /// focused app left on screen, and standard shortcuts like ⌘Q are no-ops.
 fn install_app_menu(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    // NOTE: the Quit action is handled per-window (see the App::on_action
+    // block inside main()) so it can check for running sessions first.
     cx.on_action(|_: &About, _cx| show_about_panel());
 
     cx.bind_keys([
@@ -1318,6 +1319,12 @@ fn main() {
     }
 
     let application = Application::new();
+
+    // macOS: clicking the dock icon while the app is hidden (window was
+    // closed via the red ✕) should bring the window back.
+    application.on_reopen(|cx: &mut App| {
+        cx.activate(true);
+    });
 
     application.run(move |cx: &mut App| {
         // Load bundled fonts so we have a deterministic monospace font
@@ -1551,10 +1558,43 @@ fn main() {
                     })
                     .detach();
 
-                    // App-level handlers for menu-dispatched toggles. Registering
+                    // App-level handlers for menu-dispatched actions. Registering
                     // at App scope (not on the element tree) guarantees the
-                    // View menu items stay enabled regardless of focus state.
+                    // menu items stay enabled regardless of focus state.
                     let toggle_handle = cx.entity().downgrade();
+
+                    // Quit interception — confirm before quitting when
+                    // sessions are still running.
+                    App::on_action::<Quit>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            let should_quit = handle
+                                .update(cx, |state: &mut AppState, cx| {
+                                    let active_count = state
+                                        .projects
+                                        .iter()
+                                        .flat_map(|p| &p.sessions)
+                                        .filter(|s| {
+                                            matches!(
+                                                s.status,
+                                                SessionStatus::Running | SessionStatus::Idle
+                                            )
+                                        })
+                                        .count();
+                                    if active_count > 0 {
+                                        state.confirming_quit = true;
+                                        cx.notify();
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                })
+                                .unwrap_or(true);
+                            if should_quit {
+                                cx.quit();
+                            }
+                        }
+                    });
                     App::on_action::<ToggleSidebarAction>(cx, {
                         let handle = toggle_handle.clone();
                         move |_, cx| {
@@ -1578,31 +1618,12 @@ fn main() {
                         }
                     });
 
-                    // Register quit interception — block close when sessions are running.
-                    let quit_handle = cx.entity().downgrade();
+                    // macOS convention: the red ✕ hides the window rather
+                    // than quitting the app. Clicking the dock icon will
+                    // reactivate it (see on_reopen below).
                     window.on_window_should_close(cx, move |_window, cx| {
-                        quit_handle
-                            .update(cx, |state: &mut AppState, cx| {
-                                let active_count = state
-                                    .projects
-                                    .iter()
-                                    .flat_map(|p| &p.sessions)
-                                    .filter(|s| {
-                                        matches!(
-                                            s.status,
-                                            SessionStatus::Running | SessionStatus::Idle
-                                        )
-                                    })
-                                    .count();
-                                if active_count > 0 {
-                                    state.confirming_quit = true;
-                                    cx.notify();
-                                    false // block the close
-                                } else {
-                                    true // allow close
-                                }
-                            })
-                            .unwrap_or(true)
+                        cx.hide();
+                        false // never actually close the window
                     });
 
                     AppState {
