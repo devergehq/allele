@@ -1,4 +1,5 @@
 use crate::session::Session;
+use crate::settings::ProjectSettings;
 use crate::state::ArchivedSession;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -23,6 +24,8 @@ pub struct Project {
     /// and updated on merge/delete actions. The corresponding git refs
     /// live in canonical as `refs/allele/archive/<session-id>`.
     pub archives: Vec<ArchivedSession>,
+    /// Per-project settings (merge strategy, default branch, etc.).
+    pub settings: ProjectSettings,
 }
 
 impl Project {
@@ -35,6 +38,7 @@ impl Project {
             loading_sessions: Vec::new(),
             expanded: true,
             archives: Vec::new(),
+            settings: ProjectSettings::default(),
         }
     }
 

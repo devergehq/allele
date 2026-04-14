@@ -138,7 +138,7 @@ pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
 /// Fetch the remote's default branch and rebase the current branch onto it.
 ///
 /// Steps:
-/// 1. Detect remote default branch (main/master)
+/// 1. Detect remote default branch (main/master) — or use `branch_override` if given
 /// 2. `git fetch <remote> <branch>`
 /// 3. `git rebase <remote>/<branch>`
 ///
@@ -151,6 +151,17 @@ pub fn fetch_and_rebase_onto_remote(
     repo: &Path,
     remote: &str,
 ) -> anyhow::Result<bool> {
+    fetch_and_rebase_onto_remote_branch(repo, remote, None)
+}
+
+/// Like [`fetch_and_rebase_onto_remote`] but accepts an explicit branch name.
+/// When `branch_override` is `Some`, that branch is used instead of
+/// auto-detecting from `refs/remotes/<remote>/HEAD`.
+pub fn fetch_and_rebase_onto_remote_branch(
+    repo: &Path,
+    remote: &str,
+    branch_override: Option<&str>,
+) -> anyhow::Result<bool> {
     if !is_git_repo(repo) {
         anyhow::bail!(
             "fetch_and_rebase_onto_remote: not a git repo: {}",
@@ -158,7 +169,10 @@ pub fn fetch_and_rebase_onto_remote(
         );
     }
 
-    let branch = remote_default_branch(repo, remote);
+    let branch = match branch_override {
+        Some(b) => b.to_string(),
+        None => remote_default_branch(repo, remote),
+    };
 
     // Record HEAD before to detect if rebase changed anything.
     let head_before = {
@@ -528,6 +542,119 @@ pub fn merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<Merge
     } else {
         Ok(MergeResult::Merged)
     }
+}
+
+/// Squash-merge an archived session ref into canonical's current branch.
+///
+/// Uses `git merge --squash` to stage all changes, then creates a single
+/// commit. Returns `MergeResult::AlreadyUpToDate` if the archive ref is
+/// already an ancestor of HEAD.
+pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<MergeResult> {
+    if !is_git_repo(canonical) {
+        anyhow::bail!("squash_merge_archive: not a git repo: {}", canonical.display());
+    }
+
+    let ref_name = archive_ref_name(session_id);
+
+    // --squash stages the changes but does NOT create a commit.
+    let mut cmd = git_cmd(Some(canonical));
+    cmd.arg("merge")
+        .arg("--squash")
+        .arg(&ref_name);
+    run_git(cmd, "squash merge archive")?;
+
+    // Check if there's anything staged to commit.
+    let mut cmd = git_cmd(Some(canonical));
+    cmd.arg("diff").arg("--cached").arg("--quiet");
+    let has_staged = cmd.output()
+        .map(|o| !o.status.success()) // exit 1 = there are differences
+        .unwrap_or(false);
+
+    if !has_staged {
+        return Ok(MergeResult::AlreadyUpToDate);
+    }
+
+    // Create the squash commit.
+    let mut cmd = git_cmd(Some(canonical));
+    cmd.arg("commit")
+        .arg("--no-edit")
+        .arg("-m")
+        .arg(format!("Squash merge session {session_id}"));
+    run_git(cmd, "squash commit")?;
+
+    Ok(MergeResult::Merged)
+}
+
+/// Rebase an archive ref's commits onto canonical's current branch, then
+/// fast-forward merge. Produces linear history.
+///
+/// Steps:
+/// 1. Detach at the archive ref
+/// 2. Rebase onto canonical's branch
+/// 3. Fast-forward canonical's branch to the rebased tip
+///
+/// Returns `MergeResult::AlreadyUpToDate` if the archive ref is already
+/// an ancestor of HEAD.
+pub fn rebase_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<MergeResult> {
+    if !is_git_repo(canonical) {
+        anyhow::bail!("rebase_merge_archive: not a git repo: {}", canonical.display());
+    }
+
+    let ref_name = archive_ref_name(session_id);
+
+    // Check if archive is already an ancestor of HEAD.
+    let mut cmd = git_cmd(Some(canonical));
+    cmd.arg("merge-base")
+        .arg("--is-ancestor")
+        .arg(&ref_name)
+        .arg("HEAD");
+    if cmd.output().map(|o| o.status.success()).unwrap_or(false) {
+        return Ok(MergeResult::AlreadyUpToDate);
+    }
+
+    // Record which branch we're on so we can return to it.
+    let original_branch = current_branch(canonical)
+        .ok_or_else(|| anyhow::anyhow!("rebase_merge_archive: cannot determine current branch"))?;
+
+    // Create a temporary branch from the archive ref for rebasing.
+    let tmp_branch = format!("allele/rebase-tmp/{session_id}");
+    let mut cmd = git_cmd(Some(canonical));
+    cmd.arg("checkout").arg("-b").arg(&tmp_branch).arg(&ref_name);
+    run_git(cmd, "checkout tmp branch for rebase")?;
+
+    // Rebase onto the original branch.
+    let mut cmd = git_cmd(Some(canonical));
+    cmd.arg("rebase").arg(&original_branch);
+    if let Err(e) = run_git(cmd, "rebase archive onto target") {
+        // Abort the rebase and return to original branch.
+        let mut abort = git_cmd(Some(canonical));
+        abort.arg("rebase").arg("--abort");
+        let _ = abort.output();
+        let mut co = git_cmd(Some(canonical));
+        co.arg("checkout").arg(&original_branch);
+        let _ = co.output();
+        // Clean up tmp branch.
+        let mut del = git_cmd(Some(canonical));
+        del.arg("branch").arg("-D").arg(&tmp_branch);
+        let _ = del.output();
+        return Err(e);
+    }
+
+    // Fast-forward the original branch to the rebased tip.
+    let mut cmd = git_cmd(Some(canonical));
+    cmd.arg("checkout").arg(&original_branch);
+    run_git(cmd, "checkout original branch")?;
+
+    let mut cmd = git_cmd(Some(canonical));
+    cmd.arg("merge").arg("--ff-only").arg(&tmp_branch);
+    run_git(cmd, "ff-merge rebased work")?;
+
+    // Clean up the temporary branch.
+    let mut cmd = git_cmd(Some(canonical));
+    cmd.arg("branch").arg("-D").arg(&tmp_branch);
+    let _ = cmd.output(); // non-fatal
+
+    Ok(MergeResult::Merged)
 }
 
 // --- Branch introspection -----------------------------------------------

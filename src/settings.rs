@@ -1,11 +1,73 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// How session work gets integrated back into the canonical branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MergeStrategy {
+    /// `git merge --no-ff --no-edit` — preserves merge commit (default).
+    Merge,
+    /// `git merge --squash` + explicit commit — collapses session into one commit.
+    Squash,
+    /// Rebase session commits onto target branch, then fast-forward merge — linear history.
+    RebaseThenMerge,
+}
+
+impl Default for MergeStrategy {
+    fn default() -> Self {
+        Self::Merge
+    }
+}
+
+/// Per-project settings that govern clone, merge, and sync behaviour.
+///
+/// Every field has a serde default matching the pre-settings-era behaviour,
+/// so existing `settings.json` files deserialise without error.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSettings {
+    /// Override the auto-detected default branch (e.g. `"main"`, `"develop"`).
+    /// `None` = auto-detect from `refs/remotes/<remote>/HEAD`, fallback `"master"`.
+    #[serde(default)]
+    pub default_branch: Option<String>,
+
+    /// How session work gets integrated into canonical.
+    #[serde(default)]
+    pub merge_strategy: MergeStrategy,
+
+    /// Fetch + rebase canonical onto the remote tip before merging session work.
+    /// This syncs with upstream — orthogonal to `merge_strategy`.
+    #[serde(default = "default_true")]
+    pub rebase_before_merge: bool,
+
+    /// Remote name for fetch/rebase operations. `None` = `"origin"`.
+    #[serde(default)]
+    pub remote: Option<String>,
+}
+
+impl Default for ProjectSettings {
+    fn default() -> Self {
+        Self {
+            default_branch: None,
+            merge_strategy: MergeStrategy::default(),
+            rebase_before_merge: true,
+            remote: None,
+        }
+    }
+}
+
+impl ProjectSettings {
+    /// Resolved remote name — returns the override or `"origin"`.
+    pub fn resolved_remote(&self) -> &str {
+        self.remote.as_deref().unwrap_or("origin")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectSave {
     pub id: String,
     pub name: String,
     pub source_path: PathBuf,
+    #[serde(default)]
+    pub settings: ProjectSettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
