@@ -1,7 +1,7 @@
 use gpui::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use crate::terminal::TerminalView;
 
@@ -93,6 +93,13 @@ pub struct Session {
     /// Not persisted — the value isn't useful across app restarts because
     /// the process holding it is gone.
     pub allocated_port: Option<u16>,
+    /// When `Some(deadline)`, the session was recently (re)started via
+    /// `resume_session`. If the PTY exits before `deadline`, the session
+    /// reverts to `Suspended` rather than flipping to `Done` — this avoids
+    /// landing the user in the "Session ended" trap when `claude --resume`
+    /// can't find history and exits immediately. Cleared once the deadline
+    /// passes without an exit.
+    pub resuming_until: Option<Instant>,
 }
 
 impl Session {
@@ -117,6 +124,7 @@ impl Session {
             merged: false,
             auto_naming_fired: false,
             allocated_port: None,
+            resuming_until: None,
         }
     }
 
@@ -148,6 +156,7 @@ impl Session {
             merged,
             auto_naming_fired: false,
             allocated_port: None,
+            resuming_until: None,
         }
     }
 

@@ -29,6 +29,30 @@ enum MainTab {
     Editor,
 }
 
+/// Check whether Claude Code has on-disk history for a given session ID.
+///
+/// Claude stores each conversation at `~/.claude/projects/<slug>/<id>.jsonl`,
+/// where `<slug>` is the cwd encoded with `/` → `-`. We don't assume the slug
+/// format — just scan the `projects` directory for any matching filename.
+/// Returns `false` on any IO error so the caller falls back to `--session-id`
+/// (fresh session, same UUID) rather than failing into "Session ended".
+fn claude_session_history_exists(session_id: &str) -> bool {
+    let Some(home) = dirs::home_dir() else { return false; };
+    let projects_dir = home.join(".claude").join("projects");
+    let needle = format!("{session_id}.jsonl");
+    let Ok(entries) = std::fs::read_dir(&projects_dir) else { return false; };
+    for entry in entries.flatten() {
+        let sub = entry.path();
+        if !sub.is_dir() {
+            continue;
+        }
+        if sub.join(&needle).exists() {
+            return true;
+        }
+    }
+    false
+}
+
 #[derive(Debug)]
 enum PendingAction {
     NewSessionInActiveProject,
@@ -82,6 +106,9 @@ enum PendingAction {
     /// Replace the external-editor command with a new value and persist.
     /// Emitted by the Settings window on every edit.
     UpdateExternalEditor(String),
+    /// Auto-resume a session after launch. Fires once from the first render
+    /// tick so `resume_session` has a valid `window` / `cx`.
+    ResumeSession { project_idx: usize, session_idx: usize },
 }
 
 /// Position of a session in the project tree.
@@ -575,6 +602,12 @@ impl AppState {
                 .archived_sessions
                 .extend(project.archives.iter().cloned());
         }
+        persisted.last_active_session_id = self.active.and_then(|cursor| {
+            self.projects
+                .get(cursor.project_idx)
+                .and_then(|p| p.sessions.get(cursor.session_idx))
+                .map(|s| s.id.clone())
+        });
         if let Err(e) = persisted.save() {
             eprintln!("Failed to save state.json: {e}");
         }
@@ -1443,17 +1476,26 @@ impl AppState {
         let session_id = session.id.clone();
         let label = session.label.clone();
 
+        // Pick the resume flag based on whether Claude actually has history
+        // for this session ID on disk. Claude stores conversations under
+        // `~/.claude/projects/<slug>/<id>.jsonl`. If no jsonl for this id
+        // exists anywhere, `claude --resume <id>` bails out immediately,
+        // which used to flip the session to Done. Fall back to
+        // `--session-id <id>` in that case — same UUID, empty history,
+        // still a continuable session.
+        let has_history = claude_session_history_exists(&session_id);
         let hooks_path_str = self
             .hooks_settings_path
             .as_ref()
             .map(|p| p.to_string_lossy().to_string());
         let command = self.claude_path.as_ref().map(|path| {
-            let mut args = vec![
-                "--resume".to_string(),
-                session_id.clone(),
-                "--name".to_string(),
-                label.clone(),
-            ];
+            let mut args = if has_history {
+                vec!["--resume".to_string(), session_id.clone()]
+            } else {
+                vec!["--session-id".to_string(), session_id.clone()]
+            };
+            args.push("--name".to_string());
+            args.push(label.clone());
             if let Some(hooks) = hooks_path_str {
                 args.push("--settings".to_string());
                 args.push(hooks);
@@ -1526,6 +1568,11 @@ impl AppState {
             session.terminal_view = Some(terminal_view);
             session.status = SessionStatus::Running;
             session.last_active = std::time::SystemTime::now();
+            // Grace window: if the PTY exits in the next 3s, the exit
+            // watcher reverts to Suspended instead of flipping to Done.
+            // Protects against `claude --resume` exiting immediately.
+            session.resuming_until =
+                Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
             self.active = Some(cursor);
             self.pending_action = Some(PendingAction::FocusActive);
         }
@@ -2258,11 +2305,49 @@ fn main() {
                         false // never actually close the window
                     });
 
+                    // Locate the session to auto-resume on launch. We look up
+                    // `last_active_session_id` from the loaded state and, if
+                    // its clone path is still on disk, pre-select it + queue
+                    // a ResumeSession so the first render tick spawns the
+                    // resumed PTY. If the clone is gone (user deleted it
+                    // externally), fall back to no auto-selection.
+                    let (initial_active, initial_pending) = loaded_state_for_window
+                        .last_active_session_id
+                        .as_deref()
+                        .and_then(|target_id| {
+                            for (p_idx, project) in projects.iter().enumerate() {
+                                for (s_idx, session) in project.sessions.iter().enumerate() {
+                                    if session.id == target_id {
+                                        let resumable = session
+                                            .clone_path
+                                            .as_ref()
+                                            .map(|p| p.exists())
+                                            .unwrap_or(false);
+                                        let cursor = SessionCursor {
+                                            project_idx: p_idx,
+                                            session_idx: s_idx,
+                                        };
+                                        let pending = if resumable {
+                                            Some(PendingAction::ResumeSession {
+                                                project_idx: p_idx,
+                                                session_idx: s_idx,
+                                            })
+                                        } else {
+                                            None
+                                        };
+                                        return Some((Some(cursor), pending));
+                                    }
+                                }
+                            }
+                            None
+                        })
+                        .unwrap_or((None, None));
+
                     AppState {
                         projects,
-                        active: None,
+                        active: initial_active,
                         claude_path: claude_path_clone,
-                        pending_action: None,
+                        pending_action: initial_pending,
                         sidebar_visible: settings_for_window.sidebar_visible,
                         sidebar_width: settings_for_window.sidebar_width
                             .max(SIDEBAR_MIN_WIDTH),
@@ -2833,6 +2918,10 @@ impl Render for AppState {
                     };
                     snapshot.save();
                 }
+                PendingAction::ResumeSession { project_idx, session_idx } => {
+                    let cursor = SessionCursor { project_idx, session_idx };
+                    self.resume_session(cursor, window, cx);
+                }
                 PendingAction::UpdateExternalEditor(cmd) => {
                     skip_refocus = true;
                     let trimmed = cmd.trim();
@@ -2873,6 +2962,7 @@ impl Render for AppState {
         // Suspended sessions are already terminal/attached-less and are
         // skipped.
         let mut state_dirty = false;
+        let now = std::time::Instant::now();
         for project in &mut self.projects {
             for session in &mut project.sessions {
                 if matches!(
@@ -2883,9 +2973,32 @@ impl Render for AppState {
                 }
                 let Some(tv) = session.terminal_view.as_ref() else { continue; };
                 if tv.read(cx).has_exited() {
-                    session.status = SessionStatus::Done;
+                    // If we're still inside the resume grace window, treat
+                    // this as a resume failure — revert to Suspended and
+                    // drop the PTY so the user can try again or the UI can
+                    // prompt them — rather than silently locking them into
+                    // the "Session ended" overlay.
+                    let resume_failed = session
+                        .resuming_until
+                        .map(|deadline| now < deadline)
+                        .unwrap_or(false);
+                    if resume_failed {
+                        eprintln!(
+                            "Resume failed for session {} — PTY exited inside grace window",
+                            session.id
+                        );
+                        session.terminal_view = None;
+                        session.status = SessionStatus::Suspended;
+                    } else {
+                        session.status = SessionStatus::Done;
+                    }
                     session.last_active = std::time::SystemTime::now();
+                    session.resuming_until = None;
                     state_dirty = true;
+                } else if let Some(deadline) = session.resuming_until {
+                    if now >= deadline {
+                        session.resuming_until = None;
+                    }
                 }
             }
         }
@@ -3630,6 +3743,21 @@ impl Render for AppState {
             .map(|s| s.status == SessionStatus::Done)
             .unwrap_or(false);
 
+        // Can the currently-Done session be revived with its prior conversation?
+        // Needs both the clone directory still on disk *and* Claude's history
+        // jsonl for this session id. When true, the "Session ended" bar shows
+        // a primary "Resume" button; otherwise it falls back to "New Session".
+        let active_is_resumable = self
+            .active_session()
+            .map(|s| {
+                s.clone_path
+                    .as_ref()
+                    .map(|p| p.exists())
+                    .unwrap_or(false)
+                    && claude_session_history_exists(&s.id)
+            })
+            .unwrap_or(false);
+
         let sidebar_w = self.sidebar_width;
         let sidebar_visible = self.sidebar_visible;
         let is_resizing = self.sidebar_resizing;
@@ -3821,6 +3949,56 @@ impl Render for AppState {
                     }
 
                     if active_is_done {
+                        let mut buttons = div()
+                            .flex()
+                            .flex_row()
+                            .gap(px(8.0));
+
+                        if active_is_resumable {
+                            buttons = buttons.child(
+                                div()
+                                    .id("resume-btn")
+                                    .cursor_pointer()
+                                    .px(px(10.0))
+                                    .py(px(4.0))
+                                    .rounded(px(4.0))
+                                    .bg(rgb(0x89b4fa))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(0x1e1e2e))
+                                    .hover(|s| s.bg(rgb(0x74c7ec)))
+                                    .child("Resume")
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                                        if let Some(active) = this.active {
+                                            this.pending_action = Some(PendingAction::ResumeSession {
+                                                project_idx: active.project_idx,
+                                                session_idx: active.session_idx,
+                                            });
+                                            cx.notify();
+                                        }
+                                    })),
+                            );
+                        }
+
+                        buttons = buttons.child(
+                            div()
+                                .id("restart-btn")
+                                .cursor_pointer()
+                                .px(px(10.0))
+                                .py(px(4.0))
+                                .rounded(px(4.0))
+                                .bg(rgb(0x45475a))
+                                .text_size(px(11.0))
+                                .text_color(rgb(0xcdd6f4))
+                                .hover(|s| s.bg(rgb(0x585b70)))
+                                .child("New Session")
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                                    if let Some(active) = this.active {
+                                        this.pending_action = Some(PendingAction::AddSessionToProject(active.project_idx));
+                                        cx.notify();
+                                    }
+                                })),
+                        );
+
                         main_area = main_area.child(
                             // "Session ended" overlay bar at bottom
                             div()
@@ -3843,25 +4021,7 @@ impl Render for AppState {
                                         .text_color(rgb(0x6c7086))
                                         .child("Session ended"),
                                 )
-                                .child(
-                                    div()
-                                        .id("restart-btn")
-                                        .cursor_pointer()
-                                        .px(px(10.0))
-                                        .py(px(4.0))
-                                        .rounded(px(4.0))
-                                        .bg(rgb(0x45475a))
-                                        .text_size(px(11.0))
-                                        .text_color(rgb(0xcdd6f4))
-                                        .hover(|s| s.bg(rgb(0x585b70)))
-                                        .child("New Session")
-                                        .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                            if let Some(active) = this.active {
-                                                this.pending_action = Some(PendingAction::AddSessionToProject(active.project_idx));
-                                                cx.notify();
-                                            }
-                                        })),
-                                ),
+                                .child(buttons),
                         );
                     }
 

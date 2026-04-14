@@ -89,6 +89,11 @@ pub struct PersistedState {
     pub sessions: Vec<PersistedSession>,
     #[serde(default)]
     pub archived_sessions: Vec<ArchivedSession>,
+    /// Session ID that was active when the app last saved state. On next
+    /// launch, auto-resume this session so the user lands back in their
+    /// conversation without clicking. `None` → no auto-resume.
+    #[serde(default)]
+    pub last_active_session_id: Option<String>,
 }
 
 impl PersistedState {
