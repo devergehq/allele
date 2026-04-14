@@ -87,8 +87,7 @@ struct AppState {
     hooks_settings_path: Option<PathBuf>,
     /// Current user settings (sound/notification preferences).
     user_settings: Settings,
-    // Drawer terminal state
-    drawer_visible: bool,
+    // Drawer terminal state (visibility is per-session on Session struct)
     drawer_height: f32,
     drawer_resizing: bool,
     // Right sidebar state
@@ -134,7 +133,7 @@ impl AppState {
                 source_path: p.source_path.clone(),
             }).collect(),
             drawer_height: self.drawer_height,
-            drawer_visible: self.drawer_visible,
+            drawer_visible: false,
             right_sidebar_visible: self.right_sidebar_visible,
             right_sidebar_width: self.right_sidebar_width,
             ..self.user_settings.clone()
@@ -436,6 +435,7 @@ impl AppState {
         // Msg::Shutdown, killing the subprocesses. The clone on disk is untouched.
         session.terminal_view = None;
         session.drawer_terminal = None;
+        session.drawer_visible = false;
         session.status = SessionStatus::Suspended;
         session.last_active = std::time::SystemTime::now();
 
@@ -1485,7 +1485,6 @@ fn main() {
                         confirming_discard: None,
                         confirming_dirty_session: None,
                         hooks_settings_path: hooks_settings_path_for_window,
-                        drawer_visible: settings_for_window.drawer_visible,
                         drawer_height: settings_for_window.drawer_height
                             .max(DRAWER_MIN_HEIGHT),
                         drawer_resizing: false,
@@ -1808,10 +1807,21 @@ impl Render for AppState {
                 }
                 PendingAction::ToggleDrawer => {
                     skip_refocus = true;
-                    self.drawer_visible = !self.drawer_visible;
-                    if self.drawer_visible {
-                        // Lazily spawn the drawer terminal for the active session
-                        if let Some(cursor) = self.active {
+                    if let Some(cursor) = self.active {
+                        // Toggle the per-session drawer_visible flag
+                        let now_visible = {
+                            let session = self.projects
+                                .get_mut(cursor.project_idx)
+                                .and_then(|p| p.sessions.get_mut(cursor.session_idx));
+                            if let Some(s) = session {
+                                s.drawer_visible = !s.drawer_visible;
+                                s.drawer_visible
+                            } else {
+                                false
+                            }
+                        };
+                        if now_visible {
+                            // Lazily spawn the drawer terminal for the active session
                             let needs_spawn = self.projects
                                 .get(cursor.project_idx)
                                 .and_then(|p| p.sessions.get(cursor.session_idx))
@@ -1832,7 +1842,6 @@ impl Render for AppState {
                                             this.pending_action = Some(PendingAction::ToggleDrawer);
                                             cx.notify();
                                         }
-                                        // Drawer terminal doesn't handle session-management events
                                         _ => {}
                                     }
                                 }).detach();
@@ -1853,13 +1862,13 @@ impl Render for AppState {
                                     fh.focus(window, cx);
                                 }
                             }
-                        }
-                    } else {
-                        // Focus back to the main terminal when hiding drawer
-                        if let Some(session) = self.active_session() {
-                            if let Some(tv) = session.terminal_view.as_ref() {
-                                let fh = tv.read(cx).focus_handle.clone();
-                                fh.focus(window, cx);
+                        } else {
+                            // Focus back to the main terminal when hiding drawer
+                            if let Some(session) = self.active_session() {
+                                if let Some(tv) = session.terminal_view.as_ref() {
+                                    let fh = tv.read(cx).focus_handle.clone();
+                                    fh.focus(window, cx);
+                                }
                             }
                         }
                     }
@@ -2495,6 +2504,9 @@ impl Render for AppState {
         let sidebar_visible = self.sidebar_visible;
         let is_resizing = self.sidebar_resizing;
         let drawer_is_resizing = self.drawer_resizing;
+        let drawer_visible = self.active_session()
+            .map(|s| s.drawer_visible)
+            .unwrap_or(false);
         let right_sidebar_visible = self.right_sidebar_visible;
         let right_sidebar_w = self.right_sidebar_width;
         let right_sidebar_resizing = self.right_sidebar_resizing;
@@ -2627,9 +2639,21 @@ impl Render for AppState {
                     let mut main_area = div()
                         .flex_1()
                         .min_h(px(100.0))
+                        .overflow_hidden()
                         .relative();
 
                     if let Some(tv) = self.active_session().and_then(|s| s.terminal_view.clone()) {
+                        // Tell the main terminal how much space the drawer
+                        // reserves below it so the PTY resize is correct.
+                        let inset = if drawer_visible {
+                            // 6px resize handle + ~30px header + drawer panel
+                            6.0 + 30.0 + self.drawer_height
+                        } else {
+                            0.0
+                        };
+                        tv.update(cx, |tv, _cx| {
+                            tv.bottom_inset = inset;
+                        });
                         main_area = main_area.child(tv);
                     } else {
                         // Empty-state placeholder
@@ -2787,9 +2811,9 @@ impl Render for AppState {
                     content_col = content_col.child(main_area);
                 }
 
-                // --- Drawer terminal (fixed height, shown when drawer_visible) ---
+                // --- Drawer terminal (fixed height, shown per-session) ---
                 let drawer_h = self.drawer_height;
-                if self.drawer_visible {
+                if drawer_visible {
                     // Resize handle — 6px tall invisible hover zone above drawer
                     content_col = content_col.child(
                         div()

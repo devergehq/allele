@@ -78,6 +78,10 @@ pub struct TerminalView {
     search_current_idx: usize,
     // URL detection
     hovered_url: Option<(usize, usize, usize, String)>, // (row, col_start, col_end, url)
+    /// Pixels reserved below this terminal (e.g. drawer panel + chrome).
+    /// Set by the parent before render so the PTY resize computation
+    /// accounts for space that isn't available to this view.
+    pub bottom_inset: f32,
     // Resize debounce — record desired size + timestamp, only commit
     // the resize to the PTY once the size has been stable for RESIZE_DEBOUNCE_MS.
     pending_resize: Option<(TermSize, Instant)>,
@@ -147,6 +151,7 @@ impl TerminalView {
                     search_matches: Vec::new(),
                     search_current_idx: 0,
                     hovered_url: None,
+                    bottom_inset: 0.0,
                     pending_resize: None,
                     bell_flash_start: None,
                     frame_count: 0,
@@ -314,6 +319,7 @@ impl TerminalView {
             search_matches: Vec::new(),
             search_current_idx: 0,
             hovered_url: None,
+            bottom_inset: 0.0,
             pending_resize: None,
             bell_flash_start: None,
             frame_count: 0,
@@ -753,7 +759,7 @@ impl Render for TerminalView {
             let origin_y = self.element_origin_y.load(std::sync::atomic::Ordering::Relaxed) as f32;
             if origin_x > 0.0 {
                 let available_width = f32::from(viewport.width) - origin_x;
-                let available_height = f32::from(viewport.height) - origin_y;
+                let available_height = f32::from(viewport.height) - origin_y - self.bottom_inset;
                 if available_width > 100.0 && available_height > 100.0 {
                     let new_size = Self::compute_size(
                         available_width, available_height,

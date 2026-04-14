@@ -67,6 +67,9 @@ pub struct Session {
     /// Per-session drawer terminal (plain shell). Created lazily on first
     /// toggle, persists across hide/show cycles.
     pub drawer_terminal: Option<Entity<TerminalView>>,
+    /// Whether the bottom drawer is visible for this session. Per-session
+    /// so switching sessions preserves each session's drawer state.
+    pub drawer_visible: bool,
     /// Set to `true` after a successful merge-and-close. When the session
     /// is subsequently removed, `remove_session` skips creating an archive
     /// entry because the work is already in canonical.
@@ -92,6 +95,7 @@ impl Session {
             last_active: now,
             clone_path: None,
             drawer_terminal: None,
+            drawer_visible: false,
             merged: false,
             auto_naming_fired: false,
         }
@@ -119,6 +123,7 @@ impl Session {
             last_active,
             clone_path,
             drawer_terminal: None,
+            drawer_visible: false,
             merged,
             auto_naming_fired: false,
         }
