@@ -17,7 +17,7 @@ APP_DIR="$BINARY_DIR/Allele.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 PLIST="$CONTENTS_DIR/Info.plist"
-LINK="$MACOS_DIR/allele"
+LINK="$MACOS_DIR/Allele"
 
 # Find Info.plist relative to this script
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"

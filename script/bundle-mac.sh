@@ -21,10 +21,10 @@ if [[ "${1:-}" == "--release" ]]; then
     CARGO_FLAG="--release"
 fi
 
-echo "==> Building allele ($PROFILE)..."
+echo "==> Building Allele ($PROFILE)..."
 cargo build $CARGO_FLAG
 
-BINARY="$PROJECT_DIR/target/$PROFILE/allele"
+BINARY="$PROJECT_DIR/target/$PROFILE/Allele"
 if [[ ! -f "$BINARY" ]]; then
     echo "Error: binary not found at $BINARY" >&2
     exit 1
@@ -42,7 +42,7 @@ mkdir -p "$MACOS_DIR"
 cp "$PROJECT_DIR/resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 
 # Copy binary
-cp "$BINARY" "$MACOS_DIR/allele"
+cp "$BINARY" "$MACOS_DIR/Allele"
 
 echo "==> Done: $APP_DIR"
 echo ""

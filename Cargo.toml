@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2021"
 description = "Claude Code session manager — APFS clone management for parallel variant workflows"
 
+[[bin]]
+name = "Allele"
+path = "src/main.rs"
+
 [dependencies]
 # GPUI — pinned to specific Zed commit (same rev Termy uses, known working)
 gpui = { git = "https://github.com/zed-industries/zed", rev = "83de8a25e0ef71a8d762a148459bc863adaeb7e3", package = "gpui" }

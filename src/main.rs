@@ -11,6 +11,8 @@ mod trust;
 
 use gpui::*;
 use project::Project;
+
+actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction]);
 use session::{Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
@@ -1203,6 +1205,102 @@ fn install_panic_hook() {
     }));
 }
 
+/// Install the native macOS app menu ("Allele" with About + Quit, plus a
+/// View menu for sidebar/drawer toggles).
+///
+/// Without this, a focused Allele window shows whatever menu the previously
+/// focused app left on screen, and standard shortcuts like ⌘Q are no-ops.
+fn install_app_menu(cx: &mut App) {
+    cx.on_action(|_: &Quit, cx| cx.quit());
+    cx.on_action(|_: &About, _cx| show_about_panel());
+
+    cx.bind_keys([
+        KeyBinding::new("cmd-q", Quit, None),
+        KeyBinding::new("cmd-b", ToggleSidebarAction, None),
+        KeyBinding::new("cmd-j", ToggleDrawerAction, None),
+    ]);
+
+    cx.set_menus(vec![
+        Menu {
+            name: "Allele".into(),
+            items: vec![
+                MenuItem::action("About Allele", About),
+                MenuItem::separator(),
+                MenuItem::action("Quit Allele", Quit),
+            ],
+        },
+        Menu {
+            name: "View".into(),
+            items: vec![
+                MenuItem::action("Show/Hide Sidebar", ToggleSidebarAction),
+                MenuItem::action("Show/Hide Terminal", ToggleDrawerAction),
+            ],
+        },
+    ]);
+}
+
+/// Open the standard macOS About panel, populated with app details and a
+/// clickable link to the GitHub repo.
+fn show_about_panel() {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        use cocoa::appkit::NSApp;
+        use cocoa::base::{id, nil};
+        use cocoa::foundation::NSString;
+        use objc::{class, msg_send, sel, sel_impl};
+
+        #[repr(C)]
+        struct NSRange {
+            location: usize,
+            length: usize,
+        }
+
+        let name: id = NSString::alloc(nil).init_str("Allele");
+        let version: id = NSString::alloc(nil)
+            .init_str(concat!("Version ", env!("CARGO_PKG_VERSION")));
+        let copyright: id = NSString::alloc(nil).init_str(
+            "Claude Code session manager — APFS clone management for parallel variant workflows.",
+        );
+
+        // Credits: plain ASCII so UTF-16 offsets line up with byte offsets for
+        // the NSLink range below.
+        const URL: &str = "https://github.com/devergehq/allele";
+        const BODY: &str = "Claude Code session manager\nAPFS clone management for parallel variant workflows.\n\n";
+        let credits_text = format!("{BODY}{URL}");
+
+        let ns_credits_str: id = NSString::alloc(nil).init_str(&credits_text);
+        let credits: id = msg_send![class!(NSMutableAttributedString), alloc];
+        let credits: id = msg_send![credits, initWithString: ns_credits_str];
+
+        let url_str: id = NSString::alloc(nil).init_str(URL);
+        let url: id = msg_send![class!(NSURL), URLWithString: url_str];
+        let link_key: id = NSString::alloc(nil).init_str("NSLink");
+        let range = NSRange {
+            location: BODY.len(),
+            length: URL.len(),
+        };
+        let _: () = msg_send![credits, addAttribute: link_key value: url range: range];
+
+        let keys: [id; 4] = [
+            NSString::alloc(nil).init_str("ApplicationName"),
+            NSString::alloc(nil).init_str("ApplicationVersion"),
+            NSString::alloc(nil).init_str("Copyright"),
+            NSString::alloc(nil).init_str("Credits"),
+        ];
+        let vals: [id; 4] = [name, version, copyright, credits];
+        let options: id = msg_send![
+            class!(NSDictionary),
+            dictionaryWithObjects: vals.as_ptr()
+            forKeys: keys.as_ptr()
+            count: 4usize
+        ];
+
+        let app = NSApp();
+        let _: () = msg_send![app, activateIgnoringOtherApps: true];
+        let _: () = msg_send![app, orderFrontStandardAboutPanelWithOptions: options];
+    }
+}
+
 fn main() {
     install_panic_hook();
 
@@ -1227,6 +1325,8 @@ fn main() {
                 std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf").as_slice()),
             ])
             .expect("failed to load bundled fonts");
+
+        install_app_menu(cx);
 
         // Load persisted settings
         let loaded_settings = Settings::load();
@@ -1445,6 +1545,33 @@ fn main() {
                         }
                     })
                     .detach();
+
+                    // App-level handlers for menu-dispatched toggles. Registering
+                    // at App scope (not on the element tree) guarantees the
+                    // View menu items stay enabled regardless of focus state.
+                    let toggle_handle = cx.entity().downgrade();
+                    App::on_action::<ToggleSidebarAction>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            handle
+                                .update(cx, |this: &mut AppState, cx| {
+                                    this.pending_action = Some(PendingAction::ToggleSidebar);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    });
+                    App::on_action::<ToggleDrawerAction>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            handle
+                                .update(cx, |this: &mut AppState, cx| {
+                                    this.pending_action = Some(PendingAction::ToggleDrawer);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    });
 
                     // Register quit interception — block close when sessions are running.
                     let quit_handle = cx.entity().downgrade();
