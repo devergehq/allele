@@ -8,6 +8,16 @@ use flume::{Receiver, Sender};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Grace window between SIGTERM and SIGKILL when tearing down a PTY's
+/// child process group on drop. Short enough that a UI "close tab" feels
+/// instant; long enough that well-behaved servers (vite, rails) can flush.
+const TERM_GRACE: Duration = Duration::from_millis(750);
+
+/// Cleanup callback run when a `PtyTerminal` is dropped, before the
+/// process-group kill path. See `PtyTerminal::on_close`.
+pub type CleanupHook = Box<dyn FnOnce() + Send + 'static>;
 
 /// A command to run in the PTY
 pub struct ShellCommand {
@@ -98,6 +108,15 @@ pub struct PtyTerminal {
     pub bell_pending: bool,
     /// Title set by terminal apps via OSC sequences.
     pub title: Option<String>,
+    /// Process-group leader pid of the child shell, captured at spawn.
+    /// `None` on non-Unix or if the PID was unavailable. Used on drop to
+    /// `killpg` the foreground tree so dev servers that ignore SIGHUP or
+    /// daemonise don't leak.
+    child_pid: Option<u32>,
+    /// Cleanup callbacks to run when this terminal is dropped. Fired in
+    /// LIFO order (defer semantics) before the kill path, so hooks can
+    /// still read outside state.
+    cleanup_hooks: Vec<CleanupHook>,
 }
 
 impl PtyTerminal {
@@ -151,6 +170,15 @@ impl PtyTerminal {
         let window_id = 0;
         let pty = tty::new(&pty_options, size.into(), window_id)?;
 
+        // Capture the child's pid before the event loop takes ownership of
+        // the Pty. alacritty calls `setsid()` in the fork, so this pid is
+        // also the process-group leader — `killpg(pid, …)` reaches every
+        // foreground descendant.
+        #[cfg(unix)]
+        let child_pid = Some(pty.child().id());
+        #[cfg(not(unix))]
+        let child_pid: Option<u32> = None;
+
         // Start the event loop (reads PTY output → feeds to Term)
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
         let pty_tx = Notifier(event_loop.channel());
@@ -164,7 +192,20 @@ impl PtyTerminal {
             exited: false,
             bell_pending: false,
             title: None,
+            child_pid,
+            cleanup_hooks: Vec::new(),
         })
+    }
+
+    /// Register a callback to run when this terminal is dropped. Hooks
+    /// fire in LIFO order (latest registration runs first) before the
+    /// PTY is killed, so they can still observe app state. Panics in a
+    /// hook are caught and logged — one bad hook won't skip the rest.
+    pub fn on_close<F>(&mut self, hook: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        self.cleanup_hooks.push(Box::new(hook));
     }
 
     /// Find the claude binary on the system
@@ -233,6 +274,47 @@ impl PtyTerminal {
 
 impl Drop for PtyTerminal {
     fn drop(&mut self) {
+        // Run cleanup hooks first (LIFO), while the PTY is still alive —
+        // hooks may want to observe state before we tear things down.
+        // Each hook is panic-caught so one failure doesn't skip the rest.
+        while let Some(hook) = self.cleanup_hooks.pop() {
+            if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook)) {
+                eprintln!("PtyTerminal cleanup hook panicked: {panic:?}");
+            }
+        }
+
+        // Close the PTY master FD — this signals the event loop to drain
+        // and the kernel will SIGHUP the foreground process group.
         let _ = self.pty_tx.0.send(Msg::Shutdown);
+
+        // Belt-and-braces: some children ignore SIGHUP, daemonise, or have
+        // disowned their controlling terminal. Explicitly SIGTERM the
+        // process group, then SIGKILL after a short grace. Done on a
+        // detached thread so Drop (render-thread) stays non-blocking.
+        #[cfg(unix)]
+        if let Some(pid) = self.child_pid.take() {
+            std::thread::spawn(move || kill_child_group(pid));
+        }
     }
+}
+
+/// Kill the process group led by `pid` with a SIGTERM→grace→SIGKILL escalation.
+/// Runs on a detached thread so it can sleep without blocking the caller.
+#[cfg(unix)]
+fn kill_child_group(pid: u32) {
+    let pid = pid as libc::pid_t;
+    // SIGTERM — ask nicely. ESRCH (no such process) is fine: alacritty's
+    // event loop may have already reaped the child.
+    unsafe { libc::killpg(pid, libc::SIGTERM) };
+
+    std::thread::sleep(TERM_GRACE);
+
+    // killpg(pid, 0) probes for the group's existence; if still alive,
+    // escalate to SIGKILL.
+    let alive = unsafe { libc::killpg(pid, 0) } == 0;
+    if alive {
+        unsafe { libc::killpg(pid, libc::SIGKILL) };
+    }
+    // Do not waitpid — alacritty's EventLoop owns the Child and reaps it
+    // when it drops. Waiting here would race with that reaper.
 }

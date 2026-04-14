@@ -1907,19 +1907,29 @@ impl AppState {
             });
         }
 
-        // Drop the Session — this frees the terminal_view entity (if any),
-        // which in turn kills the PTY via the Drop impl on PtyTerminal.
-        // Suspended sessions have `terminal_view = None` so there's no PTY
-        // to kill; only the clone needs cleanup.
-        drop(removed);
-
-        // Close the linked Chrome tab (best-effort; ignored if Chrome is
-        // not running or the tab id is stale). Only when integration is on.
-        if self.user_settings.browser_integration_enabled {
-            if let Some(id) = removed_browser_tab_id {
-                let _ = browser::close_tab(id);
+        // Register Chrome-tab cleanup as a hook on the PTY: when the
+        // terminal is dropped below, the tab closes as part of the same
+        // teardown sequence (alongside SIGTERM to any dev servers).
+        // Suspended sessions have no terminal_view, so fall back to the
+        // direct call. Integration-disabled case: still no-op.
+        let close_tab = self.user_settings.browser_integration_enabled
+            .then_some(removed_browser_tab_id)
+            .flatten();
+        if let Some(id) = close_tab {
+            match removed.terminal_view.as_ref() {
+                Some(tv) => tv.update(cx, |view, _| {
+                    view.on_close(move || { let _ = browser::close_tab(id); });
+                }),
+                None => { let _ = browser::close_tab(id); }
             }
         }
+
+        // Drop the Session — this frees the terminal_view entity (if any),
+        // which fires cleanup hooks then kills the PTY process group via
+        // the Drop impl on PtyTerminal. Suspended sessions have
+        // `terminal_view = None` so there's no PTY to kill; only the
+        // clone needs cleanup.
+        drop(removed);
         let _ = removed_session_id; // reserved for future use
 
         // Show an "Archiving…" placeholder if there's a clone to clean up

@@ -365,6 +365,18 @@ impl TerminalView {
         self.terminal.as_ref().and_then(|t| t.title.clone())
     }
 
+    /// Register a cleanup callback to run when this terminal is dropped
+    /// (suspend, remove, app exit). Forwards to `PtyTerminal::on_close`.
+    /// No-op if the PTY failed to spawn.
+    pub fn on_close<F>(&mut self, hook: F)
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        if let Some(t) = self.terminal.as_mut() {
+            t.on_close(hook);
+        }
+    }
+
     /// Convert window-relative pixel position to visible screen cell (row, col).
     /// row is the visible row index (0..screen_lines), col is the column.
     /// Convert a window-relative pixel position into (row, col) grid
