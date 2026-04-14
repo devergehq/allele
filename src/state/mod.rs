@@ -44,6 +44,13 @@ pub struct PersistedSession {
     /// Index of the active drawer tab at save time.
     #[serde(default)]
     pub drawer_active_tab: usize,
+    /// Chrome tab id linked to this session. May be stale after Chrome
+    /// restart — reconciled on first sync after rehydration.
+    #[serde(default)]
+    pub browser_tab_id: Option<i64>,
+    /// Last URL seen on the linked tab.
+    #[serde(default)]
+    pub browser_last_url: Option<String>,
 }
 
 impl PersistedSession {
@@ -64,6 +71,8 @@ impl PersistedSession {
                 session.drawer_tabs.iter().map(|t| t.name.clone()).collect()
             },
             drawer_active_tab: session.drawer_active_tab,
+            browser_tab_id: session.browser_tab_id,
+            browser_last_url: session.browser_last_url.clone(),
         }
     }
 }
