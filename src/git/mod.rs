@@ -576,6 +576,86 @@ pub fn archive_ref_name(session_id: &str) -> String {
 
 // --- Session auto-naming ------------------------------------------------
 
+/// Extract a 3-5 word slug from a user prompt using keyword extraction.
+/// Uses stop-word removal and positional weighting (earlier meaningful words
+/// are preferred). Designed for voice-transcribed prompts that often start
+/// with filler like "Alright, so I need you to...".
+pub fn extract_slug_from_prompt(prompt: &str, max_words: usize) -> String {
+    use std::collections::HashSet;
+
+    // Common English stop words + voice-transcription filler.
+    let stop_words: HashSet<&str> = [
+        // Articles, pronouns, prepositions, conjunctions
+        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
+        "of", "with", "by", "from", "as", "into", "through", "during", "before",
+        "after", "above", "below", "between", "out", "off", "over", "under",
+        "again", "further", "then", "once", "is", "are", "was", "were", "be",
+        "been", "being", "have", "has", "had", "having", "do", "does", "did",
+        "doing", "will", "would", "could", "should", "may", "might", "shall",
+        "can", "need", "must", "ought", "i", "me", "my", "myself", "we", "our",
+        "ours", "ourselves", "you", "your", "yours", "yourself", "yourselves",
+        "he", "him", "his", "himself", "she", "her", "hers", "herself", "it",
+        "its", "itself", "they", "them", "their", "theirs", "themselves",
+        "what", "which", "who", "whom", "this", "that", "these", "those",
+        "am", "not", "no", "nor", "if", "than", "too", "very", "just",
+        "about", "up", "so", "some", "such", "only", "same", "also", "how",
+        "all", "each", "every", "both", "few", "more", "most", "other",
+        "any", "here", "there", "when", "where", "why", "while",
+        // Voice-transcription filler
+        "alright", "right", "okay", "ok", "well", "yeah", "yep", "yes",
+        "basically", "actually", "probably", "really", "kind", "like",
+        "thing", "things", "gonna", "gotta", "wanna", "suppose", "guess",
+        "mean", "know", "think", "want", "got", "get", "let", "say",
+        "look", "see", "go", "going", "come", "coming", "make", "making",
+        "take", "taking", "give", "giving", "put", "keep", "still",
+        "now", "first", "second", "one", "two", "way", "something",
+        // Common prompt preamble / filler verbs
+        "please", "help", "start", "started", "starting", "working", "need",
+        "looking", "trying", "another", "issue", "issues", "just", "new",
+        "apply", "said", "previously", "opened", "bumped", "popped",
+        "called", "set", "made", "using", "recently", "changes", "changed",
+        "exact", "easy", "enough",
+        // Positional/relational filler common in voice transcription
+        "back", "whole", "sure", "relation", "lot", "lots", "bit",
+        "much", "done", "already", "quite", "different",
+        // Allele-contextual noise (present in nearly every prompt)
+        "session", "branch", "allele", "claude",
+    ].iter().copied().collect();
+
+    // Skip metadata-like prefix lines (e.g. "session branch: allele/session/...")
+    // before extracting keywords from the actual request.
+    let cleaned: String = prompt
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim().to_lowercase();
+            !trimmed.is_empty()
+                && !trimmed.starts_with("session branch:")
+                && !trimmed.starts_with("session id:")
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    let mut seen = HashSet::new();
+    let words: Vec<String> = cleaned
+        .to_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|w| w.len() >= 3)
+        .filter(|w| !stop_words.contains(w))
+        .filter(|w| seen.insert(w.to_string())) // deduplicate
+        .map(|w| w.to_string())
+        .collect();
+
+    // Take up to max_words from the filtered list. Positional weighting is
+    // implicit: earlier words in the prompt (after filler removal) appear first.
+    let selected: Vec<&str> = words.iter().map(|s| s.as_str()).take(max_words).collect();
+
+    if selected.is_empty() {
+        return String::new();
+    }
+
+    selected.join("-")
+}
+
 /// Sanitise a string for use as a git branch name segment.
 /// Lowercase, hyphens only, max length, no leading/trailing hyphens.
 pub fn slugify(input: &str, max_len: usize) -> String {

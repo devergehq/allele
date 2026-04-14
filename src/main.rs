@@ -500,21 +500,27 @@ impl AppState {
         use session::SessionStatus;
 
         // --- Auto-naming: trigger on any event while label is a placeholder ---
-        // Previously gated on UserPromptSubmit only, but that event could be
-        // missed in edge cases (race with session addition, duplicate events,
-        // etc.). Now we trigger on ANY event for a placeholder-labelled session,
-        // using the `auto_naming_fired` flag to prevent duplicate spawns.
-        // The background task is idempotent — it reads the .prompt sidecar
-        // file (which only exists after the first UserPromptSubmit hook) and
-        // retries if it hasn't appeared yet.
-        let auto_name_data = if !session.auto_naming_fired {
-            let is_placeholder = session.label.starts_with("Claude ")
-                || session.label.starts_with("Shell ");
-            if is_placeholder {
+        // Fires on the first hook event (usually SessionStart) to start polling
+        // for the .prompt file. If that attempt times out (user hadn't typed yet),
+        // a retry fires on UserPromptSubmit when the .prompt file is guaranteed
+        // to exist.
+        let is_placeholder = session.label.starts_with("Claude ")
+            || session.label.starts_with("Shell ");
+        let auto_name_data = if is_placeholder {
+            if !session.auto_naming_fired {
+                // First attempt — start polling for the prompt file.
                 session.auto_naming_fired = true;
                 eprintln!(
                     "auto-naming: triggered for {} label={:?} on {:?}",
                     session.id, session.label, event.kind
+                );
+                Some((session.id.clone(), session.clone_path.clone()))
+            } else if matches!(event.kind, HookKind::UserPromptSubmit) {
+                // Retry — first attempt likely timed out before user typed.
+                // The .prompt file is guaranteed to exist now.
+                eprintln!(
+                    "auto-naming: retrying for {} on UserPromptSubmit (label still {:?})",
+                    session.id, session.label
                 );
                 Some((session.id.clone(), session.clone_path.clone()))
             } else {
@@ -545,8 +551,7 @@ impl AppState {
             // No status change, but still trigger auto-naming if applicable.
             if let Some((session_id, clone_path)) = auto_name_data {
                 eprintln!("auto-naming: trigger fired for session {session_id}");
-                let claude_path = self.claude_path.clone();
-                self.trigger_auto_naming(session_id, clone_path, claude_path, cx);
+                self.trigger_auto_naming(session_id, clone_path, cx);
             }
             return;
         };
@@ -554,8 +559,7 @@ impl AppState {
             // No status transition, but still trigger auto-naming if applicable.
             if let Some((session_id, clone_path)) = auto_name_data {
                 eprintln!("auto-naming: trigger fired for session {session_id}");
-                let claude_path = self.claude_path.clone();
-                self.trigger_auto_naming(session_id, clone_path, claude_path, cx);
+                self.trigger_auto_naming(session_id, clone_path, cx);
             }
             return;
         }
@@ -616,35 +620,31 @@ impl AppState {
         // Trigger auto-naming after all borrows are released.
         if let Some((session_id, clone_path)) = auto_name_data {
             eprintln!("auto-naming: trigger fired for session {session_id}");
-            let claude_path = self.claude_path.clone();
-            self.trigger_auto_naming(session_id, clone_path, claude_path, cx);
+            self.trigger_auto_naming(session_id, clone_path, cx);
         }
     }
 
     /// Spawn a background task that reads the first prompt from the hook
-    /// events directory, calls `claude -p --model haiku --bare` to summarise
-    /// it into a 3-5 word slug, then updates the session label and renames
-    /// the git branch. No-ops silently on any failure.
+    /// events directory, extracts keywords to produce a 3-5 word slug, then
+    /// updates the session label and renames the git branch.
+    /// No external dependencies — pure Rust keyword extraction.
     fn trigger_auto_naming(
         &self,
         session_id: String,
         clone_path: Option<PathBuf>,
-        claude_path: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        let Some(claude_bin) = claude_path else { return; };
         let Some(events_dir) = hooks::events_dir() else { return; };
 
         cx.spawn(async move |this, cx| {
             // Read the .prompt file (written by the hook receiver on the first
-            // UserPromptSubmit). Since auto-naming now fires on the very first
-            // hook event (often session_start, which precedes the user typing),
-            // we use a generous retry window: 30 attempts × 2s = 60s total.
-            // This covers the common case where the user takes a few seconds
-            // to type their first prompt after the session starts.
+            // UserPromptSubmit). Since auto-naming fires on the first hook event
+            // (often session_start, before the user types), we poll generously:
+            // 120 attempts × 2s = 4 minutes. The extraction itself is instant
+            // so there's no cost to waiting longer.
             let prompt_path = events_dir.join(format!("{session_id}.prompt"));
             let mut prompt_text = None;
-            for attempt in 0..30 {
+            for attempt in 0..120 {
                 if let Ok(text) = std::fs::read_to_string(&prompt_path) {
                     if !text.trim().is_empty() {
                         prompt_text = Some(text);
@@ -660,7 +660,7 @@ impl AppState {
             }
 
             let Some(prompt) = prompt_text else {
-                eprintln!("auto-naming: no prompt file found after 60s for {session_id}");
+                eprintln!("auto-naming: no prompt file found after 4min for {session_id}");
                 return;
             };
             eprintln!(
@@ -668,58 +668,12 @@ impl AppState {
                 prompt.len()
             );
 
-            // Truncate prompt to first 200 chars to keep the LLM call cheap.
-            let truncated: String = prompt.chars().take(200).collect();
+            // Extract keywords — pure Rust, no LLM needed.
+            let slug_raw = git::extract_slug_from_prompt(&prompt, 4);
 
-            // Call claude to summarise.
-            let summary_prompt = format!(
-                "Summarise this user request in exactly 3-5 lowercase words separated by hyphens, \
-                 suitable as a git branch name. Output ONLY the slug, nothing else.\n\n\
-                 Request: {truncated}"
-            );
-
-            // Spawn via login shell so the subprocess inherits the user's
-            // full environment (PATH, auth tokens, etc.). A bare
-            // std::process::Command inherits Allele's .app bundle env which
-            // is too stripped-down for `claude` to authenticate.
-            //
-            // We avoid --bare because it disables OAuth/keychain auth. Instead
-            // we use --tools "" (no tools) and --no-session-persistence to keep
-            // it lightweight, and --system-prompt to skip CLAUDE.md loading.
-            let escaped_prompt = summary_prompt.replace('\'', "'\\''");
-            let result = cx.background_executor().spawn(async move {
-                std::process::Command::new("/bin/bash")
-                    .arg("-lc")
-                    .arg(format!(
-                        "exec '{}' -p --model haiku --tools '' --no-session-persistence \
-                         --system-prompt 'Output only a short hyphenated slug. No explanation.' \
-                         '{}'",
-                        claude_bin.replace('\'', "'\\''"),
-                        escaped_prompt,
-                    ))
-                    .output()
-            }).await;
-
-            let slug_raw = match result {
-                Ok(output) if output.status.success() => {
-                    String::from_utf8_lossy(&output.stdout).trim().to_string()
-                }
-                Ok(output) => {
-                    eprintln!(
-                        "auto-naming: claude summarise failed: {}",
-                        String::from_utf8_lossy(&output.stderr).trim()
-                    );
-                    return;
-                }
-                Err(e) => {
-                    eprintln!("auto-naming: failed to spawn claude: {e}");
-                    return;
-                }
-            };
-
-            eprintln!("auto-naming: haiku returned slug_raw={slug_raw:?} for {session_id}");
+            eprintln!("auto-naming: extracted slug_raw={slug_raw:?} for {session_id}");
             if slug_raw.is_empty() {
-                eprintln!("auto-naming: empty slug from claude");
+                eprintln!("auto-naming: empty slug from keyword extraction");
                 return;
             }
 
