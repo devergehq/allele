@@ -108,6 +108,20 @@ Added post-original-plan.
 - [x] macOS `.app` bundle for clipboard history app compatibility
 - [x] Stderr capture from `.app` bundle context
 
+## Phase 9: Per-Project Settings — DONE
+
+Added post-original-plan. Configurable merge/sync behaviour per project.
+
+- [x] `ProjectSettings` struct with serde defaults (backwards-compatible)
+- [x] Configurable merge strategy (Merge, Squash, RebaseThenMerge)
+- [x] Configurable rebase-before-merge toggle
+- [x] Configurable default branch override (auto-detect fallback)
+- [x] Configurable remote name override (defaults to "origin")
+- [x] Settings threaded through both merge pipelines (MergeAndClose + MergeArchive)
+- [x] Inline settings panel in sidebar (⚙ gear icon on project header)
+- [ ] **Text input fields for branch/remote in UI** (needs GPUI text input widget)
+- [ ] **Per-session merge strategy override**
+
 ---
 
 ## Remaining Work
@@ -123,3 +137,4 @@ Ordered by priority. These are the known gaps.
 5. **Split terminal views** — side-by-side sessions
 6. **Git status indicator per workspace**
 7. **Session templates** — pre-configured Claude args
+8. **GPUI text input widget** — needed for inline editing of branch/remote in project settings
