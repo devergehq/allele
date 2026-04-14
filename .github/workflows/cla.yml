@@ -38,7 +38,7 @@ jobs:
           path-to-signatures: ".github/cla-signatures.json"
 
           # Users who do not need to sign (maintainers, bots).
-          allowlist: "patrickdorival,dependabot[bot]"
+          allowlist: "dependabot[bot]"
 
           # Message posted on first PR from an unsigned contributor.
           custom-notsigned-prcomment: |

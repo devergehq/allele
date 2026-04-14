@@ -120,6 +120,8 @@ struct AppState {
     right_sidebar_resizing: bool,
     /// When true, a quit confirmation banner is shown because running sessions exist.
     confirming_quit: bool,
+    /// Project index whose settings panel is currently open in the sidebar.
+    editing_project_settings: Option<usize>,
     /// Live handle to an open Settings window. Keeps ⌘, from spawning
     /// duplicates — when set, the action re-activates the existing window
     /// instead of opening a new one. Cleared when the window closes.
@@ -159,6 +161,7 @@ impl AppState {
                 id: p.id.clone(),
                 name: p.name.clone(),
                 source_path: p.source_path.clone(),
+                settings: p.settings.clone(),
             }).collect(),
             drawer_height: self.drawer_height,
             drawer_visible: false,
@@ -1244,13 +1247,13 @@ impl AppState {
                         // is canonical itself (Phase C fallback when the
                         // clonefile syscall failed), skip the archive
                         // pipeline — no session branch exists, the fetch
-                        // would be a no-op self-fetch, and delete_clone
+                        // would be a no-op self-fetch, and trash_clone
                         // will bail on the workspace-dir safety check.
                         if clone_path == canonical_for_task {
                             return clone::delete_clone(&clone_path);
                         }
                         // Archive the session's work into canonical
-                        // before the clone dir is removed. Order is
+                        // before the clone is trashed. Order is
                         // load-bearing — archive_session must run while
                         // the clone still exists.
                         if let Err(e) = git::archive_session(
@@ -1262,7 +1265,7 @@ impl AppState {
                                 "archive_session failed for {session_id_for_task}: {e}"
                             );
                         }
-                        clone::delete_clone(&clone_path)
+                        clone::trash_clone(&clone_path).map(|_| ())
                     })
                     .await;
 
@@ -1323,14 +1326,16 @@ impl AppState {
         self.save_state();
         cx.notify();
 
-        // Spawn background cleanup for all clones
+        // Spawn background cleanup for all clones — trash (rename) instead
+        // of delete so this completes near-instantly. The trash purge at
+        // startup handles actual deletion asynchronously.
         if !clone_paths.is_empty() {
             cx.spawn(async move |_this, cx| {
                 cx.background_executor()
                     .spawn(async move {
                         for path in clone_paths {
-                            if let Err(e) = clone::delete_clone(&path) {
-                                eprintln!("Failed to delete clone at {}: {e}", path.display());
+                            if let Err(e) = clone::trash_clone(&path) {
+                                eprintln!("Failed to trash clone at {}: {e}", path.display());
                             }
                         }
                     })
@@ -1395,7 +1400,8 @@ fn install_panic_hook() {
 /// Without this, a focused Allele window shows whatever menu the previously
 /// focused app left on screen, and standard shortcuts like ⌘Q are no-ops.
 fn install_app_menu(cx: &mut App) {
-    cx.on_action(|_: &Quit, cx| cx.quit());
+    // NOTE: the Quit action is handled per-window (see the App::on_action
+    // block inside main()) so it can check for running sessions first.
     cx.on_action(|_: &About, _cx| show_about_panel());
 
     cx.bind_keys([
@@ -1503,6 +1509,12 @@ fn main() {
 
     let application = Application::new();
 
+    // macOS: clicking the dock icon while the app is hidden (window was
+    // closed via the red ✕) should bring the window back.
+    application.on_reopen(|cx: &mut App| {
+        cx.activate(true);
+    });
+
     application.run(move |cx: &mut App| {
         // Load bundled fonts so we have a deterministic monospace font
         // regardless of what's installed on the system.
@@ -1540,39 +1552,44 @@ fn main() {
             }
         };
 
-        // Conservative orphan sweep: move any on-disk clone not referenced by
-        // the loaded state into ~/.allele/trash/, then purge trash
-        // entries older than TRASH_TTL_DAYS. This runs before the window
-        // opens so the user never sees stale placeholders. The project
-        // sources map lets sweep_orphans archive orphan session work into
-        // canonical before trashing.
+        // Conservative orphan sweep + trash purge + archive ref pruning.
+        // Runs on a background thread so the UI opens immediately —
+        // these are pure filesystem/git operations with no UI interaction.
+        // Orphan clones aren't in persisted state so the sidebar is
+        // unaffected; the sweep just reclaims disk space.
         let referenced = state::referenced_clone_paths(&loaded_state);
         let project_sources: HashMap<String, PathBuf> = loaded_settings
             .projects
             .iter()
             .map(|p| (p.name.clone(), p.source_path.clone()))
             .collect();
-        match clone::sweep_orphans(&referenced, &project_sources) {
-            Ok(0) => {}
-            Ok(n) => eprintln!("Orphan sweep trashed {n} unreferenced clone(s)"),
-            Err(e) => eprintln!("Orphan sweep failed: {e}"),
-        }
-        match clone::purge_trash_older_than_days(clone::TRASH_TTL_DAYS) {
-            Ok(0) => {}
-            Ok(n) => eprintln!("Trash purge removed {n} expired entry/entries"),
-            Err(e) => eprintln!("Trash purge failed: {e}"),
-        }
-
-        // Prune archive refs older than the trash TTL so they don't
-        // accumulate indefinitely in canonical repos.
-        for p in &loaded_settings.projects {
-            if let Err(e) = git::prune_archive_refs(&p.source_path, clone::TRASH_TTL_DAYS) {
-                eprintln!(
-                    "prune_archive_refs failed for {}: {e}",
-                    p.source_path.display()
-                );
+        let project_paths_for_prune: Vec<PathBuf> = loaded_settings
+            .projects
+            .iter()
+            .map(|p| p.source_path.clone())
+            .collect();
+        std::thread::spawn(move || {
+            match clone::sweep_orphans(&referenced, &project_sources) {
+                Ok(0) => {}
+                Ok(n) => eprintln!("Orphan sweep trashed {n} unreferenced clone(s)"),
+                Err(e) => eprintln!("Orphan sweep failed: {e}"),
             }
-        }
+            match clone::purge_trash_older_than_days(clone::TRASH_TTL_DAYS) {
+                Ok(0) => {}
+                Ok(n) => eprintln!("Trash purge removed {n} expired entry/entries"),
+                Err(e) => eprintln!("Trash purge failed: {e}"),
+            }
+            // Prune archive refs older than the trash TTL so they don't
+            // accumulate indefinitely in canonical repos.
+            for source_path in &project_paths_for_prune {
+                if let Err(e) = git::prune_archive_refs(source_path, clone::TRASH_TTL_DAYS) {
+                    eprintln!(
+                        "prune_archive_refs failed for {}: {e}",
+                        source_path.display()
+                    );
+                }
+            }
+        });
 
         let claude_path = PtyTerminal::find_claude()
             .map(|p| p.to_string_lossy().to_string());
@@ -1628,6 +1645,7 @@ fn main() {
                                 id: p.id.clone(),
                                 name: p.name.clone(),
                                 source_path: p.source_path.clone(),
+                                settings: p.settings.clone(),
                             }).collect(),
                             ..this.user_settings.clone()
                         };
@@ -1638,6 +1656,7 @@ fn main() {
                     let mut projects: Vec<Project> = settings_for_window.projects.iter().map(|p| {
                         let mut proj = Project::new(p.name.clone(), p.source_path.clone());
                         proj.id = p.id.clone();
+                        proj.settings = p.settings.clone();
                         proj
                     }).collect();
 
@@ -1737,10 +1756,43 @@ fn main() {
                     })
                     .detach();
 
-                    // App-level handlers for menu-dispatched toggles. Registering
+                    // App-level handlers for menu-dispatched actions. Registering
                     // at App scope (not on the element tree) guarantees the
-                    // View menu items stay enabled regardless of focus state.
+                    // menu items stay enabled regardless of focus state.
                     let toggle_handle = cx.entity().downgrade();
+
+                    // Quit interception — confirm before quitting when
+                    // sessions are still running.
+                    App::on_action::<Quit>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            let should_quit = handle
+                                .update(cx, |state: &mut AppState, cx| {
+                                    let active_count = state
+                                        .projects
+                                        .iter()
+                                        .flat_map(|p| &p.sessions)
+                                        .filter(|s| {
+                                            matches!(
+                                                s.status,
+                                                SessionStatus::Running | SessionStatus::Idle
+                                            )
+                                        })
+                                        .count();
+                                    if active_count > 0 {
+                                        state.confirming_quit = true;
+                                        cx.notify();
+                                        false
+                                    } else {
+                                        true
+                                    }
+                                })
+                                .unwrap_or(true);
+                            if should_quit {
+                                cx.quit();
+                            }
+                        }
+                    });
                     App::on_action::<ToggleSidebarAction>(cx, {
                         let handle = toggle_handle.clone();
                         move |_, cx| {
@@ -1806,31 +1858,12 @@ fn main() {
                         }
                     });
 
-                    // Register quit interception — block close when sessions are running.
-                    let quit_handle = cx.entity().downgrade();
+                    // macOS convention: the red ✕ hides the window rather
+                    // than quitting the app. Clicking the dock icon will
+                    // reactivate it (see on_reopen below).
                     window.on_window_should_close(cx, move |_window, cx| {
-                        quit_handle
-                            .update(cx, |state: &mut AppState, cx| {
-                                let active_count = state
-                                    .projects
-                                    .iter()
-                                    .flat_map(|p| &p.sessions)
-                                    .filter(|s| {
-                                        matches!(
-                                            s.status,
-                                            SessionStatus::Running | SessionStatus::Idle
-                                        )
-                                    })
-                                    .count();
-                                if active_count > 0 {
-                                    state.confirming_quit = true;
-                                    cx.notify();
-                                    false // block the close
-                                } else {
-                                    true // allow close
-                                }
-                            })
-                            .unwrap_or(true)
+                        cx.hide();
+                        false // never actually close the window
                     });
 
                     AppState {
@@ -1855,6 +1888,7 @@ fn main() {
                             .max(RIGHT_SIDEBAR_MIN_WIDTH),
                         right_sidebar_resizing: false,
                         confirming_quit: false,
+                        editing_project_settings: None,
                         user_settings: settings_for_window.clone(),
                         settings_window: None,
                     }
@@ -1931,7 +1965,18 @@ impl Render for AppState {
                     if let Some(project) = self.projects.get_mut(project_idx) {
                         if let Some(entry) = project.archives.get(archive_idx) {
                             let session_id = entry.id.clone();
-                            match git::merge_archive(&project.source_path, &session_id) {
+                            let merge_result = match project.settings.merge_strategy {
+                                crate::settings::MergeStrategy::Merge => {
+                                    git::merge_archive(&project.source_path, &session_id)
+                                }
+                                crate::settings::MergeStrategy::Squash => {
+                                    git::squash_merge_archive(&project.source_path, &session_id)
+                                }
+                                crate::settings::MergeStrategy::RebaseThenMerge => {
+                                    git::rebase_merge_archive(&project.source_path, &session_id)
+                                }
+                            };
+                            match merge_result {
                                 Ok(git::MergeResult::Merged) => {
                                     let _ = git::delete_ref(
                                         &project.source_path,
@@ -1985,6 +2030,7 @@ impl Render for AppState {
                             let session_id = session.id.clone();
                             let session_label = session.label.clone();
                             let canonical = project.source_path.clone();
+                            let proj_settings = project.settings.clone();
 
                             // Capture session metadata for potential restoration on failure
                             // (must happen before the mutable borrow for loading_sessions).
@@ -2054,10 +2100,12 @@ impl Render for AppState {
                                             // 1. Auto-commit + fetch session branch as archive ref
                                             git::archive_session(&canonical, &clone_path, &session_id)?;
 
-                                            // 2. Fetch origin & rebase canonical onto remote tip
-                                            if git::has_remote(&canonical, "origin") {
-                                                if let Err(e) = git::fetch_and_rebase_onto_remote(&canonical, "origin") {
-                                                    eprintln!("Rebase onto origin failed for {session_id}: {e}");
+                                            // 2. Optionally fetch remote & rebase canonical onto remote tip
+                                            let remote = proj_settings.resolved_remote();
+                                            if proj_settings.rebase_before_merge && git::has_remote(&canonical, remote) {
+                                                let branch_override = proj_settings.default_branch.as_deref();
+                                                if let Err(e) = git::fetch_and_rebase_onto_remote_branch(&canonical, remote, branch_override) {
+                                                    eprintln!("Rebase onto {remote} failed for {session_id}: {e}");
                                                     // Clean up the archive ref only — preserve the clone
                                                     let _ = git::delete_ref(
                                                         &canonical,
@@ -2065,11 +2113,21 @@ impl Render for AppState {
                                                     );
                                                     anyhow::bail!("Rebase failed — resolve conflicts in the session and merge again. {e}");
                                                 }
-                                                eprintln!("Rebased canonical onto origin for {session_id}");
+                                                eprintln!("Rebased canonical onto {remote} for {session_id}");
                                             }
 
-                                            // 3. Merge the archive ref into canonical HEAD
-                                            let merge_result = git::merge_archive(&canonical, &session_id);
+                                            // 3. Merge the archive ref using the configured strategy
+                                            let merge_result = match proj_settings.merge_strategy {
+                                                crate::settings::MergeStrategy::Merge => {
+                                                    git::merge_archive(&canonical, &session_id)
+                                                }
+                                                crate::settings::MergeStrategy::Squash => {
+                                                    git::squash_merge_archive(&canonical, &session_id)
+                                                }
+                                                crate::settings::MergeStrategy::RebaseThenMerge => {
+                                                    git::rebase_merge_archive(&canonical, &session_id)
+                                                }
+                                            };
 
                                             // 4. Always delete the archive ref (cleanup even on merge failure)
                                             let _ = git::delete_ref(
@@ -2091,9 +2149,10 @@ impl Render for AppState {
                                                 }
                                             }
 
-                                            // 5. Delete the APFS clone only on success
-                                            if let Err(e) = clone::delete_clone(&clone_path) {
-                                                eprintln!("Failed to delete clone after merge for {session_id}: {e}");
+                                            // 5. Trash the APFS clone (near-instant rename) on
+                                            //    success. Actual deletion deferred to startup purge.
+                                            if let Err(e) = clone::trash_clone(&clone_path) {
+                                                eprintln!("Failed to trash clone after merge for {session_id}: {e}");
                                             }
                                             Ok(())
                                         })
@@ -2375,6 +2434,7 @@ impl Render for AppState {
                             id: p.id.clone(),
                             name: p.name.clone(),
                             source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
                         }).collect(),
                         ..self.user_settings.clone()
                     };
@@ -2479,6 +2539,30 @@ impl Render for AppState {
                             })),
                     )
                     .child(
+                        // Project settings button
+                        div()
+                            .id(SharedString::from(format!("settings-project-{p_idx}")))
+                            .cursor_pointer()
+                            .px(px(4.0))
+                            .text_size(px(11.0))
+                            .text_color(if self.editing_project_settings == Some(p_idx) {
+                                rgb(0x89b4fa) // blue when active
+                            } else {
+                                rgb(0x45475a)
+                            })
+                            .hover(|s| s.text_color(rgb(0x89b4fa)))
+                            .child("⚙")
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                cx.stop_propagation();
+                                if this.editing_project_settings == Some(p_idx) {
+                                    this.editing_project_settings = None;
+                                } else {
+                                    this.editing_project_settings = Some(p_idx);
+                                }
+                                cx.notify();
+                            })),
+                    )
+                    .child(
                         // Remove project button
                         div()
                             .id(SharedString::from(format!("remove-project-{p_idx}")))
@@ -2552,6 +2636,185 @@ impl Render for AppState {
                                     this.pending_action = Some(PendingAction::CancelDirtySession);
                                     cx.notify();
                                 })),
+                        )
+                        .into_any_element(),
+                );
+            }
+
+            // Inline project settings panel
+            if self.editing_project_settings == Some(p_idx) {
+                let current_strategy = match project.settings.merge_strategy {
+                    crate::settings::MergeStrategy::Merge => "Merge (--no-ff)",
+                    crate::settings::MergeStrategy::Squash => "Squash",
+                    crate::settings::MergeStrategy::RebaseThenMerge => "Rebase + FF",
+                };
+                let current_branch = project.settings.default_branch
+                    .as_deref()
+                    .unwrap_or("auto-detect");
+                let current_remote = project.settings.remote
+                    .as_deref()
+                    .unwrap_or("origin");
+                let rebase_label = if project.settings.rebase_before_merge {
+                    "Yes"
+                } else {
+                    "No"
+                };
+
+                // Helper: a settings row with label + clickable value
+                let settings_row = |id: &str, label: &str, value: &str| -> AnyElement {
+                    div()
+                        .pl(px(24.0))
+                        .pr(px(12.0))
+                        .py(px(3.0))
+                        .bg(rgb(0x1e1e2e))
+                        .flex()
+                        .flex_row()
+                        .justify_between()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(0x6c7086))
+                                .child(SharedString::from(label.to_string())),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(0x89b4fa))
+                                .child(SharedString::from(value.to_string())),
+                        )
+                        .into_any_element()
+                };
+
+                // Settings header
+                sidebar_items.push(
+                    div()
+                        .pl(px(24.0))
+                        .pr(px(12.0))
+                        .py(px(4.0))
+                        .bg(rgb(0x1e1e2e))
+                        .border_b_1()
+                        .border_color(rgb(0x313244))
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(rgb(0x89b4fa))
+                                .child("PROJECT SETTINGS"),
+                        )
+                        .into_any_element(),
+                );
+
+                // Merge strategy — clickable to cycle
+                sidebar_items.push(
+                    div()
+                        .id(SharedString::from(format!("setting-strategy-{p_idx}")))
+                        .cursor_pointer()
+                        .pl(px(24.0))
+                        .pr(px(12.0))
+                        .py(px(3.0))
+                        .bg(rgb(0x1e1e2e))
+                        .hover(|s| s.bg(rgb(0x313244)))
+                        .flex()
+                        .flex_row()
+                        .justify_between()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(0x6c7086))
+                                .child("Merge strategy"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(0x89b4fa))
+                                .child(SharedString::from(current_strategy.to_string())),
+                        )
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                            cx.stop_propagation();
+                            if let Some(project) = this.projects.get_mut(p_idx) {
+                                project.settings.merge_strategy = match project.settings.merge_strategy {
+                                    crate::settings::MergeStrategy::Merge => crate::settings::MergeStrategy::Squash,
+                                    crate::settings::MergeStrategy::Squash => crate::settings::MergeStrategy::RebaseThenMerge,
+                                    crate::settings::MergeStrategy::RebaseThenMerge => crate::settings::MergeStrategy::Merge,
+                                };
+                            }
+                            this.save_settings();
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+
+                // Rebase before merge — clickable to toggle
+                sidebar_items.push(
+                    div()
+                        .id(SharedString::from(format!("setting-rebase-{p_idx}")))
+                        .cursor_pointer()
+                        .pl(px(24.0))
+                        .pr(px(12.0))
+                        .py(px(3.0))
+                        .bg(rgb(0x1e1e2e))
+                        .hover(|s| s.bg(rgb(0x313244)))
+                        .flex()
+                        .flex_row()
+                        .justify_between()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(rgb(0x6c7086))
+                                .child("Sync remote first"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(10.0))
+                                .text_color(if project.settings.rebase_before_merge {
+                                    rgb(0xa6e3a1) // green = on
+                                } else {
+                                    rgb(0xf38ba8) // red = off
+                                })
+                                .child(SharedString::from(rebase_label.to_string())),
+                        )
+                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                            cx.stop_propagation();
+                            if let Some(project) = this.projects.get_mut(p_idx) {
+                                project.settings.rebase_before_merge = !project.settings.rebase_before_merge;
+                            }
+                            this.save_settings();
+                            cx.notify();
+                        }))
+                        .into_any_element(),
+                );
+
+                // Default branch — read-only display (editing needs text input)
+                sidebar_items.push(settings_row(
+                    &format!("setting-branch-{p_idx}"),
+                    "Default branch",
+                    current_branch,
+                ));
+
+                // Remote — read-only display
+                sidebar_items.push(settings_row(
+                    &format!("setting-remote-{p_idx}"),
+                    "Remote",
+                    current_remote,
+                ));
+
+                // Bottom border
+                sidebar_items.push(
+                    div()
+                        .pl(px(24.0))
+                        .pr(px(12.0))
+                        .py(px(2.0))
+                        .bg(rgb(0x1e1e2e))
+                        .border_b_1()
+                        .border_color(rgb(0x313244))
+                        .child(
+                            div()
+                                .text_size(px(9.0))
+                                .text_color(rgb(0x45475a))
+                                .child("Edit settings.json for branch/remote"),
                         )
                         .into_any_element(),
                 );
