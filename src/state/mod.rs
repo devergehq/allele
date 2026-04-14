@@ -37,6 +37,13 @@ pub struct PersistedSession {
     /// merge-and-close. When set, discard skips creating an archive entry.
     #[serde(default)]
     pub merged: bool,
+    /// Drawer terminal tab names at save time. Tabs are re-spawned with
+    /// these names when the drawer is first opened on the rehydrated session.
+    #[serde(default)]
+    pub drawer_tab_names: Vec<String>,
+    /// Index of the active drawer tab at save time.
+    #[serde(default)]
+    pub drawer_active_tab: usize,
 }
 
 impl PersistedSession {
@@ -50,6 +57,13 @@ impl PersistedSession {
             started_at: session.started_at,
             last_active: session.last_active,
             merged: session.merged,
+            drawer_tab_names: if session.drawer_tabs.is_empty() {
+                // Tabs not yet materialised — preserve pending names from disk.
+                session.pending_drawer_tab_names.clone()
+            } else {
+                session.drawer_tabs.iter().map(|t| t.name.clone()).collect()
+            },
+            drawer_active_tab: session.drawer_active_tab,
         }
     }
 }

@@ -11,9 +11,8 @@ mod trust;
 
 use gpui::*;
 use project::Project;
-
 actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction]);
-use session::{Session, SessionStatus};
+use session::{DrawerTab, Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
 use terminal::{ShellCommand, TerminalEvent, TerminalView};
@@ -46,6 +45,18 @@ enum PendingAction {
     MergeAndClose { project_idx: usize, session_idx: usize },
     /// Toggle the bottom drawer terminal panel.
     ToggleDrawer,
+    /// Create a new drawer terminal tab in the active session.
+    NewDrawerTab,
+    /// Switch the active drawer tab.
+    SwitchDrawerTab(usize),
+    /// Close a drawer tab by index. Closing the last tab hides the drawer.
+    CloseDrawerTab(usize),
+    /// Enter rename mode for a drawer tab.
+    StartRenameDrawerTab(usize),
+    /// Commit the current rename buffer as the tab's new name.
+    CommitRenameDrawerTab,
+    /// Cancel rename mode without saving.
+    CancelRenameDrawerTab,
     /// Toggle the left sidebar visibility.
     ToggleSidebar,
     /// Toggle the right sidebar visibility.
@@ -92,6 +103,12 @@ struct AppState {
     // Drawer terminal state (visibility is per-session on Session struct)
     drawer_height: f32,
     drawer_resizing: bool,
+    /// Active inline tab rename: (session cursor, tab index, current buffer).
+    /// When Some, the tab strip renders that tab as an editable label.
+    drawer_rename: Option<(SessionCursor, usize, String)>,
+    /// Focus handle for the inline rename input. Created lazily when rename
+    /// mode first activates in a given AppState instance.
+    drawer_rename_focus: Option<FocusHandle>,
     // Right sidebar state
     right_sidebar_visible: bool,
     right_sidebar_width: f32,
@@ -439,7 +456,11 @@ impl AppState {
         // Drop the terminal_view and drawer — Drop impl on PtyTerminal sends
         // Msg::Shutdown, killing the subprocesses. The clone on disk is untouched.
         session.terminal_view = None;
-        session.drawer_terminal = None;
+        // Drop the drawer PTYs but preserve the names so the next open
+        // restores the same tab layout (matches the rehydration path).
+        let names: Vec<String> = session.drawer_tabs.iter().map(|t| t.name.clone()).collect();
+        session.drawer_tabs.clear();
+        session.pending_drawer_tab_names = names;
         session.drawer_visible = false;
         session.status = SessionStatus::Suspended;
         session.last_active = std::time::SystemTime::now();
@@ -453,6 +474,110 @@ impl AppState {
 
         self.save_state();
         cx.notify();
+    }
+
+    /// Spawn one drawer terminal tab in the given session with an optional
+    /// pre-chosen name. Default name is "Terminal N" where N is 1-based.
+    fn spawn_drawer_tab(
+        &mut self,
+        cursor: SessionCursor,
+        name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let working_dir = self.projects
+            .get(cursor.project_idx)
+            .and_then(|p| p.sessions.get(cursor.session_idx))
+            .and_then(|s| s.clone_path.clone());
+        let drawer_tv = cx.new(|cx| TerminalView::new(window, cx, None, working_dir));
+        cx.subscribe(
+            &drawer_tv,
+            |this: &mut Self,
+             _tv: Entity<TerminalView>,
+             event: &TerminalEvent,
+             cx: &mut Context<Self>| {
+                if let TerminalEvent::ToggleDrawer = event {
+                    this.pending_action = Some(PendingAction::ToggleDrawer);
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
+
+        if let Some(session) = self.projects
+            .get_mut(cursor.project_idx)
+            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+        {
+            let tab_name = name.unwrap_or_else(|| {
+                format!("Terminal {}", session.drawer_tabs.len() + 1)
+            });
+            session.drawer_tabs.push(DrawerTab {
+                view: drawer_tv,
+                name: tab_name,
+            });
+        }
+    }
+
+    /// Materialise drawer tabs for a session that has none yet. Uses saved
+    /// names from `pending_drawer_tab_names` if present, else creates one
+    /// default "Terminal 1" tab.
+    fn ensure_drawer_tabs(
+        &mut self,
+        cursor: SessionCursor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (needs_default, pending) = {
+            let session = self.projects
+                .get(cursor.project_idx)
+                .and_then(|p| p.sessions.get(cursor.session_idx));
+            match session {
+                Some(s) if !s.drawer_tabs.is_empty() => (false, Vec::new()),
+                Some(s) => {
+                    if s.pending_drawer_tab_names.is_empty() {
+                        (true, Vec::new())
+                    } else {
+                        (false, s.pending_drawer_tab_names.clone())
+                    }
+                }
+                None => return,
+            }
+        };
+
+        if needs_default {
+            self.spawn_drawer_tab(cursor, None, window, cx);
+        } else if !pending.is_empty() {
+            for name in pending {
+                self.spawn_drawer_tab(cursor, Some(name), window, cx);
+            }
+            if let Some(session) = self.projects
+                .get_mut(cursor.project_idx)
+                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+            {
+                session.pending_drawer_tab_names.clear();
+                if session.drawer_active_tab >= session.drawer_tabs.len() {
+                    session.drawer_active_tab = session.drawer_tabs.len().saturating_sub(1);
+                }
+            }
+        }
+    }
+
+    /// Focus the currently active drawer tab's terminal view (if any).
+    fn focus_active_drawer_tab(
+        &self,
+        cursor: SessionCursor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.projects
+            .get(cursor.project_idx)
+            .and_then(|p| p.sessions.get(cursor.session_idx))
+        {
+            if let Some(tab) = session.drawer_tabs.get(session.drawer_active_tab) {
+                let fh = tab.view.read(cx).focus_handle.clone();
+                fh.focus(window, cx);
+            }
+        }
     }
 
     /// Apply a single hook event to the matching session.
@@ -1474,6 +1599,10 @@ fn main() {
                             persisted.last_active,
                             persisted.clone_path.clone(),
                             persisted.merged,
+                        )
+                        .with_drawer_tabs(
+                            persisted.drawer_tab_names.clone(),
+                            persisted.drawer_active_tab,
                         );
                         project.sessions.push(session);
                     }
@@ -1581,6 +1710,8 @@ fn main() {
                         drawer_height: settings_for_window.drawer_height
                             .max(DRAWER_MIN_HEIGHT),
                         drawer_resizing: false,
+                        drawer_rename: None,
+                        drawer_rename_focus: None,
                         right_sidebar_visible: settings_for_window.right_sidebar_visible,
                         right_sidebar_width: settings_for_window.right_sidebar_width
                             .max(RIGHT_SIDEBAR_MIN_WIDTH),
@@ -1927,7 +2058,6 @@ impl Render for AppState {
                 PendingAction::ToggleDrawer => {
                     skip_refocus = true;
                     if let Some(cursor) = self.active {
-                        // Toggle the per-session drawer_visible flag
                         let now_visible = {
                             let session = self.projects
                                 .get_mut(cursor.project_idx)
@@ -1940,49 +2070,9 @@ impl Render for AppState {
                             }
                         };
                         if now_visible {
-                            // Lazily spawn the drawer terminal for the active session
-                            let needs_spawn = self.projects
-                                .get(cursor.project_idx)
-                                .and_then(|p| p.sessions.get(cursor.session_idx))
-                                .map(|s| s.drawer_terminal.is_none())
-                                .unwrap_or(false);
-                            if needs_spawn {
-                                let working_dir = self.projects
-                                    .get(cursor.project_idx)
-                                    .and_then(|p| p.sessions.get(cursor.session_idx))
-                                    .and_then(|s| s.clone_path.clone());
-                                let drawer_tv = cx.new(|cx| {
-                                    TerminalView::new(window, cx, None, working_dir)
-                                });
-                                // Subscribe so Cmd+J from the drawer also toggles
-                                cx.subscribe(&drawer_tv, |this: &mut Self, _tv: Entity<TerminalView>, event: &TerminalEvent, cx: &mut Context<Self>| {
-                                    match event {
-                                        TerminalEvent::ToggleDrawer => {
-                                            this.pending_action = Some(PendingAction::ToggleDrawer);
-                                            cx.notify();
-                                        }
-                                        _ => {}
-                                    }
-                                }).detach();
-                                if let Some(session) = self.projects
-                                    .get_mut(cursor.project_idx)
-                                    .and_then(|p| p.sessions.get_mut(cursor.session_idx))
-                                {
-                                    session.drawer_terminal = Some(drawer_tv);
-                                }
-                            }
-                            // Focus the drawer terminal
-                            if let Some(session) = self.projects
-                                .get(cursor.project_idx)
-                                .and_then(|p| p.sessions.get(cursor.session_idx))
-                            {
-                                if let Some(dt) = session.drawer_terminal.as_ref() {
-                                    let fh = dt.read(cx).focus_handle.clone();
-                                    fh.focus(window, cx);
-                                }
-                            }
+                            self.ensure_drawer_tabs(cursor, window, cx);
+                            self.focus_active_drawer_tab(cursor, window, cx);
                         } else {
-                            // Focus back to the main terminal when hiding drawer
                             if let Some(session) = self.active_session() {
                                 if let Some(tv) = session.terminal_view.as_ref() {
                                     let fh = tv.read(cx).focus_handle.clone();
@@ -1991,7 +2081,123 @@ impl Render for AppState {
                             }
                         }
                     }
-                    self.save_settings();
+                    self.save_state();
+                }
+                PendingAction::NewDrawerTab => {
+                    skip_refocus = true;
+                    if let Some(cursor) = self.active {
+                        self.spawn_drawer_tab(cursor, None, window, cx);
+                        if let Some(session) = self.projects
+                            .get_mut(cursor.project_idx)
+                            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                        {
+                            session.drawer_active_tab = session.drawer_tabs.len().saturating_sub(1);
+                            session.drawer_visible = true;
+                        }
+                        self.focus_active_drawer_tab(cursor, window, cx);
+                        self.save_state();
+                    }
+                }
+                PendingAction::SwitchDrawerTab(idx) => {
+                    skip_refocus = true;
+                    if let Some(cursor) = self.active {
+                        if let Some(session) = self.projects
+                            .get_mut(cursor.project_idx)
+                            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                        {
+                            if idx < session.drawer_tabs.len() {
+                                session.drawer_active_tab = idx;
+                            }
+                        }
+                        self.drawer_rename = None;
+                        self.focus_active_drawer_tab(cursor, window, cx);
+                        self.save_state();
+                    }
+                }
+                PendingAction::CloseDrawerTab(idx) => {
+                    skip_refocus = true;
+                    if let Some(cursor) = self.active {
+                        let (remaining, hide_drawer) = {
+                            let session = self.projects
+                                .get_mut(cursor.project_idx)
+                                .and_then(|p| p.sessions.get_mut(cursor.session_idx));
+                            if let Some(s) = session {
+                                if idx < s.drawer_tabs.len() {
+                                    s.drawer_tabs.remove(idx);
+                                }
+                                if s.drawer_active_tab >= s.drawer_tabs.len() {
+                                    s.drawer_active_tab = s.drawer_tabs.len().saturating_sub(1);
+                                }
+                                let empty = s.drawer_tabs.is_empty();
+                                if empty {
+                                    s.drawer_visible = false;
+                                }
+                                (s.drawer_tabs.len(), empty)
+                            } else {
+                                (0, true)
+                            }
+                        };
+                        if let Some((rc, ri, _)) = &self.drawer_rename {
+                            if *rc == cursor && *ri >= remaining {
+                                self.drawer_rename = None;
+                            }
+                        }
+                        if hide_drawer {
+                            if let Some(session) = self.active_session() {
+                                if let Some(tv) = session.terminal_view.as_ref() {
+                                    let fh = tv.read(cx).focus_handle.clone();
+                                    fh.focus(window, cx);
+                                }
+                            }
+                        } else {
+                            self.focus_active_drawer_tab(cursor, window, cx);
+                        }
+                        self.save_state();
+                    }
+                }
+                PendingAction::StartRenameDrawerTab(idx) => {
+                    skip_refocus = true;
+                    if let Some(cursor) = self.active {
+                        let initial = self.projects
+                            .get(cursor.project_idx)
+                            .and_then(|p| p.sessions.get(cursor.session_idx))
+                            .and_then(|s| s.drawer_tabs.get(idx))
+                            .map(|t| t.name.clone());
+                        if let Some(name) = initial {
+                            self.drawer_rename = Some((cursor, idx, name));
+                            let fh = self.drawer_rename_focus
+                                .get_or_insert_with(|| cx.focus_handle())
+                                .clone();
+                            fh.focus(window, cx);
+                            cx.notify();
+                        }
+                    }
+                }
+                PendingAction::CommitRenameDrawerTab => {
+                    skip_refocus = true;
+                    if let Some((cursor, idx, buf)) = self.drawer_rename.take() {
+                        let trimmed = buf.trim().to_string();
+                        if !trimmed.is_empty() {
+                            if let Some(session) = self.projects
+                                .get_mut(cursor.project_idx)
+                                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                            {
+                                if let Some(tab) = session.drawer_tabs.get_mut(idx) {
+                                    tab.name = trimmed;
+                                }
+                            }
+                        }
+                        self.focus_active_drawer_tab(cursor, window, cx);
+                        self.save_state();
+                    }
+                }
+                PendingAction::CancelRenameDrawerTab => {
+                    skip_refocus = true;
+                    let cursor_opt = self.drawer_rename.take().map(|(c, _, _)| c);
+                    if let Some(cursor) = cursor_opt {
+                        self.focus_active_drawer_tab(cursor, window, cx);
+                    }
+                    cx.notify();
                 }
                 PendingAction::ToggleSidebar => {
                     self.sidebar_visible = !self.sidebar_visible;
@@ -3151,27 +3357,208 @@ impl Render for AppState {
                             })),
                     );
 
-                    // Drawer header bar
+                    // --- Drawer header bar with tab strip ---
+                    let active_cursor = self.active;
+                    let (tabs_meta, active_tab_idx, active_tab_view): (
+                        Vec<(usize, String)>,
+                        usize,
+                        Option<Entity<TerminalView>>,
+                    ) = if let Some(session) = self.active_session() {
+                        let data = session
+                            .drawer_tabs
+                            .iter()
+                            .enumerate()
+                            .map(|(i, t)| (i, t.name.clone()))
+                            .collect();
+                        let view = session
+                            .drawer_tabs
+                            .get(session.drawer_active_tab)
+                            .map(|t| t.view.clone());
+                        (data, session.drawer_active_tab, view)
+                    } else {
+                        (Vec::new(), 0, None)
+                    };
+
+                    let renaming_idx = self
+                        .drawer_rename
+                        .as_ref()
+                        .filter(|(c, _, _)| Some(*c) == active_cursor)
+                        .map(|(_, i, _)| *i);
+                    let rename_buf = self
+                        .drawer_rename
+                        .as_ref()
+                        .filter(|(c, _, _)| Some(*c) == active_cursor)
+                        .map(|(_, _, buf)| buf.clone())
+                        .unwrap_or_default();
+                    let rename_focus = self.drawer_rename_focus.clone();
+
+                    let mut tab_strip = div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(4.0))
+                        .flex_1()
+                        .overflow_hidden();
+
+                    for (idx, name) in tabs_meta {
+                        let is_active = idx == active_tab_idx;
+                        let is_renaming = renaming_idx == Some(idx);
+                        let tab_bg = if is_active { 0x313244 } else { 0x1e1e2e };
+                        let tab_fg = if is_active { 0xcdd6f4 } else { 0xa6adc8 };
+
+                        let mut tab_el = div()
+                            .id(("drawer-tab", idx))
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .px(px(10.0))
+                            .py(px(3.0))
+                            .rounded(px(4.0))
+                            .bg(rgb(tab_bg))
+                            .text_size(px(11.0))
+                            .text_color(rgb(tab_fg))
+                            .cursor_pointer()
+                            .hover(|s| s.bg(rgb(0x45475a)));
+
+                        if is_renaming {
+                            let display = if rename_buf.is_empty() {
+                                " ".to_string()
+                            } else {
+                                rename_buf.clone()
+                            };
+                            let mut label = div()
+                                .min_w(px(40.0))
+                                .px(px(4.0))
+                                .border_1()
+                                .border_color(rgb(0x89b4fa))
+                                .rounded(px(2.0))
+                                .bg(rgb(0x181825))
+                                .text_color(rgb(0xcdd6f4))
+                                .child(format!("{display}▎"));
+                            if let Some(fh) = rename_focus.clone() {
+                                label = label
+                                    .track_focus(&fh)
+                                    .on_key_down(cx.listener(
+                                        |this: &mut Self, event: &KeyDownEvent, _window, cx| {
+                                            let key = event.keystroke.key.as_str();
+                                            let mods = &event.keystroke.modifiers;
+                                            match key {
+                                                "enter" => {
+                                                    this.pending_action =
+                                                        Some(PendingAction::CommitRenameDrawerTab);
+                                                    cx.notify();
+                                                }
+                                                "escape" => {
+                                                    this.pending_action =
+                                                        Some(PendingAction::CancelRenameDrawerTab);
+                                                    cx.notify();
+                                                }
+                                                "backspace" => {
+                                                    if let Some((_, _, buf)) =
+                                                        this.drawer_rename.as_mut()
+                                                    {
+                                                        buf.pop();
+                                                        cx.notify();
+                                                    }
+                                                }
+                                                _ => {
+                                                    if let Some(ref ch) = event.keystroke.key_char {
+                                                        if !mods.control && !mods.platform {
+                                                            if let Some((_, _, buf)) =
+                                                                this.drawer_rename.as_mut()
+                                                            {
+                                                                buf.push_str(ch);
+                                                                cx.notify();
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        },
+                                    ));
+                            }
+                            tab_el = tab_el.child(label);
+                        } else {
+                            tab_el = tab_el
+                                .child(
+                                    div()
+                                        .child(name)
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this: &mut Self, event: &MouseDownEvent, _window, cx| {
+                                                if event.click_count >= 2 {
+                                                    this.pending_action =
+                                                        Some(PendingAction::StartRenameDrawerTab(idx));
+                                                } else {
+                                                    this.pending_action =
+                                                        Some(PendingAction::SwitchDrawerTab(idx));
+                                                }
+                                                cx.notify();
+                                            }),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id(("drawer-tab-close", idx))
+                                        .px(px(4.0))
+                                        .rounded(px(3.0))
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(0x6c7086))
+                                        .hover(|s| {
+                                            s.bg(rgb(0x585b70))
+                                                .text_color(rgb(0xf38ba8))
+                                        })
+                                        .child("×")
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                                this.pending_action =
+                                                    Some(PendingAction::CloseDrawerTab(idx));
+                                                cx.notify();
+                                            }),
+                                        ),
+                                );
+                        }
+
+                        tab_strip = tab_strip.child(tab_el);
+                    }
+
+                    // New tab button
+                    tab_strip = tab_strip.child(
+                        div()
+                            .id("drawer-new-tab-btn")
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .rounded(px(4.0))
+                            .text_size(px(13.0))
+                            .text_color(rgb(0x6c7086))
+                            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .child("+")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this: &mut Self, _event, _window, cx| {
+                                    this.pending_action = Some(PendingAction::NewDrawerTab);
+                                    cx.notify();
+                                }),
+                            ),
+                    );
+
                     content_col = content_col.child(
                         div()
                             .w_full()
                             .flex_shrink_0()
-                            .px(px(12.0))
-                            .py(px(6.0))
+                            .px(px(8.0))
+                            .py(px(4.0))
                             .bg(rgb(0x181825))
                             .border_b_1()
                             .border_color(rgb(0x313244))
                             .flex()
                             .flex_row()
                             .items_center()
-                            .justify_between()
-                            .child(
-                                div()
-                                    .text_size(px(11.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .text_color(rgb(0xa6adc8))
-                                    .child("Terminal"),
-                            )
+                            .gap(px(8.0))
+                            .child(tab_strip)
                             .child(
                                 div()
                                     .id("drawer-close-btn")
@@ -3190,14 +3577,14 @@ impl Render for AppState {
                             ),
                     );
 
-                    // Drawer content
+                    // Drawer content — active tab's terminal view
                     let mut drawer_panel = div()
                         .w_full()
                         .h(px(drawer_h))
                         .flex_shrink_0()
                         .bg(rgb(0x1e1e2e));
 
-                    if let Some(dt) = self.active_session().and_then(|s| s.drawer_terminal.clone()) {
+                    if let Some(dt) = active_tab_view {
                         drawer_panel = drawer_panel.child(dt);
                     } else {
                         drawer_panel = drawer_panel.child(
