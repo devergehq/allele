@@ -209,28 +209,6 @@ pub fn delete_clone(clone_path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// List all workspace clones for a project
-pub fn list_clones(project_name: &str) -> anyhow::Result<Vec<PathBuf>> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
-
-    let project_dir = home.join(CLONE_BASE).join(project_name);
-
-    if !project_dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut clones = Vec::new();
-    for entry in fs::read_dir(project_dir)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            clones.push(entry.path());
-        }
-    }
-
-    Ok(clones)
-}
-
 /// Return the trash base directory, creating it if necessary.
 pub fn trash_base() -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir()

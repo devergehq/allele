@@ -65,8 +65,6 @@ enum PendingAction {
     ToggleRightSidebar,
     /// Source path missing — open folder picker so the user can relocate.
     RelocateProject(usize),
-    /// Canonical has uncommitted changes — confirm before creating a session.
-    ConfirmDirtySession(usize),
     /// Proceed with session creation despite dirty canonical.
     ProceedDirtySession(usize),
     /// Cancel dirty-state session creation.
@@ -129,10 +127,8 @@ struct AppState {
 }
 
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
-const SIDEBAR_DEFAULT_WIDTH: f32 = 240.0;
 const DRAWER_MIN_HEIGHT: f32 = 100.0;
 const RIGHT_SIDEBAR_MIN_WIDTH: f32 = 160.0;
-const RIGHT_SIDEBAR_DEFAULT_WIDTH: f32 = 300.0;
 
 impl AppState {
     /// Get the currently active session, if any.
@@ -2409,10 +2405,6 @@ impl Render for AppState {
                     })
                     .detach();
                 }
-                PendingAction::ConfirmDirtySession(project_idx) => {
-                    self.confirming_dirty_session = Some(project_idx);
-                    cx.notify();
-                }
                 PendingAction::ProceedDirtySession(project_idx) => {
                     // confirming_dirty_session stays Some so
                     // add_session_to_project skips the dirty check.
@@ -2661,7 +2653,7 @@ impl Render for AppState {
                 };
 
                 // Helper: a settings row with label + clickable value
-                let settings_row = |id: &str, label: &str, value: &str| -> AnyElement {
+                let settings_row = |_id: &str, label: &str, value: &str| -> AnyElement {
                     div()
                         .pl(px(24.0))
                         .pr(px(12.0))

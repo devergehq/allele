@@ -1,6 +1,6 @@
 use alacritty_terminal::event::{Event as AlacEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, Msg, Notifier};
-use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::{Config as TermConfig, Term};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
@@ -16,13 +16,6 @@ pub struct ShellCommand {
 }
 
 impl ShellCommand {
-    pub fn new(program: impl Into<String>) -> Self {
-        Self {
-            program: program.into(),
-            args: Vec::new(),
-        }
-    }
-
     pub fn with_args(program: impl Into<String>, args: Vec<String>) -> Self {
         Self {
             program: program.into(),
@@ -103,18 +96,11 @@ pub struct PtyTerminal {
     pub exited: bool,
     /// Set to true when Bell event is received, cleared by consumer.
     pub bell_pending: bool,
-    /// Alt screen state — true when terminal is in alternate screen buffer.
-    pub in_alt_screen: bool,
     /// Title set by terminal apps via OSC sequences.
     pub title: Option<String>,
 }
 
 impl PtyTerminal {
-    /// Create a terminal running the default shell
-    pub fn new(size: TermSize) -> anyhow::Result<Self> {
-        Self::spawn(size, None, None)
-    }
-
     /// Create a terminal running a specific command in a specific directory
     pub fn spawn(
         size: TermSize,
@@ -177,7 +163,6 @@ impl PtyTerminal {
             size,
             exited: false,
             bell_pending: false,
-            in_alt_screen: false,
             title: None,
         })
     }
@@ -215,11 +200,6 @@ impl PtyTerminal {
         self.size = new_size;
         let _ = self.pty_tx.0.send(Msg::Resize(new_size.into()));
         self.term.lock().resize(new_size);
-    }
-
-    /// Scroll the terminal display
-    pub fn scroll(&self, delta: i32) {
-        self.term.lock().scroll_display(Scroll::Delta(delta));
     }
 
     /// Drain pending events (call regularly to process PTY output)

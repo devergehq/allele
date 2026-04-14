@@ -135,7 +135,8 @@ pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
     }
 }
 
-/// Fetch the remote's default branch and rebase the current branch onto it.
+/// Fetch the remote's default branch (or `branch_override` if given) and
+/// rebase the current branch onto it.
 ///
 /// Steps:
 /// 1. Detect remote default branch (main/master) — or use `branch_override` if given
@@ -147,16 +148,6 @@ pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
 ///
 /// Returns `Ok(true)` if the rebase made changes, `Ok(false)` if already
 /// up to date (no rebase needed).
-pub fn fetch_and_rebase_onto_remote(
-    repo: &Path,
-    remote: &str,
-) -> anyhow::Result<bool> {
-    fetch_and_rebase_onto_remote_branch(repo, remote, None)
-}
-
-/// Like [`fetch_and_rebase_onto_remote`] but accepts an explicit branch name.
-/// When `branch_override` is `Some`, that branch is used instead of
-/// auto-detecting from `refs/remotes/<remote>/HEAD`.
 pub fn fetch_and_rebase_onto_remote_branch(
     repo: &Path,
     remote: &str,

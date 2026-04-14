@@ -50,6 +50,13 @@ core-text = "=21.0.0"  # Pin to avoid core-graphics version conflict with GPUI
 cocoa = "0.26"
 objc = "0.2"
 
+[lints.rust]
+# The `objc` 0.2 crate expands `#[cfg(feature = "cargo-clippy")]` inside its
+# `msg_send!` / `class!` macros. That feature name is a legacy nightly signal
+# that no longer exists, and cargo's check-cfg flags it. The crate is
+# unmaintained (no newer release fixes this), so teach check-cfg about it.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "83de8a25e0ef71a8d762a148459bc863adaeb7e3", package = "gpui", features = ["test-support"] }
 tempfile = "3"
