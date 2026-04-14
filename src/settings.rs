@@ -142,6 +142,15 @@ pub struct Settings {
     /// window.
     #[serde(default = "default_session_cleanup_paths")]
     pub session_cleanup_paths: Vec<String>,
+
+    // --- browser integration -------------------------------------------------
+    /// When true, Allele manages one tab in the user's running Google Chrome
+    /// per session. Session switches activate the matching tab; session
+    /// create/resume navigates the tab to the project's preview URL. Off by
+    /// default because it talks to the user's real Chrome via AppleScript
+    /// (Automation permission prompt on first use).
+    #[serde(default)]
+    pub browser_integration_enabled: bool,
 }
 
 fn default_sidebar_width() -> f32 { 240.0 }
@@ -196,6 +205,7 @@ impl Default for Settings {
             response_ready_sound_path: None,
             session_cleanup_paths: default_session_cleanup_paths(),
             external_editor_command: None,
+            browser_integration_enabled: false,
         }
     }
 }

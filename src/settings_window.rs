@@ -28,6 +28,7 @@ use crate::AppState;
 enum Section {
     Sessions,
     Editor,
+    Browser,
 }
 
 impl Section {
@@ -35,6 +36,7 @@ impl Section {
         match self {
             Section::Sessions => "Sessions",
             Section::Editor => "Editor",
+            Section::Browser => "Browser",
         }
     }
 }
@@ -56,6 +58,10 @@ pub struct SettingsWindowState {
     external_editor: String,
     /// Focus handle for the external-editor input.
     external_editor_focus: Option<FocusHandle>,
+    /// Whether Chrome browser integration is enabled. Mirrored from
+    /// `Settings::browser_integration_enabled`; pushed back via
+    /// `UpdateBrowserIntegration` on toggle.
+    browser_integration_enabled: bool,
 }
 
 impl SettingsWindowState {
@@ -63,6 +69,7 @@ impl SettingsWindowState {
         app: WeakEntity<AppState>,
         initial_paths: Vec<String>,
         initial_external_editor: String,
+        initial_browser_integration: bool,
     ) -> Self {
         Self {
             app,
@@ -72,6 +79,7 @@ impl SettingsWindowState {
             draft_focus: None,
             external_editor: initial_external_editor,
             external_editor_focus: None,
+            browser_integration_enabled: initial_browser_integration,
         }
     }
 
@@ -120,6 +128,17 @@ impl SettingsWindowState {
             })
             .ok();
     }
+
+    fn push_browser_integration(&self, cx: &mut Context<Self>) {
+        let value = self.browser_integration_enabled;
+        self.app
+            .update(cx, |state: &mut AppState, cx| {
+                state.pending_action =
+                    Some(crate::PendingAction::UpdateBrowserIntegration(value));
+                cx.notify();
+            })
+            .ok();
+    }
 }
 
 impl Render for SettingsWindowState {
@@ -136,7 +155,7 @@ impl Render for SettingsWindowState {
 }
 
 fn render_sidebar(selected: Section, cx: &mut Context<SettingsWindowState>) -> impl IntoElement {
-    let sections = [Section::Sessions, Section::Editor];
+    let sections = [Section::Sessions, Section::Editor, Section::Browser];
 
     let mut list = div()
         .flex()
@@ -190,7 +209,94 @@ fn render_pane(
     match this.selected {
         Section::Sessions => render_sessions_pane(this, cx).into_any_element(),
         Section::Editor => render_editor_pane(this, cx).into_any_element(),
+        Section::Browser => render_browser_pane(this, cx).into_any_element(),
     }
+}
+
+fn render_browser_pane(
+    this: &mut SettingsWindowState,
+    cx: &mut Context<SettingsWindowState>,
+) -> impl IntoElement {
+    let enabled = this.browser_integration_enabled;
+
+    let toggle = div()
+        .id("browser-toggle")
+        .cursor_pointer()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, _window, cx| {
+                this.browser_integration_enabled = !this.browser_integration_enabled;
+                this.push_browser_integration(cx);
+                cx.notify();
+            }),
+        )
+        .child(
+            // Small track + knob toggle, styled consistently with the rest
+            // of the dark theme. Coloured knob is on the right when enabled.
+            div()
+                .w(px(32.0))
+                .h(px(18.0))
+                .rounded(px(9.0))
+                .bg(if enabled { rgb(0x89b4fa) } else { rgb(0x45475a) })
+                .flex()
+                .items_center()
+                .justify_start()
+                .px(px(2.0))
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .rounded(px(7.0))
+                        .bg(rgb(0x1e1e2e))
+                        .ml(if enabled { px(14.0) } else { px(0.0) }),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(0xcdd6f4))
+                .child(if enabled {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }),
+        );
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .p(px(20.0))
+        .gap(px(12.0))
+        .child(
+            div()
+                .text_size(px(16.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0xcdd6f4))
+                .child("Browser"),
+        )
+        .child(
+            div()
+                .w_full()
+                .text_size(px(12.0))
+                .text_color(rgb(0xa6adc8))
+                .child(
+                    "Link each Allele session to a tab in your running \
+                     Google Chrome. Switching sessions activates the \
+                     matching tab; new sessions open a tab at the project's \
+                     allele.json preview URL. Uses AppleScript against your \
+                     real Chrome (first use prompts for Automation \
+                     permission). When disabled, preview URLs fall back to \
+                     your system default browser.",
+                ),
+        )
+        .child(toggle)
 }
 
 fn render_editor_pane(
@@ -454,6 +560,7 @@ pub fn open_settings_window(
     app: WeakEntity<AppState>,
     initial_paths: Vec<String>,
     initial_external_editor: String,
+    initial_browser_integration: bool,
 ) -> anyhow::Result<WindowHandle<SettingsWindowState>> {
     // Size tuned to the default content: 180px section list + a pane with
     // a short description and three default cleanup entries. Leaves enough
@@ -471,7 +578,12 @@ pub fn open_settings_window(
 
     cx.open_window(options, move |_window, cx| {
         cx.new(move |_cx| {
-            SettingsWindowState::new(app, initial_paths, initial_external_editor)
+            SettingsWindowState::new(
+                app,
+                initial_paths,
+                initial_external_editor,
+                initial_browser_integration,
+            )
         })
     })
 }

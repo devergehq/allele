@@ -1,3 +1,4 @@
+mod browser;
 mod terminal;
 mod sidebar;
 mod clone;
@@ -27,6 +28,7 @@ use std::path::PathBuf;
 enum MainTab {
     Claude,
     Editor,
+    Browser,
 }
 
 /// Check whether Claude Code has on-disk history for a given session ID.
@@ -106,9 +108,20 @@ enum PendingAction {
     /// Replace the external-editor command with a new value and persist.
     /// Emitted by the Settings window on every edit.
     UpdateExternalEditor(String),
+    /// Toggle Chrome browser integration on/off. When toggled off we clear
+    /// the current sync status so the Browser tab shows the disabled state.
+    UpdateBrowserIntegration(bool),
     /// Auto-resume a session after launch. Fires once from the first render
     /// tick so `resume_session` has a valid `window` / `cx`.
     ResumeSession { project_idx: usize, session_idx: usize },
+    /// Activate the Chrome tab linked to the currently-active session,
+    /// creating one if the session has no tab id yet or the stored id is
+    /// stale. Fired on session switch, session resume, and Browser-tab
+    /// click.
+    SyncBrowserToActiveSession,
+    /// Close the Chrome tab linked to the given session and clear its
+    /// stored tab id. User-initiated via the Browser tab's Close button.
+    CloseBrowserTabForSession { project_idx: usize, session_idx: usize },
 }
 
 /// Position of a session in the project tree.
@@ -172,6 +185,10 @@ struct AppState {
     /// Right-click context menu target for the Editor file tree.
     /// Stores (right-clicked path, window-space position of the click).
     editor_context_menu: Option<(PathBuf, Point<Pixels>)>,
+    /// Status text for the Browser tab panel (e.g. "Chrome is not
+    /// running", "Linked to tab #…"). Updated by SyncBrowserToActiveSession
+    /// and rendered by render_browser_placeholder.
+    browser_status: String,
 }
 
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
@@ -186,6 +203,18 @@ impl AppState {
             .get(cursor.project_idx)?
             .sessions
             .get(cursor.session_idx)
+    }
+
+    /// Should the Browser tab appear in the tab strip? Requires both the
+    /// feature flag to be on and the active session to have a preview URL
+    /// recorded (populated from `allele.json` by apply_project_config).
+    fn browser_tab_available(&self) -> bool {
+        if !self.user_settings.browser_integration_enabled {
+            return false;
+        }
+        self.active_session()
+            .and_then(|s| s.browser_last_url.as_ref())
+            .is_some()
     }
 
     /// Root directory for the Editor tab's file tree: the active session's
@@ -224,13 +253,20 @@ impl AppState {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        let previous = this.main_tab;
                         this.main_tab = tab;
+                        // Entering the Browser tab syncs Chrome to the
+                        // active session (activates its tab or creates one).
+                        if tab == MainTab::Browser && previous != MainTab::Browser {
+                            this.pending_action =
+                                Some(PendingAction::SyncBrowserToActiveSession);
+                        }
                         cx.notify();
                     }),
                 )
         };
 
-        div()
+        let mut strip = div()
             .w_full()
             .flex_shrink_0()
             .px(px(8.0))
@@ -243,7 +279,11 @@ impl AppState {
             .items_center()
             .gap(px(4.0))
             .child(tab("main-tab-claude", "Claude", MainTab::Claude))
-            .child(tab("main-tab-editor", "Editor", MainTab::Editor))
+            .child(tab("main-tab-editor", "Editor", MainTab::Editor));
+        if self.browser_tab_available() {
+            strip = strip.child(tab("main-tab-browser", "Browser", MainTab::Browser));
+        }
+        strip
     }
 
     /// Two-column Editor view: file tree on the left, file preview on the right.
@@ -344,6 +384,209 @@ impl AppState {
         }
 
         root
+    }
+
+    /// Compute the global-screen rect where Chrome should sit when the
+    /// Browser tab is active. Uses the Allele window's current bounds minus
+    /// the sidebar(s), tab strip, and drawer. Coords are top-left origin in
+    /// points, matching the macOS Accessibility API.
+    /// Status panel for the Browser tab. No Chrome process is embedded —
+    /// this panel only shows the current sync state (Chrome running?
+    /// session linked to a tab?) and exposes a Close button for the
+    /// current session's tab.
+    fn render_browser_placeholder(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.user_settings.browser_integration_enabled {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(8.0))
+                .bg(rgb(0x1e1e2e))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0xcdd6f4))
+                        .child("Chrome browser integration is disabled"),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x6c7086))
+                        .child(
+                            "Enable it in Allele → Settings → Browser to link \
+                             each session to a tab in your running Chrome.",
+                        ),
+                );
+        }
+        let active = self.active;
+        let chrome_up = browser::chrome_running();
+        let session_tab = self.active_session().and_then(|s| s.browser_tab_id);
+
+        let headline = if !chrome_up {
+            "Google Chrome is not running".to_string()
+        } else if let Some(id) = session_tab {
+            format!("Linked to Chrome tab #{id}")
+        } else if self.active_session().is_some() {
+            "No Chrome tab yet for this session".to_string()
+        } else {
+            "Open a session to use the Browser tab".to_string()
+        };
+
+        let mut root = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap(px(10.0))
+            .bg(rgb(0x1e1e2e));
+
+        root = root.child(
+            div()
+                .text_size(px(13.0))
+                .text_color(rgb(0xcdd6f4))
+                .child(headline),
+        );
+
+        if !self.browser_status.is_empty() {
+            root = root.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(0x6c7086))
+                    .child(self.browser_status.clone()),
+            );
+        }
+
+        if chrome_up && self.active_session().is_some() {
+            let mut buttons = div().flex().flex_row().gap(px(8.0));
+
+            buttons = buttons.child(
+                div()
+                    .id("browser-sync-btn")
+                    .cursor_pointer()
+                    .px(px(10.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .bg(rgb(0x89b4fa))
+                    .text_size(px(11.0))
+                    .text_color(rgb(0x1e1e2e))
+                    .hover(|s| s.bg(rgb(0x74c7ec)))
+                    .child("Open in Chrome")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut Self, _event, _window, cx| {
+                            this.pending_action =
+                                Some(PendingAction::SyncBrowserToActiveSession);
+                            cx.notify();
+                        }),
+                    ),
+            );
+
+            if let (Some(cur), Some(_)) = (active, session_tab) {
+                buttons = buttons.child(
+                    div()
+                        .id("browser-close-btn")
+                        .cursor_pointer()
+                        .px(px(10.0))
+                        .py(px(4.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(0x45475a))
+                        .text_size(px(11.0))
+                        .text_color(rgb(0xcdd6f4))
+                        .hover(|s| s.bg(rgb(0x585b70)))
+                        .child("Close Chrome tab")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                this.pending_action = Some(
+                                    PendingAction::CloseBrowserTabForSession {
+                                        project_idx: cur.project_idx,
+                                        session_idx: cur.session_idx,
+                                    },
+                                );
+                                cx.notify();
+                            }),
+                        ),
+                );
+            }
+
+            root = root.child(buttons);
+        }
+
+        root = root.child(
+            div()
+                .text_size(px(10.0))
+                .text_color(rgb(0x6c7086))
+                .child(
+                    "Allow Automation for Google Chrome in System Settings \
+                     → Privacy & Security → Automation if tab switching \
+                     fails silently.",
+                ),
+        );
+
+        root
+    }
+
+    /// Activate the active session's Chrome tab, creating one if the id
+    /// is unset or stale. Updates `browser_status` for UI feedback and
+    /// persists the resolved tab id.
+    fn sync_browser_to_active(&mut self) {
+        if !self.user_settings.browser_integration_enabled {
+            self.browser_status.clear();
+            return;
+        }
+        let Some(cursor) = self.active else {
+            self.browser_status.clear();
+            return;
+        };
+        if !browser::chrome_running() {
+            self.browser_status =
+                "Start Google Chrome and try again.".to_string();
+            return;
+        }
+
+        let stored = self
+            .projects
+            .get(cursor.project_idx)
+            .and_then(|p| p.sessions.get(cursor.session_idx))
+            .and_then(|s| s.browser_tab_id);
+        let fallback_url = self
+            .projects
+            .get(cursor.project_idx)
+            .and_then(|p| p.sessions.get(cursor.session_idx))
+            .and_then(|s| s.browser_last_url.clone())
+            .unwrap_or_else(|| "about:blank".to_string());
+
+        if let Some(id) = stored {
+            if browser::activate_tab(id) {
+                self.browser_status = format!("Activated tab #{id}");
+                return;
+            }
+        }
+
+        match browser::create_tab(&fallback_url) {
+            Some(new_id) => {
+                if let Some(session) = self
+                    .projects
+                    .get_mut(cursor.project_idx)
+                    .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                {
+                    session.browser_tab_id = Some(new_id);
+                    if session.browser_last_url.is_none() {
+                        session.browser_last_url = Some(fallback_url);
+                    }
+                }
+                self.browser_status = format!("Created tab #{new_id}");
+                self.save_state();
+            }
+            None => {
+                self.browser_status = "Could not create Chrome tab (check \
+                    Automation permission)."
+                    .to_string();
+            }
+        }
     }
 
     /// Floating right-click menu for the file tree. Rendered via
@@ -1080,8 +1323,36 @@ impl AppState {
 
         if let Some(preview) = cfg.preview {
             let url = config::substitute(&preview.url, port, &clone_path);
-            if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
-                eprintln!("allele: failed to open preview URL {url}: {e}");
+            // Always record the preview URL on the session so the Browser
+            // tab visibility logic can key off it regardless of whether
+            // Chrome integration is on right now.
+            let tab_id = if let Some(session) = self
+                .projects
+                .get_mut(cursor.project_idx)
+                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+            {
+                session.browser_last_url = Some(url.clone());
+                session.browser_tab_id
+            } else {
+                None
+            };
+            if self.user_settings.browser_integration_enabled {
+                // Navigate an existing linked tab so allele.json edits pick
+                // up on resume; if this session is active, run a full sync
+                // so Chrome ends up on the right tab.
+                if let Some(id) = tab_id {
+                    let _ = browser::navigate_tab(id, &url);
+                }
+                if self.active == Some(cursor) {
+                    self.sync_browser_to_active();
+                }
+            } else {
+                // Integration off — fall back to the legacy "open in
+                // default browser" behaviour so the preview URL still
+                // lands somewhere useful.
+                if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
+                    eprintln!("allele: failed to open preview URL {url}: {e}");
+                }
             }
         }
     }
@@ -1602,6 +1873,8 @@ impl AppState {
         let clone_path = removed.clone_path.clone();
         let removed_label = removed.label.clone();
         let already_merged = removed.merged;
+        let removed_session_id = removed.id.clone();
+        let removed_browser_tab_id = removed.browser_tab_id;
         // Captured before drop(removed) / end of &mut project borrow.
         let canonical_for_task = project.source_path.clone();
         let session_id_for_task = removed.id.clone();
@@ -1627,6 +1900,15 @@ impl AppState {
         // Suspended sessions have `terminal_view = None` so there's no PTY
         // to kill; only the clone needs cleanup.
         drop(removed);
+
+        // Close the linked Chrome tab (best-effort; ignored if Chrome is
+        // not running or the tab id is stale). Only when integration is on.
+        if self.user_settings.browser_integration_enabled {
+            if let Some(id) = removed_browser_tab_id {
+                let _ = browser::close_tab(id);
+            }
+        }
+        let _ = removed_session_id; // reserved for future use
 
         // Show an "Archiving…" placeholder if there's a clone to clean up
         let placeholder_id = uuid::Uuid::new_v4().to_string();
@@ -1941,6 +2223,17 @@ fn main() {
         std::process::exit(1);
     }
 
+    // One-shot cleanup of `~/.allele/browsers/` — stale per-task Chrome
+    // user-data-dirs from an earlier embedding approach. Safe to delete;
+    // browser integration now lives entirely in AppleScript against the
+    // user's real Chrome.
+    if let Some(home) = dirs::home_dir() {
+        let stale = home.join(".allele").join("browsers");
+        if stale.exists() {
+            let _ = std::fs::remove_dir_all(&stale);
+        }
+    }
+
     let application = Application::new();
 
     // macOS: clicking the dock icon while the app is hidden (window was
@@ -2152,6 +2445,10 @@ fn main() {
                         .with_drawer_tabs(
                             persisted.drawer_tab_names.clone(),
                             persisted.drawer_active_tab,
+                        )
+                        .with_browser(
+                            persisted.browser_tab_id,
+                            persisted.browser_last_url.clone(),
                         );
                         project.sessions.push(session);
                     }
@@ -2259,7 +2556,7 @@ fn main() {
                             // "attempted to dereference an ArenaRef after
                             // its Arena was cleared".
                             let Some(strong) = handle.upgrade() else { return };
-                            let (existing, paths, external_editor) = strong.update(cx, |state: &mut AppState, _cx| {
+                            let (existing, paths, external_editor, browser_integration) = strong.update(cx, |state: &mut AppState, _cx| {
                                 (
                                     state.settings_window,
                                     state.user_settings.session_cleanup_paths.clone(),
@@ -2268,6 +2565,7 @@ fn main() {
                                         .external_editor_command
                                         .clone()
                                         .unwrap_or_default(),
+                                    state.user_settings.browser_integration_enabled,
                                 )
                             });
 
@@ -2283,7 +2581,7 @@ fn main() {
                             }
 
                             let weak = handle.clone();
-                            match settings_window::open_settings_window(cx, weak, paths, external_editor) {
+                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration) {
                                 Ok(new_handle) => {
                                     strong
                                         .update(cx, |state: &mut AppState, _cx| {
@@ -2373,6 +2671,7 @@ fn main() {
                         editor_expanded_dirs: HashSet::new(),
                         editor_preview: None,
                         editor_context_menu: None,
+                        browser_status: String::new(),
                     }
                 })
             },
@@ -2708,6 +3007,8 @@ impl Render for AppState {
                             }
                         }
                     }
+                    // Keep Chrome's active tab aligned with the active session.
+                    self.sync_browser_to_active();
                 }
                 PendingAction::ToggleDrawer => {
                     skip_refocus = true;
@@ -2921,6 +3222,49 @@ impl Render for AppState {
                 PendingAction::ResumeSession { project_idx, session_idx } => {
                     let cursor = SessionCursor { project_idx, session_idx };
                     self.resume_session(cursor, window, cx);
+                    self.sync_browser_to_active();
+                }
+                PendingAction::SyncBrowserToActiveSession => {
+                    skip_refocus = true;
+                    self.sync_browser_to_active();
+                }
+                PendingAction::CloseBrowserTabForSession { project_idx, session_idx } => {
+                    skip_refocus = true;
+                    let cursor = SessionCursor { project_idx, session_idx };
+                    let tab_id = self
+                        .projects
+                        .get(cursor.project_idx)
+                        .and_then(|p| p.sessions.get(cursor.session_idx))
+                        .and_then(|s| s.browser_tab_id);
+                    if let Some(id) = tab_id {
+                        let _ = browser::close_tab(id);
+                    }
+                    if let Some(session) = self
+                        .projects
+                        .get_mut(cursor.project_idx)
+                        .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                    {
+                        session.browser_tab_id = None;
+                    }
+                    self.browser_status = "Chrome tab closed.".to_string();
+                    self.save_state();
+                }
+                PendingAction::UpdateBrowserIntegration(enabled) => {
+                    skip_refocus = true;
+                    self.user_settings.browser_integration_enabled = enabled;
+                    if !enabled {
+                        self.browser_status.clear();
+                    }
+                    let snapshot = Settings {
+                        projects: self.projects.iter().map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        }).collect(),
+                        ..self.user_settings.clone()
+                    };
+                    snapshot.save();
                 }
                 PendingAction::UpdateExternalEditor(cmd) => {
                     skip_refocus = true;
@@ -2954,6 +3298,14 @@ impl Render for AppState {
                     }
                 }
             }
+        }
+
+        // If the user is on the Browser tab but it's no longer eligible
+        // (flag turned off, switched to a session without a preview URL,
+        // or project config lost the preview entry), fall back to Claude
+        // so the main pane keeps showing something useful.
+        if self.main_tab == MainTab::Browser && !self.browser_tab_available() {
+            self.main_tab = MainTab::Claude;
         }
 
         // Update session statuses from PTY state.
@@ -3903,49 +4255,52 @@ impl Render for AppState {
                         .overflow_hidden()
                         .relative();
 
-                    let show_claude = self.main_tab == MainTab::Claude;
-
-                    if show_claude {
-                    if let Some(tv) = self.active_session().and_then(|s| s.terminal_view.clone()) {
-                        // Tell the main terminal how much space the drawer
-                        // reserves below it so the PTY resize is correct.
-                        let inset = if drawer_visible {
-                            // 6px resize handle + ~30px header + drawer panel
-                            6.0 + 30.0 + self.drawer_height
-                        } else {
-                            0.0
-                        };
-                        tv.update(cx, |tv, _cx| {
-                            tv.bottom_inset = inset;
-                        });
-                        main_area = main_area.child(tv);
-                    } else {
-                        // Empty-state placeholder
-                        main_area = main_area.child(
-                            div()
-                                .size_full()
-                                .flex()
-                                .flex_col()
-                                .items_center()
-                                .justify_center()
-                                .gap(px(16.0))
-                                .bg(rgb(0x1e1e2e))
-                                .child(
+                    match self.main_tab {
+                        MainTab::Claude => {
+                            if let Some(tv) = self.active_session().and_then(|s| s.terminal_view.clone()) {
+                                // Tell the main terminal how much space the drawer
+                                // reserves below it so the PTY resize is correct.
+                                let inset = if drawer_visible {
+                                    // 6px resize handle + ~30px header + drawer panel
+                                    6.0 + 30.0 + self.drawer_height
+                                } else {
+                                    0.0
+                                };
+                                tv.update(cx, |tv, _cx| {
+                                    tv.bottom_inset = inset;
+                                });
+                                main_area = main_area.child(tv);
+                            } else {
+                                main_area = main_area.child(
                                     div()
-                                        .text_size(px(16.0))
-                                        .text_color(rgb(0x6c7086))
-                                        .child("No active session"),
-                                )
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(rgb(0x45475a))
-                                        .child("Click + in the sidebar to open a project"),
-                                ),
-                        );
-                    }
-                    } else {
-                        main_area = main_area.child(self.render_editor_view(cx));
+                                        .size_full()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap(px(16.0))
+                                        .bg(rgb(0x1e1e2e))
+                                        .child(
+                                            div()
+                                                .text_size(px(16.0))
+                                                .text_color(rgb(0x6c7086))
+                                                .child("No active session"),
+                                        )
+                                        .child(
+                                            div()
+                                                .text_size(px(12.0))
+                                                .text_color(rgb(0x45475a))
+                                                .child("Click + in the sidebar to open a project"),
+                                        ),
+                                );
+                            }
+                        }
+                        MainTab::Editor => {
+                            main_area = main_area.child(self.render_editor_view(cx));
+                        }
+                        MainTab::Browser => {
+                            main_area = main_area.child(self.render_browser_placeholder(cx));
+                        }
                     }
 
                     if active_is_done {

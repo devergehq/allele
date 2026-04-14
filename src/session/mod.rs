@@ -100,6 +100,14 @@ pub struct Session {
     /// can't find history and exits immediately. Cleared once the deadline
     /// passes without an exit.
     pub resuming_until: Option<Instant>,
+    /// Integer id of the Chrome tab linked to this session. Assigned by
+    /// Chrome when we `make new tab…` via AppleScript. Stable within a
+    /// Chrome process; becomes stale on Chrome restart — reconciled by
+    /// recreating the tab on next sync.
+    pub browser_tab_id: Option<i64>,
+    /// Last URL we saw / set for the linked tab. Used when the stored tab
+    /// id is stale so we can recreate the tab at the same URL.
+    pub browser_last_url: Option<String>,
 }
 
 impl Session {
@@ -125,6 +133,8 @@ impl Session {
             auto_naming_fired: false,
             allocated_port: None,
             resuming_until: None,
+            browser_tab_id: None,
+            browser_last_url: None,
         }
     }
 
@@ -157,11 +167,25 @@ impl Session {
             auto_naming_fired: false,
             allocated_port: None,
             resuming_until: None,
+            browser_tab_id: None,
+            browser_last_url: None,
         }
     }
 
     pub fn with_clone(mut self, clone_path: PathBuf) -> Self {
         self.clone_path = Some(clone_path);
+        self
+    }
+
+    /// Attach persisted browser tab id and last URL during rehydration.
+    /// The tab id may be stale (Chrome restart); reconciled on first sync.
+    pub fn with_browser(
+        mut self,
+        tab_id: Option<i64>,
+        last_url: Option<String>,
+    ) -> Self {
+        self.browser_tab_id = tab_id;
+        self.browser_last_url = last_url;
         self
     }
 
