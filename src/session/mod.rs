@@ -45,6 +45,12 @@ impl SessionStatus {
     }
 }
 
+/// One named drawer terminal tab.
+pub struct DrawerTab {
+    pub view: Entity<TerminalView>,
+    pub name: String,
+}
+
 /// A single Claude Code session.
 ///
 /// `terminal_view` is `None` for sessions that were rehydrated from
@@ -64,9 +70,14 @@ pub struct Session {
     /// APFS clone path for this session. `None` means the session runs
     /// directly in the project source (fallback mode).
     pub clone_path: Option<PathBuf>,
-    /// Per-session drawer terminal (plain shell). Created lazily on first
-    /// toggle, persists across hide/show cycles.
-    pub drawer_terminal: Option<Entity<TerminalView>>,
+    /// Per-session drawer terminals (plain shell). Multiple named tabs.
+    /// Empty until the drawer is first toggled open.
+    pub drawer_tabs: Vec<DrawerTab>,
+    /// Index into `drawer_tabs` for the currently shown tab.
+    pub drawer_active_tab: usize,
+    /// Tab names to lazily spawn when the drawer is first opened — used
+    /// when the session is rehydrated from `state.json`. Consumed on open.
+    pub pending_drawer_tab_names: Vec<String>,
     /// Whether the bottom drawer is visible for this session. Per-session
     /// so switching sessions preserves each session's drawer state.
     pub drawer_visible: bool,
@@ -94,7 +105,9 @@ impl Session {
             started_at: now,
             last_active: now,
             clone_path: None,
-            drawer_terminal: None,
+            drawer_tabs: Vec::new(),
+            drawer_active_tab: 0,
+            pending_drawer_tab_names: Vec::new(),
             drawer_visible: false,
             merged: false,
             auto_naming_fired: false,
@@ -122,7 +135,9 @@ impl Session {
             started_at,
             last_active,
             clone_path,
-            drawer_terminal: None,
+            drawer_tabs: Vec::new(),
+            drawer_active_tab: 0,
+            pending_drawer_tab_names: Vec::new(),
             drawer_visible: false,
             merged,
             auto_naming_fired: false,
@@ -131,6 +146,16 @@ impl Session {
 
     pub fn with_clone(mut self, clone_path: PathBuf) -> Self {
         self.clone_path = Some(clone_path);
+        self
+    }
+
+    /// Attach pending drawer-tab names + active index restored from disk.
+    /// The tabs are spawned lazily when the drawer is first opened.
+    pub fn with_drawer_tabs(mut self, names: Vec<String>, active: usize) -> Self {
+        if !names.is_empty() {
+            self.drawer_active_tab = active.min(names.len().saturating_sub(1));
+            self.pending_drawer_tab_names = names;
+        }
         self
     }
 
