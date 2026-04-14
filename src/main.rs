@@ -1018,14 +1018,15 @@ impl AppState {
                 let clone_succeeded = clone_path != source_path;
 
                 // Purge stale runtime files (Overmind/Foreman sockets, server
-                // pid files, etc.) before any drawer tab spawns its command.
-                // Runs on the fallback path too — when clonefile failed we're
-                // operating directly in the canonical checkout, which may
-                // still have a leftover socket from a previous run.
-                clone::cleanup_stale_runtime(
-                    &clone_path,
-                    &this.user_settings.session_cleanup_paths,
-                );
+                // pid files, etc.) that the parent left in the working tree —
+                // clonefile(2) faithfully copied them. Must happen before any
+                // drawer tab spawns its command.
+                if clone_succeeded {
+                    clone::cleanup_stale_runtime(
+                        &clone_path,
+                        &this.user_settings.session_cleanup_paths,
+                    );
+                }
 
                 // Find the project again (indices may have shifted if user removed projects)
                 let Some(project) = this.projects.get_mut(project_idx) else {
@@ -1742,14 +1743,6 @@ impl AppState {
             );
             return;
         }
-
-        // Sweep stale runtime artefacts (Overmind/Foreman sockets, server pid
-        // files) left behind by the previous run of this session before any
-        // drawer tab respawns via apply_project_config below.
-        clone::cleanup_stale_runtime(
-            &clone_path,
-            &self.user_settings.session_cleanup_paths,
-        );
 
         let session_id = session.id.clone();
         let label = session.label.clone();
