@@ -1060,13 +1060,13 @@ impl AppState {
                         // is canonical itself (Phase C fallback when the
                         // clonefile syscall failed), skip the archive
                         // pipeline — no session branch exists, the fetch
-                        // would be a no-op self-fetch, and delete_clone
+                        // would be a no-op self-fetch, and trash_clone
                         // will bail on the workspace-dir safety check.
                         if clone_path == canonical_for_task {
                             return clone::delete_clone(&clone_path);
                         }
                         // Archive the session's work into canonical
-                        // before the clone dir is removed. Order is
+                        // before the clone is trashed. Order is
                         // load-bearing — archive_session must run while
                         // the clone still exists.
                         if let Err(e) = git::archive_session(
@@ -1078,7 +1078,7 @@ impl AppState {
                                 "archive_session failed for {session_id_for_task}: {e}"
                             );
                         }
-                        clone::delete_clone(&clone_path)
+                        clone::trash_clone(&clone_path).map(|_| ())
                     })
                     .await;
 
@@ -1139,14 +1139,16 @@ impl AppState {
         self.save_state();
         cx.notify();
 
-        // Spawn background cleanup for all clones
+        // Spawn background cleanup for all clones — trash (rename) instead
+        // of delete so this completes near-instantly. The trash purge at
+        // startup handles actual deletion asynchronously.
         if !clone_paths.is_empty() {
             cx.spawn(async move |_this, cx| {
                 cx.background_executor()
                     .spawn(async move {
                         for path in clone_paths {
-                            if let Err(e) = clone::delete_clone(&path) {
-                                eprintln!("Failed to delete clone at {}: {e}", path.display());
+                            if let Err(e) = clone::trash_clone(&path) {
+                                eprintln!("Failed to trash clone at {}: {e}", path.display());
                             }
                         }
                     })
@@ -1353,39 +1355,44 @@ fn main() {
             }
         };
 
-        // Conservative orphan sweep: move any on-disk clone not referenced by
-        // the loaded state into ~/.allele/trash/, then purge trash
-        // entries older than TRASH_TTL_DAYS. This runs before the window
-        // opens so the user never sees stale placeholders. The project
-        // sources map lets sweep_orphans archive orphan session work into
-        // canonical before trashing.
+        // Conservative orphan sweep + trash purge + archive ref pruning.
+        // Runs on a background thread so the UI opens immediately —
+        // these are pure filesystem/git operations with no UI interaction.
+        // Orphan clones aren't in persisted state so the sidebar is
+        // unaffected; the sweep just reclaims disk space.
         let referenced = state::referenced_clone_paths(&loaded_state);
         let project_sources: HashMap<String, PathBuf> = loaded_settings
             .projects
             .iter()
             .map(|p| (p.name.clone(), p.source_path.clone()))
             .collect();
-        match clone::sweep_orphans(&referenced, &project_sources) {
-            Ok(0) => {}
-            Ok(n) => eprintln!("Orphan sweep trashed {n} unreferenced clone(s)"),
-            Err(e) => eprintln!("Orphan sweep failed: {e}"),
-        }
-        match clone::purge_trash_older_than_days(clone::TRASH_TTL_DAYS) {
-            Ok(0) => {}
-            Ok(n) => eprintln!("Trash purge removed {n} expired entry/entries"),
-            Err(e) => eprintln!("Trash purge failed: {e}"),
-        }
-
-        // Prune archive refs older than the trash TTL so they don't
-        // accumulate indefinitely in canonical repos.
-        for p in &loaded_settings.projects {
-            if let Err(e) = git::prune_archive_refs(&p.source_path, clone::TRASH_TTL_DAYS) {
-                eprintln!(
-                    "prune_archive_refs failed for {}: {e}",
-                    p.source_path.display()
-                );
+        let project_paths_for_prune: Vec<PathBuf> = loaded_settings
+            .projects
+            .iter()
+            .map(|p| p.source_path.clone())
+            .collect();
+        std::thread::spawn(move || {
+            match clone::sweep_orphans(&referenced, &project_sources) {
+                Ok(0) => {}
+                Ok(n) => eprintln!("Orphan sweep trashed {n} unreferenced clone(s)"),
+                Err(e) => eprintln!("Orphan sweep failed: {e}"),
             }
-        }
+            match clone::purge_trash_older_than_days(clone::TRASH_TTL_DAYS) {
+                Ok(0) => {}
+                Ok(n) => eprintln!("Trash purge removed {n} expired entry/entries"),
+                Err(e) => eprintln!("Trash purge failed: {e}"),
+            }
+            // Prune archive refs older than the trash TTL so they don't
+            // accumulate indefinitely in canonical repos.
+            for source_path in &project_paths_for_prune {
+                if let Err(e) = git::prune_archive_refs(source_path, clone::TRASH_TTL_DAYS) {
+                    eprintln!(
+                        "prune_archive_refs failed for {}: {e}",
+                        source_path.display()
+                    );
+                }
+            }
+        });
 
         let claude_path = PtyTerminal::find_claude()
             .map(|p| p.to_string_lossy().to_string());
@@ -1855,9 +1862,10 @@ impl Render for AppState {
                                                 }
                                             }
 
-                                            // 5. Delete the APFS clone only on success
-                                            if let Err(e) = clone::delete_clone(&clone_path) {
-                                                eprintln!("Failed to delete clone after merge for {session_id}: {e}");
+                                            // 5. Trash the APFS clone (near-instant rename) on
+                                            //    success. Actual deletion deferred to startup purge.
+                                            if let Err(e) = clone::trash_clone(&clone_path) {
+                                                eprintln!("Failed to trash clone after merge for {session_id}: {e}");
                                             }
                                             Ok(())
                                         })
