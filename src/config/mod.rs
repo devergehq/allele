@@ -42,6 +42,15 @@ pub struct ProjectConfig {
     /// unknown ids fall back to the global default.
     #[serde(default)]
     pub agent: Option<String>,
+    /// One-shot command run before terminals/preview are spawned. Must
+    /// complete before the rest of the session materialises. Empty or
+    /// whitespace-only is treated as absent.
+    #[serde(default)]
+    pub startup: Option<String>,
+    /// One-shot command run when the session is discarded, before the
+    /// clone is archived/trashed. Empty or whitespace-only is absent.
+    #[serde(default)]
+    pub shutdown: Option<String>,
 }
 
 impl ProjectConfig {
@@ -172,6 +181,33 @@ mod tests {
             cfg.preview.as_ref().map(|p| p.url.as_str()),
             Some("http://127.0.0.1:{{unique_port}}")
         );
+    }
+
+    #[test]
+    fn load_parses_startup_and_shutdown() {
+        let tmp = std::env::temp_dir().join("allele-test-lifecycle");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("allele.json"),
+            r#"{
+                "startup": "bin/setup",
+                "shutdown": "docker compose down"
+            }"#,
+        )
+        .unwrap();
+        let cfg = ProjectConfig::load(&tmp).expect("should parse");
+        assert_eq!(cfg.startup.as_deref(), Some("bin/setup"));
+        assert_eq!(cfg.shutdown.as_deref(), Some("docker compose down"));
+    }
+
+    #[test]
+    fn load_without_lifecycle_fields_defaults_to_none() {
+        let tmp = std::env::temp_dir().join("allele-test-no-lifecycle");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("allele.json"), r#"{ "terminals": [] }"#).unwrap();
+        let cfg = ProjectConfig::load(&tmp).expect("should parse");
+        assert!(cfg.startup.is_none());
+        assert!(cfg.shutdown.is_none());
     }
 
     #[test]

@@ -23,7 +23,7 @@ use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
 use terminal::{clamp_font_size, ShellCommand, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Which view is shown in the main (center) column.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -1536,8 +1536,59 @@ impl AppState {
             session.allocated_port = port;
         }
 
+        let startup = cfg
+            .startup
+            .as_ref()
+            .map(|s| config::substitute(s, port, &clone_path))
+            .filter(|s| !s.trim().is_empty());
+
+        if let Some(startup_cmd) = startup {
+            let clone_for_task = clone_path.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let status = cx
+                    .background_executor()
+                    .spawn(async move {
+                        std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&startup_cmd)
+                            .current_dir(&clone_for_task)
+                            .status()
+                    })
+                    .await;
+                match status {
+                    Ok(s) if !s.success() => {
+                        eprintln!("allele: startup command exited with {s} — continuing");
+                    }
+                    Err(e) => {
+                        eprintln!("allele: failed to run startup command: {e} — continuing");
+                    }
+                    _ => {}
+                }
+                let _ = this.update_in(cx, move |this: &mut Self, window, cx| {
+                    this.spawn_terminals_and_preview(cursor, &cfg, port, &clone_path, window, cx);
+                });
+            })
+            .detach();
+        } else {
+            self.spawn_terminals_and_preview(cursor, &cfg, port, &clone_path, window, cx);
+        }
+    }
+
+    /// Spawn the drawer terminals and open the preview URL for a session
+    /// whose `allele.json` has already been loaded. Split out of
+    /// `apply_project_config` so it can be deferred until after an
+    /// optional `startup` command has finished running.
+    fn spawn_terminals_and_preview(
+        &mut self,
+        cursor: SessionCursor,
+        cfg: &config::ProjectConfig,
+        port: Option<u16>,
+        clone_path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         for term in &cfg.terminals {
-            let substituted = config::substitute(&term.command, port, &clone_path);
+            let substituted = config::substitute(&term.command, port, clone_path);
             // Always spawn an interactive shell (inherit default — None).
             // If a startup command was declared, push it into the PTY's
             // stdin buffer so the freshly-loaded shell reads and executes
@@ -1571,8 +1622,8 @@ impl AppState {
             }
         }
 
-        if let Some(preview) = cfg.preview {
-            let url = config::substitute(&preview.url, port, &clone_path);
+        if let Some(preview) = &cfg.preview {
+            let url = config::substitute(&preview.url, port, clone_path);
             // Always record the preview URL on the session so the Browser
             // tab visibility logic can key off it regardless of whether
             // Chrome integration is on right now.
@@ -2194,6 +2245,38 @@ impl AppState {
                     view.on_close(move || { let _ = browser::close_tab(id); });
                 }),
                 None => { let _ = browser::close_tab(id); }
+            }
+        }
+
+        // Run the project-declared shutdown command (if any) before we
+        // drop the PTY and archive/trash the clone. Runs in-line — the
+        // Discard action is already destructive and user-confirmed, and
+        // the archive pipeline below is async, so a brief block here is
+        // acceptable. Failure is logged and teardown continues so a
+        // broken hook can't strand the clone on disk.
+        if let Some(clone_path) = clone_path.as_ref() {
+            if let Some(cfg) = config::ProjectConfig::load(clone_path) {
+                let shutdown = cfg
+                    .shutdown
+                    .as_ref()
+                    .map(|s| config::substitute(s, removed.allocated_port, clone_path))
+                    .filter(|s| !s.trim().is_empty());
+                if let Some(cmd) = shutdown {
+                    match std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&cmd)
+                        .current_dir(clone_path)
+                        .status()
+                    {
+                        Ok(s) if !s.success() => {
+                            eprintln!("allele: shutdown command exited with {s} — continuing");
+                        }
+                        Err(e) => {
+                            eprintln!("allele: failed to run shutdown command: {e} — continuing");
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
 

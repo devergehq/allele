@@ -103,7 +103,9 @@ Example:
   ],
   "preview": {
     "url": "http://127.0.0.1:{{unique_port}}"
-  }
+  },
+  "startup": "bin/setup",
+  "shutdown": "docker compose down"
 }
 ```
 
@@ -117,6 +119,16 @@ Example:
     at an empty prompt.
 - `preview.url` — optional. Opened in the system browser once per
   materialisation (creation and resume).
+- `startup` — optional. One-shot shell command run via `sh -c` in the
+  session's clone before any terminal or preview is spawned. Terminals
+  and preview wait for it to exit — use this for `bin/setup`, dependency
+  installs, or booting a background daemon the preview URL depends on.
+  Make it idempotent: it re-runs on every cold-resume. On non-zero exit
+  a warning is logged and the session continues.
+- `shutdown` — optional. One-shot shell command run via `sh -c` in the
+  clone when the session is **discarded** (not on plain close/suspend,
+  which keep the clone). Runs before the clone is archived and trashed,
+  so `{{folder}}` still exists. Same failure policy as `startup`.
 
 **Placeholders**
 
