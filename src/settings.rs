@@ -125,6 +125,14 @@ pub struct Settings {
     #[serde(default)]
     pub response_ready_sound_path: Option<String>,
 
+    // --- editor --------------------------------------------------------------
+    /// Command used for the Editor tab's "Open in External Editor" context
+    /// menu. `None` falls back to `DEFAULT_EXTERNAL_EDITOR` (Sublime Text's
+    /// `subl` CLI). The command is invoked as `<cmd> <path>` via the shell's
+    /// PATH — either a bare binary name on PATH or a full executable path.
+    #[serde(default)]
+    pub external_editor_command: Option<String>,
+
     // --- session cleanup -----------------------------------------------------
     /// Paths (relative to the session clone root) to delete immediately after
     /// a clone is created. Catches stale runtime artifacts the parent left in
@@ -162,6 +170,10 @@ pub const DEFAULT_AWAITING_INPUT_SOUND: &str = "/System/Library/Sounds/Hero.aiff
 /// a custom path in settings.json.
 pub const DEFAULT_RESPONSE_READY_SOUND: &str = "/System/Library/Sounds/Glass.aiff";
 
+/// Default CLI used by "Open in External Editor". Sublime Text ships `subl`
+/// on PATH when the user has installed the CLI helper.
+pub const DEFAULT_EXTERNAL_EDITOR: &str = "subl";
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -183,6 +195,7 @@ impl Default for Settings {
             awaiting_input_sound_path: None,
             response_ready_sound_path: None,
             session_cleanup_paths: default_session_cleanup_paths(),
+            external_editor_command: None,
         }
     }
 }

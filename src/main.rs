@@ -19,8 +19,15 @@ use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
 use terminal::{ShellCommand, TerminalEvent, TerminalView};
 use terminal::pty_terminal::PtyTerminal;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+
+/// Which view is shown in the main (center) column.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MainTab {
+    Claude,
+    Editor,
+}
 
 #[derive(Debug)]
 enum PendingAction {
@@ -72,6 +79,9 @@ enum PendingAction {
     /// Replace the session-cleanup-paths list with a new value and persist.
     /// Emitted by the Settings window on every edit.
     UpdateCleanupPaths(Vec<String>),
+    /// Replace the external-editor command with a new value and persist.
+    /// Emitted by the Settings window on every edit.
+    UpdateExternalEditor(String),
 }
 
 /// Position of a session in the project tree.
@@ -124,6 +134,17 @@ struct AppState {
     /// duplicates — when set, the action re-activates the existing window
     /// instead of opening a new one. Cleared when the window closes.
     settings_window: Option<WindowHandle<settings_window::SettingsWindowState>>,
+    /// Which view the center column is currently showing.
+    main_tab: MainTab,
+    /// File path currently selected in the Editor tab's file tree.
+    editor_selected_path: Option<PathBuf>,
+    /// Directories expanded in the Editor tab's file tree.
+    editor_expanded_dirs: HashSet<PathBuf>,
+    /// Cached (path, contents) of the currently previewed file.
+    editor_preview: Option<(PathBuf, String)>,
+    /// Right-click context menu target for the Editor file tree.
+    /// Stores (right-clicked path, window-space position of the click).
+    editor_context_menu: Option<(PathBuf, Point<Pixels>)>,
 }
 
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
@@ -138,6 +159,376 @@ impl AppState {
             .get(cursor.project_idx)?
             .sessions
             .get(cursor.session_idx)
+    }
+
+    /// Root directory for the Editor tab's file tree: the active session's
+    /// clone path if present, otherwise the project's source path.
+    fn editor_workspace_root(&self) -> Option<PathBuf> {
+        let cursor = self.active?;
+        let project = self.projects.get(cursor.project_idx)?;
+        let session = project.sessions.get(cursor.session_idx)?;
+        Some(
+            session
+                .clone_path
+                .clone()
+                .unwrap_or_else(|| project.source_path.clone()),
+        )
+    }
+
+    /// Tab strip above the main content column: Claude / Editor.
+    fn render_main_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let active = self.main_tab;
+
+        let tab = |id: &'static str, label: &'static str, tab: MainTab| {
+            let is_active = tab == active;
+            let bg = if is_active { 0x313244 } else { 0x1e1e2e };
+            let fg = if is_active { 0xcdd6f4 } else { 0xa6adc8 };
+            div()
+                .id(id)
+                .px(px(12.0))
+                .py(px(4.0))
+                .rounded(px(4.0))
+                .bg(rgb(bg))
+                .text_size(px(11.0))
+                .text_color(rgb(fg))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(0x45475a)))
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        this.main_tab = tab;
+                        cx.notify();
+                    }),
+                )
+        };
+
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .px(px(8.0))
+            .py(px(4.0))
+            .bg(rgb(0x181825))
+            .border_b_1()
+            .border_color(rgb(0x313244))
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .child(tab("main-tab-claude", "Claude", MainTab::Claude))
+            .child(tab("main-tab-editor", "Editor", MainTab::Editor))
+    }
+
+    /// Two-column Editor view: file tree on the left, file preview on the right.
+    fn render_editor_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let root = self.editor_workspace_root();
+
+        let tree_col = {
+            let mut col = div()
+                .id("editor-tree-scroll")
+                .w(px(240.0))
+                .flex_shrink_0()
+                .h_full()
+                .overflow_y_scroll()
+                .bg(rgb(0x181825))
+                .border_r_1()
+                .border_color(rgb(0x313244))
+                .py(px(6.0))
+                .text_size(px(12.0))
+                .text_color(rgb(0xcdd6f4));
+
+            if let Some(root_path) = root.clone() {
+                let mut rows: Vec<AnyElement> = Vec::new();
+                let mut counter: usize = 0;
+                self.collect_tree_rows(&root_path, 0, &mut rows, &mut counter, cx);
+                if rows.is_empty() {
+                    col = col.child(
+                        div()
+                            .px(px(10.0))
+                            .py(px(6.0))
+                            .text_color(rgb(0x6c7086))
+                            .child("(empty workspace)"),
+                    );
+                } else {
+                    for row in rows {
+                        col = col.child(row);
+                    }
+                }
+            } else {
+                col = col.child(
+                    div()
+                        .px(px(10.0))
+                        .py(px(6.0))
+                        .text_color(rgb(0x6c7086))
+                        .child("No active session"),
+                );
+            }
+
+            col
+        };
+
+        let preview_col = {
+            let mut col = div()
+                .id("editor-preview-scroll")
+                .flex_1()
+                .min_w(px(0.0))
+                .h_full()
+                .overflow_scroll()
+                .bg(rgb(0x1e1e2e))
+                .p(px(12.0))
+                .text_size(px(12.0))
+                .text_color(rgb(0xcdd6f4))
+                .font_family("monospace");
+
+            match (&self.editor_selected_path, &self.editor_preview) {
+                (Some(sel), Some((p, contents))) if p == sel => {
+                    col = col.child(
+                        div()
+                            .whitespace_normal()
+                            .child(contents.clone()),
+                    );
+                }
+                (Some(sel), _) => {
+                    col = col.child(format!("Loading {}…", sel.display()));
+                }
+                _ => {
+                    col = col
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(rgb(0x6c7086))
+                        .child("Select a file to preview");
+                }
+            }
+
+            col
+        };
+
+        let mut root = div()
+            .size_full()
+            .flex()
+            .flex_row()
+            .bg(rgb(0x1e1e2e))
+            .child(tree_col)
+            .child(preview_col);
+
+        if self.editor_context_menu.is_some() {
+            root = root.child(self.render_editor_context_menu(cx));
+        }
+
+        root
+    }
+
+    /// Floating right-click menu for the file tree. Rendered via
+    /// `deferred` so it paints on top of sibling content, and positioned
+    /// in window coordinates at the click site.
+    fn render_editor_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (path, position) = self.editor_context_menu.clone().unwrap();
+
+        let item = |id: &'static str, label: &'static str, path: PathBuf, reveal: bool| {
+            div()
+                .id(id)
+                .px(px(14.0))
+                .py(px(6.0))
+                .text_size(px(12.0))
+                .text_color(rgb(0xcdd6f4))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(0x45475a)))
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        if reveal {
+                            Self::reveal_in_finder(&path);
+                        } else {
+                            this.open_in_external_editor(&path);
+                        }
+                        this.editor_context_menu = None;
+                        cx.notify();
+                    }),
+                )
+        };
+
+        let menu = div()
+            .flex()
+            .flex_col()
+            .min_w(px(220.0))
+            .py(px(4.0))
+            .bg(rgb(0x181825))
+            .border_1()
+            .border_color(rgb(0x45475a))
+            .rounded(px(6.0))
+            .shadow_md()
+            .child(item(
+                "editor-ctx-reveal",
+                "Reveal in Finder",
+                path.clone(),
+                true,
+            ))
+            .child(item(
+                "editor-ctx-open-external",
+                "Open in External Editor",
+                path,
+                false,
+            ));
+
+        deferred(anchored().position(position).snap_to_window().child(menu))
+    }
+
+    /// Recursively build file-tree rows starting at `dir`.
+    /// Directories render as "▸"/"▾" rows; files as plain rows.
+    fn collect_tree_rows(
+        &self,
+        dir: &std::path::Path,
+        depth: usize,
+        out: &mut Vec<AnyElement>,
+        counter: &mut usize,
+        cx: &mut Context<Self>,
+    ) {
+        let read = match std::fs::read_dir(dir) {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let mut entries: Vec<(PathBuf, bool, String)> = read
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') {
+                    return None;
+                }
+                let is_dir = e.file_type().ok()?.is_dir();
+                Some((e.path(), is_dir, name))
+            })
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
+
+        let indent = px((depth * 12) as f32 + 8.0);
+
+        for (path, is_dir, name) in entries {
+            let is_expanded = self.editor_expanded_dirs.contains(&path);
+            let is_selected = self.editor_selected_path.as_ref() == Some(&path);
+
+            let label = if is_dir {
+                let glyph = if is_expanded { "▾" } else { "▸" };
+                format!("{glyph} {name}")
+            } else {
+                format!("  {name}")
+            };
+
+            let row_bg = if is_selected { 0x313244 } else { 0x181825 };
+            let path_for_click = path.clone();
+
+            let row_id = *counter;
+            *counter += 1;
+            let path_for_right_click = path.clone();
+            let row = div()
+                .id(("editor-tree-row", row_id))
+                .flex()
+                .flex_row()
+                .items_center()
+                .pl(indent)
+                .pr(px(8.0))
+                .py(px(2.0))
+                .bg(rgb(row_bg))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(0x313244)))
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        let p = path_for_click.clone();
+                        if p.is_dir() {
+                            if this.editor_expanded_dirs.contains(&p) {
+                                this.editor_expanded_dirs.remove(&p);
+                            } else {
+                                this.editor_expanded_dirs.insert(p);
+                            }
+                        } else {
+                            this.editor_selected_path = Some(p.clone());
+                            this.load_preview(p);
+                        }
+                        this.editor_context_menu = None;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this: &mut Self, event: &MouseDownEvent, _window, cx| {
+                        this.editor_context_menu =
+                            Some((path_for_right_click.clone(), event.position));
+                        cx.notify();
+                    }),
+                )
+                .into_any_element();
+
+            out.push(row);
+
+            if is_dir && is_expanded {
+                self.collect_tree_rows(&path, depth + 1, out, counter, cx);
+            }
+        }
+    }
+
+    /// Reveal a path in macOS Finder. For files, Finder selects the file
+    /// inside its containing folder; for directories, it opens them.
+    fn reveal_in_finder(path: &std::path::Path) {
+        let _ = std::process::Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn();
+    }
+
+    /// Spawn the user-configured external editor with `path` as an argument.
+    /// Defaults to Sublime Text's `subl` CLI when no override is set.
+    fn open_in_external_editor(&self, path: &std::path::Path) {
+        let cmd = self
+            .user_settings
+            .external_editor_command
+            .as_deref()
+            .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
+        let trimmed = cmd.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        // Split on whitespace so users can set flags (e.g. `"code -g"`).
+        let mut parts = trimmed.split_whitespace();
+        let program = match parts.next() {
+            Some(p) => p,
+            None => return,
+        };
+        let mut command = std::process::Command::new(program);
+        for arg in parts {
+            command.arg(arg);
+        }
+        command.arg(path);
+        if let Err(e) = command.spawn() {
+            eprintln!(
+                "Failed to launch external editor '{}': {e}",
+                trimmed
+            );
+        }
+    }
+
+    /// Load a file into the preview cache. Skips binary files and anything
+    /// over 512 KB with a placeholder string.
+    fn load_preview(&mut self, path: PathBuf) {
+        const MAX: u64 = 512 * 1024;
+        let contents = match std::fs::metadata(&path) {
+            Ok(meta) if meta.len() > MAX => "File too large to preview".to_string(),
+            Ok(_) => match std::fs::read(&path) {
+                Ok(bytes) => {
+                    if bytes.contains(&0) {
+                        "Binary file".to_string()
+                    } else {
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    }
+                }
+                Err(e) => format!("Could not read file: {e}"),
+            },
+            Err(e) => format!("Could not stat file: {e}"),
+        };
+        self.editor_preview = Some((path, contents));
     }
 
     fn save_settings(&self) {
@@ -1821,10 +2212,15 @@ fn main() {
                             // "attempted to dereference an ArenaRef after
                             // its Arena was cleared".
                             let Some(strong) = handle.upgrade() else { return };
-                            let (existing, paths) = strong.update(cx, |state: &mut AppState, _cx| {
+                            let (existing, paths, external_editor) = strong.update(cx, |state: &mut AppState, _cx| {
                                 (
                                     state.settings_window,
                                     state.user_settings.session_cleanup_paths.clone(),
+                                    state
+                                        .user_settings
+                                        .external_editor_command
+                                        .clone()
+                                        .unwrap_or_default(),
                                 )
                             });
 
@@ -1840,7 +2236,7 @@ fn main() {
                             }
 
                             let weak = handle.clone();
-                            match settings_window::open_settings_window(cx, weak, paths) {
+                            match settings_window::open_settings_window(cx, weak, paths, external_editor) {
                                 Ok(new_handle) => {
                                     strong
                                         .update(cx, |state: &mut AppState, _cx| {
@@ -1887,6 +2283,11 @@ fn main() {
                         editing_project_settings: None,
                         user_settings: settings_for_window.clone(),
                         settings_window: None,
+                        main_tab: MainTab::Claude,
+                        editor_selected_path: None,
+                        editor_expanded_dirs: HashSet::new(),
+                        editor_preview: None,
+                        editor_context_menu: None,
                     }
                 })
             },
@@ -2421,6 +2822,25 @@ impl Render for AppState {
                     // projects/window-geometry fields — synthesise them
                     // from AppState before writing, mirroring the pattern
                     // used in observe_window_bounds.
+                    let snapshot = Settings {
+                        projects: self.projects.iter().map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        }).collect(),
+                        ..self.user_settings.clone()
+                    };
+                    snapshot.save();
+                }
+                PendingAction::UpdateExternalEditor(cmd) => {
+                    skip_refocus = true;
+                    let trimmed = cmd.trim();
+                    self.user_settings.external_editor_command = if trimmed.is_empty() {
+                        None
+                    } else {
+                        Some(trimmed.to_string())
+                    };
                     let snapshot = Settings {
                         projects: self.projects.iter().map(|p| ProjectSave {
                             id: p.id.clone(),
@@ -3344,6 +3764,9 @@ impl Render for AppState {
                     .flex()
                     .flex_col();
 
+                // --- Main-area tab strip: Claude / Editor ---
+                content_col = content_col.child(self.render_main_tab_strip(cx));
+
                 // --- Main terminal area (flex_1, takes remaining space) ---
                 {
                     let mut main_area = div()
@@ -3352,6 +3775,9 @@ impl Render for AppState {
                         .overflow_hidden()
                         .relative();
 
+                    let show_claude = self.main_tab == MainTab::Claude;
+
+                    if show_claude {
                     if let Some(tv) = self.active_session().and_then(|s| s.terminal_view.clone()) {
                         // Tell the main terminal how much space the drawer
                         // reserves below it so the PTY resize is correct.
@@ -3389,6 +3815,9 @@ impl Render for AppState {
                                         .child("Click + in the sidebar to open a project"),
                                 ),
                         );
+                    }
+                    } else {
+                        main_area = main_area.child(self.render_editor_view(cx));
                     }
 
                     if active_is_done {

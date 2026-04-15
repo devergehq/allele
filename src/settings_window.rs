@@ -27,12 +27,14 @@ use crate::AppState;
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     Sessions,
+    Editor,
 }
 
 impl Section {
     fn label(self) -> &'static str {
         match self {
             Section::Sessions => "Sessions",
+            Section::Editor => "Editor",
         }
     }
 }
@@ -50,16 +52,26 @@ pub struct SettingsWindowState {
     draft: String,
     /// Focus handle for the draft input. Created lazily on first render.
     draft_focus: Option<FocusHandle>,
+    /// Live text buffer for the external-editor command input.
+    external_editor: String,
+    /// Focus handle for the external-editor input.
+    external_editor_focus: Option<FocusHandle>,
 }
 
 impl SettingsWindowState {
-    pub fn new(app: WeakEntity<AppState>, initial_paths: Vec<String>) -> Self {
+    pub fn new(
+        app: WeakEntity<AppState>,
+        initial_paths: Vec<String>,
+        initial_external_editor: String,
+    ) -> Self {
         Self {
             app,
             selected: Section::Sessions,
             cleanup_paths: initial_paths,
             draft: String::new(),
             draft_focus: None,
+            external_editor: initial_external_editor,
+            external_editor_focus: None,
         }
     }
 
@@ -97,6 +109,17 @@ impl SettingsWindowState {
             cx.notify();
         }
     }
+
+    fn push_external_editor(&self, cx: &mut Context<Self>) {
+        let value = self.external_editor.clone();
+        self.app
+            .update(cx, |state: &mut AppState, cx| {
+                state.pending_action =
+                    Some(crate::PendingAction::UpdateExternalEditor(value));
+                cx.notify();
+            })
+            .ok();
+    }
 }
 
 impl Render for SettingsWindowState {
@@ -112,8 +135,8 @@ impl Render for SettingsWindowState {
     }
 }
 
-fn render_sidebar(selected: Section, _cx: &mut Context<SettingsWindowState>) -> impl IntoElement {
-    let sections = [Section::Sessions];
+fn render_sidebar(selected: Section, cx: &mut Context<SettingsWindowState>) -> impl IntoElement {
+    let sections = [Section::Sessions, Section::Editor];
 
     let mut list = div()
         .flex()
@@ -127,10 +150,14 @@ fn render_sidebar(selected: Section, _cx: &mut Context<SettingsWindowState>) -> 
 
     for section in sections {
         let is_selected = section == selected;
+        let id: SharedString =
+            format!("settings-section-{}", section.label()).into();
         let row = div()
+            .id(id)
             .px(px(14.0))
             .py(px(6.0))
             .text_size(px(12.0))
+            .cursor_pointer()
             .text_color(if is_selected {
                 rgb(0xcdd6f4)
             } else {
@@ -141,7 +168,15 @@ fn render_sidebar(selected: Section, _cx: &mut Context<SettingsWindowState>) -> 
             } else {
                 rgb(0x181825)
             })
-            .child(section.label());
+            .hover(|s| s.bg(rgb(0x313244)))
+            .child(section.label())
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.selected = section;
+                    cx.notify();
+                }),
+            );
         list = list.child(row);
     }
 
@@ -154,7 +189,96 @@ fn render_pane(
 ) -> AnyElement {
     match this.selected {
         Section::Sessions => render_sessions_pane(this, cx).into_any_element(),
+        Section::Editor => render_editor_pane(this, cx).into_any_element(),
     }
+}
+
+fn render_editor_pane(
+    this: &mut SettingsWindowState,
+    cx: &mut Context<SettingsWindowState>,
+) -> impl IntoElement {
+    let focus = this
+        .external_editor_focus
+        .get_or_insert_with(|| cx.focus_handle())
+        .clone();
+
+    let display_is_placeholder = this.external_editor.is_empty();
+    let display = if display_is_placeholder {
+        crate::settings::DEFAULT_EXTERNAL_EDITOR.to_string()
+    } else {
+        this.external_editor.clone()
+    };
+
+    let input = div()
+        .w_full()
+        .track_focus(&focus)
+        .px(px(10.0))
+        .py(px(6.0))
+        .rounded(px(4.0))
+        .border_1()
+        .border_color(rgb(0x45475a))
+        .bg(rgb(0x11111b))
+        .text_size(px(12.0))
+        .text_color(if display_is_placeholder {
+            rgb(0x585b70)
+        } else {
+            rgb(0xcdd6f4)
+        })
+        .child(display)
+        .on_key_down(cx.listener(
+            move |this, event: &KeyDownEvent, _window, cx| {
+                let key = event.keystroke.key.as_str();
+                let mods = &event.keystroke.modifiers;
+                match key {
+                    "enter" => {
+                        this.push_external_editor(cx);
+                    }
+                    "backspace" => {
+                        this.external_editor.pop();
+                        this.push_external_editor(cx);
+                        cx.notify();
+                    }
+                    _ => {
+                        if let Some(ch) = event.keystroke.key_char.as_ref() {
+                            if !mods.control && !mods.platform {
+                                this.external_editor.push_str(ch);
+                                this.push_external_editor(cx);
+                                cx.notify();
+                            }
+                        }
+                    }
+                }
+            },
+        ));
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .p(px(20.0))
+        .gap(px(12.0))
+        .child(
+            div()
+                .text_size(px(16.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0xcdd6f4))
+                .child("Editor"),
+        )
+        .child(
+            div()
+                .w_full()
+                .text_size(px(12.0))
+                .text_color(rgb(0xa6adc8))
+                .child(
+                    "External editor command — used by \"Open in External Editor\" \
+                     in the file tree's right-click menu. Bare binary name (e.g. \
+                     `subl`, `code`, `mate`) if on PATH, or an absolute path. \
+                     Leave blank to use the default (Sublime Text's `subl`).",
+                ),
+        )
+        .child(input)
 }
 
 fn render_sessions_pane(
@@ -329,6 +453,7 @@ pub fn open_settings_window(
     cx: &mut App,
     app: WeakEntity<AppState>,
     initial_paths: Vec<String>,
+    initial_external_editor: String,
 ) -> anyhow::Result<WindowHandle<SettingsWindowState>> {
     // Size tuned to the default content: 180px section list + a pane with
     // a short description and three default cleanup entries. Leaves enough
@@ -345,6 +470,8 @@ pub fn open_settings_window(
     };
 
     cx.open_window(options, move |_window, cx| {
-        cx.new(move |_cx| SettingsWindowState::new(app, initial_paths))
+        cx.new(move |_cx| {
+            SettingsWindowState::new(app, initial_paths, initial_external_editor)
+        })
     })
 }
