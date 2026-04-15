@@ -148,6 +148,28 @@ pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
 ///
 /// Returns `Ok(true)` if the rebase made changes, `Ok(false)` if already
 /// up to date (no rebase needed).
+/// Run `git pull` in the given repo. Thin wrapper — whatever the user has
+/// configured for `pull.rebase`, merge strategy, and upstream tracking
+/// applies. Intended for the "pull source root before new session" toggle,
+/// where we want exactly what the user would get typing `git pull`
+/// themselves.
+pub fn pull(repo: &Path) -> anyhow::Result<()> {
+    if !is_git_repo(repo) {
+        anyhow::bail!("pull: not a git repo: {}", repo.display());
+    }
+    let mut cmd = git_cmd(Some(repo));
+    // No TTY is attached to this subprocess, so git's interactive
+    // username/password prompt would hang forever on stdin. Disable the
+    // prompt — credential helpers (osxkeychain, SSH agent) still work,
+    // but a missing credential surfaces as a fast error instead of a
+    // hang. GIT_SSH_COMMAND with BatchMode does the same for SSH.
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    cmd.arg("pull");
+    run_git(cmd, "pull")?;
+    Ok(())
+}
+
 pub fn fetch_and_rebase_onto_remote_branch(
     repo: &Path,
     remote: &str,

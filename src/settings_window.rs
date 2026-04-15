@@ -76,6 +76,11 @@ pub struct SettingsWindowState {
     /// Global terminal font size (points). Clamped 8–32. Mirrored from
     /// `Settings::font_size`; pushed back via `UpdateFontSize`.
     font_size: f32,
+    /// Whether to run `git pull` on each project's source root before
+    /// creating a new session clone. Mirrored from
+    /// `Settings::git_pull_before_new_session`; pushed back via
+    /// `UpdateGitPullBeforeNewSession`.
+    git_pull_before_new_session: bool,
 }
 
 impl SettingsWindowState {
@@ -88,6 +93,7 @@ impl SettingsWindowState {
         initial_agents: Vec<AgentConfig>,
         initial_default_agent: Option<String>,
         initial_font_size: f32,
+        initial_git_pull_before_new_session: bool,
     ) -> Self {
         let draft_input = cx.new(|cx| {
             TextInput::new(cx, "", "Add a path (e.g. tmp/pids/server.pid)")
@@ -130,6 +136,7 @@ impl SettingsWindowState {
             default_agent: initial_default_agent,
             agent_inputs: Vec::new(),
             font_size: crate::terminal::clamp_font_size(initial_font_size),
+            git_pull_before_new_session: initial_git_pull_before_new_session,
         };
         s.sync_agent_inputs(cx);
         s
@@ -210,6 +217,17 @@ impl SettingsWindowState {
         self.font_size = default;
         self.push_font_size(cx);
         cx.notify();
+    }
+
+    fn push_git_pull_before_new_session(&self, cx: &mut Context<Self>) {
+        let value = self.git_pull_before_new_session;
+        self.app
+            .update(cx, |state: &mut AppState, cx| {
+                state.pending_action =
+                    Some(crate::PendingAction::UpdateGitPullBeforeNewSession(value));
+                cx.notify();
+            })
+            .ok();
     }
 
     // --- browser -------------------------------------------------------
@@ -721,6 +739,50 @@ fn render_sessions_pane(
     }
 
     let input = input_frame(this.draft_input.clone());
+
+    let pull_enabled = this.git_pull_before_new_session;
+    let pull_toggle = div()
+        .id("git-pull-toggle")
+        .cursor_pointer()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, _window, cx| {
+                this.git_pull_before_new_session = !this.git_pull_before_new_session;
+                this.push_git_pull_before_new_session(cx);
+                cx.notify();
+            }),
+        )
+        .child(
+            div()
+                .w(px(32.0))
+                .h(px(18.0))
+                .rounded(px(9.0))
+                .bg(if pull_enabled { rgb(0x89b4fa) } else { rgb(0x45475a) })
+                .flex()
+                .items_center()
+                .justify_start()
+                .px(px(2.0))
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .rounded(px(7.0))
+                        .bg(rgb(0x1e1e2e))
+                        .ml(if pull_enabled { px(14.0) } else { px(0.0) }),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(0xcdd6f4))
+                .child("Run `git pull` on source before creating a new session"),
+        );
+
+
     let add_button = div()
         .id("cleanup-add")
         .cursor_pointer()
@@ -757,6 +819,7 @@ fn render_sessions_pane(
                 .text_color(rgb(0xcdd6f4))
                 .child("Sessions"),
         )
+        .child(pull_toggle)
         .child(
             div()
                 .w_full()
@@ -1093,6 +1156,7 @@ pub fn open_settings_window(
     initial_agents: Vec<AgentConfig>,
     initial_default_agent: Option<String>,
     initial_font_size: f32,
+    initial_git_pull_before_new_session: bool,
 ) -> anyhow::Result<WindowHandle<SettingsWindowState>> {
     let window_size = size(px(640.0), px(440.0));
     let options = WindowOptions {
@@ -1116,6 +1180,7 @@ pub fn open_settings_window(
                 initial_agents,
                 initial_default_agent,
                 initial_font_size,
+                initial_git_pull_before_new_session,
             )
         })
     })

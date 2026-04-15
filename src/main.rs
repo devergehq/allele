@@ -120,6 +120,9 @@ enum PendingAction {
         agents: Vec<settings::AgentConfig>,
         default_agent: Option<String>,
     },
+    /// Toggle "git pull on source root before creating a new session".
+    /// Emitted by the Settings window; persisted immediately.
+    UpdateGitPullBeforeNewSession(bool),
     /// Auto-resume a session after launch. Fires once from the first render
     /// tick so `resume_session` has a valid `window` / `cx`.
     ResumeSession { project_idx: usize, session_idx: usize },
@@ -1200,6 +1203,7 @@ impl AppState {
         // Spawn the clone on a background task, then finish on the main thread
         let source_for_task = source_path.clone();
         let project_name_for_task = project_name.clone();
+        let pull_before_clone = self.user_settings.git_pull_before_new_session;
         // Two copies: one moves into the background clonefile closure (where
         // it's used as the short-ID source), the other is captured by the
         // main-thread update_in closure to set Session.id.
@@ -1212,6 +1216,15 @@ impl AppState {
             let clone_result = cx
                 .background_executor()
                 .spawn(async move {
+                    if pull_before_clone {
+                        if let Err(e) = git::pull(&source_for_task) {
+                            eprintln!(
+                                "git pull on {} failed before new session: {e} \
+                                 (continuing with clone)",
+                                source_for_task.display()
+                            );
+                        }
+                    }
                     clone::create_session_clone(
                         &source_for_task,
                         &project_name_for_task,
@@ -2859,7 +2872,7 @@ fn main() {
                             // "attempted to dereference an ArenaRef after
                             // its Arena was cleared".
                             let Some(strong) = handle.upgrade() else { return };
-                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent, font_size) = strong.update(cx, |state: &mut AppState, _cx| {
+                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session) = strong.update(cx, |state: &mut AppState, _cx| {
                                 (
                                     state.settings_window,
                                     state.user_settings.session_cleanup_paths.clone(),
@@ -2872,6 +2885,7 @@ fn main() {
                                     state.user_settings.agents.clone(),
                                     state.user_settings.default_agent.clone(),
                                     state.user_settings.font_size,
+                                    state.user_settings.git_pull_before_new_session,
                                 )
                             });
 
@@ -2887,7 +2901,7 @@ fn main() {
                             }
 
                             let weak = handle.clone();
-                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent, font_size) {
+                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session) {
                                 Ok(new_handle) => {
                                     strong
                                         .update(cx, |state: &mut AppState, _cx| {
@@ -3583,6 +3597,20 @@ impl Render for AppState {
                     skip_refocus = true;
                     self.user_settings.agents = agents;
                     self.user_settings.default_agent = default_agent;
+                }
+                PendingAction::UpdateGitPullBeforeNewSession(enabled) => {
+                    skip_refocus = true;
+                    self.user_settings.git_pull_before_new_session = enabled;
+                    let snapshot = Settings {
+                        projects: self.projects.iter().map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        }).collect(),
+                        ..self.user_settings.clone()
+                    };
+                    snapshot.save();
                 }
                 PendingAction::UpdateFontSize(size) => {
                     skip_refocus = true;

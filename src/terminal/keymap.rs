@@ -172,6 +172,12 @@ impl KeymapConfig {
             return Some(b"\n".to_vec());
         }
 
+        // Shift+Tab → CSI Z (back-tab). xterm-standard sequence that TUIs
+        // like Claude Code rely on for reverse-tab navigation.
+        if mods.shift && key == "tab" {
+            return Some(b"\x1b[Z".to_vec());
+        }
+
         // 1. Control key — algorithmic: letter → control byte
         if mods.control {
             if let Some(byte) = control_byte(key) {

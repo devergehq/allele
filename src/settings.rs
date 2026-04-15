@@ -201,6 +201,12 @@ pub struct Settings {
     /// per project via its `"agent"` field.
     #[serde(default)]
     pub default_agent: Option<String>,
+
+    /// When true, run `git pull` on each project's source root before
+    /// creating a new session clone. Failures are logged but do not abort
+    /// the session — the clone proceeds against whatever is on disk.
+    #[serde(default)]
+    pub git_pull_before_new_session: bool,
 }
 
 fn default_sidebar_width() -> f32 { 240.0 }
@@ -258,6 +264,7 @@ impl Default for Settings {
             browser_integration_enabled: false,
             agents: Vec::new(),
             default_agent: None,
+            git_pull_before_new_session: false,
         }
     }
 }
