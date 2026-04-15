@@ -6,6 +6,7 @@ mod config;
 mod git;
 mod hooks;
 mod project;
+mod scratch_pad;
 mod session;
 mod settings;
 mod settings_window;
@@ -14,7 +15,7 @@ mod trust;
 
 use gpui::*;
 use project::Project;
-actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings]);
+actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction]);
 use session::{DrawerTab, Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
@@ -122,6 +123,8 @@ enum PendingAction {
     /// Close the Chrome tab linked to the given session and clear its
     /// stored tab id. User-initiated via the Browser tab's Close button.
     CloseBrowserTabForSession { project_idx: usize, session_idx: usize },
+    /// Open (or re-focus) the scratch pad compose overlay.
+    OpenScratchPad,
 }
 
 /// Position of a session in the project tree.
@@ -189,6 +192,8 @@ struct AppState {
     /// running", "Linked to tab #…"). Updated by SyncBrowserToActiveSession
     /// and rendered by render_browser_placeholder.
     browser_status: String,
+    /// Scratch pad compose overlay. `Some` while the overlay is visible.
+    scratch_pad: Option<Entity<scratch_pad::ScratchPad>>,
 }
 
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
@@ -203,6 +208,87 @@ impl AppState {
             .get(cursor.project_idx)?
             .sessions
             .get(cursor.session_idx)
+    }
+
+    /// Open the scratch pad compose overlay, or re-focus it if already open.
+    fn open_scratch_pad(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.scratch_pad.is_none() {
+            let entity = cx.new(|cx| scratch_pad::ScratchPad::new(cx));
+            cx.subscribe(
+                &entity,
+                |this: &mut Self, _pad, event: &scratch_pad::ScratchPadEvent, cx| {
+                    match event {
+                        scratch_pad::ScratchPadEvent::Send { text, attachments } => {
+                            this.scratch_pad_send(text.clone(), attachments.clone(), cx);
+                            this.scratch_pad = None;
+                            this.pending_action = Some(PendingAction::FocusActive);
+                            cx.notify();
+                        }
+                        scratch_pad::ScratchPadEvent::Close => {
+                            this.scratch_pad = None;
+                            this.pending_action = Some(PendingAction::FocusActive);
+                            cx.notify();
+                        }
+                    }
+                },
+            )
+            .detach();
+            self.scratch_pad = Some(entity);
+        }
+        if let Some(pad) = self.scratch_pad.as_ref() {
+            let fh = pad.read(cx).focus_handle();
+            fh.focus(window, cx);
+        }
+        cx.notify();
+    }
+
+    /// Flush the composed scratch-pad payload to the active session's PTY.
+    /// Mirrors the bracketed-paste logic in `terminal_view.rs` so behaviour
+    /// is identical to a manual Cmd+V, then writes `\r` to submit.
+    fn scratch_pad_send(
+        &mut self,
+        text: String,
+        attachments: Vec<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session) = self.active_session() else { return; };
+        let Some(tv) = session.terminal_view.clone() else { return; };
+
+        // Prefix each attachment with `@` so Claude Code treats it as a file
+        // mention (reads the file) rather than literal text.
+        let mut payload = String::new();
+        for p in &attachments {
+            payload.push('@');
+            payload.push_str(&p.to_string_lossy());
+            payload.push('\n');
+        }
+        payload.push_str(&text);
+
+        // Claude Code's input editor has a paste-detection heuristic: when
+        // lots of bytes arrive back-to-back, the trailing `\r` gets absorbed
+        // into the paste as another newline instead of firing the submit.
+        // Wrap the payload in bracketed paste so CC knows where the paste
+        // ends, then dispatch the `\r` after a short gap so it's treated as
+        // a real Enter keystroke rather than pasted content.
+        if let Some(terminal) = tv.read(cx).pty() {
+            terminal.write(b"\x1b[200~");
+            terminal.write(payload.as_bytes());
+            terminal.write(b"\x1b[201~");
+        }
+        let tv_weak = tv.downgrade();
+        cx.spawn(async move |_this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(80))
+                .await;
+            let _ = cx.update(|cx| {
+                if let Some(tv) = tv_weak.upgrade() {
+                    if let Some(terminal) = tv.read(cx).pty() {
+                        terminal.write(b"\r");
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     /// Should the Browser tab appear in the tab strip? Requires both the
@@ -1112,6 +1198,10 @@ impl AppState {
                             this.pending_action = Some(PendingAction::ToggleRightSidebar);
                             cx.notify();
                         }
+                        TerminalEvent::OpenScratchPad => {
+                            this.pending_action = Some(PendingAction::OpenScratchPad);
+                            cx.notify();
+                        }
                     }
                 }).detach();
 
@@ -1839,6 +1929,10 @@ impl AppState {
                     this.pending_action = Some(PendingAction::ToggleRightSidebar);
                     cx.notify();
                 }
+                TerminalEvent::OpenScratchPad => {
+                    this.pending_action = Some(PendingAction::OpenScratchPad);
+                    cx.notify();
+                }
             }
         }).detach();
 
@@ -2147,6 +2241,7 @@ fn install_app_menu(cx: &mut App) {
         KeyBinding::new("cmd-b", ToggleSidebarAction, None),
         KeyBinding::new("cmd-j", ToggleDrawerAction, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
+        KeyBinding::new("cmd-k", OpenScratchPadAction, None),
     ]);
 
     cx.set_menus(vec![
@@ -2165,6 +2260,8 @@ fn install_app_menu(cx: &mut App) {
             items: vec![
                 MenuItem::action("Show/Hide Sidebar", ToggleSidebarAction),
                 MenuItem::action("Show/Hide Terminal", ToggleDrawerAction),
+                MenuItem::separator(),
+                MenuItem::action("Open Scratch Pad", OpenScratchPadAction),
             ],
         },
     ]);
@@ -2568,6 +2665,17 @@ fn main() {
                                 .ok();
                         }
                     });
+                    App::on_action::<OpenScratchPadAction>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            handle
+                                .update(cx, |this: &mut AppState, cx| {
+                                    this.pending_action = Some(PendingAction::OpenScratchPad);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    });
                     App::on_action::<OpenSettings>(cx, {
                         let handle = toggle_handle.clone();
                         move |_, cx| {
@@ -2694,6 +2802,7 @@ fn main() {
                         editor_preview: None,
                         editor_context_menu: None,
                         browser_status: String::new(),
+                        scratch_pad: None,
                     }
                 })
             },
@@ -3270,6 +3379,10 @@ impl Render for AppState {
                     }
                     self.browser_status = "Chrome tab closed.".to_string();
                     self.save_state();
+                }
+                PendingAction::OpenScratchPad => {
+                    skip_refocus = true;
+                    self.open_scratch_pad(window, cx);
                 }
                 PendingAction::UpdateBrowserIntegration(enabled) => {
                     skip_refocus = true;
@@ -4828,6 +4941,7 @@ impl Render for AppState {
         // Outer wrapper: non-flex, relative-positioned container hosting both
         // the flex row and the optional drag overlay as siblings.
         let mut outer = div()
+            .id("app-outer")
             .size_full()
             .relative()
             .child(flex_row);
@@ -4919,6 +5033,10 @@ impl Render for AppState {
                         cx.notify();
                     })),
             );
+        }
+
+        if let Some(pad) = self.scratch_pad.clone() {
+            outer = outer.child(pad);
         }
 
         outer
