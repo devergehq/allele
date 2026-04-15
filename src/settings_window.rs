@@ -29,6 +29,7 @@ enum Section {
     Agents,
     Editor,
     Browser,
+    Appearance,
 }
 
 impl Section {
@@ -38,6 +39,7 @@ impl Section {
             Section::Agents => "Agents",
             Section::Editor => "Editor",
             Section::Browser => "Browser",
+            Section::Appearance => "Appearance",
         }
     }
 }
@@ -71,6 +73,9 @@ pub struct SettingsWindowState {
     /// `sync_agent_inputs`. Indexed by agent id so reordering or
     /// removing entries doesn't churn focus state on unrelated rows.
     agent_inputs: Vec<AgentInputs>,
+    /// Global terminal font size (points). Clamped 8–32. Mirrored from
+    /// `Settings::font_size`; pushed back via `UpdateFontSize`.
+    font_size: f32,
 }
 
 impl SettingsWindowState {
@@ -82,6 +87,7 @@ impl SettingsWindowState {
         initial_browser_integration: bool,
         initial_agents: Vec<AgentConfig>,
         initial_default_agent: Option<String>,
+        initial_font_size: f32,
     ) -> Self {
         let draft_input = cx.new(|cx| {
             TextInput::new(cx, "", "Add a path (e.g. tmp/pids/server.pid)")
@@ -123,6 +129,7 @@ impl SettingsWindowState {
             agents: initial_agents,
             default_agent: initial_default_agent,
             agent_inputs: Vec::new(),
+            font_size: crate::terminal::clamp_font_size(initial_font_size),
         };
         s.sync_agent_inputs(cx);
         s
@@ -171,6 +178,38 @@ impl SettingsWindowState {
                 cx.notify();
             })
             .ok();
+    }
+
+    // --- font size ------------------------------------------------------
+
+    fn push_font_size(&self, cx: &mut Context<Self>) {
+        let value = self.font_size;
+        self.app
+            .update(cx, |state: &mut AppState, cx| {
+                state.pending_action = Some(crate::PendingAction::UpdateFontSize(value));
+                cx.notify();
+            })
+            .ok();
+    }
+
+    fn adjust_font_size(&mut self, delta: f32, cx: &mut Context<Self>) {
+        let new_size = crate::terminal::clamp_font_size(self.font_size + delta);
+        if (new_size - self.font_size).abs() < f32::EPSILON {
+            return;
+        }
+        self.font_size = new_size;
+        self.push_font_size(cx);
+        cx.notify();
+    }
+
+    fn reset_font_size(&mut self, cx: &mut Context<Self>) {
+        let default = crate::terminal::DEFAULT_FONT_SIZE;
+        if (default - self.font_size).abs() < f32::EPSILON {
+            return;
+        }
+        self.font_size = default;
+        self.push_font_size(cx);
+        cx.notify();
     }
 
     // --- browser -------------------------------------------------------
@@ -320,7 +359,13 @@ impl Render for SettingsWindowState {
 }
 
 fn render_sidebar(selected: Section, cx: &mut Context<SettingsWindowState>) -> impl IntoElement {
-    let sections = [Section::Sessions, Section::Agents, Section::Editor, Section::Browser];
+    let sections = [
+        Section::Sessions,
+        Section::Agents,
+        Section::Editor,
+        Section::Browser,
+        Section::Appearance,
+    ];
 
     let mut list = div()
         .flex()
@@ -367,6 +412,7 @@ fn render_pane(
         Section::Agents => render_agents_pane(this, cx).into_any_element(),
         Section::Editor => render_editor_pane(this, cx).into_any_element(),
         Section::Browser => render_browser_pane(this, cx).into_any_element(),
+        Section::Appearance => render_appearance_pane(this, cx).into_any_element(),
     }
 }
 
@@ -384,6 +430,132 @@ fn input_frame(child: Entity<TextInput>) -> Div {
         .text_color(rgb(0xcdd6f4))
         .overflow_hidden()
         .child(child)
+}
+
+fn render_appearance_pane(
+    this: &mut SettingsWindowState,
+    cx: &mut Context<SettingsWindowState>,
+) -> impl IntoElement {
+    let size = this.font_size;
+    let min = crate::terminal::MIN_FONT_SIZE;
+    let max = crate::terminal::MAX_FONT_SIZE;
+    let default = crate::terminal::DEFAULT_FONT_SIZE;
+    let at_min = size <= min + f32::EPSILON;
+    let at_max = size >= max - f32::EPSILON;
+    let at_default = (size - default).abs() < f32::EPSILON;
+
+    let stepper_button = |id: &'static str, label: &'static str, enabled: bool| {
+        let base = div()
+            .id(SharedString::from(id))
+            .w(px(28.0))
+            .h(px(24.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(rgb(0x45475a))
+            .bg(rgb(0x11111b))
+            .text_size(px(14.0))
+            .text_color(if enabled { rgb(0xcdd6f4) } else { rgb(0x585b70) })
+            .child(label);
+        if enabled {
+            base.cursor_pointer().hover(|s| s.bg(rgb(0x313244)))
+        } else {
+            base.hover(|s| s)
+        }
+    };
+
+    let minus = stepper_button("font-size-minus", "−", !at_min).on_mouse_down(
+        MouseButton::Left,
+        cx.listener(move |this, _event, _window, cx| {
+            cx.stop_propagation();
+            this.adjust_font_size(-1.0, cx);
+        }),
+    );
+
+    let plus = stepper_button("font-size-plus", "+", !at_max).on_mouse_down(
+        MouseButton::Left,
+        cx.listener(move |this, _event, _window, cx| {
+            cx.stop_propagation();
+            this.adjust_font_size(1.0, cx);
+        }),
+    );
+
+    let readout = div()
+        .w(px(56.0))
+        .h(px(24.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(4.0))
+        .bg(rgb(0x181825))
+        .text_size(px(12.0))
+        .text_color(rgb(0xcdd6f4))
+        .child(format!("{:.0} pt", size));
+
+    let reset = {
+        let base = div()
+            .id("font-size-reset")
+            .px(px(10.0))
+            .py(px(4.0))
+            .rounded(px(4.0))
+            .border_1()
+            .border_color(rgb(0x45475a))
+            .bg(rgb(0x11111b))
+            .text_size(px(11.0))
+            .text_color(if at_default { rgb(0x585b70) } else { rgb(0xcdd6f4) })
+            .child("Reset");
+        if at_default {
+            base
+        } else {
+            base.cursor_pointer().hover(|s| s.bg(rgb(0x313244))).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    cx.stop_propagation();
+                    this.reset_font_size(cx);
+                }),
+            )
+        }
+    };
+
+    let controls = div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(minus)
+        .child(readout)
+        .child(plus)
+        .child(reset);
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .p(px(20.0))
+        .gap(px(12.0))
+        .child(
+            div()
+                .text_size(px(16.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0xcdd6f4))
+                .child("Appearance"),
+        )
+        .child(
+            div()
+                .w_full()
+                .text_size(px(12.0))
+                .text_color(rgb(0xa6adc8))
+                .child(
+                    "Terminal font size — applies to every terminal (sessions \
+                     and drawer tabs) live. Cmd+= / Cmd+- / Cmd+0 change this \
+                     same value from inside a terminal.",
+                ),
+        )
+        .child(controls)
 }
 
 fn render_browser_pane(
@@ -920,6 +1092,7 @@ pub fn open_settings_window(
     initial_browser_integration: bool,
     initial_agents: Vec<AgentConfig>,
     initial_default_agent: Option<String>,
+    initial_font_size: f32,
 ) -> anyhow::Result<WindowHandle<SettingsWindowState>> {
     let window_size = size(px(640.0), px(440.0));
     let options = WindowOptions {
@@ -942,6 +1115,7 @@ pub fn open_settings_window(
                 initial_browser_integration,
                 initial_agents,
                 initial_default_agent,
+                initial_font_size,
             )
         })
     })

@@ -21,7 +21,7 @@ actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSett
 use session::{DrawerTab, Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
-use terminal::{ShellCommand, TerminalEvent, TerminalView};
+use terminal::{clamp_font_size, ShellCommand, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -133,6 +133,12 @@ enum PendingAction {
     CloseBrowserTabForSession { project_idx: usize, session_idx: usize },
     /// Open (or re-focus) the scratch pad compose overlay.
     OpenScratchPad,
+    /// Replace the global terminal font size and persist. Emitted by the
+    /// Settings window, by Cmd+=/Cmd+- (as a clamped new value), and by
+    /// Cmd+0 (reset to DEFAULT_FONT_SIZE). The handler clamps again,
+    /// writes `user_settings.font_size`, saves to disk, and broadcasts
+    /// the new value to every open `TerminalView`.
+    UpdateFontSize(f32),
 }
 
 /// Position of a session in the project tree.
@@ -1015,7 +1021,6 @@ impl AppState {
         let settings = Settings {
             sidebar_visible: self.sidebar_visible,
             sidebar_width: self.sidebar_width,
-            font_size: 13.0,
             window_x: None,
             window_y: None,
             window_width: None,
@@ -1265,8 +1270,9 @@ impl AppState {
                 }
 
                 // Create the terminal view with the clone as PWD
+                let initial_font_size = this.user_settings.font_size;
                 let terminal_view = cx.new(|cx| {
-                    TerminalView::new(window, cx, command, Some(clone_path.clone()))
+                    TerminalView::new(window, cx, command, Some(clone_path.clone()), initial_font_size)
                 });
 
                 // Subscribe to terminal events
@@ -1315,6 +1321,16 @@ impl AppState {
                         }
                         TerminalEvent::OpenScratchPad => {
                             this.pending_action = Some(PendingAction::OpenScratchPad);
+                            cx.notify();
+                        }
+                        TerminalEvent::AdjustFontSize(delta) => {
+                            let new_size = clamp_font_size(this.user_settings.font_size + delta);
+                            this.pending_action = Some(PendingAction::UpdateFontSize(new_size));
+                            cx.notify();
+                        }
+                        TerminalEvent::ResetFontSize => {
+                            this.pending_action =
+                                Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
                             cx.notify();
                         }
                     }
@@ -1395,16 +1411,31 @@ impl AppState {
             .get(cursor.project_idx)
             .and_then(|p| p.sessions.get(cursor.session_idx))
             .and_then(|s| s.clone_path.clone());
-        let drawer_tv = cx.new(|cx| TerminalView::new(window, cx, command, working_dir));
+        let initial_font_size = self.user_settings.font_size;
+        let drawer_tv =
+            cx.new(|cx| TerminalView::new(window, cx, command, working_dir, initial_font_size));
         cx.subscribe(
             &drawer_tv,
             |this: &mut Self,
              _tv: Entity<TerminalView>,
              event: &TerminalEvent,
              cx: &mut Context<Self>| {
-                if let TerminalEvent::ToggleDrawer = event {
-                    this.pending_action = Some(PendingAction::ToggleDrawer);
-                    cx.notify();
+                match event {
+                    TerminalEvent::ToggleDrawer => {
+                        this.pending_action = Some(PendingAction::ToggleDrawer);
+                        cx.notify();
+                    }
+                    TerminalEvent::AdjustFontSize(delta) => {
+                        let new_size = clamp_font_size(this.user_settings.font_size + delta);
+                        this.pending_action = Some(PendingAction::UpdateFontSize(new_size));
+                        cx.notify();
+                    }
+                    TerminalEvent::ResetFontSize => {
+                        this.pending_action =
+                            Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
+                        cx.notify();
+                    }
+                    _ => {}
                 }
             },
         )
@@ -1998,8 +2029,9 @@ impl AppState {
             .and_then(|a| agents::build_command(a, &ctx, true));
 
         // Build the new TerminalView on the main thread with window access.
+        let initial_font_size = self.user_settings.font_size;
         let terminal_view = cx.new(|cx| {
-            TerminalView::new(window, cx, command, Some(clone_path.clone()))
+            TerminalView::new(window, cx, command, Some(clone_path.clone()), initial_font_size)
         });
 
         // Subscribe to terminal events so the resumed session wires up the
@@ -2052,6 +2084,15 @@ impl AppState {
                 }
                 TerminalEvent::OpenScratchPad => {
                     this.pending_action = Some(PendingAction::OpenScratchPad);
+                    cx.notify();
+                }
+                TerminalEvent::AdjustFontSize(delta) => {
+                    let new_size = clamp_font_size(this.user_settings.font_size + delta);
+                    this.pending_action = Some(PendingAction::UpdateFontSize(new_size));
+                    cx.notify();
+                }
+                TerminalEvent::ResetFontSize => {
+                    this.pending_action = Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
                     cx.notify();
                 }
             }
@@ -2819,7 +2860,7 @@ fn main() {
                             // "attempted to dereference an ArenaRef after
                             // its Arena was cleared".
                             let Some(strong) = handle.upgrade() else { return };
-                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent) = strong.update(cx, |state: &mut AppState, _cx| {
+                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent, font_size) = strong.update(cx, |state: &mut AppState, _cx| {
                                 (
                                     state.settings_window,
                                     state.user_settings.session_cleanup_paths.clone(),
@@ -2831,6 +2872,7 @@ fn main() {
                                     state.user_settings.browser_integration_enabled,
                                     state.user_settings.agents.clone(),
                                     state.user_settings.default_agent.clone(),
+                                    state.user_settings.font_size,
                                 )
                             });
 
@@ -2846,7 +2888,7 @@ fn main() {
                             }
 
                             let weak = handle.clone();
-                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent) {
+                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent, font_size) {
                                 Ok(new_handle) => {
                                     strong
                                         .update(cx, |state: &mut AppState, _cx| {
@@ -3542,6 +3584,32 @@ impl Render for AppState {
                     skip_refocus = true;
                     self.user_settings.agents = agents;
                     self.user_settings.default_agent = default_agent;
+                }
+                PendingAction::UpdateFontSize(size) => {
+                    skip_refocus = true;
+                    let new_size = clamp_font_size(size);
+                    let changed = (self.user_settings.font_size - new_size).abs() > f32::EPSILON;
+                    self.user_settings.font_size = new_size;
+                    // Broadcast to every open terminal (per-session main view
+                    // and drawer tabs) so the change applies live. Collect
+                    // the handles first to avoid holding a borrow across the
+                    // per-view update calls.
+                    if changed {
+                        let mut views: Vec<Entity<TerminalView>> = Vec::new();
+                        for project in &self.projects {
+                            for session in &project.sessions {
+                                if let Some(tv) = session.terminal_view.as_ref() {
+                                    views.push(tv.clone());
+                                }
+                                for tab in &session.drawer_tabs {
+                                    views.push(tab.view.clone());
+                                }
+                            }
+                        }
+                        for view in views {
+                            view.update(cx, |tv, cx| tv.set_font_size(new_size, window, cx));
+                        }
+                    }
                     let snapshot = Settings {
                         projects: self.projects.iter().map(|p| ProjectSave {
                             id: p.id.clone(),

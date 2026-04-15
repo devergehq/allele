@@ -8,9 +8,14 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 const FONT_FAMILY: &str = "JetBrains Mono";
-const FONT_SIZE: f32 = 13.0;
-const MIN_FONT_SIZE: f32 = 8.0;
-const MAX_FONT_SIZE: f32 = 32.0;
+pub const DEFAULT_FONT_SIZE: f32 = 13.0;
+pub const MIN_FONT_SIZE: f32 = 8.0;
+pub const MAX_FONT_SIZE: f32 = 32.0;
+
+/// Clamp any f32 into the valid terminal font-size range.
+pub fn clamp_font_size(size: f32) -> f32 {
+    size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+}
 const MIN_COLS: u16 = 20;
 const MIN_ROWS: u16 = 4;
 /// Milliseconds the desired terminal size must be stable before we commit
@@ -36,6 +41,12 @@ pub enum TerminalEvent {
     ToggleRightSidebar,
     /// Open the scratch pad compose overlay (Cmd+K).
     OpenScratchPad,
+    /// User hit Cmd+= / Cmd+- — adjust the global default font size by `delta`
+    /// points. AppState clamps, persists, and broadcasts to every terminal.
+    AdjustFontSize(f32),
+    /// User hit Cmd+0 — reset the global default font size to the built-in
+    /// default. Handled by AppState the same way as AdjustFontSize.
+    ResetFontSize,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -111,8 +122,10 @@ impl TerminalView {
         cx: &mut Context<Self>,
         command: Option<ShellCommand>,
         working_dir: Option<PathBuf>,
+        initial_font_size: f32,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+        let font_size = clamp_font_size(initial_font_size);
 
         // Measure cell dimensions from the actual font via GPUI's text system.
         // This value is used both for PTY resize (column/row count) and for
@@ -125,7 +138,7 @@ impl TerminalView {
             fallbacks: None,
         };
         let (measured_w, measured_h) =
-            TerminalGridElement::measure_cell(window, &font, px(FONT_SIZE));
+            TerminalGridElement::measure_cell(window, &font, px(font_size));
         let cell_width = f32::from(measured_w);
         let cell_height = f32::from(measured_h);
 
@@ -139,7 +152,7 @@ impl TerminalView {
                     last_cols: 80,
                     last_rows: 24,
                     focus_handle,
-                    font_size: FONT_SIZE,
+                    font_size,
                     cell_width,
                     cell_height,
                     scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -307,7 +320,7 @@ impl TerminalView {
             last_cols: 80,
             last_rows: 24,
             focus_handle,
-            font_size: FONT_SIZE,
+            font_size,
             cell_width,
             cell_height,
             scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -336,6 +349,19 @@ impl TerminalView {
             current_fps: 0,
             keymap: KeymapConfig::default(),
         }
+    }
+
+    /// Apply a new font size coming from AppState (settings change or
+    /// broadcast after Cmd+=/Cmd+-). Clamps, remeasures, notifies. No-op
+    /// when the value matches the current size.
+    pub fn set_font_size(&mut self, size: f32, window: &mut Window, cx: &mut Context<Self>) {
+        let new_size = clamp_font_size(size);
+        if (new_size - self.font_size).abs() < f32::EPSILON {
+            return;
+        }
+        self.font_size = new_size;
+        self.remeasure_cells(window);
+        cx.notify();
     }
 
     /// Recompute cell dimensions from current font_size.
@@ -884,7 +910,7 @@ impl Render for TerminalView {
             .bg(bg_color)
             .overflow_hidden()
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, window, cx| {
+            .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
                 this.last_keypress = Instant::now();
                 this.cursor_visible = true;
 
@@ -999,29 +1025,9 @@ impl Render for TerminalView {
                                 cx.notify();
                             }
                         }
-                        AppAction::ZoomIn => {
-                            let new_size = (this.font_size + 1.0).min(MAX_FONT_SIZE);
-                            if new_size != this.font_size {
-                                this.font_size = new_size;
-                                this.remeasure_cells(window);
-                                cx.notify();
-                            }
-                        }
-                        AppAction::ZoomOut => {
-                            let new_size = (this.font_size - 1.0).max(MIN_FONT_SIZE);
-                            if new_size != this.font_size {
-                                this.font_size = new_size;
-                                this.remeasure_cells(window);
-                                cx.notify();
-                            }
-                        }
-                        AppAction::ZoomReset => {
-                            if this.font_size != FONT_SIZE {
-                                this.font_size = FONT_SIZE;
-                                this.remeasure_cells(window);
-                                cx.notify();
-                            }
-                        }
+                        AppAction::ZoomIn => cx.emit(TerminalEvent::AdjustFontSize(1.0)),
+                        AppAction::ZoomOut => cx.emit(TerminalEvent::AdjustFontSize(-1.0)),
+                        AppAction::ZoomReset => cx.emit(TerminalEvent::ResetFontSize),
                         AppAction::NewSession => cx.emit(TerminalEvent::NewSession),
                         AppAction::CloseSession => cx.emit(TerminalEvent::CloseSession),
                         AppAction::PrevSession => cx.emit(TerminalEvent::PrevSession),
