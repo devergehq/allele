@@ -48,6 +48,41 @@ impl ScratchEditor {
         self.lines.join("\n")
     }
 
+    /// Immutable view of the line buffer — used by the parent view to
+    /// render per-line click targets.
+    pub fn lines(&self) -> &[String] {
+        &self.lines
+    }
+
+    /// Current cursor position.
+    pub fn cursor(&self) -> Pos {
+        self.cursor
+    }
+
+    /// Char count of a given line, clamped if `line` is out of range.
+    pub fn line_char_count(&self, line: usize) -> usize {
+        self.line_len(line)
+    }
+
+    /// Move the cursor to `pos`, clamping to the valid document range.
+    /// When `extend` is true, preserves / creates a selection anchor so
+    /// the current selection grows to the new cursor (shift+click).
+    /// When false, clears any selection.
+    pub fn set_cursor(&mut self, pos: Pos, extend: bool) {
+        let last_line = self.lines.len().saturating_sub(1);
+        let line = pos.line.min(last_line);
+        let col = pos.col.min(self.line_len(line));
+        let clamped = Pos { line, col };
+        if extend {
+            if self.anchor.is_none() {
+                self.anchor = Some(self.cursor);
+            }
+        } else {
+            self.anchor = None;
+        }
+        self.cursor = clamped;
+    }
+
     // ── selection helpers ─────────────────────────────────────────────
     pub fn selection_range(&self) -> Option<(Pos, Pos)> {
         let anchor = self.anchor?;
@@ -382,92 +417,6 @@ impl ScratchEditor {
         KeyOutcome::Ignored
     }
 
-    // ── render ────────────────────────────────────────────────────────
-    pub fn render(&self) -> impl IntoElement {
-        let selection = self.selection_range();
-        let cursor = self.cursor;
-        let mut col = div()
-            .flex()
-            .flex_col()
-            .font_family("JetBrains Mono")
-            .text_size(px(13.0))
-            .text_color(rgb(0xcdd6f4));
-        for (line_idx, line_text) in self.lines.iter().enumerate() {
-            col = col.child(render_line(line_text, line_idx, cursor, selection));
-        }
-        col
-    }
-}
-
-fn render_line(
-    text: &str,
-    line_idx: usize,
-    cursor: Pos,
-    selection: Option<(Pos, Pos)>,
-) -> Div {
-    let chars: Vec<char> = text.chars().collect();
-    let len = chars.len();
-    let mut row = div()
-        .flex()
-        .flex_row()
-        .min_h(px(19.0))
-        .w_full();
-
-    let is_cursor_line = cursor.line == line_idx;
-    let cursor_color = rgb(0xcdd6f4);
-
-    let sel_range = selection.and_then(|(s, e)| {
-        // Return (start_col_in_this_line, end_col_in_this_line) clipped to this line
-        if line_idx < s.line || line_idx > e.line {
-            return None;
-        }
-        let start_col = if line_idx == s.line { s.col } else { 0 };
-        let end_col = if line_idx == e.line { e.col } else { len + 1 }; // +1 so a trailing newline hi-light is visible
-        Some((start_col, end_col))
-    });
-
-    for i in 0..=len {
-        // Cursor bar at column i (before char i)
-        if is_cursor_line && cursor.col == i {
-            row = row.child(
-                div()
-                    .w(px(2.0))
-                    .min_w(px(2.0))
-                    .bg(cursor_color)
-                    .h(px(17.0)),
-            );
-        }
-        if i == len { break; }
-
-        let ch = chars[i];
-        let ch_str: String = ch.to_string();
-        let in_sel = sel_range
-            .map(|(s, e)| i >= s && i < e)
-            .unwrap_or(false);
-        let cell = if in_sel {
-            div().bg(rgb(0x45475a)).child(ch_str)
-        } else {
-            div().child(ch_str)
-        };
-        row = row.child(cell);
-    }
-
-    // Empty-line selection bar — show a thin highlight if the selection
-    // covers this line's newline but the line has no chars
-    if len == 0 {
-        if let Some((s, e)) = sel_range {
-            if s == 0 && e > 0 {
-                row = row.child(
-                    div()
-                        .w(px(6.0))
-                        .bg(rgb(0x45475a))
-                        .h(px(17.0)),
-                );
-            }
-        }
-    }
-
-    row
 }
 
 /// Convert a char index into a byte index within `s`.

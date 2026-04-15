@@ -8,7 +8,7 @@
 mod clipboard_image;
 mod editor;
 
-use editor::{KeyOutcome, ScratchEditor};
+use editor::{KeyOutcome, Pos, ScratchEditor};
 use gpui::*;
 use std::path::PathBuf;
 
@@ -87,6 +87,131 @@ impl ScratchPad {
                 false
             }
         }
+    }
+
+    /// Render the editor (lines + cursor) with per-char click handlers
+    /// that reposition the cursor. Lives here rather than on the editor
+    /// itself so `cx.listener` is in scope for the click closures.
+    fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selection = self.editor.selection_range();
+        let cursor = self.editor.cursor();
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .font_family("JetBrains Mono")
+            .text_size(px(13.0))
+            .text_color(rgb(0xcdd6f4));
+        for (line_idx, line_text) in self.editor.lines().iter().enumerate() {
+            col = col.child(self.render_line(cx, line_idx, line_text, cursor, selection));
+        }
+        col
+    }
+
+    fn render_line(
+        &self,
+        cx: &mut Context<Self>,
+        line_idx: usize,
+        text: &str,
+        cursor: Pos,
+        selection: Option<(Pos, Pos)>,
+    ) -> Stateful<Div> {
+        let chars: Vec<char> = text.chars().collect();
+        let len = chars.len();
+        let cursor_color = rgb(0xcdd6f4);
+        let is_cursor_line = cursor.line == line_idx;
+
+        // Row click handler — fires when the click lands in the row but
+        // not on a child cell (i.e. in the empty flex space to the right
+        // of the last character). Positions cursor at end of line.
+        let mut row = div()
+            .id(("scratch-line", line_idx))
+            .flex()
+            .flex_row()
+            .min_h(px(19.0))
+            .w_full()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this: &mut Self, event: &MouseDownEvent, _w, cx| {
+                    let extend = event.modifiers.shift;
+                    let line_end = this.editor.line_char_count(line_idx);
+                    this.editor.set_cursor(Pos { line: line_idx, col: line_end }, extend);
+                    this.editor.focus.focus(_w, cx);
+                    cx.notify();
+                }),
+            );
+
+        let sel_range = selection.and_then(|(s, e)| {
+            if line_idx < s.line || line_idx > e.line {
+                return None;
+            }
+            let start_col = if line_idx == s.line { s.col } else { 0 };
+            let end_col = if line_idx == e.line { e.col } else { len + 1 };
+            Some((start_col, end_col))
+        });
+
+        for i in 0..=len {
+            // Cursor bar at column i (before char i)
+            if is_cursor_line && cursor.col == i {
+                row = row.child(
+                    div()
+                        .w(px(2.0))
+                        .min_w(px(2.0))
+                        .bg(cursor_color)
+                        .h(px(17.0)),
+                );
+            }
+            if i == len { break; }
+
+            let ch = chars[i];
+            let ch_str: String = ch.to_string();
+            let in_sel = sel_range
+                .map(|(s, e)| i >= s && i < e)
+                .unwrap_or(false);
+            // Each char cell is its own click target → cursor lands
+            // before that char. stop_propagation prevents the row's
+            // end-of-line handler from also firing.
+            // Pack (line, col) into a single id integer — ElementId's
+            // From impls don't cover 3-tuples, and lines won't exceed
+            // 2^32 cols in any sane input.
+            let cell_id = ((line_idx as u64) << 32) | (i as u64);
+            let cell_base = div()
+                .id(("scratch-cell", cell_id as usize))
+                .cursor_text()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, event: &MouseDownEvent, _w, cx| {
+                        cx.stop_propagation();
+                        let extend = event.modifiers.shift;
+                        this.editor.set_cursor(Pos { line: line_idx, col: i }, extend);
+                        this.editor.focus.focus(_w, cx);
+                        cx.notify();
+                    }),
+                )
+                .child(ch_str);
+            let cell = if in_sel {
+                cell_base.bg(rgb(0x45475a))
+            } else {
+                cell_base
+            };
+            row = row.child(cell);
+        }
+
+        // Empty-line selection bar — show a thin highlight if the selection
+        // covers this line's newline but the line has no chars.
+        if len == 0 {
+            if let Some((s, e)) = sel_range {
+                if s == 0 && e > 0 {
+                    row = row.child(
+                        div()
+                            .w(px(6.0))
+                            .bg(rgb(0x45475a))
+                            .h(px(17.0)),
+                    );
+                }
+            }
+        }
+
+        row
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -298,7 +423,22 @@ impl Render for ScratchPad {
                             KeyOutcome::Ignored => {}
                         }
                     }))
-                    .child(self.editor.render()),
+                    // Click in the empty space below the text → cursor
+                    // jumps to end of document. Child line / cell handlers
+                    // stop_propagation so this only fires for the padding
+                    // region below the last line.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut Self, event: &MouseDownEvent, window, cx| {
+                            let extend = event.modifiers.shift;
+                            let last_line = this.editor.lines().len().saturating_sub(1);
+                            let end_col = this.editor.line_char_count(last_line);
+                            this.editor.set_cursor(Pos { line: last_line, col: end_col }, extend);
+                            this.editor.focus.focus(window, cx);
+                            cx.notify();
+                        }),
+                    )
+                    .child(self.render_editor(cx)),
             )
             .child(self.render_footer(cx));
 
