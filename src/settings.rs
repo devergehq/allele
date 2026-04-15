@@ -124,6 +124,16 @@ pub struct Settings {
     /// Default: `/System/Library/Sounds/Glass.aiff`.
     #[serde(default)]
     pub response_ready_sound_path: Option<String>,
+
+    // --- session cleanup -----------------------------------------------------
+    /// Paths (relative to the session clone root) to delete immediately after
+    /// a clone is created. Catches stale runtime artifacts the parent left in
+    /// the source tree — Overmind/Foreman sockets, server pid files, etc. —
+    /// that would otherwise trip the child session when it tries to start
+    /// those same processes. Users can add or remove entries via the Settings
+    /// window.
+    #[serde(default = "default_session_cleanup_paths")]
+    pub session_cleanup_paths: Vec<String>,
 }
 
 fn default_sidebar_width() -> f32 { 240.0 }
@@ -131,6 +141,19 @@ fn default_font_size() -> f32 { 13.0 }
 fn default_drawer_height() -> f32 { 200.0 }
 fn default_right_sidebar_width() -> f32 { 300.0 }
 fn default_true() -> bool { true }
+
+/// Default list of stale runtime files to purge from a fresh session clone.
+/// `.overmind.sock` is the canonical case — Overmind refuses to start when a
+/// socket from the parent clone sticks around. `.foreman.sock` is the Foreman
+/// equivalent; `tmp/pids/server.pid` is the Rails/Puma pid file that makes
+/// `rails s` bail with "a server is already running".
+fn default_session_cleanup_paths() -> Vec<String> {
+    vec![
+        ".overmind.sock".to_string(),
+        ".foreman.sock".to_string(),
+        "tmp/pids/server.pid".to_string(),
+    ]
+}
 
 /// Built-in macOS sound for AwaitingInput. Used when the user hasn't set
 /// a custom path in settings.json.
@@ -159,6 +182,7 @@ impl Default for Settings {
             notifications_enabled: false,
             awaiting_input_sound_path: None,
             response_ready_sound_path: None,
+            session_cleanup_paths: default_session_cleanup_paths(),
         }
     }
 }
@@ -186,5 +210,35 @@ impl Settings {
         if let Ok(json) = serde_json::to_string_pretty(self) {
             let _ = std::fs::write(&path, json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_includes_overmind_sock() {
+        let s = Settings::default();
+        assert!(s.session_cleanup_paths.iter().any(|p| p == ".overmind.sock"));
+    }
+
+    #[test]
+    fn legacy_settings_file_without_cleanup_paths_gets_defaults() {
+        // A settings.json saved before this field existed — deserialization
+        // must fill session_cleanup_paths via serde(default) rather than
+        // failing or leaving it empty.
+        let legacy = r#"{ "sidebar_width": 240.0, "font_size": 13.0 }"#;
+        let s: Settings = serde_json::from_str(legacy).expect("should deserialize");
+        assert_eq!(s.session_cleanup_paths, default_session_cleanup_paths());
+    }
+
+    #[test]
+    fn explicit_empty_cleanup_list_is_preserved() {
+        // If a user deletes every entry, we must respect that — don't silently
+        // re-seed defaults on load.
+        let json = r#"{ "session_cleanup_paths": [] }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(s.session_cleanup_paths.is_empty());
     }
 }

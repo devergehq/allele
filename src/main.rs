@@ -7,12 +7,13 @@ mod hooks;
 mod project;
 mod session;
 mod settings;
+mod settings_window;
 mod state;
 mod trust;
 
 use gpui::*;
 use project::Project;
-actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction]);
+actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings]);
 use session::{DrawerTab, Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
@@ -70,6 +71,9 @@ enum PendingAction {
     ProceedDirtySession(usize),
     /// Cancel dirty-state session creation.
     CancelDirtySession,
+    /// Replace the session-cleanup-paths list with a new value and persist.
+    /// Emitted by the Settings window on every edit.
+    UpdateCleanupPaths(Vec<String>),
 }
 
 /// Position of a session in the project tree.
@@ -118,6 +122,10 @@ struct AppState {
     confirming_quit: bool,
     /// Project index whose settings panel is currently open in the sidebar.
     editing_project_settings: Option<usize>,
+    /// Live handle to an open Settings window. Keeps ⌘, from spawning
+    /// duplicates — when set, the action re-activates the existing window
+    /// instead of opening a new one. Cleared when the window closes.
+    settings_window: Option<WindowHandle<settings_window::SettingsWindowState>>,
 }
 
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
@@ -345,6 +353,17 @@ impl AppState {
                 };
 
                 let clone_succeeded = clone_path != source_path;
+
+                // Purge stale runtime files (Overmind/Foreman sockets, server
+                // pid files, etc.) that the parent left in the working tree —
+                // clonefile(2) faithfully copied them. Must happen before any
+                // drawer tab spawns its command.
+                if clone_succeeded {
+                    clone::cleanup_stale_runtime(
+                        &clone_path,
+                        &this.user_settings.session_cleanup_paths,
+                    );
+                }
 
                 // Find the project again (indices may have shifted if user removed projects)
                 let Some(project) = this.projects.get_mut(project_idx) else {
@@ -1389,6 +1408,7 @@ fn install_app_menu(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-b", ToggleSidebarAction, None),
         KeyBinding::new("cmd-j", ToggleDrawerAction, None),
+        KeyBinding::new("cmd-,", OpenSettings, None),
     ]);
 
     cx.set_menus(vec![
@@ -1396,6 +1416,8 @@ fn install_app_menu(cx: &mut App) {
             name: "Allele".into(),
             items: vec![
                 MenuItem::action("About Allele", About),
+                MenuItem::separator(),
+                MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),
                 MenuItem::action("Quit Allele", Quit),
             ],
@@ -1793,6 +1815,48 @@ fn main() {
                                 .ok();
                         }
                     });
+                    App::on_action::<OpenSettings>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            // Must happen here (not via PendingAction) — the
+                            // pending-action dispatch runs inside render(),
+                            // and cx.open_window() during a render tears
+                            // GPUI's element arena apart with
+                            // "attempted to dereference an ArenaRef after
+                            // its Arena was cleared".
+                            let Some(strong) = handle.upgrade() else { return };
+                            let (existing, paths) = strong.update(cx, |state: &mut AppState, _cx| {
+                                (
+                                    state.settings_window,
+                                    state.user_settings.session_cleanup_paths.clone(),
+                                )
+                            });
+
+                            if let Some(win) = existing {
+                                if win
+                                    .update(cx, |_state, window, _cx| {
+                                        window.activate_window();
+                                    })
+                                    .is_ok()
+                                {
+                                    return;
+                                }
+                            }
+
+                            let weak = handle.clone();
+                            match settings_window::open_settings_window(cx, weak, paths) {
+                                Ok(new_handle) => {
+                                    strong
+                                        .update(cx, |state: &mut AppState, _cx| {
+                                            state.settings_window = Some(new_handle);
+                                        });
+                                }
+                                Err(e) => {
+                                    eprintln!("Failed to open settings window: {e}");
+                                }
+                            }
+                        }
+                    });
 
                     // macOS convention: the red ✕ hides the window rather
                     // than quitting the app. Clicking the dock icon will
@@ -1826,6 +1890,7 @@ fn main() {
                         confirming_quit: false,
                         editing_project_settings: None,
                         user_settings: settings_for_window.clone(),
+                        settings_window: None,
                     }
                 })
             },
@@ -2356,6 +2421,24 @@ impl Render for AppState {
                 PendingAction::CancelDirtySession => {
                     self.confirming_dirty_session = None;
                     cx.notify();
+                }
+                PendingAction::UpdateCleanupPaths(paths) => {
+                    skip_refocus = true;
+                    self.user_settings.session_cleanup_paths = paths;
+                    // Persist. Settings::save() also needs the up-to-date
+                    // projects/window-geometry fields — synthesise them
+                    // from AppState before writing, mirroring the pattern
+                    // used in observe_window_bounds.
+                    let snapshot = Settings {
+                        projects: self.projects.iter().map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        }).collect(),
+                        ..self.user_settings.clone()
+                    };
+                    snapshot.save();
                 }
             }
 

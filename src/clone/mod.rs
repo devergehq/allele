@@ -127,6 +127,62 @@ pub fn create_clone(source: &Path, workspace_name: &str) -> anyhow::Result<PathB
     Ok(clone_path)
 }
 
+/// Delete stale runtime artifacts left behind in a fresh session clone.
+///
+/// APFS `clonefile(2)` is faithful — it copies `.overmind.sock`, Puma pid
+/// files and similar per-process state from the parent working copy. Those
+/// files make the new session's drawer tabs refuse to start their
+/// processes ("Overmind is already running…", "a server is already
+/// running…"). This sweep runs immediately after a clone, before any
+/// drawer terminal is spawned.
+///
+/// `paths` are interpreted as relative to `clone_path`. Entries that would
+/// escape the clone (via `..` or an absolute component) are skipped with a
+/// warning — protects users from a footgun if they edit the config by
+/// hand. Missing entries are silently ignored; any other per-entry error
+/// is logged but does not abort the sweep.
+pub fn cleanup_stale_runtime(clone_path: &Path, paths: &[String]) {
+    for entry in paths {
+        let trimmed = entry.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let rel = Path::new(trimmed);
+        if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+            eprintln!(
+                "cleanup_stale_runtime: refusing entry '{trimmed}' — must be a \
+                 relative path with no '..' segments"
+            );
+            continue;
+        }
+
+        let target = clone_path.join(rel);
+        let meta = match fs::symlink_metadata(&target) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => {
+                eprintln!("cleanup_stale_runtime: stat {} failed: {e}", target.display());
+                continue;
+            }
+        };
+
+        let ft = meta.file_type();
+        // Symlinks and regular files use remove_file; directories use
+        // remove_dir_all. Sockets/FIFOs are treated as files (remove_file
+        // handles them on Unix).
+        let result = if ft.is_dir() {
+            fs::remove_dir_all(&target)
+        } else {
+            fs::remove_file(&target)
+        };
+
+        if let Err(e) = result {
+            eprintln!("cleanup_stale_runtime: remove {} failed: {e}", target.display());
+        }
+    }
+}
+
 /// Delete a workspace clone outright.
 ///
 /// This is the destructive path — only used via the explicit "Discard"
@@ -380,4 +436,88 @@ pub fn sweep_orphans(
     }
 
     Ok(trashed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn unique_tmp(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let pid = std::process::id();
+        let dir = std::env::temp_dir().join(format!("allele-test-{tag}-{pid}-{n}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn cleanup_removes_known_files_and_skips_missing() {
+        let clone = unique_tmp("cleanup-basic");
+        fs::write(clone.join(".overmind.sock"), b"").unwrap();
+        fs::create_dir_all(clone.join("tmp/pids")).unwrap();
+        fs::write(clone.join("tmp/pids/server.pid"), b"12345").unwrap();
+
+        let paths = vec![
+            ".overmind.sock".to_string(),
+            ".foreman.sock".to_string(), // missing — must be a no-op
+            "tmp/pids/server.pid".to_string(),
+        ];
+        cleanup_stale_runtime(&clone, &paths);
+
+        assert!(!clone.join(".overmind.sock").exists());
+        assert!(!clone.join("tmp/pids/server.pid").exists());
+        // Parent dir should be left alone — we only delete the leaf entry.
+        assert!(clone.join("tmp/pids").exists());
+
+        fs::remove_dir_all(&clone).ok();
+    }
+
+    #[test]
+    fn cleanup_refuses_parent_dir_escape() {
+        let clone = unique_tmp("cleanup-escape");
+        let sibling = clone.parent().unwrap().join("should-survive.txt");
+        fs::write(&sibling, b"keep me").unwrap();
+
+        // Relative path with .. that would escape — must be rejected.
+        let rel = format!("../{}", sibling.file_name().unwrap().to_string_lossy());
+        cleanup_stale_runtime(&clone, &[rel]);
+
+        assert!(sibling.exists(), "parent-dir escape must not delete sibling files");
+
+        fs::remove_file(&sibling).ok();
+        fs::remove_dir_all(&clone).ok();
+    }
+
+    #[test]
+    fn cleanup_refuses_absolute_path() {
+        let clone = unique_tmp("cleanup-abs");
+        let outside = unique_tmp("cleanup-abs-outside").join("victim.txt");
+        fs::write(&outside, b"keep me").unwrap();
+
+        cleanup_stale_runtime(&clone, &[outside.to_string_lossy().to_string()]);
+
+        assert!(outside.exists(), "absolute entries must be rejected");
+
+        fs::remove_file(&outside).ok();
+        fs::remove_dir_all(outside.parent().unwrap()).ok();
+        fs::remove_dir_all(&clone).ok();
+    }
+
+    #[test]
+    fn cleanup_handles_directory_entry() {
+        let clone = unique_tmp("cleanup-dir");
+        let dir = clone.join("tmp/cache");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a"), b"x").unwrap();
+        fs::write(dir.join("b"), b"y").unwrap();
+
+        cleanup_stale_runtime(&clone, &["tmp/cache".to_string()]);
+
+        assert!(!dir.exists());
+        assert!(clone.join("tmp").exists());
+
+        fs::remove_dir_all(&clone).ok();
+    }
 }
