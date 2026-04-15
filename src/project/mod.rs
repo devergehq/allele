@@ -19,7 +19,6 @@ pub struct Project {
     pub source_path: PathBuf,
     pub sessions: Vec<Session>,
     pub loading_sessions: Vec<LoadingSession>,
-    pub expanded: bool,
     /// Archived session metadata — populated from state.json at startup
     /// and updated on merge/delete actions. The corresponding git refs
     /// live in canonical as `refs/allele/archive/<session-id>`.
@@ -36,7 +35,6 @@ impl Project {
             source_path,
             sessions: Vec::new(),
             loading_sessions: Vec::new(),
-            expanded: true,
             archives: Vec::new(),
             settings: ProjectSettings::default(),
         }

@@ -329,11 +329,6 @@ impl TerminalView {
         }
     }
 
-    /// Focus this terminal view
-    pub fn focus(&self, window: &mut Window, cx: &mut App) {
-        self.focus_handle.focus(window, cx);
-    }
-
     /// Recompute cell dimensions from current font_size.
     /// Called after font size changes (Cmd+= / Cmd+-).
     fn remeasure_cells(&mut self, window: &mut Window) {
