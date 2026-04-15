@@ -34,6 +34,8 @@ pub enum TerminalEvent {
     ToggleSidebar,
     /// Toggle the right sidebar visibility.
     ToggleRightSidebar,
+    /// Open the scratch pad compose overlay (Cmd+K).
+    OpenScratchPad,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -96,6 +98,13 @@ pub struct TerminalView {
 }
 
 impl TerminalView {
+    /// Access the underlying PTY terminal, if the session is still running.
+    /// Used by external callers (e.g. the Scratch Pad) that need to write
+    /// raw bytes into the PTY.
+    pub fn pty(&self) -> Option<&PtyTerminal> {
+        self.terminal.as_ref()
+    }
+
     /// Create a terminal view running a specific command, or default shell if None
     pub fn new(
         window: &mut Window,
@@ -1009,6 +1018,7 @@ impl Render for TerminalView {
                         AppAction::ToggleDrawer => cx.emit(TerminalEvent::ToggleDrawer),
                         AppAction::ToggleSidebar => cx.emit(TerminalEvent::ToggleSidebar),
                         AppAction::ToggleRightSidebar => cx.emit(TerminalEvent::ToggleRightSidebar),
+                        AppAction::OpenScratchPad => cx.emit(TerminalEvent::OpenScratchPad),
                         AppAction::SendBytes(bytes) => {
                             if let Some(ref terminal) = this.terminal {
                                 terminal.write(bytes);
