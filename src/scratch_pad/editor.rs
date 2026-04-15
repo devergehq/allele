@@ -83,6 +83,21 @@ impl ScratchEditor {
         self.cursor = clamped;
     }
 
+    /// Replace the entire document with `text`, placing the cursor at the
+    /// end and clearing any selection.
+    pub fn replace_all(&mut self, text: String) {
+        let lines: Vec<String> = if text.is_empty() {
+            vec![String::new()]
+        } else {
+            text.split('\n').map(|s| s.to_string()).collect()
+        };
+        let last_line = lines.len() - 1;
+        let last_col = lines[last_line].chars().count();
+        self.lines = lines;
+        self.cursor = Pos { line: last_line, col: last_col };
+        self.anchor = None;
+    }
+
     // ── selection helpers ─────────────────────────────────────────────
     pub fn selection_range(&self) -> Option<(Pos, Pos)> {
         let anchor = self.anchor?;

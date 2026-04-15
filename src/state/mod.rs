@@ -96,6 +96,25 @@ pub struct ArchivedSession {
     pub archived_at: u64,
 }
 
+/// One saved Scratch Pad entry. Persisted so users can recall past
+/// messages they sent to Claude via the compose overlay. Keyed by
+/// `project_id` so history is naturally per-project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScratchPadEntry {
+    /// Stable UUID for list keys / future deletion.
+    pub id: String,
+    /// Owning project ID (links to `ProjectSave.id` in settings.json).
+    pub project_id: String,
+    /// The composed text that was submitted. Attachments are not persisted.
+    pub text: String,
+    /// When the entry was submitted.
+    pub created_at: SystemTime,
+}
+
+/// Per-project entry cap for scratch pad history. Prevents state.json
+/// from growing unbounded for long-lived projects.
+pub const SCRATCH_HISTORY_PER_PROJECT_LIMIT: usize = 50;
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PersistedState {
     #[serde(default)]
@@ -107,6 +126,10 @@ pub struct PersistedState {
     /// conversation without clicking. `None` → no auto-resume.
     #[serde(default)]
     pub last_active_session_id: Option<String>,
+    /// Scratch Pad submission history, newest first across all projects.
+    /// Consumers filter by `project_id` to show per-project history.
+    #[serde(default)]
+    pub scratch_pad_history: Vec<ScratchPadEntry>,
 }
 
 impl PersistedState {

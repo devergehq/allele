@@ -11,6 +11,20 @@ mod editor;
 use editor::{KeyOutcome, Pos, ScratchEditor};
 use gpui::*;
 use std::path::PathBuf;
+use std::time::SystemTime;
+
+/// One saved Scratch Pad submission shown in the history panel. Mirrors
+/// the shape of `state::ScratchPadEntry` so the caller (AppState) can
+/// translate persisted rows into these when opening the overlay — the
+/// scratch pad module stays decoupled from the rest of the crate.
+#[derive(Debug, Clone)]
+pub struct HistoryEntry {
+    /// Stable id — matches the persisted row in state.json so deletion
+    /// can target a specific entry without ambiguity.
+    pub id: String,
+    pub text: String,
+    pub created_at: SystemTime,
+}
 
 /// Events emitted by the scratch pad that the AppState listens for to drive
 /// the actual PTY write and modal dismissal.
@@ -18,6 +32,10 @@ use std::path::PathBuf;
 pub enum ScratchPadEvent {
     Send { text: String, attachments: Vec<PathBuf> },
     Close,
+    /// User clicked the × on a history row. Parent (AppState) owns the
+    /// persisted list and is responsible for removing the entry and
+    /// refreshing the pad's history.
+    DeleteHistoryEntry { id: String },
 }
 
 impl EventEmitter<ScratchPadEvent> for ScratchPad {}
@@ -25,6 +43,11 @@ impl EventEmitter<ScratchPadEvent> for ScratchPad {}
 pub struct ScratchPad {
     editor: ScratchEditor,
     attachments: Vec<PathBuf>,
+    /// Scratch history for the active project, newest first. Populated
+    /// at open time by the caller.
+    history: Vec<HistoryEntry>,
+    /// Whether the history side panel is visible.
+    history_open: bool,
 }
 
 impl ScratchPad {
@@ -32,7 +55,15 @@ impl ScratchPad {
         Self {
             editor: ScratchEditor::new(cx),
             attachments: Vec::new(),
+            history: Vec::new(),
+            history_open: false,
         }
+    }
+
+    /// Replace the current history list. Called by the caller when the
+    /// overlay opens so the panel reflects the active project's entries.
+    pub fn set_history(&mut self, entries: Vec<HistoryEntry>) {
+        self.history = entries;
     }
 
     pub fn focus_handle(&self) -> FocusHandle {
@@ -215,6 +246,14 @@ impl ScratchPad {
     }
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let history_count = self.history.len();
+        let history_label = if history_count > 0 {
+            format!("History ({})", history_count)
+        } else {
+            "History".to_string()
+        };
+        let history_toggle_bg = if self.history_open { 0x45475a } else { 0x1e1e2e };
+
         div()
             .flex()
             .flex_row()
@@ -233,19 +272,155 @@ impl ScratchPad {
             )
             .child(
                 div()
-                    .id("scratch-close")
-                    .cursor_pointer()
-                    .px(px(6.0))
-                    .py(px(2.0))
-                    .rounded(px(4.0))
-                    .text_size(px(14.0))
-                    .text_color(rgb(0x6c7086))
-                    .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
-                    .child("×")
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
-                        this.close(cx);
-                    })),
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(6.0))
+                    .child(
+                        div()
+                            .id("scratch-history-toggle")
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(3.0))
+                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(rgb(0x45475a))
+                            .bg(rgb(history_toggle_bg))
+                            .text_size(px(11.0))
+                            .text_color(rgb(0xa6adc8))
+                            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .child(history_label)
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
+                                this.history_open = !this.history_open;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id("scratch-close")
+                            .cursor_pointer()
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(4.0))
+                            .text_size(px(14.0))
+                            .text_color(rgb(0x6c7086))
+                            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .child("×")
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
+                                this.close(cx);
+                            })),
+                    ),
             )
+    }
+
+    /// Render the scrollable history list shown in the right-side panel.
+    /// Each row previews the entry's first line (truncated) plus a relative
+    /// timestamp. Clicking a row loads its text into the editor and closes
+    /// the panel.
+    fn render_history_panel(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut list = div()
+            .w(px(240.0))
+            .h_full()
+            .flex()
+            .flex_col()
+            .border_l_1()
+            .border_color(rgb(0x313244))
+            .bg(rgb(0x181825));
+
+        if self.history.is_empty() {
+            list = list.child(
+                div()
+                    .px(px(14.0))
+                    .py(px(12.0))
+                    .text_size(px(11.0))
+                    .text_color(rgb(0x6c7086))
+                    .child("No history yet for this project."),
+            );
+            return list;
+        }
+
+        let mut scroll = div()
+            .id("scratch-history-scroll")
+            .flex_1()
+            .overflow_y_scroll();
+
+        for (idx, entry) in self.history.iter().enumerate() {
+            let preview = preview_line(&entry.text);
+            let stamp = relative_time(entry.created_at);
+            let text = entry.text.clone();
+            let entry_id = entry.id.clone();
+            let entry_id_for_delete = entry.id.clone();
+
+            // Row body — clicking anywhere outside the × loads the entry.
+            let row_body = div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .cursor_pointer()
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(0xcdd6f4))
+                        .child(preview),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(rgb(0x6c7086))
+                        .pt(px(2.0))
+                        .child(stamp),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _ev, window, cx| {
+                        this.editor.replace_all(text.clone());
+                        this.history_open = false;
+                        this.editor.focus.focus(window, cx);
+                        cx.notify();
+                        let _ = &entry_id;
+                    }),
+                );
+
+            let delete_btn = div()
+                .id(("scratch-history-del", idx))
+                .flex()
+                .items_center()
+                .justify_center()
+                .w(px(20.0))
+                .h(px(20.0))
+                .ml(px(8.0))
+                .rounded(px(4.0))
+                .text_size(px(14.0))
+                .text_color(rgb(0x6c7086))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8)))
+                .child("×")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |_this: &mut Self, _ev, _w, cx| {
+                        cx.stop_propagation();
+                        cx.emit(ScratchPadEvent::DeleteHistoryEntry {
+                            id: entry_id_for_delete.clone(),
+                        });
+                    }),
+                );
+
+            let row = div()
+                .id(("scratch-history-row", idx))
+                .flex()
+                .flex_row()
+                .items_start()
+                .px(px(12.0))
+                .py(px(8.0))
+                .border_b_1()
+                .border_color(rgb(0x313244))
+                .hover(|s| s.bg(rgb(0x313244)))
+                .child(row_body)
+                .child(delete_btn);
+            scroll = scroll.child(row);
+        }
+
+        list.child(scroll)
     }
 
     fn render_chips(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -396,8 +571,8 @@ impl Render for ScratchPad {
             })
             .child(self.render_header(cx))
             .child(self.render_chips(cx))
-            .child(
-                div()
+            .child({
+                let editor_area = div()
                     .id("scratch-editor-scroll")
                     .flex_1()
                     .min_h(px(240.0))
@@ -438,10 +613,60 @@ impl Render for ScratchPad {
                             cx.notify();
                         }),
                     )
-                    .child(self.render_editor(cx)),
-            )
+                    .child(self.render_editor(cx));
+
+                let mut split = div()
+                    .flex()
+                    .flex_row()
+                    .flex_1()
+                    .min_h(px(240.0))
+                    .child(editor_area);
+
+                if self.history_open {
+                    split = split.child(self.render_history_panel(cx));
+                }
+
+                split
+            })
             .child(self.render_footer(cx));
 
         backdrop.child(card)
+    }
+}
+
+/// Take the first line of `text` and truncate to roughly fit a ~240px panel
+/// column. Blank entries collapse to "(empty)".
+fn preview_line(text: &str) -> String {
+    let first = text.lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        return "(empty)".to_string();
+    }
+    const MAX: usize = 60;
+    if first.chars().count() <= MAX {
+        first.to_string()
+    } else {
+        let truncated: String = first.chars().take(MAX - 1).collect();
+        format!("{}\u{2026}", truncated)
+    }
+}
+
+/// Human-readable "2m ago" / "3h ago" / "yesterday" style stamp.
+fn relative_time(then: SystemTime) -> String {
+    let Ok(elapsed) = SystemTime::now().duration_since(then) else {
+        return "just now".to_string();
+    };
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        "just now".to_string()
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else if secs < 86_400 * 2 {
+        "yesterday".to_string()
+    } else if secs < 86_400 * 30 {
+        format!("{}d ago", secs / 86_400)
+    } else {
+        format!("{}mo ago", secs / (86_400 * 30))
     }
 }

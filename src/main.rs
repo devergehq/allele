@@ -201,6 +201,10 @@ struct AppState {
     browser_status: String,
     /// Scratch pad compose overlay. `Some` while the overlay is visible.
     scratch_pad: Option<Entity<scratch_pad::ScratchPad>>,
+    /// Persistent Scratch Pad submission history across all projects.
+    /// Loaded from state.json on startup, appended on submit, written back
+    /// on every save_state. Filtered by project when the overlay opens.
+    scratch_pad_history: Vec<state::ScratchPadEntry>,
 }
 
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
@@ -219,8 +223,32 @@ impl AppState {
 
     /// Open the scratch pad compose overlay, or re-focus it if already open.
     fn open_scratch_pad(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Collect per-project history entries before creating the overlay so
+        // we can seed the history panel with them.
+        let project_id = self
+            .active
+            .and_then(|cursor| self.projects.get(cursor.project_idx))
+            .map(|p| p.id.clone());
+        let entries: Vec<scratch_pad::HistoryEntry> = match project_id.as_deref() {
+            Some(pid) => self
+                .scratch_pad_history
+                .iter()
+                .filter(|e| e.project_id == pid)
+                .map(|e| scratch_pad::HistoryEntry {
+                    id: e.id.clone(),
+                    text: e.text.clone(),
+                    created_at: e.created_at,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+
         if self.scratch_pad.is_none() {
-            let entity = cx.new(|cx| scratch_pad::ScratchPad::new(cx));
+            let entity = cx.new(|cx| {
+                let mut pad = scratch_pad::ScratchPad::new(cx);
+                pad.set_history(entries.clone());
+                pad
+            });
             cx.subscribe(
                 &entity,
                 |this: &mut Self, _pad, event: &scratch_pad::ScratchPadEvent, cx| {
@@ -236,11 +264,18 @@ impl AppState {
                             this.pending_action = Some(PendingAction::FocusActive);
                             cx.notify();
                         }
+                        scratch_pad::ScratchPadEvent::DeleteHistoryEntry { id } => {
+                            this.delete_scratch_history_entry(id.clone(), cx);
+                        }
                     }
                 },
             )
             .detach();
             self.scratch_pad = Some(entity);
+        } else if let Some(pad) = self.scratch_pad.as_ref() {
+            // Overlay already open — refresh history in case it has changed
+            // since it was first opened.
+            pad.update(cx, |pad, _| pad.set_history(entries));
         }
         if let Some(pad) = self.scratch_pad.as_ref() {
             let fh = pad.read(cx).focus_handle();
@@ -260,6 +295,34 @@ impl AppState {
     ) {
         let Some(session) = self.active_session() else { return; };
         let Some(tv) = session.terminal_view.clone() else { return; };
+
+        // Capture this submission into per-project scratch history. Keyed
+        // by the active session's project so the next Cmd+K in the same
+        // project can recall it.
+        if !text.trim().is_empty() {
+            if let Some(cursor) = self.active {
+                if let Some(project) = self.projects.get(cursor.project_idx) {
+                    let entry = state::ScratchPadEntry {
+                        id: uuid::Uuid::new_v4().to_string(),
+                        project_id: project.id.clone(),
+                        text: text.clone(),
+                        created_at: std::time::SystemTime::now(),
+                    };
+                    self.scratch_pad_history.insert(0, entry);
+                    // Trim this project's entries to the per-project limit.
+                    let pid = project.id.clone();
+                    let mut count = 0usize;
+                    self.scratch_pad_history.retain(|e| {
+                        if e.project_id != pid {
+                            return true;
+                        }
+                        count += 1;
+                        count <= state::SCRATCH_HISTORY_PER_PROJECT_LIMIT
+                    });
+                    self.save_state();
+                }
+            }
+        }
 
         // Prefix each attachment with `@` so Claude Code treats it as a file
         // mention (reads the file) rather than literal text.
@@ -296,6 +359,44 @@ impl AppState {
             });
         })
         .detach();
+    }
+
+    /// Remove a scratch pad history entry by id, persist the change, and
+    /// refresh the open overlay so the row disappears immediately.
+    fn delete_scratch_history_entry(&mut self, id: String, cx: &mut Context<Self>) {
+        let before = self.scratch_pad_history.len();
+        self.scratch_pad_history.retain(|e| e.id != id);
+        if self.scratch_pad_history.len() == before {
+            return;
+        }
+        self.save_state();
+
+        // Refresh the overlay's in-memory history list so the UI updates
+        // without waiting for re-open.
+        if let Some(pad) = self.scratch_pad.as_ref() {
+            let project_id = self
+                .active
+                .and_then(|cursor| self.projects.get(cursor.project_idx))
+                .map(|p| p.id.clone());
+            let entries: Vec<scratch_pad::HistoryEntry> = match project_id.as_deref() {
+                Some(pid) => self
+                    .scratch_pad_history
+                    .iter()
+                    .filter(|e| e.project_id == pid)
+                    .map(|e| scratch_pad::HistoryEntry {
+                        id: e.id.clone(),
+                        text: e.text.clone(),
+                        created_at: e.created_at,
+                    })
+                    .collect(),
+                None => Vec::new(),
+            };
+            pad.update(cx, |pad, pad_cx| {
+                pad.set_history(entries);
+                pad_cx.notify();
+            });
+        }
+        cx.notify();
     }
 
     /// Should the Browser tab appear in the tab strip? Requires both the
@@ -956,6 +1057,7 @@ impl AppState {
                 .and_then(|p| p.sessions.get(cursor.session_idx))
                 .map(|s| s.id.clone())
         });
+        persisted.scratch_pad_history = self.scratch_pad_history.clone();
         if let Err(e) = persisted.save() {
             eprintln!("Failed to save state.json: {e}");
         }
@@ -2835,6 +2937,7 @@ fn main() {
                         editor_context_menu: None,
                         browser_status: String::new(),
                         scratch_pad: None,
+                        scratch_pad_history: loaded_state.scratch_pad_history.clone(),
                     }
                 })
             },
