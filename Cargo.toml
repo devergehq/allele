@@ -28,6 +28,9 @@ libc = "0.2"
 dirs = "6"
 which = "7"
 
+# Grapheme-aware text segmentation for the Settings text input
+unicode-segmentation = "1"
+
 # State management
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

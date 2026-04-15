@@ -108,6 +108,11 @@ pub struct Session {
     /// Last URL we saw / set for the linked tab. Used when the stored tab
     /// id is stale so we can recreate the tab at the same URL.
     pub browser_last_url: Option<String>,
+    /// Id of the coding agent that spawned this session (matches
+    /// `AgentConfig.id` in settings). Resume uses this to re-spawn with
+    /// the same adapter regardless of the current global default. `None`
+    /// for pre-feature sessions — those fall back to the default.
+    pub agent_id: Option<String>,
 }
 
 impl Session {
@@ -135,6 +140,7 @@ impl Session {
             resuming_until: None,
             browser_tab_id: None,
             browser_last_url: None,
+            agent_id: None,
         }
     }
 
@@ -169,11 +175,17 @@ impl Session {
             resuming_until: None,
             browser_tab_id: None,
             browser_last_url: None,
+            agent_id: None,
         }
     }
 
     pub fn with_clone(mut self, clone_path: PathBuf) -> Self {
         self.clone_path = Some(clone_path);
+        self
+    }
+
+    pub fn with_agent_id(mut self, agent_id: Option<String>) -> Self {
+        self.agent_id = agent_id;
         self
     }
 

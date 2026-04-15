@@ -37,6 +37,11 @@ pub struct ProjectConfig {
     pub terminals: Vec<TerminalCfg>,
     #[serde(default)]
     pub preview: Option<PreviewCfg>,
+    /// Overrides the globally-configured default coding agent for this
+    /// project. Matches `AgentConfig.id` in settings.json. Missing or
+    /// unknown ids fall back to the global default.
+    #[serde(default)]
+    pub agent: Option<String>,
 }
 
 impl ProjectConfig {

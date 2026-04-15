@@ -51,6 +51,9 @@ pub struct PersistedSession {
     /// Last URL seen on the linked tab.
     #[serde(default)]
     pub browser_last_url: Option<String>,
+    /// Id of the coding agent that originally spawned the session.
+    #[serde(default)]
+    pub agent_id: Option<String>,
 }
 
 impl PersistedSession {
@@ -73,6 +76,7 @@ impl PersistedSession {
             drawer_active_tab: session.drawer_active_tab,
             browser_tab_id: session.browser_tab_id,
             browser_last_url: session.browser_last_url.clone(),
+            agent_id: session.agent_id.clone(),
         }
     }
 }

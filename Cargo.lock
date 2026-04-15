@@ -112,6 +112,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "unicode-segmentation",
  "uuid",
  "which 7.0.3",
 ]

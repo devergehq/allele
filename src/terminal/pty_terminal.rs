@@ -208,29 +208,6 @@ impl PtyTerminal {
         self.cleanup_hooks.push(Box::new(hook));
     }
 
-    /// Find the claude binary on the system
-    pub fn find_claude() -> Option<PathBuf> {
-        // Check common locations
-        let candidates = [
-            // User-local install
-            dirs::home_dir().map(|h| h.join(".local/bin/claude")),
-            // npm global
-            dirs::home_dir().map(|h| h.join(".npm/bin/claude")),
-            // Homebrew
-            Some(PathBuf::from("/opt/homebrew/bin/claude")),
-            Some(PathBuf::from("/usr/local/bin/claude")),
-        ];
-
-        for candidate in candidates.into_iter().flatten() {
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-
-        // Fall back to PATH lookup
-        which::which("claude").ok()
-    }
-
     /// Write input bytes to the PTY
     pub fn write(&self, input: &[u8]) {
         let _ = self.pty_tx.0.send(Msg::Input(input.to_vec().into()));

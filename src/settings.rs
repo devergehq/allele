@@ -1,6 +1,46 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// Which built-in adapter drives an agent's command building. `Generic`
+/// is used for custom user-added entries that just run a binary with the
+/// configured extra args.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentKind {
+    Claude,
+    Opencode,
+    Generic,
+}
+
+impl Default for AgentKind {
+    fn default() -> Self { AgentKind::Generic }
+}
+
+/// One entry in the user's configured coding-agent list. Paths are
+/// optional so an entry can represent "agent type I know about, but
+/// not installed on this machine" — the settings UI shows an empty
+/// override slot.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AgentConfig {
+    /// Stable id — referenced by `Session.agent_id` and by
+    /// `allele.json`'s `"agent"` override field.
+    pub id: String,
+    #[serde(default)]
+    pub kind: AgentKind,
+    #[serde(default)]
+    pub display_name: String,
+    /// Absolute path to the binary. `None` means "not detected" for
+    /// built-in kinds, or "not yet configured" for generic entries.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Extra command-line arguments appended to the ones the adapter
+    /// builds (e.g. `--dangerously-skip-permissions` for Claude).
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
 /// How session work gets integrated back into the canonical branch.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MergeStrategy {
@@ -151,6 +191,16 @@ pub struct Settings {
     /// (Automation permission prompt on first use).
     #[serde(default)]
     pub browser_integration_enabled: bool,
+
+    // --- coding agents -------------------------------------------------------
+    /// Configured coding agents. Empty on legacy settings files — seeded
+    /// via `ensure_agents_seeded` on first load.
+    #[serde(default)]
+    pub agents: Vec<AgentConfig>,
+    /// Id of the globally-default agent. `allele.json` can override this
+    /// per project via its `"agent"` field.
+    #[serde(default)]
+    pub default_agent: Option<String>,
 }
 
 fn default_sidebar_width() -> f32 { 240.0 }
@@ -206,6 +256,8 @@ impl Default for Settings {
             session_cleanup_paths: default_session_cleanup_paths(),
             external_editor_command: None,
             browser_integration_enabled: false,
+            agents: Vec::new(),
+            default_agent: None,
         }
     }
 }
@@ -219,9 +271,35 @@ impl Settings {
 
     /// Load settings from disk. Returns default if file doesn't exist or is invalid.
     pub fn load() -> Self {
-        let Some(path) = Self::path() else { return Self::default(); };
-        let Ok(contents) = std::fs::read_to_string(&path) else { return Self::default(); };
-        serde_json::from_str(&contents).unwrap_or_default()
+        let Some(path) = Self::path() else {
+            let mut s = Self::default();
+            s.ensure_agents_seeded();
+            return s;
+        };
+        let mut s: Self = match std::fs::read_to_string(&path) {
+            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
+            Err(_) => Self::default(),
+        };
+        s.ensure_agents_seeded();
+        s
+    }
+
+    /// Populate the agents list (and a default id) on a fresh install or a
+    /// legacy settings file that predates the feature. Runs filesystem
+    /// probes via the `agents` module. Idempotent — skipped when the list
+    /// already has entries.
+    pub fn ensure_agents_seeded(&mut self) {
+        if self.agents.is_empty() {
+            self.agents = crate::agents::seed_agents();
+        }
+        if self.default_agent.is_none() {
+            self.default_agent = self
+                .agents
+                .iter()
+                .find(|a| a.enabled && a.path.is_some())
+                .or_else(|| self.agents.first())
+                .map(|a| a.id.clone());
+        }
     }
 
     /// Save settings to disk. Silently fails on error (not critical).

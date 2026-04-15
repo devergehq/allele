@@ -1,3 +1,4 @@
+mod agents;
 mod browser;
 mod terminal;
 mod sidebar;
@@ -11,6 +12,7 @@ mod session;
 mod settings;
 mod settings_window;
 mod state;
+mod text_input;
 mod trust;
 
 use gpui::*;
@@ -20,7 +22,6 @@ use session::{DrawerTab, Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
 use terminal::{ShellCommand, TerminalEvent, TerminalView};
-use terminal::pty_terminal::PtyTerminal;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
@@ -112,6 +113,13 @@ enum PendingAction {
     /// Toggle Chrome browser integration on/off. When toggled off we clear
     /// the current sync status so the Browser tab shows the disabled state.
     UpdateBrowserIntegration(bool),
+    /// Replace the entire coding-agents list and the default-agent id.
+    /// Emitted by the Settings window on every edit (add/remove agent,
+    /// toggle enabled, edit path / extra args, pick default, re-detect).
+    UpdateAgents {
+        agents: Vec<settings::AgentConfig>,
+        default_agent: Option<String>,
+    },
     /// Auto-resume a session after launch. Fires once from the first render
     /// tick so `resume_session` has a valid `window` / `cx`.
     ResumeSession { project_idx: usize, session_idx: usize },
@@ -137,7 +145,6 @@ struct SessionCursor {
 struct AppState {
     projects: Vec<Project>,
     active: Option<SessionCursor>,
-    claude_path: Option<String>,
     pending_action: Option<PendingAction>,
     // Sidebar state
     sidebar_visible: bool,
@@ -1041,35 +1048,40 @@ impl AppState {
         let project_name = project.name.clone();
         let session_count = project.sessions.len() + project.loading_sessions.len() + 1;
 
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let display_label = if self.claude_path.is_some() {
-            format!("Claude {session_count}")
-        } else {
-            format!("Shell {session_count}")
-        };
+        // Pick the agent for this session: allele.json override first,
+        // then the global default. Falls through to the first enabled
+        // agent with a resolved path. `None` here means "no agent
+        // available" — the PTY drops into the user's default shell.
+        let project_override = config::ProjectConfig::load(&project.source_path)
+            .and_then(|c| c.agent);
+        let agent = agents::resolve(
+            &self.user_settings.agents,
+            self.user_settings.default_agent.as_deref(),
+            project_override.as_deref(),
+            None,
+        )
+        .cloned();
 
-        // Build the claude command with --session-id + --name so our internal
-        // UUID *is* Claude's session ID. This is what enables cold-resume later:
-        // `claude --resume <same-uuid>` picks up the conversation in the same
-        // clone path. --settings injects Allele's attention-routing
-        // hooks so the Notification/Stop events flow back into the sidebar.
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let display_label = match &agent {
+            Some(a) => format!("{} {session_count}", a.display_name),
+            None => format!("Shell {session_count}"),
+        };
+        let agent_id = agent.as_ref().map(|a| a.id.clone());
+
         let hooks_path_str = self
             .hooks_settings_path
             .as_ref()
             .map(|p| p.to_string_lossy().to_string());
-        let command = self.claude_path.as_ref().map(|path| {
-            let mut args = vec![
-                "--session-id".to_string(),
-                session_id.clone(),
-                "--name".to_string(),
-                display_label.clone(),
-            ];
-            if let Some(hooks) = hooks_path_str {
-                args.push("--settings".to_string());
-                args.push(hooks);
-            }
-            ShellCommand::with_args(path.clone(), args)
-        });
+        let ctx = agents::SpawnCtx {
+            session_id: &session_id,
+            label: &display_label,
+            hooks_settings_path: hooks_path_str.as_deref(),
+            has_history: false,
+        };
+        let command = agent
+            .as_ref()
+            .and_then(|a| agents::build_command(a, &ctx, false));
 
         // Add a loading placeholder immediately so the user sees feedback
         project.loading_sessions.push(project::LoadingSession {
@@ -1087,6 +1099,7 @@ impl AppState {
         let session_id_for_clone = session_id.clone();
         let session_id_for_session = session_id.clone();
         let display_label_for_task = display_label.clone();
+        let agent_id_for_task = agent_id.clone();
 
         cx.spawn_in(window, async move |this, cx| {
             let clone_result = cx
@@ -1210,7 +1223,8 @@ impl AppState {
                     display_label_for_task,
                     terminal_view,
                 )
-                .with_clone(clone_path);
+                .with_clone(clone_path)
+                .with_agent_id(agent_id_for_task.clone());
                 let Some(project) = this.projects.get_mut(project_idx) else { return; };
                 project.sessions.push(session);
                 let session_idx = project.sessions.len() - 1;
@@ -1848,33 +1862,38 @@ impl AppState {
 
         let session_id = session.id.clone();
         let label = session.label.clone();
+        let stored_agent_id = session.agent_id.clone();
 
-        // Pick the resume flag based on whether Claude actually has history
-        // for this session ID on disk. Claude stores conversations under
-        // `~/.claude/projects/<slug>/<id>.jsonl`. If no jsonl for this id
-        // exists anywhere, `claude --resume <id>` bails out immediately,
-        // which used to flip the session to Done. Fall back to
-        // `--session-id <id>` in that case — same UUID, empty history,
-        // still a continuable session.
+        // Resolve the agent. Prefer the session's stored agent_id so a
+        // resume always uses whatever spawned the session originally,
+        // even if the user has since changed the global default.
+        // Falls back to allele.json → global default → first enabled.
+        let project_override = config::ProjectConfig::load(&project.source_path)
+            .and_then(|c| c.agent);
+        let agent = agents::resolve(
+            &self.user_settings.agents,
+            self.user_settings.default_agent.as_deref(),
+            project_override.as_deref(),
+            stored_agent_id.as_deref(),
+        )
+        .cloned();
+
+        // Only adapters that understand session ids care about history —
+        // for claude this gates `--resume` vs `--session-id`.
         let has_history = claude_session_history_exists(&session_id);
         let hooks_path_str = self
             .hooks_settings_path
             .as_ref()
             .map(|p| p.to_string_lossy().to_string());
-        let command = self.claude_path.as_ref().map(|path| {
-            let mut args = if has_history {
-                vec!["--resume".to_string(), session_id.clone()]
-            } else {
-                vec!["--session-id".to_string(), session_id.clone()]
-            };
-            args.push("--name".to_string());
-            args.push(label.clone());
-            if let Some(hooks) = hooks_path_str {
-                args.push("--settings".to_string());
-                args.push(hooks);
-            }
-            ShellCommand::with_args(path.clone(), args)
-        });
+        let ctx = agents::SpawnCtx {
+            session_id: &session_id,
+            label: &label,
+            hooks_settings_path: hooks_path_str.as_deref(),
+            has_history,
+        };
+        let command = agent
+            .as_ref()
+            .and_then(|a| agents::build_command(a, &ctx, true));
 
         // Build the new TerminalView on the main thread with window access.
         let terminal_view = cx.new(|cx| {
@@ -1936,6 +1955,8 @@ impl AppState {
             }
         }).detach();
 
+        let resolved_agent_id = agent.as_ref().map(|a| a.id.clone());
+
         // Attach the new PTY to the existing session entry.
         if let Some(session) = self
             .projects
@@ -1945,6 +1966,12 @@ impl AppState {
             session.terminal_view = Some(terminal_view);
             session.status = SessionStatus::Running;
             session.last_active = std::time::SystemTime::now();
+            // Pin the resolved agent so subsequent resumes pick up the
+            // same adapter even if the global default changes. Leaves a
+            // previously-stored id alone when nothing could be resolved.
+            if resolved_agent_id.is_some() {
+                session.agent_id = resolved_agent_id;
+            }
             // Grace window: if the PTY exits in the next 3s, the exit
             // watcher reverts to Suspended instead of flipping to Done.
             // Protects against `claude --resume` exiting immediately.
@@ -2244,6 +2271,11 @@ fn install_app_menu(cx: &mut App) {
         KeyBinding::new("cmd-k", OpenScratchPadAction, None),
     ]);
 
+    // Reusable text-input bindings (cursor / selection / paste / arrow
+    // keys etc.) — gated by the `TextInput` key context so they only
+    // fire while a Settings input is focused.
+    text_input::bind_keys(cx);
+
     cx.set_menus(vec![
         Menu {
             name: "Allele".into(),
@@ -2437,16 +2469,14 @@ fn main() {
             }
         });
 
-        let claude_path = PtyTerminal::find_claude()
-            .map(|p| p.to_string_lossy().to_string());
-
-        if let Some(ref path) = claude_path {
-            eprintln!("Found Claude Code at: {path}");
-        } else {
-            eprintln!("Claude Code not found — falling back to default shell");
+        // Log resolved agent paths at startup for diagnostics. Agent
+        // detection is owned by the Settings seeder (runs on load).
+        for agent in &loaded_settings.agents {
+            match &agent.path {
+                Some(p) => eprintln!("Agent '{}' at: {p}", agent.id),
+                None => eprintln!("Agent '{}' not found", agent.id),
+            }
         }
-
-        let claude_path_clone = claude_path.clone();
 
         let window_bounds = match (
             loaded_settings.window_x,
@@ -2568,7 +2598,8 @@ fn main() {
                         .with_browser(
                             persisted.browser_tab_id,
                             persisted.browser_last_url.clone(),
-                        );
+                        )
+                        .with_agent_id(persisted.agent_id.clone());
                         project.sessions.push(session);
                     }
 
@@ -2686,7 +2717,7 @@ fn main() {
                             // "attempted to dereference an ArenaRef after
                             // its Arena was cleared".
                             let Some(strong) = handle.upgrade() else { return };
-                            let (existing, paths, external_editor, browser_integration) = strong.update(cx, |state: &mut AppState, _cx| {
+                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent) = strong.update(cx, |state: &mut AppState, _cx| {
                                 (
                                     state.settings_window,
                                     state.user_settings.session_cleanup_paths.clone(),
@@ -2696,6 +2727,8 @@ fn main() {
                                         .clone()
                                         .unwrap_or_default(),
                                     state.user_settings.browser_integration_enabled,
+                                    state.user_settings.agents.clone(),
+                                    state.user_settings.default_agent.clone(),
                                 )
                             });
 
@@ -2711,7 +2744,7 @@ fn main() {
                             }
 
                             let weak = handle.clone();
-                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration) {
+                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent) {
                                 Ok(new_handle) => {
                                     strong
                                         .update(cx, |state: &mut AppState, _cx| {
@@ -2774,7 +2807,6 @@ fn main() {
                     AppState {
                         projects,
                         active: initial_active,
-                        claude_path: claude_path_clone,
                         pending_action: initial_pending,
                         sidebar_visible: settings_for_window.sidebar_visible,
                         sidebar_width: settings_for_window.sidebar_width
@@ -2948,6 +2980,7 @@ impl Render for AppState {
                             // (must happen before the mutable borrow for loading_sessions).
                             let restore_started = session.started_at;
                             let restore_last_active = session.last_active;
+                            let restore_agent_id = session.agent_id.clone();
 
                             // If no clone or clone == canonical, just remove (no git ops).
                             let needs_git = clone_path.as_ref().map_or(false, |cp| *cp != canonical);
@@ -3087,7 +3120,8 @@ impl Render for AppState {
                                                 restore_last_active,
                                                 Some(restore_clone.clone()),
                                                 false, // not merged — that's the point
-                                            );
+                                            )
+                                            .with_agent_id(restore_agent_id.clone());
                                             if let Some(project) = this.projects.get_mut(project_idx_for_task) {
                                                 project.sessions.push(restored);
                                             }
@@ -3390,6 +3424,21 @@ impl Render for AppState {
                     if !enabled {
                         self.browser_status.clear();
                     }
+                    let snapshot = Settings {
+                        projects: self.projects.iter().map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        }).collect(),
+                        ..self.user_settings.clone()
+                    };
+                    snapshot.save();
+                }
+                PendingAction::UpdateAgents { agents, default_agent } => {
+                    skip_refocus = true;
+                    self.user_settings.agents = agents;
+                    self.user_settings.default_agent = default_agent;
                     let snapshot = Settings {
                         projects: self.projects.iter().map(|p| ProjectSave {
                             id: p.id.clone(),
