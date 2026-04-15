@@ -264,8 +264,15 @@ impl TerminalView {
                                 // ghost copy when CC repaints on top. reset() clears both
                                 // scrollback AND visible cells, giving CC a blank canvas.
                                 if let Some(ref terminal) = this.terminal {
-                                    terminal.term.lock().grid_mut().reset::<alacritty_terminal::vte::ansi::Color>();
-                                    eprintln!("[RESIZE-DIAG] RESET grid (scrollback + visible) before SIGWINCH");
+                                    let mut term = terminal.term.lock();
+                                    let in_alt_screen = term.mode()
+                                        .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
+                                    if in_alt_screen {
+                                        term.grid_mut().reset::<alacritty_terminal::vte::ansi::Color>();
+                                        eprintln!("[RESIZE-DIAG] RESET grid (alt-screen, pre-SIGWINCH)");
+                                    } else {
+                                        eprintln!("[RESIZE-DIAG] SKIP reset (primary screen — preserve scrollback)");
+                                    }
                                 }
                                 this.last_cols = pending_size.cols;
                                 this.last_rows = pending_size.rows;
