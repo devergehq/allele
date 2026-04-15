@@ -2655,7 +2655,6 @@ fn main() {
                         let viewport = window.viewport_size();
                         let settings = Settings {
                             sidebar_width: this.sidebar_width,
-                            font_size: 13.0,
                             window_x: None,
                             window_y: None,
                             window_width: Some(f32::from(viewport.width)),
@@ -4612,6 +4611,7 @@ impl Render for AppState {
 
                     match self.main_tab {
                         MainTab::Claude => {
+                            main_area = main_area.pt(px(6.0));
                             if let Some(tv) = self.active_session().and_then(|s| s.terminal_view.clone()) {
                                 // Tell the main terminal how much space the drawer
                                 // reserves below it so the PTY resize is correct.
