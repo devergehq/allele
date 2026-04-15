@@ -450,6 +450,18 @@ impl AppState {
                 .child(headline),
         );
 
+        if let Some(url) = self
+            .active_session()
+            .and_then(|s| s.browser_last_url.as_ref())
+        {
+            root = root.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(0x89b4fa))
+                    .child(format!("Preview URL: {url}")),
+            );
+        }
+
         if !self.browser_status.is_empty() {
             root = root.child(
                 div()
