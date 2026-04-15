@@ -35,6 +35,11 @@ pub struct TerminalGridElement {
     search_matches: Vec<(i32, usize, usize)>, // (line_offset, col_start, col_end) — alacritty Line value
     search_current_idx: usize,
     hovered_url: Option<(usize, usize, usize)>, // (row, col_start, col_end)
+    hovered_path: Option<(usize, usize, usize)>, // (row, col_start, col_end)
+    /// Persistent passive highlights for URLs in the visible viewport.
+    url_spans: Vec<(usize, usize, usize)>,
+    /// Persistent passive highlights for file paths in the visible viewport.
+    path_spans: Vec<(usize, usize, usize)>,
     // Shared atomic origin — updated during paint so mouse handlers can translate coords
     origin_x_out: Option<Arc<std::sync::atomic::AtomicI32>>,
     origin_y_out: Option<Arc<std::sync::atomic::AtomicI32>>,
@@ -60,6 +65,9 @@ impl TerminalGridElement {
             search_matches: Vec::new(),
             search_current_idx: 0,
             hovered_url: None,
+            hovered_path: None,
+            url_spans: Vec::new(),
+            path_spans: Vec::new(),
             origin_x_out: None,
             origin_y_out: None,
         }
@@ -88,6 +96,21 @@ impl TerminalGridElement {
 
     pub fn hovered_url(mut self, url: Option<(usize, usize, usize)>) -> Self {
         self.hovered_url = url;
+        self
+    }
+
+    pub fn hovered_path(mut self, path: Option<(usize, usize, usize)>) -> Self {
+        self.hovered_path = path;
+        self
+    }
+
+    pub fn url_spans(mut self, spans: Vec<(usize, usize, usize)>) -> Self {
+        self.url_spans = spans;
+        self
+    }
+
+    pub fn path_spans(mut self, spans: Vec<(usize, usize, usize)>) -> Self {
+        self.path_spans = spans;
         self
     }
 
@@ -578,15 +601,55 @@ impl Element for TerminalGridElement {
             }
         }
 
-        // Paint URL underline on hover
+        // Paint passive URL underlines (persistent). Solid enough to read
+        // as "clickable" without Cmd-hover probing.
+        let num_rows_visible = prepaint_state.rows.len();
+        for &(row, col_start, col_end) in &self.url_spans {
+            if row >= num_rows_visible { continue; }
+            let y = origin.y + cell_h * (row as f32 + 1.0) - px(1.5);
+            let x = origin.x + cell_w * col_start as f32;
+            let w = cell_w * (col_end - col_start + 1) as f32;
+            window.paint_quad(fill(
+                Bounds::new(point(x, y), size(w, px(1.0))),
+                hsla(210.0 / 360.0, 0.8, 0.7, 0.75),
+            ));
+        }
+
+        // Paint passive path underlines. Same visual weight as URLs —
+        // slightly different hue so the two categories are distinguishable.
+        for &(row, col_start, col_end) in &self.path_spans {
+            if row >= num_rows_visible { continue; }
+            let y = origin.y + cell_h * (row as f32 + 1.0) - px(1.5);
+            let x = origin.x + cell_w * col_start as f32;
+            let w = cell_w * (col_end - col_start + 1) as f32;
+            window.paint_quad(fill(
+                Bounds::new(point(x, y), size(w, px(1.0))),
+                hsla(170.0 / 360.0, 0.5, 0.65, 0.7),
+            ));
+        }
+
+        // Paint URL underline on hover (brighter emphasis over the passive line)
         if let Some((row, col_start, col_end)) = self.hovered_url {
-            if row < prepaint_state.rows.len() {
+            if row < num_rows_visible {
                 let y = origin.y + cell_h * (row as f32 + 1.0) - px(1.5);
                 let x = origin.x + cell_w * col_start as f32;
                 let w = cell_w * (col_end - col_start + 1) as f32;
                 window.paint_quad(fill(
                     Bounds::new(point(x, y), size(w, px(1.0))),
-                    hsla(210.0 / 360.0, 0.8, 0.7, 0.8),
+                    hsla(210.0 / 360.0, 0.8, 0.7, 0.95),
+                ));
+            }
+        }
+
+        // Paint path underline on hover (brighter emphasis over the passive line)
+        if let Some((row, col_start, col_end)) = self.hovered_path {
+            if row < num_rows_visible {
+                let y = origin.y + cell_h * (row as f32 + 1.0) - px(1.5);
+                let x = origin.x + cell_w * col_start as f32;
+                let w = cell_w * (col_end - col_start + 1) as f32;
+                window.paint_quad(fill(
+                    Bounds::new(point(x, y), size(w, px(1.0))),
+                    hsla(180.0 / 360.0, 0.6, 0.7, 0.9),
                 ));
             }
         }

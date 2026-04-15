@@ -47,9 +47,24 @@ pub enum TerminalEvent {
     /// User hit Cmd+0 — reset the global default font size to the built-in
     /// default. Handled by AppState the same way as AdjustFontSize.
     ResetFontSize,
+    /// Right-click on a detected file path in terminal output selected
+    /// "Open in External Editor". Parent resolves editor command from
+    /// user_settings and spawns it with optional line/col jump.
+    OpenExternalEditor {
+        path: PathBuf,
+        line_col: Option<(u32, Option<u32>)>,
+    },
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
+
+/// State for the floating right-click context menu rendered on top of the
+/// terminal grid when the user right-clicks a detected file path.
+pub struct TerminalCtxMenu {
+    pub path: PathBuf,
+    pub line_col: Option<(u32, Option<u32>)>,
+    pub position: Point<Pixels>,
+}
 
 /// GPUI View wrapping a PTY-backed terminal
 pub struct TerminalView {
@@ -91,6 +106,18 @@ pub struct TerminalView {
     search_current_idx: usize,
     // URL detection
     hovered_url: Option<(usize, usize, usize, String)>, // (row, col_start, col_end, url)
+    // Path detection (Cmd hover). Same shape as hovered_url + parsed line/col.
+    hovered_path: Option<(usize, usize, usize, PathBuf, Option<(u32, Option<u32>)>)>,
+    /// Working directory captured at spawn. Used to resolve relative paths
+    /// encountered in terminal output (e.g. grep results, compiler errors).
+    working_dir: Option<PathBuf>,
+    /// Persistent visual highlight spans for URLs in the visible viewport.
+    /// Recomputed on grid changes. (row, col_start, col_end).
+    visible_url_spans: Vec<(usize, usize, usize)>,
+    /// Persistent visual highlight spans for file paths in the visible viewport.
+    visible_path_spans: Vec<(usize, usize, usize)>,
+    /// Active right-click context menu state. `None` = no menu visible.
+    terminal_context_menu: Option<TerminalCtxMenu>,
     /// Pixels reserved below this terminal (e.g. drawer panel + chrome).
     /// Set by the parent before render so the PTY resize computation
     /// accounts for space that isn't available to this view.
@@ -142,6 +169,7 @@ impl TerminalView {
         let cell_width = f32::from(measured_w);
         let cell_height = f32::from(measured_h);
 
+        let saved_working_dir = working_dir.clone();
         let terminal = match PtyTerminal::spawn(TermSize::default(), command, working_dir) {
             Ok(t) => Some(t),
             Err(e) => {
@@ -173,6 +201,11 @@ impl TerminalView {
                     search_matches: Vec::new(),
                     search_current_idx: 0,
                     hovered_url: None,
+                    hovered_path: None,
+                    working_dir: saved_working_dir.clone(),
+                    visible_url_spans: Vec::new(),
+                    visible_path_spans: Vec::new(),
+                    terminal_context_menu: None,
                     bottom_inset: 0.0,
                     pending_resize: None,
                     bell_flash_start: None,
@@ -348,6 +381,11 @@ impl TerminalView {
             search_matches: Vec::new(),
             search_current_idx: 0,
             hovered_url: None,
+            hovered_path: None,
+            working_dir: saved_working_dir,
+            visible_url_spans: Vec::new(),
+            visible_path_spans: Vec::new(),
+            terminal_context_menu: None,
             bottom_inset: 0.0,
             pending_resize: None,
             bell_flash_start: None,
@@ -637,6 +675,254 @@ impl TerminalView {
         None
     }
 
+    /// Build (chars, columns) parallel arrays for a visible row, skipping
+    /// WIDE_CHAR_SPACER cells. Returns empty vecs if row is out of range.
+    fn line_chars_cols(&self, row: usize) -> (Vec<char>, Vec<usize>) {
+        let Some(terminal) = self.terminal.as_ref() else { return (vec![], vec![]) };
+        let term = terminal.term.lock();
+        let grid = term.grid();
+        let num_cols = grid.columns();
+        let num_lines = grid.screen_lines();
+        if row >= num_lines {
+            return (vec![], vec![]);
+        }
+        let display_offset = grid.display_offset() as i32;
+        let grid_line = Line(row as i32 - display_offset);
+        let mut chars = Vec::with_capacity(num_cols);
+        let mut cols = Vec::with_capacity(num_cols);
+        for col in 0..num_cols {
+            let c = &grid[grid_line][Column(col)];
+            if c.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
+                continue;
+            }
+            let ch = if c.c == '\0' { ' ' } else { c.c };
+            chars.push(ch);
+            cols.push(col);
+        }
+        (chars, cols)
+    }
+
+    /// Classify a raw token into a (resolved_path, line_col) pair if it
+    /// refers to an existing filesystem path, otherwise `None`.
+    ///
+    /// Accepts: absolute paths (`/...`, `~/...`), explicit relative
+    /// (`./...`, `../...`), and bare relative forms that must exist
+    /// under `working_dir`. Parses an optional `:line[:col]` suffix.
+    fn classify_path_token(
+        &self,
+        token: &str,
+    ) -> Option<(PathBuf, Option<(u32, Option<u32>)>)> {
+        if token.is_empty() {
+            return None;
+        }
+
+        // Split trailing :N[:M] into (path_part, line_col). Only accept
+        // purely numeric segments — otherwise leave the colon in the path.
+        let (path_part, line_col) = parse_line_col_suffix(token);
+
+        // Expand ~ → $HOME.
+        let expanded: PathBuf = if let Some(rest) = path_part.strip_prefix("~/") {
+            match dirs::home_dir() {
+                Some(h) => h.join(rest),
+                None => return None,
+            }
+        } else if path_part == "~" {
+            dirs::home_dir()?
+        } else {
+            PathBuf::from(path_part)
+        };
+
+        // Resolve relative to working_dir when applicable.
+        let candidate: PathBuf = if expanded.is_absolute() {
+            expanded
+        } else if let Some(ref wd) = self.working_dir {
+            wd.join(&expanded)
+        } else {
+            expanded
+        };
+
+        if candidate.exists() {
+            Some((candidate, line_col))
+        } else {
+            None
+        }
+    }
+
+    /// Cheap syntactic check used by the persistent viewport scan — no
+    /// filesystem stat. Returns true if the token *looks like* it could
+    /// be a path, based on shape only.
+    fn token_looks_like_path(token: &str) -> bool {
+        if token.len() < 2 {
+            return false;
+        }
+        let (path_part, _) = parse_line_col_suffix(token);
+        if path_part.is_empty() {
+            return false;
+        }
+        if path_part.starts_with('/') || path_part.starts_with("~/") || path_part == "~" {
+            return true;
+        }
+        if path_part.starts_with("./") || path_part.starts_with("../") {
+            return true;
+        }
+        // Bare relative: require at least one '/' or a file extension to
+        // avoid matching random words. e.g. `src/main.rs` or `foo.rs`.
+        if path_part.contains('/') {
+            return true;
+        }
+        if let Some(dot) = path_part.rfind('.') {
+            let ext = &path_part[dot + 1..];
+            // Extensions: 1-8 alphanumeric chars.
+            if (1..=8).contains(&ext.len())
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Find a file path at the given grid cell, if any. Mirrors `url_at`:
+    /// returns `(row, col_start, col_end, resolved_path, line_col)` so the
+    /// caller can draw a highlight and resolve the click target.
+    fn path_at(
+        &self,
+        cell: (usize, usize),
+    ) -> Option<(usize, usize, usize, PathBuf, Option<(u32, Option<u32>)>)> {
+        let (row, col) = cell;
+        let (chars, cols) = self.line_chars_cols(row);
+        if chars.is_empty() {
+            return None;
+        }
+
+        // Locate the whitespace-delimited token at `col`, stripping common
+        // surrounding punctuation ([]()"'{}<>).
+        let hovered_idx = cols.iter().position(|&c| c == col)?;
+
+        if chars[hovered_idx].is_whitespace() {
+            return None;
+        }
+
+        // Walk left/right to find token bounds.
+        let mut tok_start = hovered_idx;
+        while tok_start > 0 && !chars[tok_start - 1].is_whitespace() {
+            tok_start -= 1;
+        }
+        let mut tok_end = hovered_idx;
+        while tok_end + 1 < chars.len() && !chars[tok_end + 1].is_whitespace() {
+            tok_end += 1;
+        }
+
+        // Trim matched brackets/quotes at edges.
+        while tok_start < tok_end
+            && matches!(chars[tok_start], '(' | '[' | '{' | '<' | '"' | '\'' | '`')
+        {
+            tok_start += 1;
+        }
+        while tok_end > tok_start
+            && matches!(chars[tok_end], ')' | ']' | '}' | '>' | '"' | '\'' | '`' | ',' | ';' | '.' | '!' | '?')
+        {
+            tok_end -= 1;
+        }
+
+        if tok_start > tok_end {
+            return None;
+        }
+
+        let token: String = chars[tok_start..=tok_end].iter().collect();
+        let (path, line_col) = self.classify_path_token(&token)?;
+        let col_start = cols[tok_start];
+        let col_end = cols[tok_end];
+        Some((row, col_start, col_end, path, line_col))
+    }
+
+    /// Scan the visible viewport for URL and path spans. Called when the
+    /// grid mutates; results are cached in `visible_url_spans` /
+    /// `visible_path_spans` for the renderer to consume.
+    ///
+    /// Path detection uses `token_looks_like_path` (no stat) to stay cheap
+    /// on large outputs; the exact `path_at` filesystem check only runs
+    /// on hover/right-click.
+    fn scan_visible_spans(&mut self) {
+        self.visible_url_spans.clear();
+        self.visible_path_spans.clear();
+
+        let Some(terminal) = self.terminal.as_ref() else { return };
+        let num_lines = {
+            let term = terminal.term.lock();
+            term.grid().screen_lines()
+        };
+
+        for row in 0..num_lines {
+            let (chars, cols) = self.line_chars_cols(row);
+            if chars.is_empty() {
+                continue;
+            }
+
+            // URLs: http(s):// scan (same as url_at).
+            let text: String = chars.iter().collect();
+            for (scheme_start, _) in text.match_indices("http://").chain(text.match_indices("https://")) {
+                // Convert byte offset → char offset in `chars`.
+                let prefix = &text[..scheme_start];
+                let char_start = prefix.chars().count();
+                let mut char_end = char_start;
+                while char_end < chars.len() {
+                    let c = chars[char_end];
+                    if c.is_whitespace() || matches!(c, ')' | ']' | '>' | '"' | '\'') {
+                        break;
+                    }
+                    char_end += 1;
+                }
+                while char_end > char_start
+                    && matches!(chars[char_end - 1], '.' | ',' | ';' | ':' | '!' | '?')
+                {
+                    char_end -= 1;
+                }
+                if char_end > char_start {
+                    let col_start = cols[char_start];
+                    let col_end = cols[char_end - 1];
+                    self.visible_url_spans.push((row, col_start, col_end));
+                }
+            }
+
+            // Paths: whitespace-delimited tokens that look like paths.
+            let mut i = 0;
+            while i < chars.len() {
+                if chars[i].is_whitespace() {
+                    i += 1;
+                    continue;
+                }
+                let tok_start = i;
+                while i < chars.len() && !chars[i].is_whitespace() {
+                    i += 1;
+                }
+                let mut tok_end = i - 1;
+
+                // Trim matched brackets/quotes.
+                let mut ts = tok_start;
+                while ts < tok_end
+                    && matches!(chars[ts], '(' | '[' | '{' | '<' | '"' | '\'' | '`')
+                {
+                    ts += 1;
+                }
+                while tok_end > ts
+                    && matches!(chars[tok_end], ')' | ']' | '}' | '>' | '"' | '\'' | '`' | ',' | ';' | '.' | '!' | '?')
+                {
+                    tok_end -= 1;
+                }
+                if ts > tok_end {
+                    continue;
+                }
+                let token: String = chars[ts..=tok_end].iter().collect();
+                if Self::token_looks_like_path(&token) {
+                    let col_start = cols[ts];
+                    let col_end = cols[tok_end];
+                    self.visible_path_spans.push((row, col_start, col_end));
+                }
+            }
+        }
+    }
+
     /// Update search matches by scanning visible grid for query string.
     ///
     /// Handles multi-byte UTF-8 (bullets, emoji, CJK) correctly by tracking
@@ -805,6 +1091,94 @@ impl TerminalView {
             cell_height: cell_h as u16,
         }
     }
+
+    /// Render the floating right-click context menu for a detected file
+    /// path. Returns an empty vec when no menu is active.
+    fn render_terminal_context_menu(
+        &self,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let Some(menu) = self.terminal_context_menu.as_ref() else {
+            return Vec::new();
+        };
+        let path = menu.path.clone();
+        let line_col = menu.line_col;
+        let position = menu.position;
+
+        let item = |id: &'static str,
+                    label: String,
+                    on_click: Box<
+            dyn Fn(&mut TerminalView, &mut Context<TerminalView>) + 'static,
+        >| {
+            div()
+                .id(id)
+                .px(px(14.0))
+                .py(px(6.0))
+                .text_size(px(12.0))
+                .text_color(rgb(0xcdd6f4))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(0x45475a)))
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        on_click(this, cx);
+                        this.terminal_context_menu = None;
+                        cx.notify();
+                    }),
+                )
+        };
+
+        let label_open = match line_col {
+            Some((line, Some(col))) => format!("Open in Editor ({}:{})", line, col),
+            Some((line, None)) => format!("Open in Editor (line {})", line),
+            None => "Open in Editor".to_string(),
+        };
+
+        let path_for_open = path.clone();
+        let path_for_reveal = path;
+
+        let menu_el = div()
+            .flex()
+            .flex_col()
+            .min_w(px(220.0))
+            .py(px(4.0))
+            .bg(rgb(0x181825))
+            .border_1()
+            .border_color(rgb(0x45475a))
+            .rounded(px(6.0))
+            .shadow_md()
+            .child(item(
+                "term-ctx-open-editor",
+                label_open,
+                Box::new(move |this: &mut TerminalView, cx: &mut Context<TerminalView>| {
+                    cx.emit(TerminalEvent::OpenExternalEditor {
+                        path: path_for_open.clone(),
+                        line_col,
+                    });
+                    let _ = this;
+                }),
+            ))
+            .child(item(
+                "term-ctx-reveal",
+                "Reveal in Finder".to_string(),
+                Box::new(move |_this: &mut TerminalView, _cx: &mut Context<TerminalView>| {
+                    let _ = std::process::Command::new("open")
+                        .arg("-R")
+                        .arg(&path_for_reveal)
+                        .spawn();
+                }),
+            ));
+
+        vec![deferred(
+            anchored()
+                .position(position)
+                .snap_to_window()
+                .child(menu_el),
+        )
+        .into_any_element()]
+    }
 }
 
 impl Render for TerminalView {
@@ -873,6 +1247,12 @@ impl Render for TerminalView {
                 .into_any_element();
         }
 
+        // Rescan visible viewport for URL/path highlight spans. Runs only
+        // when render() runs, which is driven by cx.notify() after pty
+        // events / scroll / resize / blink / bell — so pinned to the
+        // existing render cadence, not per-frame.
+        self.scan_visible_spans();
+
         let Some(ref terminal) = self.terminal else {
             return div()
                 .size_full()
@@ -906,6 +1286,9 @@ impl Render for TerminalView {
         .selection(selection)
         .search_matches(self.search_matches.clone(), self.search_current_idx)
         .hovered_url(self.hovered_url.as_ref().map(|(r, cs, ce, _)| (*r, *cs, *ce)))
+        .hovered_path(self.hovered_path.as_ref().map(|(r, cs, ce, _, _)| (*r, *cs, *ce)))
+        .url_spans(self.visible_url_spans.clone())
+        .path_spans(self.visible_path_spans.clone())
         .origin_out(self.element_origin_x.clone(), self.element_origin_y.clone());
 
         let bell_active = self.bell_flash_start.is_some();
@@ -923,6 +1306,13 @@ impl Render for TerminalView {
 
                 let key = event.keystroke.key.as_str();
                 let mods = &event.keystroke.modifiers;
+
+                // Escape dismisses an open terminal context menu first.
+                if key == "escape" && this.terminal_context_menu.is_some() {
+                    this.terminal_context_menu = None;
+                    cx.notify();
+                    return;
+                }
 
                 // Handle search mode input
                 if this.search_active {
@@ -1082,6 +1472,11 @@ impl Render for TerminalView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, event: &MouseDownEvent, window, cx| {
+                    // Any left-click dismisses an open terminal context menu.
+                    if this.terminal_context_menu.is_some() {
+                        this.terminal_context_menu = None;
+                        cx.notify();
+                    }
                     let viewport = window.viewport_size();
                     let click_x = f32::from(event.position.x);
                     let click_y = f32::from(event.position.y);
@@ -1215,19 +1610,24 @@ impl Render for TerminalView {
                     return;
                 }
 
-                // URL detection on Cmd hover
+                // URL / path detection on Cmd hover
                 if event.modifiers.platform {
                     let x = f32::from(event.position.x);
                     let y = f32::from(event.position.y);
                     // If the hover is out of grid bounds (padding, etc.)
                     // clear any existing hovered URL. Prevents calling
                     // url_at with an OOB cell.
-                    this.hovered_url = this
-                        .pixel_to_cell(x, y)
-                        .and_then(|cell| this.url_at(cell));
+                    let cell = this.pixel_to_cell(x, y);
+                    this.hovered_url = cell.and_then(|c| this.url_at(c));
+                    this.hovered_path = if this.hovered_url.is_some() {
+                        None
+                    } else {
+                        cell.and_then(|c| this.path_at(c))
+                    };
                     cx.notify();
-                } else if this.hovered_url.is_some() {
+                } else if this.hovered_url.is_some() || this.hovered_path.is_some() {
                     this.hovered_url = None;
+                    this.hovered_path = None;
                     cx.notify();
                 }
 
@@ -1256,6 +1656,33 @@ impl Render for TerminalView {
                     cx.notify();
                 }
             }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this: &mut Self, event: &MouseDownEvent, _window, cx| {
+                    let x = f32::from(event.position.x);
+                    let y = f32::from(event.position.y);
+                    let Some(cell) = this.pixel_to_cell(x, y) else { return };
+
+                    // URL: open immediately in default browser, no menu.
+                    if let Some((_, _, _, url)) = this.url_at(cell) {
+                        let _ = std::process::Command::new("open").arg(&url).spawn();
+                        return;
+                    }
+
+                    // Path: show context menu anchored at the click point.
+                    if let Some((_, _, _, path, line_col)) = this.path_at(cell) {
+                        this.terminal_context_menu = Some(TerminalCtxMenu {
+                            path,
+                            line_col,
+                            position: event.position,
+                        });
+                        cx.notify();
+                    } else if this.terminal_context_menu.is_some() {
+                        this.terminal_context_menu = None;
+                        cx.notify();
+                    }
+                }),
+            )
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
@@ -1353,6 +1780,7 @@ impl Render for TerminalView {
                 }
             })
             .child(grid_element)
+            .children(self.render_terminal_context_menu(cx))
             .children(if self.search_active {
                 let match_count = self.search_matches.len();
                 let current = if match_count > 0 { self.search_current_idx + 1 } else { 0 };
@@ -1382,4 +1810,48 @@ impl Render for TerminalView {
             })
             .into_any_element()
     }
+}
+
+/// Split `foo.rs:12:34` into (`foo.rs`, Some((12, Some(34)))).
+/// If no numeric suffix is present, returns (token, None).
+pub(crate) fn parse_line_col_suffix(token: &str) -> (&str, Option<(u32, Option<u32>)>) {
+    // Walk from end, peeling at most two numeric segments.
+    let bytes = token.as_bytes();
+    let mut end = bytes.len();
+    let mut nums: Vec<(usize, u32)> = Vec::with_capacity(2);
+
+    while nums.len() < 2 {
+        // Scan backwards over digits.
+        let mut digit_start = end;
+        while digit_start > 0 && bytes[digit_start - 1].is_ascii_digit() {
+            digit_start -= 1;
+        }
+        if digit_start == end || digit_start == 0 {
+            break;
+        }
+        // Require ':' right before the digit run.
+        if bytes[digit_start - 1] != b':' {
+            break;
+        }
+        let digits = &token[digit_start..end];
+        let Ok(n) = digits.parse::<u32>() else { break };
+        nums.push((digit_start - 1, n)); // colon position
+        end = digit_start - 1;
+    }
+
+    if nums.is_empty() {
+        return (token, None);
+    }
+    // nums[0] is the rightmost (col if two), nums[last] is leftmost (line).
+    let path_end = nums.last().unwrap().0;
+    let path_part = &token[..path_end];
+    if path_part.is_empty() {
+        return (token, None);
+    }
+    let line_col = match nums.len() {
+        1 => Some((nums[0].1, None)),
+        2 => Some((nums[1].1, Some(nums[0].1))),
+        _ => None,
+    };
+    (path_part, line_col)
 }

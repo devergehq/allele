@@ -972,27 +972,7 @@ impl AppState {
             .external_editor_command
             .as_deref()
             .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
-        let trimmed = cmd.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        // Split on whitespace so users can set flags (e.g. `"code -g"`).
-        let mut parts = trimmed.split_whitespace();
-        let program = match parts.next() {
-            Some(p) => p,
-            None => return,
-        };
-        let mut command = std::process::Command::new(program);
-        for arg in parts {
-            command.arg(arg);
-        }
-        command.arg(path);
-        if let Err(e) = command.spawn() {
-            eprintln!(
-                "Failed to launch external editor '{}': {e}",
-                trimmed
-            );
-        }
+        settings::spawn_external_editor(cmd, path, None);
     }
 
     /// Load a file into the preview cache. Skips binary files and anything
@@ -1345,6 +1325,14 @@ impl AppState {
                             this.pending_action =
                                 Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
                             cx.notify();
+                        }
+                        TerminalEvent::OpenExternalEditor { path, line_col } => {
+                            let cmd = this
+                                .user_settings
+                                .external_editor_command
+                                .as_deref()
+                                .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
+                            settings::spawn_external_editor(cmd, path, *line_col);
                         }
                     }
                 }).detach();
@@ -2107,6 +2095,14 @@ impl AppState {
                 TerminalEvent::ResetFontSize => {
                     this.pending_action = Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
                     cx.notify();
+                }
+                TerminalEvent::OpenExternalEditor { path, line_col } => {
+                    let cmd = this
+                        .user_settings
+                        .external_editor_command
+                        .as_deref()
+                        .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
+                    settings::spawn_external_editor(cmd, path, *line_col);
                 }
             }
         }).detach();

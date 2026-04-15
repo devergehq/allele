@@ -239,6 +239,42 @@ pub const DEFAULT_RESPONSE_READY_SOUND: &str = "/System/Library/Sounds/Glass.aif
 /// on PATH when the user has installed the CLI helper.
 pub const DEFAULT_EXTERNAL_EDITOR: &str = "subl";
 
+/// Launch the user's configured external editor on `path`, optionally jumping
+/// to `line[:col]`. The line/col spec is appended as `path:line` or
+/// `path:line:col` — the format that `subl`, `code -g`, `mate`, `emacs +line`
+/// (approximately), and most modern editors recognise.
+///
+/// `editor_command` is a whitespace-split invocation (e.g. `"code -g"`).
+/// Empty or all-whitespace input is a no-op.
+pub fn spawn_external_editor(
+    editor_command: &str,
+    path: &std::path::Path,
+    line_col: Option<(u32, Option<u32>)>,
+) {
+    let trimmed = editor_command.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let mut parts = trimmed.split_whitespace();
+    let program = match parts.next() {
+        Some(p) => p,
+        None => return,
+    };
+    let mut command = std::process::Command::new(program);
+    for arg in parts {
+        command.arg(arg);
+    }
+    let path_arg = match line_col {
+        Some((line, Some(col))) => format!("{}:{}:{}", path.display(), line, col),
+        Some((line, None)) => format!("{}:{}", path.display(), line),
+        None => path.display().to_string(),
+    };
+    command.arg(path_arg);
+    if let Err(e) = command.spawn() {
+        eprintln!("Failed to launch external editor '{}': {e}", trimmed);
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
