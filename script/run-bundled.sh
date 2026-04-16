@@ -37,6 +37,15 @@ if [[ ! -f "$PLIST" ]] || ! cmp -s "$SOURCE_PLIST" "$PLIST"; then
     cp "$SOURCE_PLIST" "$PLIST"
 fi
 
+# Copy app icon into bundle Resources
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
+SOURCE_ICNS="$PROJECT_DIR/resources/Allele.icns"
+DEST_ICNS="$RESOURCES_DIR/Allele.icns"
+mkdir -p "$RESOURCES_DIR"
+if [[ -f "$SOURCE_ICNS" ]] && { [[ ! -f "$DEST_ICNS" ]] || ! cmp -s "$SOURCE_ICNS" "$DEST_ICNS"; }; then
+    cp "$SOURCE_ICNS" "$DEST_ICNS"
+fi
+
 # Stderr log — macOS `open` launches a new process whose stderr is
 # disconnected from the calling terminal. Write a launcher script
 # inside the bundle that redirects stderr to a log file, then exec's
