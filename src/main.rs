@@ -25,6 +25,26 @@ use terminal::{clamp_font_size, ShellCommand, TerminalEvent, TerminalView, DEFAU
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
+/// A minimal tooltip view for hover text on buttons.
+struct SimpleTooltip {
+    text: SharedString,
+}
+
+impl Render for SimpleTooltip {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(4.0))
+            .bg(rgb(0x1e1e2e))
+            .border_1()
+            .border_color(rgb(0x45475a))
+            .text_size(px(11.0))
+            .text_color(rgb(0xcdd6f4))
+            .child(self.text.clone())
+    }
+}
+
 /// Which view is shown in the main (center) column.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MainTab {
@@ -3899,6 +3919,9 @@ impl Render for AppState {
                             .text_color(rgb(0x6c7086))
                             .hover(|s| s.text_color(rgb(0xa6e3a1)))
                             .child("+")
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| SimpleTooltip { text: "New session".into() }).into()
+                            })
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                 cx.stop_propagation();
                                 this.pending_action = Some(PendingAction::AddSessionToProject(p_idx));
@@ -3919,6 +3942,9 @@ impl Render for AppState {
                             })
                             .hover(|s| s.text_color(rgb(0x89b4fa)))
                             .child("⚙")
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| SimpleTooltip { text: "Project settings".into() }).into()
+                            })
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                 cx.stop_propagation();
                                 if this.editing_project_settings == Some(p_idx) {
@@ -3939,6 +3965,9 @@ impl Render for AppState {
                             .text_color(rgb(0x45475a))
                             .hover(|s| s.text_color(rgb(0xf38ba8)))
                             .child("✕")
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| SimpleTooltip { text: "Remove project".into() }).into()
+                            })
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                 cx.stop_propagation();
                                 this.pending_action = Some(PendingAction::RemoveProject(p_idx));
@@ -4387,6 +4416,9 @@ impl Render for AppState {
                                     .text_color(rgb(0x45475a))
                                     .hover(|s| s.text_color(rgb(0xa6e3a1)))
                                     .child("✓")
+                                    .tooltip(|_window, cx| {
+                                        cx.new(|_| SimpleTooltip { text: "Merge and close session".into() }).into()
+                                    })
                                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                         cx.stop_propagation();
                                         this.pending_action = Some(PendingAction::MergeAndClose {
@@ -4405,6 +4437,9 @@ impl Render for AppState {
                                     .text_color(rgb(0x45475a))
                                     .hover(|s| s.text_color(rgb(0x89b4fa)))
                                     .child("✕")
+                                    .tooltip(|_window, cx| {
+                                        cx.new(|_| SimpleTooltip { text: "Suspend session".into() }).into()
+                                    })
                                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                         cx.stop_propagation();
                                         this.pending_action = Some(PendingAction::CloseSessionKeepClone {
@@ -4423,6 +4458,9 @@ impl Render for AppState {
                                     .text_color(rgb(0x45475a))
                                     .hover(|s| s.text_color(rgb(0xf38ba8)))
                                     .child("🗑")
+                                    .tooltip(|_window, cx| {
+                                        cx.new(|_| SimpleTooltip { text: "Discard session".into() }).into()
+                                    })
                                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                         cx.stop_propagation();
                                         this.pending_action = Some(PendingAction::RequestDiscardSession {
@@ -4525,6 +4563,9 @@ impl Render for AppState {
                                             .text_color(rgb(0xa6e3a1))
                                             .hover(|s| s.bg(rgb(0x313244)))
                                             .child("merge")
+                                            .tooltip(|_window, cx| {
+                                                cx.new(|_| SimpleTooltip { text: "Merge archive into project".into() }).into()
+                                            })
                                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                                 cx.stop_propagation();
                                                 this.pending_action = Some(PendingAction::MergeArchive {
@@ -4544,6 +4585,9 @@ impl Render for AppState {
                                             .text_color(rgb(0x45475a))
                                             .hover(|s| s.text_color(rgb(0xf38ba8)))
                                             .child("×")
+                                            .tooltip(|_window, cx| {
+                                                cx.new(|_| SimpleTooltip { text: "Delete archive".into() }).into()
+                                            })
                                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                                 cx.stop_propagation();
                                                 this.pending_action = Some(PendingAction::DeleteArchive {
@@ -4663,6 +4707,9 @@ impl Render for AppState {
                                     .text_color(rgb(0x6c7086))
                                     .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xa6e3a1)))
                                     .child("+")
+                                    .tooltip(|_window, cx| {
+                                        cx.new(|_| SimpleTooltip { text: "Open project".into() }).into()
+                                    })
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                         this.open_folder_picker(cx);
                                     })),
@@ -5171,6 +5218,9 @@ impl Render for AppState {
                                                 .text_color(rgb(0xf38ba8))
                                         })
                                         .child("×")
+                                        .tooltip(|_window, cx| {
+                                            cx.new(|_| SimpleTooltip { text: "Close tab".into() }).into()
+                                        })
                                         .on_mouse_down(
                                             MouseButton::Left,
                                             cx.listener(move |this: &mut Self, _event, _window, cx| {
@@ -5197,6 +5247,9 @@ impl Render for AppState {
                             .text_color(rgb(0x6c7086))
                             .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
                             .child("+")
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| SimpleTooltip { text: "New terminal tab".into() }).into()
+                            })
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this: &mut Self, _event, _window, cx| {
@@ -5231,6 +5284,9 @@ impl Render for AppState {
                                     .text_color(rgb(0x6c7086))
                                     .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
                                     .child("×")
+                                    .tooltip(|_window, cx| {
+                                        cx.new(|_| SimpleTooltip { text: "Close drawer".into() }).into()
+                                    })
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                         this.pending_action = Some(PendingAction::ToggleDrawer);
                                         cx.notify();
@@ -5318,6 +5374,9 @@ impl Render for AppState {
                                     .text_color(rgb(0x6c7086))
                                     .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
                                     .child("×")
+                                    .tooltip(|_window, cx| {
+                                        cx.new(|_| SimpleTooltip { text: "Close inspector".into() }).into()
+                                    })
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                         this.pending_action = Some(PendingAction::ToggleRightSidebar);
                                         cx.notify();
