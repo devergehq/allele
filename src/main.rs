@@ -154,6 +154,9 @@ enum PendingAction {
     /// Toggle "git pull on source root before creating a new session".
     /// Emitted by the Settings window; persisted immediately.
     UpdateGitPullBeforeNewSession(bool),
+    /// Toggle "promote attention-needed sessions to top of list".
+    /// Emitted by the Settings window; persisted immediately.
+    UpdatePromoteAttentionSessions(bool),
     /// Auto-resume a session after launch. Fires once from the first render
     /// tick so `resume_session` has a valid `window` / `cx`.
     ResumeSession { project_idx: usize, session_idx: usize },
@@ -267,6 +270,9 @@ struct AppState {
     sidebar_filter_input: Entity<text_input::TextInput>,
     /// Current sidebar filter text (lowercased for matching).
     sidebar_filter: String,
+    /// Frame counter for the animated spinner icon on Running sessions.
+    /// Incremented by a 120ms recurring timer.
+    spinner_frame: usize,
     /// Right-click context menu on a session row: (cursor, click position).
     session_context_menu: Option<(SessionCursor, Point<Pixels>)>,
     /// "Edit session" modal for renaming/commenting an existing session.
@@ -280,6 +286,8 @@ struct AppState {
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
 const DRAWER_MIN_HEIGHT: f32 = 100.0;
 const RIGHT_SIDEBAR_MIN_WIDTH: f32 = 160.0;
+/// Braille-pattern spinner frames for Running session status.
+const SPINNER_FRAMES: &[&str] = &["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
 
 impl AppState {
     /// Get the currently active session, if any.
@@ -3539,6 +3547,44 @@ fn main() {
                     })
                     .detach();
 
+                    // Spinner + status-text tick timer. Runs every 120ms to
+                    // animate the Braille spinner on Running sessions and
+                    // update each session's status_text from terminal output.
+                    cx.spawn(async move |this, cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(120))
+                                .await;
+
+                            if this
+                                .update(cx, |state: &mut AppState, cx| {
+                                    state.spinner_frame = state.spinner_frame.wrapping_add(1);
+
+                                    // Update status_text from terminal output.
+                                    let mut any_running = false;
+                                    for project in &mut state.projects {
+                                        for session in &mut project.sessions {
+                                            if session.status == SessionStatus::Running {
+                                                any_running = true;
+                                            }
+                                            if let Some(tv) = &session.terminal_view {
+                                                session.status_text = tv.read(cx).last_output_line();
+                                            }
+                                        }
+                                    }
+
+                                    if any_running {
+                                        cx.notify();
+                                    }
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+
                     // App-level handlers for menu-dispatched actions. Registering
                     // at App scope (not on the element tree) guarantees the
                     // menu items stay enabled regardless of focus state.
@@ -3619,7 +3665,7 @@ fn main() {
                             // "attempted to dereference an ArenaRef after
                             // its Arena was cleared".
                             let Some(strong) = handle.upgrade() else { return };
-                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session) = strong.update(cx, |state: &mut AppState, _cx| {
+                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions) = strong.update(cx, |state: &mut AppState, _cx| {
                                 (
                                     state.settings_window,
                                     state.user_settings.session_cleanup_paths.clone(),
@@ -3633,6 +3679,7 @@ fn main() {
                                     state.user_settings.default_agent.clone(),
                                     state.user_settings.font_size,
                                     state.user_settings.git_pull_before_new_session,
+                                    state.user_settings.promote_attention_sessions,
                                 )
                             });
 
@@ -3648,7 +3695,7 @@ fn main() {
                             }
 
                             let weak = handle.clone();
-                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session) {
+                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions) {
                                 Ok(new_handle) => {
                                     strong
                                         .update(cx, |state: &mut AppState, _cx| {
@@ -3756,6 +3803,7 @@ fn main() {
                         edit_session_modal: None,
                         sidebar_filter_input,
                         sidebar_filter: String::new(),
+                        spinner_frame: 0,
                     }
                 })
             },
@@ -4398,6 +4446,20 @@ impl Render for AppState {
                     };
                     snapshot.save();
                 }
+                PendingAction::UpdatePromoteAttentionSessions(enabled) => {
+                    skip_refocus = true;
+                    self.user_settings.promote_attention_sessions = enabled;
+                    let snapshot = Settings {
+                        projects: self.projects.iter().map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        }).collect(),
+                        ..self.user_settings.clone()
+                    };
+                    snapshot.save();
+                }
                 PendingAction::UpdateFontSize(size) => {
                     skip_refocus = true;
                     let new_size = clamp_font_size(size);
@@ -5018,9 +5080,23 @@ impl Render for AppState {
                 );
             }
 
-            // Sessions under this project — pinned sessions first.
+            // Sessions under this project — attention-needed first (if
+            // enabled), then pinned, then the rest by original index.
             let mut session_order: Vec<usize> = (0..project.sessions.len()).collect();
-            session_order.sort_by_key(|&idx| !project.sessions[idx].pinned);
+            let promote = self.user_settings.promote_attention_sessions;
+            session_order.sort_by_key(|&idx| {
+                let s = &project.sessions[idx];
+                let attention: u8 = if promote {
+                    match s.status {
+                        SessionStatus::AwaitingInput => 0,
+                        SessionStatus::ResponseReady => 1,
+                        _ => 2,
+                    }
+                } else {
+                    2
+                };
+                (attention, !s.pinned, idx)
+            });
 
             for s_idx in session_order {
                 let session = &project.sessions[s_idx];
@@ -5109,17 +5185,23 @@ impl Render for AppState {
                     .child({
                         let session_pinned = session.pinned;
                         let session_comment = session.comment.clone();
+                        let session_status_text = session.status_text.clone();
                         let mut label_row = div()
                             .flex()
                             .flex_row()
                             .gap(px(6.0))
                             .items_center()
-                            .child(
+                            .child({
+                                let icon_text = if session.status == SessionStatus::Running {
+                                    SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()].to_string()
+                                } else {
+                                    status_icon.to_string()
+                                };
                                 div()
                                     .text_size(px(10.0))
                                     .text_color(rgb(status_color))
-                                    .child(status_icon.to_string()),
-                            );
+                                    .child(icon_text)
+                            });
                         if session_pinned {
                             label_row = label_row.child(
                                 div()
@@ -5156,6 +5238,16 @@ impl Render for AppState {
                                     .text_size(px(10.0))
                                     .text_color(rgb(0x585b70))
                                     .child(comment),
+                            );
+                        }
+                        if let Some(status_text) = session_status_text {
+                            info_col = info_col.child(
+                                div()
+                                    .pl(px(16.0))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0x6c7086))
+                                    .overflow_hidden()
+                                    .child(status_text),
                             );
                         }
                         info_col

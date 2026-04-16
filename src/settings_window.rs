@@ -81,6 +81,9 @@ pub struct SettingsWindowState {
     /// `Settings::git_pull_before_new_session`; pushed back via
     /// `UpdateGitPullBeforeNewSession`.
     git_pull_before_new_session: bool,
+    /// Whether attention-needed sessions are promoted to the top of the
+    /// sidebar list. Mirrored from `Settings::promote_attention_sessions`.
+    promote_attention_sessions: bool,
 }
 
 impl SettingsWindowState {
@@ -94,6 +97,7 @@ impl SettingsWindowState {
         initial_default_agent: Option<String>,
         initial_font_size: f32,
         initial_git_pull_before_new_session: bool,
+        initial_promote_attention_sessions: bool,
     ) -> Self {
         let draft_input = cx.new(|cx| {
             TextInput::new(cx, "", "Add a path (e.g. tmp/pids/server.pid)")
@@ -137,6 +141,7 @@ impl SettingsWindowState {
             agent_inputs: Vec::new(),
             font_size: crate::terminal::clamp_font_size(initial_font_size),
             git_pull_before_new_session: initial_git_pull_before_new_session,
+            promote_attention_sessions: initial_promote_attention_sessions,
         };
         s.sync_agent_inputs(cx);
         s
@@ -225,6 +230,17 @@ impl SettingsWindowState {
             .update(cx, |state: &mut AppState, cx| {
                 state.pending_action =
                     Some(crate::PendingAction::UpdateGitPullBeforeNewSession(value));
+                cx.notify();
+            })
+            .ok();
+    }
+
+    fn push_promote_attention_sessions(&self, cx: &mut Context<Self>) {
+        let value = self.promote_attention_sessions;
+        self.app
+            .update(cx, |state: &mut AppState, cx| {
+                state.pending_action =
+                    Some(crate::PendingAction::UpdatePromoteAttentionSessions(value));
                 cx.notify();
             })
             .ok();
@@ -782,6 +798,47 @@ fn render_sessions_pane(
                 .child("Run `git pull` on source before creating a new session"),
         );
 
+    let promote_enabled = this.promote_attention_sessions;
+    let promote_toggle = div()
+        .id("promote-attention-toggle")
+        .cursor_pointer()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, _window, cx| {
+                this.promote_attention_sessions = !this.promote_attention_sessions;
+                this.push_promote_attention_sessions(cx);
+                cx.notify();
+            }),
+        )
+        .child(
+            div()
+                .w(px(32.0))
+                .h(px(18.0))
+                .rounded(px(9.0))
+                .bg(if promote_enabled { rgb(0x89b4fa) } else { rgb(0x45475a) })
+                .flex()
+                .items_center()
+                .justify_start()
+                .px(px(2.0))
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .rounded(px(7.0))
+                        .bg(rgb(0x1e1e2e))
+                        .ml(if promote_enabled { px(14.0) } else { px(0.0) }),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(0xcdd6f4))
+                .child("Move attention-needed sessions to top of list"),
+        );
 
     let add_button = div()
         .id("cleanup-add")
@@ -820,6 +877,7 @@ fn render_sessions_pane(
                 .child("Sessions"),
         )
         .child(pull_toggle)
+        .child(promote_toggle)
         .child(
             div()
                 .w_full()
@@ -1157,6 +1215,7 @@ pub fn open_settings_window(
     initial_default_agent: Option<String>,
     initial_font_size: f32,
     initial_git_pull_before_new_session: bool,
+    initial_promote_attention_sessions: bool,
 ) -> anyhow::Result<WindowHandle<SettingsWindowState>> {
     let window_size = size(px(640.0), px(440.0));
     let options = WindowOptions {
@@ -1181,6 +1240,7 @@ pub fn open_settings_window(
                 initial_default_agent,
                 initial_font_size,
                 initial_git_pull_before_new_session,
+                initial_promote_attention_sessions,
             )
         })
     })

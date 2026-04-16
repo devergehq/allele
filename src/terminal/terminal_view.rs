@@ -445,6 +445,88 @@ impl TerminalView {
         self.terminal.as_ref().and_then(|t| t.title.clone())
     }
 
+    /// Return the last meaningful output line visible on screen.
+    /// Used by the sidebar to show a live status subtitle for each session.
+    ///
+    /// Skips: empty lines, bare prompt characters, and Claude Code UI
+    /// chrome (shortcut hints, cost/token lines, status bar content).
+    pub fn last_output_line(&self) -> Option<String> {
+        let terminal = self.terminal.as_ref()?;
+        let num_lines = {
+            let term = terminal.term.lock();
+            term.grid().screen_lines()
+        };
+        // Scan from bottom up, stop after checking at most 30 rows.
+        let start = num_lines.saturating_sub(1);
+        let limit = start.saturating_sub(30);
+        let mut row = start;
+        loop {
+            let (chars, _cols) = self.line_chars_cols(row);
+            let text: String = chars.iter().collect();
+            let trimmed = text.trim();
+
+            if !trimmed.is_empty() && Self::is_meaningful_line(trimmed) {
+                let result = if trimmed.len() > 80 {
+                    let mut end = 77;
+                    while end < trimmed.len() && !trimmed.is_char_boundary(end) {
+                        end += 1;
+                    }
+                    format!("{}...", &trimmed[..end])
+                } else {
+                    trimmed.to_string()
+                };
+                return Some(result);
+            }
+            if row <= limit {
+                break;
+            }
+            row -= 1;
+        }
+        None
+    }
+
+    /// Returns `false` for lines that are Claude Code UI chrome, prompts,
+    /// or other non-content lines that should be skipped by `last_output_line`.
+    fn is_meaningful_line(trimmed: &str) -> bool {
+        // Bare prompt characters only (e.g. "❯", "$", ">", "#", "%")
+        if trimmed.chars().all(|c| matches!(c, '$' | '>' | '#' | '%' | ' ' | '❯')) {
+            return false;
+        }
+
+        // Claude Code bottom-bar hints and UI chrome
+        let lower = trimmed.to_lowercase();
+
+        // "? for shortcuts", "/ for commands", etc.
+        if lower.starts_with("? for ") || lower.starts_with("/ for ") {
+            return false;
+        }
+
+        // Cost/token summary lines: "~ 1.2k tokens | $0.02"
+        if lower.starts_with('~') && (lower.contains("token") || lower.contains('$')) {
+            return false;
+        }
+
+        // Lines that are just the input prompt marker with cursor
+        // (e.g. "❯ " or "> ")
+        let stripped = trimmed.trim_start_matches(|c: char| {
+            matches!(c, '❯' | '>' | '$' | '#' | '%') || c.is_whitespace()
+        });
+        if stripped.is_empty() {
+            return false;
+        }
+
+        // Lines that are purely box-drawing / decoration
+        if trimmed.chars().all(|c| {
+            matches!(c, '─' | '│' | '┌' | '┐' | '└' | '┘' | '├' | '┤' | '┬' | '┴' | '┼'
+                      | '═' | '║' | '╔' | '╗' | '╚' | '╝' | '╠' | '╣' | '╦' | '╩' | '╬'
+                      | '━' | '┃' | '╭' | '╮' | '╰' | '╯' | '▔' | '▁' | ' ')
+        }) {
+            return false;
+        }
+
+        true
+    }
+
     /// Register a cleanup callback to run when this terminal is dropped
     /// (suspend, remove, app exit). Forwards to `PtyTerminal::on_close`.
     /// No-op if the PTY failed to spawn.
