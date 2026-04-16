@@ -263,6 +263,10 @@ struct AppState {
     scratch_pad: Option<Entity<scratch_pad::ScratchPad>>,
     /// "New session with details" modal. `Some` while the overlay is visible.
     new_session_modal: Option<Entity<new_session_modal::NewSessionModal>>,
+    /// Sidebar search/filter input entity.
+    sidebar_filter_input: Entity<text_input::TextInput>,
+    /// Current sidebar filter text (lowercased for matching).
+    sidebar_filter: String,
     /// Right-click context menu on a session row: (cursor, click position).
     session_context_menu: Option<(SessionCursor, Point<Pixels>)>,
     /// "Edit session" modal for renaming/commenting an existing session.
@@ -3704,6 +3708,16 @@ fn main() {
                         })
                         .unwrap_or((None, None));
 
+                    let sidebar_filter_input = cx.new(|cx| {
+                        text_input::TextInput::new(cx, "", "Search sessions…")
+                    });
+                    cx.subscribe(&sidebar_filter_input, |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
+                        if matches!(event, text_input::TextInputEvent::Changed) {
+                            this.sidebar_filter = input.read(cx).text().to_lowercase();
+                            cx.notify();
+                        }
+                    }).detach();
+
                     AppState {
                         projects,
                         active: initial_active,
@@ -3740,6 +3754,8 @@ fn main() {
                         new_session_modal: None,
                         session_context_menu: None,
                         edit_session_modal: None,
+                        sidebar_filter_input,
+                        sidebar_filter: String::new(),
                     }
                 })
             },
@@ -4579,9 +4595,24 @@ impl Render for AppState {
         // Build sidebar items: for each project, a header then its sessions
         let mut sidebar_items: Vec<AnyElement> = Vec::new();
         let active_cursor = self.active;
+        let filter = &self.sidebar_filter;
+        let filtering = !filter.is_empty();
 
         for (p_idx, project) in self.projects.iter().enumerate() {
             let project_name = project.name.clone();
+
+            // When filtering, skip projects that have no matching sessions.
+            if filtering {
+                let project_matches = project_name.to_lowercase().contains(filter);
+                let any_session_matches = project.sessions.iter().any(|s| {
+                    s.label.to_lowercase().contains(filter)
+                        || s.comment.as_deref().unwrap_or("").to_lowercase().contains(filter)
+                });
+                if !project_matches && !any_session_matches {
+                    continue;
+                }
+            }
+
             // Project header
             sidebar_items.push(
                 div()
@@ -4945,6 +4976,7 @@ impl Render for AppState {
 
             // Loading placeholders (sessions mid-clone)
             for loading in &project.loading_sessions {
+                if filtering { continue; }
                 sidebar_items.push(
                     div()
                         .id(SharedString::from(format!("loading-{}", loading.id)))
@@ -4992,6 +5024,17 @@ impl Render for AppState {
 
             for s_idx in session_order {
                 let session = &project.sessions[s_idx];
+
+                // Skip sessions that don't match the filter.
+                if filtering {
+                    let label_matches = session.label.to_lowercase().contains(filter);
+                    let comment_matches = session.comment.as_deref().unwrap_or("").to_lowercase().contains(filter);
+                    let project_matches = project.name.to_lowercase().contains(filter);
+                    if !label_matches && !comment_matches && !project_matches {
+                        continue;
+                    }
+                }
+
                 let is_active = active_cursor
                     .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
                     .unwrap_or(false);
@@ -5243,8 +5286,8 @@ impl Render for AppState {
                 sidebar_items.push(row.into_any_element());
             }
 
-            // Archived sessions for this project
-            if !project.archives.is_empty() {
+            // Archived sessions for this project (hidden when filtering)
+            if !project.archives.is_empty() && !filtering {
                 // Section header
                 sidebar_items.push(
                     div()
@@ -5480,6 +5523,26 @@ impl Render for AppState {
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                         this.open_folder_picker(cx);
                                     })),
+                            ),
+                    )
+                    // Search filter
+                    .child(
+                        div()
+                            .px(px(8.0))
+                            .py(px(4.0))
+                            .border_b_1()
+                            .border_color(rgb(0x313244))
+                            .child(
+                                div()
+                                    .w_full()
+                                    .px(px(8.0))
+                                    .py(px(4.0))
+                                    .rounded(px(4.0))
+                                    .bg(rgb(0x11111b))
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(0xcdd6f4))
+                                    .overflow_hidden()
+                                    .child(self.sidebar_filter_input.clone()),
                             ),
                     )
                     // Session list
