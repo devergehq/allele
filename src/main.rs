@@ -1,4 +1,5 @@
 mod actions;
+mod app_state;
 mod agents;
 mod browser;
 mod terminal;
@@ -25,14 +26,6 @@ use state::{ArchivedSession, PersistedSession, PersistedState};
 use terminal::{clamp_font_size, ShellCommand, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-
-/// Which view is shown in the main (center) column.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum MainTab {
-    Claude,
-    Editor,
-    Browser,
-}
 
 /// Check whether Claude Code has on-disk history for a given session ID.
 ///
@@ -61,88 +54,9 @@ fn claude_session_history_exists(session_id: &str) -> bool {
 // Re-export so `crate::PendingAction` / `crate::SessionCursor` still resolves
 // for other modules (e.g. settings_window.rs).
 pub(crate) use actions::{PendingAction, SessionCursor};
-
-struct AppState {
-    projects: Vec<Project>,
-    active: Option<SessionCursor>,
-    pending_action: Option<PendingAction>,
-    // Sidebar state
-    sidebar_visible: bool,
-    sidebar_width: f32,
-    sidebar_resizing: bool,
-    /// Inline confirmation gate for the Discard action. When `Some(cursor)`
-    /// the sidebar row at that cursor shows a confirm/cancel prompt instead
-    /// of the usual buttons.
-    confirming_discard: Option<SessionCursor>,
-    /// Project index awaiting dirty-state confirmation before session create.
-    confirming_dirty_session: Option<usize>,
-    /// Absolute path to the Allele hooks.json, passed to claude via
-    /// `--settings <path>` at every spawn. `None` if install_if_missing
-    /// failed — in that case hooks are silently disabled and the app still
-    /// functions normally.
-    hooks_settings_path: Option<PathBuf>,
-    /// Current user settings (sound/notification preferences).
-    user_settings: Settings,
-    // Drawer terminal state (visibility is per-session on Session struct)
-    drawer_height: f32,
-    drawer_resizing: bool,
-    /// Active inline tab rename: (session cursor, tab index, current buffer).
-    /// When Some, the tab strip renders that tab as an editable label.
-    drawer_rename: Option<(SessionCursor, usize, String)>,
-    /// Focus handle for the inline rename input. Created lazily when rename
-    /// mode first activates in a given AppState instance.
-    drawer_rename_focus: Option<FocusHandle>,
-    // Right sidebar state
-    right_sidebar_visible: bool,
-    right_sidebar_width: f32,
-    right_sidebar_resizing: bool,
-    /// When true, a quit confirmation banner is shown because running sessions exist.
-    confirming_quit: bool,
-    /// Project index whose settings panel is currently open in the sidebar.
-    editing_project_settings: Option<usize>,
-    /// Live handle to an open Settings window. Keeps ⌘, from spawning
-    /// duplicates — when set, the action re-activates the existing window
-    /// instead of opening a new one. Cleared when the window closes.
-    settings_window: Option<WindowHandle<settings_window::SettingsWindowState>>,
-    /// Transient warning shown when `git pull` on the source root fails
-    /// before session creation. Auto-dismissed after a few seconds.
-    pull_warning: Option<String>,
-    /// Which view the center column is currently showing.
-    main_tab: MainTab,
-    /// File path currently selected in the Editor tab's file tree.
-    editor_selected_path: Option<PathBuf>,
-    /// Directories expanded in the Editor tab's file tree.
-    editor_expanded_dirs: HashSet<PathBuf>,
-    /// Cached (path, contents) of the currently previewed file.
-    editor_preview: Option<(PathBuf, String)>,
-    /// Right-click context menu target for the Editor file tree.
-    /// Stores (right-clicked path, window-space position of the click).
-    editor_context_menu: Option<(PathBuf, Point<Pixels>)>,
-    /// Status text for the Browser tab panel (e.g. "Chrome is not
-    /// running", "Linked to tab #…"). Updated by SyncBrowserToActiveSession
-    /// and rendered by render_browser_placeholder.
-    browser_status: String,
-    /// Scratch pad compose overlay. `Some` while the overlay is visible.
-    scratch_pad: Option<Entity<scratch_pad::ScratchPad>>,
-    /// Persistent Scratch Pad submission history across all projects.
-    /// Loaded from state.json on startup, appended on submit, written back
-    /// on every save_state. Filtered by project when the overlay opens.
-    scratch_pad_history: Vec<state::ScratchPadEntry>,
-}
-
-const SIDEBAR_MIN_WIDTH: f32 = 160.0;
-const DRAWER_MIN_HEIGHT: f32 = 100.0;
-const RIGHT_SIDEBAR_MIN_WIDTH: f32 = 160.0;
+pub(crate) use app_state::{AppState, MainTab, SIDEBAR_MIN_WIDTH, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH};
 
 impl AppState {
-    /// Get the currently active session, if any.
-    fn active_session(&self) -> Option<&Session> {
-        let cursor = self.active?;
-        self.projects
-            .get(cursor.project_idx)?
-            .sessions
-            .get(cursor.session_idx)
-    }
 
     /// Open the scratch pad compose overlay, or re-focus it if already open.
     fn open_scratch_pad(&mut self, window: &mut Window, cx: &mut Context<Self>) {
