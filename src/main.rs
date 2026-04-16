@@ -193,6 +193,9 @@ struct AppState {
     /// duplicates — when set, the action re-activates the existing window
     /// instead of opening a new one. Cleared when the window closes.
     settings_window: Option<WindowHandle<settings_window::SettingsWindowState>>,
+    /// Transient warning shown when `git pull` on the source root fails
+    /// before session creation. Auto-dismissed after a few seconds.
+    pull_warning: Option<String>,
     /// Which view the center column is currently showing.
     main_tab: MainTab,
     /// File path currently selected in the Editor tab's file tree.
@@ -1193,28 +1196,42 @@ impl AppState {
         let agent_id_for_task = agent_id.clone();
 
         cx.spawn_in(window, async move |this, cx| {
-            let clone_result = cx
+            let (clone_result, pull_error) = cx
                 .background_executor()
                 .spawn(async move {
-                    if pull_before_clone {
-                        if let Err(e) = git::pull(&source_for_task) {
-                            eprintln!(
-                                "git pull on {} failed before new session: {e} \
-                                 (continuing with clone)",
-                                source_for_task.display()
-                            );
+                    let pull_error = if pull_before_clone {
+                        match git::pull(&source_for_task) {
+                            Ok(()) => None,
+                            Err(e) => {
+                                let msg = format!("{e}");
+                                eprintln!(
+                                    "git pull on {} failed before new session: {msg} \
+                                     (continuing with clone)",
+                                    source_for_task.display()
+                                );
+                                Some(msg)
+                            }
                         }
-                    }
-                    clone::create_session_clone(
+                    } else {
+                        None
+                    };
+                    let clone = clone::create_session_clone(
                         &source_for_task,
                         &project_name_for_task,
                         &session_id_for_clone,
-                    )
+                    );
+                    (clone, pull_error)
                 })
                 .await;
 
             // Back on the main thread with window access
             let _ = this.update_in(cx, move |this: &mut Self, window, cx| {
+                // Surface git pull failures as a transient warning banner.
+                if let Some(msg) = pull_error {
+                    this.pull_warning = Some(msg);
+                    cx.notify();
+                }
+
                 let clone_path = match clone_result {
                     Ok(p) => {
                         eprintln!("Created APFS clone at: {}", p.display());
@@ -1353,6 +1370,17 @@ impl AppState {
                 this.save_state();
                 cx.notify();
             });
+
+            // Auto-dismiss the pull warning banner after 8 seconds.
+            if this.read_with(cx, |this, _cx| this.pull_warning.is_some()).unwrap_or(false) {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(8))
+                    .await;
+                let _ = this.update_in(cx, |this: &mut Self, _window, cx| {
+                    this.pull_warning = None;
+                    cx.notify();
+                });
+            }
         })
         .detach();
     }
@@ -3064,6 +3092,7 @@ fn main() {
                         editing_project_settings: None,
                         user_settings: settings_for_window.clone(),
                         settings_window: None,
+                        pull_warning: None,
                         main_tab: MainTab::Claude,
                         editor_selected_path: None,
                         editor_expanded_dirs: HashSet::new(),
@@ -4920,6 +4949,50 @@ impl Render for AppState {
                                                     cx.notify();
                                                 })),
                                         ),
+                                ),
+                        );
+                    }
+
+                    // --- Pull warning banner (absolute overlay at top) ---
+                    if let Some(ref warning) = self.pull_warning {
+                        let label = format!("git pull failed: {warning}");
+                        main_area = main_area.child(
+                            div()
+                                .absolute()
+                                .top(px(0.0))
+                                .left(px(0.0))
+                                .right(px(0.0))
+                                .px(px(16.0))
+                                .py(px(10.0))
+                                .bg(rgb(0x2e2a1e)) // subtle amber tint
+                                .border_b_1()
+                                .border_color(rgb(0xf9e2af)) // yellow
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_size(px(13.0))
+                                        .text_color(rgb(0xf9e2af)) // yellow
+                                        .child(label),
+                                )
+                                .child(
+                                    div()
+                                        .id("pull-warning-dismiss-btn")
+                                        .cursor_pointer()
+                                        .px(px(10.0))
+                                        .py(px(4.0))
+                                        .rounded(px(4.0))
+                                        .bg(rgb(0x45475a))
+                                        .text_size(px(11.0))
+                                        .text_color(rgb(0xcdd6f4))
+                                        .hover(|s| s.bg(rgb(0x585b70)))
+                                        .child("Dismiss")
+                                        .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                                            this.pull_warning = None;
+                                            cx.notify();
+                                        })),
                                 ),
                         );
                     }

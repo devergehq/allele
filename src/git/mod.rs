@@ -41,6 +41,22 @@ fn git_cmd(repo: Option<&Path>) -> Command {
     cmd
 }
 
+/// Build a `git` command that honours the user's **full** git config
+/// (including system gitconfig where macOS stores credential helpers).
+///
+/// Use this instead of [`git_cmd`] for operations that hit a remote the
+/// user owns (pull, fetch) — those need `credential.helper=osxkeychain`
+/// from `/etc/gitconfig` to work with HTTPS repos. Interactive prompts
+/// are disabled so the subprocess never hangs waiting for stdin.
+fn user_git_cmd(repo: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(repo);
+    // Prevent interactive prompts (no TTY in background subprocess).
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    cmd
+}
+
 /// Execute a `git` subprocess and return its `Output`, converting non-zero
 /// exit into an error that includes stderr.
 fn run_git(mut cmd: Command, context: &str) -> anyhow::Result<std::process::Output> {
@@ -153,18 +169,17 @@ pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
 /// applies. Intended for the "pull source root before new session" toggle,
 /// where we want exactly what the user would get typing `git pull`
 /// themselves.
+///
+/// Unlike other git helpers in this module, this intentionally does **not**
+/// use `git_cmd()` — that sets `GIT_CONFIG_NOSYSTEM=1` which blocks the
+/// system gitconfig where macOS stores `credential.helper=osxkeychain`.
+/// Since `pull` is a user-facing operation that should honour the user's
+/// full git config, we build a plain `Command` here.
 pub fn pull(repo: &Path) -> anyhow::Result<()> {
     if !is_git_repo(repo) {
         anyhow::bail!("pull: not a git repo: {}", repo.display());
     }
-    let mut cmd = git_cmd(Some(repo));
-    // No TTY is attached to this subprocess, so git's interactive
-    // username/password prompt would hang forever on stdin. Disable the
-    // prompt — credential helpers (osxkeychain, SSH agent) still work,
-    // but a missing credential surfaces as a fast error instead of a
-    // hang. GIT_SSH_COMMAND with BatchMode does the same for SSH.
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-    cmd.env("GIT_SSH_COMMAND", "ssh -o BatchMode=yes");
+    let mut cmd = user_git_cmd(repo);
     cmd.arg("pull");
     run_git(cmd, "pull")?;
     Ok(())
@@ -194,8 +209,9 @@ pub fn fetch_and_rebase_onto_remote_branch(
         run_git_stdout(cmd, "rev-parse HEAD (pre-rebase)")?
     };
 
-    // 1. Fetch the remote branch
-    let mut cmd = git_cmd(Some(repo));
+    // 1. Fetch the remote branch — use user_git_cmd so the user's
+    //    credential helpers (osxkeychain, SSH agent) are available.
+    let mut cmd = user_git_cmd(repo);
     cmd.arg("fetch").arg(remote).arg(&branch);
     run_git(cmd, &format!("fetch {remote} {branch}"))?;
 
