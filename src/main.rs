@@ -2604,18 +2604,25 @@ fn show_about_panel() {
         };
         let _: () = msg_send![credits, addAttribute: link_key value: url range: range];
 
-        let keys: [id; 4] = [
+        // Load the embedded icon for the About panel
+        let icon_data: &[u8] = include_bytes!("../assets/icons/allele-icon-256.png");
+        let ns_icon_data: id = msg_send![class!(NSData), dataWithBytes: icon_data.as_ptr() length: icon_data.len()];
+        let icon_image: id = msg_send![class!(NSImage), alloc];
+        let icon_image: id = msg_send![icon_image, initWithData: ns_icon_data];
+
+        let keys: [id; 5] = [
             NSString::alloc(nil).init_str("ApplicationName"),
             NSString::alloc(nil).init_str("ApplicationVersion"),
             NSString::alloc(nil).init_str("Copyright"),
             NSString::alloc(nil).init_str("Credits"),
+            NSString::alloc(nil).init_str("ApplicationIcon"),
         ];
-        let vals: [id; 4] = [name, version, copyright, credits];
+        let vals: [id; 5] = [name, version, copyright, credits, icon_image];
         let options: id = msg_send![
             class!(NSDictionary),
             dictionaryWithObjects: vals.as_ptr()
             forKeys: keys.as_ptr()
-            count: 4usize
+            count: 5usize
         ];
 
         let app = NSApp();

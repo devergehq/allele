@@ -41,6 +41,11 @@ mkdir -p "$MACOS_DIR"
 # Copy Info.plist
 cp "$PROJECT_DIR/resources/Info.plist" "$CONTENTS_DIR/Info.plist"
 
+# Copy app icon
+RESOURCES_DIR="$CONTENTS_DIR/Resources"
+mkdir -p "$RESOURCES_DIR"
+cp "$PROJECT_DIR/resources/Allele.icns" "$RESOURCES_DIR/Allele.icns"
+
 # Copy binary
 cp "$BINARY" "$MACOS_DIR/Allele"
 
