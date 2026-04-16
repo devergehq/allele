@@ -54,6 +54,12 @@ pub struct PersistedSession {
     /// Id of the coding agent that originally spawned the session.
     #[serde(default)]
     pub agent_id: Option<String>,
+    /// Pinned sessions sort to the top of their project's session list.
+    #[serde(default)]
+    pub pinned: bool,
+    /// Optional user comment displayed as a subtitle on the session row.
+    #[serde(default)]
+    pub comment: Option<String>,
 }
 
 impl PersistedSession {
@@ -77,6 +83,8 @@ impl PersistedSession {
             browser_tab_id: session.browser_tab_id,
             browser_last_url: session.browser_last_url.clone(),
             agent_id: session.agent_id.clone(),
+            pinned: session.pinned,
+            comment: session.comment.clone(),
         }
     }
 }

@@ -6,6 +6,7 @@ mod clone;
 mod config;
 mod git;
 mod hooks;
+mod new_session_modal;
 mod project;
 mod scratch_pad;
 mod session;
@@ -84,6 +85,16 @@ enum PendingAction {
     FocusActive,
     OpenProjectAtPath(PathBuf),
     AddSessionToProject(usize), // project index
+    /// Open the "New session with details" modal for a project.
+    OpenNewSessionModal(usize),
+    /// Create a session with custom details from the modal.
+    AddSessionWithDetails {
+        project_idx: usize,
+        label: String,
+        branch_slug: Option<String>,
+        agent_id: Option<String>,
+        initial_prompt: Option<String>,
+    },
     RemoveProject(usize),
     /// Kill the PTY, keep the clone, mark Suspended. Next click cold-resumes.
     CloseSessionKeepClone { project_idx: usize, session_idx: usize },
@@ -162,6 +173,23 @@ enum PendingAction {
     /// writes `user_settings.font_size`, saves to disk, and broadcasts
     /// the new value to every open `TerminalView`.
     UpdateFontSize(f32),
+    /// Open the edit-session modal for a given session.
+    EditSession { project_idx: usize, session_idx: usize },
+    /// Reveal the session's clone path (or source path) in Finder.
+    RevealSessionInFinder { project_idx: usize, session_idx: usize },
+    /// Copy the session's clone path to the clipboard.
+    CopySessionPath { project_idx: usize, session_idx: usize },
+    /// Toggle the pinned state of a session.
+    TogglePinSession { project_idx: usize, session_idx: usize },
+    /// Apply edits from the edit-session modal.
+    ApplySessionEdit {
+        project_idx: usize,
+        session_idx: usize,
+        label: String,
+        branch_slug: Option<String>,
+        comment: Option<String>,
+        pinned: bool,
+    },
 }
 
 /// Position of a session in the project tree.
@@ -233,6 +261,12 @@ struct AppState {
     browser_status: String,
     /// Scratch pad compose overlay. `Some` while the overlay is visible.
     scratch_pad: Option<Entity<scratch_pad::ScratchPad>>,
+    /// "New session with details" modal. `Some` while the overlay is visible.
+    new_session_modal: Option<Entity<new_session_modal::NewSessionModal>>,
+    /// Right-click context menu on a session row: (cursor, click position).
+    session_context_menu: Option<(SessionCursor, Point<Pixels>)>,
+    /// "Edit session" modal for renaming/commenting an existing session.
+    edit_session_modal: Option<Entity<new_session_modal::EditSessionModal>>,
     /// Persistent Scratch Pad submission history across all projects.
     /// Loaded from state.json on startup, appended on submit, written back
     /// on every save_state. Filtered by project when the overlay opens.
@@ -884,6 +918,188 @@ impl AppState {
         deferred(anchored().position(position).snap_to_window().child(menu))
     }
 
+    /// Floating right-click menu for a session row.
+    fn render_session_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let (cursor, position) = self.session_context_menu.unwrap();
+        let p_idx = cursor.project_idx;
+        let s_idx = cursor.session_idx;
+
+        let is_pinned = self
+            .projects
+            .get(p_idx)
+            .and_then(|p| p.sessions.get(s_idx))
+            .map(|s| s.pinned)
+            .unwrap_or(false);
+        let pin_label = if is_pinned { "Unpin" } else { "Pin" };
+
+        let menu_item = |id: &'static str, label: &str, color: u32| {
+            div()
+                .id(id)
+                .px(px(14.0))
+                .py(px(6.0))
+                .text_size(px(12.0))
+                .text_color(rgb(color))
+                .cursor_pointer()
+                .hover(|s| s.bg(rgb(0x45475a)))
+                .child(label.to_string())
+        };
+
+        let separator = || {
+            div()
+                .w_full()
+                .h(px(1.0))
+                .my(px(4.0))
+                .bg(rgb(0x313244))
+        };
+
+        let menu = div()
+            .flex()
+            .flex_col()
+            .min_w(px(200.0))
+            .py(px(4.0))
+            .bg(rgb(0x181825))
+            .border_1()
+            .border_color(rgb(0x45475a))
+            .rounded(px(6.0))
+            .shadow_md()
+            .child(
+                menu_item("session-ctx-edit", "Edit Session…", 0xcdd6f4)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.session_context_menu = None;
+                        this.pending_action = Some(PendingAction::EditSession { project_idx: p_idx, session_idx: s_idx });
+                        cx.notify();
+                    })),
+            )
+            .child(separator())
+            .child(
+                menu_item("session-ctx-reveal", "Open in Finder", 0xcdd6f4)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.session_context_menu = None;
+                        this.pending_action = Some(PendingAction::RevealSessionInFinder { project_idx: p_idx, session_idx: s_idx });
+                        cx.notify();
+                    })),
+            )
+            .child(
+                menu_item("session-ctx-copy-path", "Copy Path", 0xcdd6f4)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.session_context_menu = None;
+                        this.pending_action = Some(PendingAction::CopySessionPath { project_idx: p_idx, session_idx: s_idx });
+                        cx.notify();
+                    })),
+            )
+            .child(separator())
+            .child(
+                menu_item("session-ctx-pin", pin_label, 0xcdd6f4)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.session_context_menu = None;
+                        this.pending_action = Some(PendingAction::TogglePinSession { project_idx: p_idx, session_idx: s_idx });
+                        cx.notify();
+                    })),
+            )
+            .child(
+                menu_item("session-ctx-comment", "Add Comment…", 0xcdd6f4)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.session_context_menu = None;
+                        this.pending_action = Some(PendingAction::EditSession { project_idx: p_idx, session_idx: s_idx });
+                        cx.notify();
+                    })),
+            )
+            .child(separator())
+            .child(
+                menu_item("session-ctx-delete", "Delete", 0xf38ba8)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.session_context_menu = None;
+                        this.pending_action = Some(PendingAction::RequestDiscardSession { project_idx: p_idx, session_idx: s_idx });
+                        cx.notify();
+                    })),
+            );
+
+        deferred(anchored().position(position).snap_to_window().child(menu))
+    }
+
+    /// Open the edit-session modal for an existing session.
+    fn open_edit_session_modal(
+        &mut self,
+        project_idx: usize,
+        session_idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.get(project_idx) else { return; };
+        let Some(session) = project.sessions.get(session_idx) else { return; };
+
+        // Extract the current branch name from the clone.
+        // If it's the default allele/session/{id} format, show empty
+        // so the placeholder text appears. Otherwise show the full name.
+        let current_branch = session
+            .clone_path
+            .as_ref()
+            .and_then(|cp| git::current_branch(cp))
+            .unwrap_or_default();
+        let default_branch = git::session_branch_name(&session.id);
+        let branch_slug = if current_branch == default_branch {
+            String::new()
+        } else {
+            current_branch
+        };
+
+        let entity = cx.new(|cx| {
+            new_session_modal::EditSessionModal::new(
+                cx,
+                project_idx,
+                session_idx,
+                &session.label,
+                &branch_slug,
+                session.comment.as_deref().unwrap_or(""),
+                session.pinned,
+            )
+        });
+
+        cx.subscribe(
+            &entity,
+            |this: &mut Self, _modal, event: &new_session_modal::EditSessionModalEvent, cx| {
+                match event {
+                    new_session_modal::EditSessionModalEvent::Apply {
+                        project_idx,
+                        session_idx,
+                        label,
+                        branch_slug,
+                        comment,
+                        pinned,
+                    } => {
+                        this.edit_session_modal = None;
+                        this.pending_action = Some(PendingAction::ApplySessionEdit {
+                            project_idx: *project_idx,
+                            session_idx: *session_idx,
+                            label: label.clone(),
+                            branch_slug: branch_slug.clone(),
+                            comment: comment.clone(),
+                            pinned: *pinned,
+                        });
+                        cx.notify();
+                    }
+                    new_session_modal::EditSessionModalEvent::Close => {
+                        this.edit_session_modal = None;
+                        this.pending_action = Some(PendingAction::FocusActive);
+                        cx.notify();
+                    }
+                }
+            },
+        )
+        .detach();
+
+        let fh = entity.read(cx).focus_handle().clone();
+        self.edit_session_modal = Some(entity);
+        fh.focus(window, cx);
+        cx.notify();
+    }
+
     /// Recursively build file-tree rows starting at `dir`.
     /// Directories render as "▸"/"▾" rows; files as plain rows.
     fn collect_tree_rows(
@@ -1388,6 +1604,397 @@ impl AppState {
                 this.active = Some(cursor);
                 this.apply_project_config(cursor, window, cx);
                 this.save_state();
+                cx.notify();
+            });
+
+            // Auto-dismiss the pull warning banner after 8 seconds.
+            if this.read_with(cx, |this, _cx| this.pull_warning.is_some()).unwrap_or(false) {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs(8))
+                    .await;
+                let _ = this.update_in(cx, |this: &mut Self, _window, cx| {
+                    this.pull_warning = None;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Open the "New session with details" modal for a project.
+    fn open_new_session_modal(
+        &mut self,
+        project_idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Build the list of enabled agents with resolved paths.
+        let agents: Vec<(String, String)> = self
+            .user_settings
+            .agents
+            .iter()
+            .filter(|a| a.enabled && a.path.is_some())
+            .map(|a| (a.id.clone(), a.display_name.clone()))
+            .collect();
+
+        // Determine which agent index is the default for this project.
+        let project_override = self
+            .projects
+            .get(project_idx)
+            .and_then(|p| config::ProjectConfig::load(&p.source_path))
+            .and_then(|c| c.agent);
+        let resolved = agents::resolve(
+            &self.user_settings.agents,
+            self.user_settings.default_agent.as_deref(),
+            project_override.as_deref(),
+            None,
+        );
+        let default_agent_idx = resolved
+            .and_then(|a| agents.iter().position(|(id, _)| id == &a.id))
+            .unwrap_or(0);
+
+        // Compute the default label that the + button would have used.
+        let session_count = self
+            .projects
+            .get(project_idx)
+            .map(|p| p.sessions.len() + p.loading_sessions.len() + 1)
+            .unwrap_or(1);
+        let default_label = resolved
+            .map(|a| format!("{} {session_count}", a.display_name))
+            .unwrap_or_else(|| format!("Shell {session_count}"));
+
+        let entity = cx.new(|cx| {
+            new_session_modal::NewSessionModal::new(
+                cx,
+                project_idx,
+                agents,
+                default_agent_idx,
+                default_label,
+            )
+        });
+
+        cx.subscribe(
+            &entity,
+            |this: &mut Self, _modal, event: &new_session_modal::NewSessionModalEvent, cx| {
+                match event {
+                    new_session_modal::NewSessionModalEvent::Create {
+                        project_idx,
+                        label,
+                        branch_slug,
+                        agent_id,
+                        initial_prompt,
+                    } => {
+                        this.new_session_modal = None;
+                        this.pending_action = Some(PendingAction::AddSessionWithDetails {
+                            project_idx: *project_idx,
+                            label: label.clone(),
+                            branch_slug: branch_slug.clone(),
+                            agent_id: agent_id.clone(),
+                            initial_prompt: initial_prompt.clone(),
+                        });
+                        cx.notify();
+                    }
+                    new_session_modal::NewSessionModalEvent::Close => {
+                        this.new_session_modal = None;
+                        this.pending_action = Some(PendingAction::FocusActive);
+                        cx.notify();
+                    }
+                }
+            },
+        )
+        .detach();
+
+        let fh = entity.read(cx).focus_handle().clone();
+        self.new_session_modal = Some(entity);
+        fh.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Create a new session with custom details (name, branch, agent, prompt).
+    ///
+    /// This is the "with details" counterpart to `add_session_to_project`.
+    /// It accepts optional overrides for label, branch slug, agent, and an
+    /// initial prompt to send to the agent after creation.
+    fn add_session_to_project_with_details(
+        &mut self,
+        project_idx: usize,
+        custom_label: String,
+        custom_branch_slug: Option<String>,
+        explicit_agent_id: Option<String>,
+        initial_prompt: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.get_mut(project_idx) else { return; };
+
+        if !project.source_path.exists() {
+            self.pending_action = Some(PendingAction::RelocateProject(project_idx));
+            cx.notify();
+            return;
+        }
+
+        let source_path = project.source_path.clone();
+        let project_name = project.name.clone();
+        let session_count = project.sessions.len() + project.loading_sessions.len() + 1;
+
+        let project_override = config::ProjectConfig::load(&project.source_path)
+            .and_then(|c| c.agent);
+        let agent = agents::resolve(
+            &self.user_settings.agents,
+            self.user_settings.default_agent.as_deref(),
+            project_override.as_deref(),
+            explicit_agent_id.as_deref(),
+        )
+        .cloned();
+
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let default_label = match &agent {
+            Some(a) => format!("{} {session_count}", a.display_name),
+            None => format!("Shell {session_count}"),
+        };
+        let display_label = if custom_label.trim().is_empty() {
+            default_label
+        } else {
+            custom_label.clone()
+        };
+        // Skip auto-naming if user provided a custom label or branch slug.
+        let skip_auto_naming = !custom_label.trim().is_empty() || custom_branch_slug.is_some();
+        let agent_id = agent.as_ref().map(|a| a.id.clone());
+
+        let hooks_path_str = self
+            .hooks_settings_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string());
+        let ctx = agents::SpawnCtx {
+            session_id: &session_id,
+            label: &display_label,
+            hooks_settings_path: hooks_path_str.as_deref(),
+            has_history: false,
+        };
+        let command = agent
+            .as_ref()
+            .and_then(|a| agents::build_command(a, &ctx, false));
+
+        project.loading_sessions.push(project::LoadingSession {
+            id: session_id.clone(),
+            label: display_label.clone(),
+        });
+        cx.notify();
+
+        let source_for_task = source_path.clone();
+        let project_name_for_task = project_name.clone();
+        let session_id_for_clone = session_id.clone();
+        let session_id_for_session = session_id.clone();
+        let display_label_for_task = display_label.clone();
+        let agent_id_for_task = agent_id.clone();
+        let pull_before_clone = self.user_settings.git_pull_before_new_session;
+        let branch_slug = custom_branch_slug;
+        let prompt = initial_prompt;
+
+        cx.spawn_in(window, async move |this, cx| {
+            let (clone_result, pull_error) = cx
+                .background_executor()
+                .spawn(async move {
+                    let pull_error = if pull_before_clone {
+                        match git::pull(&source_for_task) {
+                            Ok(()) => None,
+                            Err(e) => {
+                                let msg = format!("{e}");
+                                eprintln!(
+                                    "git pull on {} failed before new session: {msg} \
+                                     (continuing with clone)",
+                                    source_for_task.display()
+                                );
+                                Some(msg)
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    let clone = clone::create_session_clone(
+                        &source_for_task,
+                        &project_name_for_task,
+                        &session_id_for_clone,
+                    );
+                    (clone, pull_error)
+                })
+                .await;
+
+            let _ = this.update_in(cx, move |this: &mut Self, window, cx| {
+                if let Some(msg) = pull_error {
+                    this.pull_warning = Some(msg);
+                    cx.notify();
+                }
+
+                let clone_path = match clone_result {
+                    Ok(p) => {
+                        eprintln!("Created APFS clone at: {}", p.display());
+                        p
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to create APFS clone: {e}");
+                        source_path.clone()
+                    }
+                };
+
+                let clone_succeeded = clone_path != source_path;
+
+                if clone_succeeded {
+                    clone::cleanup_stale_runtime(
+                        &clone_path,
+                        &this.user_settings.session_cleanup_paths,
+                    );
+                }
+
+                let Some(project) = this.projects.get_mut(project_idx) else {
+                    let _ = clone::delete_clone(&clone_path);
+                    return;
+                };
+
+                project.loading_sessions.retain(|l| l.id != session_id);
+
+                if clone_succeeded {
+                    if let Err(e) = git::create_session_branch(
+                        &clone_path,
+                        &session_id_for_session,
+                    ) {
+                        eprintln!(
+                            "create_session_branch failed for {session_id_for_session}: {e}"
+                        );
+                    }
+
+                    // Rename the branch if the user provided a custom name.
+                    // Use the name directly (no allele/session/ prefix) since
+                    // the user explicitly chose it.
+                    if let Some(ref name) = branch_slug {
+                        let sanitised = git::sanitise_branch_name(name, 100);
+                        if !sanitised.is_empty() {
+                            if let Err(e) = git::rename_current_branch(
+                                &clone_path,
+                                &sanitised,
+                            ) {
+                                eprintln!("branch rename failed for custom name: {e}");
+                            }
+                        }
+                    }
+                }
+
+                let initial_font_size = this.user_settings.font_size;
+                let terminal_view = cx.new(|cx| {
+                    TerminalView::new(window, cx, command, Some(clone_path.clone()), initial_font_size)
+                });
+
+                cx.subscribe(&terminal_view, |this: &mut Self, _tv: Entity<TerminalView>, event: &TerminalEvent, cx: &mut Context<Self>| {
+                    match event {
+                        TerminalEvent::NewSession => {
+                            this.pending_action = Some(PendingAction::NewSessionInActiveProject);
+                            cx.notify();
+                        }
+                        TerminalEvent::CloseSession => {
+                            this.pending_action = Some(PendingAction::CloseActiveSession);
+                            cx.notify();
+                        }
+                        TerminalEvent::SwitchSession(target) => {
+                            let target = *target;
+                            let mut flat_idx = 0;
+                            'outer: for (p_idx, project) in this.projects.iter().enumerate() {
+                                for (s_idx, _) in project.sessions.iter().enumerate() {
+                                    if flat_idx == target {
+                                        this.active = Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
+                                        this.pending_action = Some(PendingAction::FocusActive);
+                                        cx.notify();
+                                        break 'outer;
+                                    }
+                                    flat_idx += 1;
+                                }
+                            }
+                        }
+                        TerminalEvent::PrevSession => {
+                            this.navigate_session(-1, cx);
+                        }
+                        TerminalEvent::NextSession => {
+                            this.navigate_session(1, cx);
+                        }
+                        TerminalEvent::ToggleDrawer => {
+                            this.pending_action = Some(PendingAction::ToggleDrawer);
+                            cx.notify();
+                        }
+                        TerminalEvent::ToggleSidebar => {
+                            this.pending_action = Some(PendingAction::ToggleSidebar);
+                            cx.notify();
+                        }
+                        TerminalEvent::ToggleRightSidebar => {
+                            this.pending_action = Some(PendingAction::ToggleRightSidebar);
+                            cx.notify();
+                        }
+                        TerminalEvent::OpenScratchPad => {
+                            this.pending_action = Some(PendingAction::OpenScratchPad);
+                            cx.notify();
+                        }
+                        TerminalEvent::AdjustFontSize(delta) => {
+                            let new_size = clamp_font_size(this.user_settings.font_size + delta);
+                            this.pending_action = Some(PendingAction::UpdateFontSize(new_size));
+                            cx.notify();
+                        }
+                        TerminalEvent::ResetFontSize => {
+                            this.pending_action =
+                                Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
+                            cx.notify();
+                        }
+                        TerminalEvent::OpenExternalEditor { path, line_col } => {
+                            let cmd = this
+                                .user_settings
+                                .external_editor_command
+                                .as_deref()
+                                .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
+                            settings::spawn_external_editor(cmd, path, *line_col);
+                        }
+                    }
+                }).detach();
+
+                let mut session = Session::new_with_id(
+                    session_id_for_session,
+                    display_label_for_task,
+                    terminal_view.clone(),
+                )
+                .with_clone(clone_path)
+                .with_agent_id(agent_id_for_task.clone());
+
+                if skip_auto_naming {
+                    session.auto_naming_fired = true;
+                }
+
+                let Some(project) = this.projects.get_mut(project_idx) else { return; };
+                project.sessions.push(session);
+                let session_idx = project.sessions.len() - 1;
+                let cursor = SessionCursor { project_idx, session_idx };
+                this.active = Some(cursor);
+                this.apply_project_config(cursor, window, cx);
+                this.save_state();
+
+                // Send the initial prompt if provided.
+                if let Some(ref prompt_text) = prompt {
+                    if let Some(terminal) = terminal_view.read(cx).pty() {
+                        terminal.write(b"\x1b[200~");
+                        terminal.write(prompt_text.as_bytes());
+                        terminal.write(b"\x1b[201~");
+                    }
+                    let tv_weak = terminal_view.downgrade();
+                    cx.spawn(async move |_this, cx| {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(80))
+                            .await;
+                        let _ = cx.update(|cx| {
+                            if let Some(tv) = tv_weak.upgrade() {
+                                if let Some(terminal) = tv.read(cx).pty() {
+                                    terminal.write(b"\r");
+                                }
+                            }
+                        });
+                    })
+                    .detach();
+                }
+
                 cx.notify();
             });
 
@@ -2865,7 +3472,7 @@ fn main() {
                             continue;
                         };
 
-                        let session = Session::suspended_from_persisted(
+                        let mut session = Session::suspended_from_persisted(
                             persisted.id.clone(),
                             persisted.label.clone(),
                             persisted.started_at,
@@ -2882,6 +3489,8 @@ fn main() {
                             persisted.browser_last_url.clone(),
                         )
                         .with_agent_id(persisted.agent_id.clone());
+                        session.pinned = persisted.pinned;
+                        session.comment = persisted.comment.clone();
                         project.sessions.push(session);
                     }
 
@@ -3121,6 +3730,9 @@ fn main() {
                         browser_status: String::new(),
                         scratch_pad: None,
                         scratch_pad_history: loaded_state.scratch_pad_history.clone(),
+                        new_session_modal: None,
+                        session_context_menu: None,
+                        edit_session_modal: None,
                     }
                 })
             },
@@ -3133,6 +3745,8 @@ impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Process pending actions
         if let Some(action) = self.pending_action.take() {
+            // Dismiss the session context menu on any action.
+            self.session_context_menu = None;
             let mut skip_refocus = false;
             match action {
                 PendingAction::NewSessionInActiveProject => {
@@ -3162,6 +3776,27 @@ impl Render for AppState {
                 }
                 PendingAction::AddSessionToProject(project_idx) => {
                     self.add_session_to_project(project_idx, window, cx);
+                }
+                PendingAction::OpenNewSessionModal(project_idx) => {
+                    skip_refocus = true;
+                    self.open_new_session_modal(project_idx, window, cx);
+                }
+                PendingAction::AddSessionWithDetails {
+                    project_idx,
+                    label,
+                    branch_slug,
+                    agent_id,
+                    initial_prompt,
+                } => {
+                    self.add_session_to_project_with_details(
+                        project_idx,
+                        label,
+                        branch_slug,
+                        agent_id,
+                        initial_prompt,
+                        window,
+                        cx,
+                    );
                 }
                 PendingAction::RemoveProject(project_idx) => {
                     self.remove_project(project_idx, window, cx);
@@ -3795,6 +4430,72 @@ impl Render for AppState {
                     };
                     snapshot.save();
                 }
+                PendingAction::EditSession { project_idx, session_idx } => {
+                    skip_refocus = true;
+                    self.open_edit_session_modal(project_idx, session_idx, window, cx);
+                }
+                PendingAction::RevealSessionInFinder { project_idx, session_idx } => {
+                    if let Some(session) = self.projects.get(project_idx)
+                        .and_then(|p| p.sessions.get(session_idx))
+                    {
+                        let path = session.clone_path.as_ref()
+                            .unwrap_or(&self.projects[project_idx].source_path);
+                        Self::reveal_in_finder(path);
+                    }
+                }
+                PendingAction::CopySessionPath { project_idx, session_idx } => {
+                    if let Some(session) = self.projects.get(project_idx)
+                        .and_then(|p| p.sessions.get(session_idx))
+                    {
+                        let path = session.clone_path.as_ref()
+                            .unwrap_or(&self.projects[project_idx].source_path);
+                        cx.write_to_clipboard(ClipboardItem::new_string(
+                            path.to_string_lossy().to_string(),
+                        ));
+                    }
+                }
+                PendingAction::TogglePinSession { project_idx, session_idx } => {
+                    if let Some(session) = self.projects.get_mut(project_idx)
+                        .and_then(|p| p.sessions.get_mut(session_idx))
+                    {
+                        session.pinned = !session.pinned;
+                    }
+                    self.save_state();
+                }
+                PendingAction::ApplySessionEdit {
+                    project_idx,
+                    session_idx,
+                    label,
+                    branch_slug,
+                    comment,
+                    pinned,
+                } => {
+                    if let Some(session) = self.projects.get_mut(project_idx)
+                        .and_then(|p| p.sessions.get_mut(session_idx))
+                    {
+                        session.label = label.clone();
+                        session.comment = comment;
+                        session.pinned = pinned;
+                        session.auto_naming_fired = true;
+
+                        // Rename the git branch if a name was provided.
+                        // Use the name directly — no allele/session/ prefix.
+                        if let Some(name) = &branch_slug {
+                            if let Some(clone_path) = &session.clone_path {
+                                let sanitised = git::sanitise_branch_name(name, 100);
+                                if !sanitised.is_empty() {
+                                    if let Err(e) = git::rename_current_branch(
+                                        clone_path,
+                                        &sanitised,
+                                    ) {
+                                        eprintln!("branch rename failed: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    self.save_state();
+                }
             }
 
             // After any sidebar-triggered action, re-focus the active
@@ -3925,6 +4626,25 @@ impl Render for AppState {
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                 cx.stop_propagation();
                                 this.pending_action = Some(PendingAction::AddSessionToProject(p_idx));
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        // New session with details button
+                        div()
+                            .id(SharedString::from(format!("new-session-details-{p_idx}")))
+                            .cursor_pointer()
+                            .px(px(4.0))
+                            .text_size(px(11.0))
+                            .text_color(rgb(0x6c7086))
+                            .hover(|s| s.text_color(rgb(0xa6e3a1)))
+                            .child("▸")
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| SimpleTooltip { text: "New session with details".into() }).into()
+                            })
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.pending_action = Some(PendingAction::OpenNewSessionModal(p_idx));
                                 cx.notify();
                             })),
                     )
@@ -4259,8 +4979,12 @@ impl Render for AppState {
                 );
             }
 
-            // Sessions under this project
-            for (s_idx, session) in project.sessions.iter().enumerate() {
+            // Sessions under this project — pinned sessions first.
+            let mut session_order: Vec<usize> = (0..project.sessions.len()).collect();
+            session_order.sort_by_key(|&idx| !project.sessions[idx].pinned);
+
+            for s_idx in session_order {
+                let session = &project.sessions[s_idx];
                 let is_active = active_cursor
                     .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
                     .unwrap_or(false);
@@ -4317,15 +5041,25 @@ impl Render for AppState {
                     .items_center()
                     .justify_between()
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        this.session_context_menu = None;
                         this.pending_action = Some(PendingAction::SelectSession {
                             project_idx: p_idx,
                             session_idx: s_idx,
                         });
                         cx.notify();
                     }))
-                    .child(
-                        div()
-                            .flex_1()
+                    .on_mouse_down(MouseButton::Right, cx.listener(move |this: &mut Self, event: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.session_context_menu = Some((
+                            SessionCursor { project_idx: p_idx, session_idx: s_idx },
+                            event.position,
+                        ));
+                        cx.notify();
+                    }))
+                    .child({
+                        let session_pinned = session.pinned;
+                        let session_comment = session.comment.clone();
+                        let mut label_row = div()
                             .flex()
                             .flex_row()
                             .gap(px(6.0))
@@ -4335,7 +5069,16 @@ impl Render for AppState {
                                     .text_size(px(10.0))
                                     .text_color(rgb(status_color))
                                     .child(status_icon.to_string()),
-                            )
+                            );
+                        if session_pinned {
+                            label_row = label_row.child(
+                                div()
+                                    .text_size(px(9.0))
+                                    .text_color(rgb(0xf9e2af))
+                                    .child("📌"),
+                            );
+                        }
+                        label_row = label_row
                             .child(
                                 div()
                                     .text_size(px(12.0))
@@ -4348,8 +5091,25 @@ impl Render for AppState {
                                     .text_color(rgb(0x585b70))
                                     .min_w(px(60.0))
                                     .child(elapsed),
-                            ),
-                    );
+                            );
+
+                        let mut info_col = div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.0))
+                            .child(label_row);
+                        if let Some(comment) = session_comment {
+                            info_col = info_col.child(
+                                div()
+                                    .pl(px(16.0))
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0x585b70))
+                                    .child(comment),
+                            );
+                        }
+                        info_col
+                    });
 
                 if is_confirming {
                     // Replace the normal buttons with a two-button confirm
@@ -5496,6 +6256,18 @@ impl Render for AppState {
 
         if let Some(pad) = self.scratch_pad.clone() {
             outer = outer.child(pad);
+        }
+
+        if let Some(modal) = self.new_session_modal.clone() {
+            outer = outer.child(modal);
+        }
+
+        if let Some(modal) = self.edit_session_modal.clone() {
+            outer = outer.child(modal);
+        }
+
+        if self.session_context_menu.is_some() {
+            outer = outer.child(self.render_session_context_menu(cx));
         }
 
         outer
