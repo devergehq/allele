@@ -207,6 +207,11 @@ pub struct Settings {
     /// the session — the clone proceeds against whatever is on disk.
     #[serde(default)]
     pub git_pull_before_new_session: bool,
+
+    /// When true, sessions in AwaitingInput or ResponseReady status are
+    /// promoted to the top of their project's session list in the sidebar.
+    #[serde(default = "default_true")]
+    pub promote_attention_sessions: bool,
 }
 
 fn default_sidebar_width() -> f32 { 240.0 }
@@ -301,6 +306,7 @@ impl Default for Settings {
             agents: Vec::new(),
             default_agent: None,
             git_pull_before_new_session: false,
+            promote_attention_sessions: true,
         }
     }
 }

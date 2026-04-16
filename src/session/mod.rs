@@ -28,7 +28,7 @@ impl SessionStatus {
             SessionStatus::Idle => "○",
             SessionStatus::Done => "✓",
             SessionStatus::Suspended => "⏸",
-            SessionStatus::AwaitingInput => "⚠",
+            SessionStatus::AwaitingInput => "❗",
             SessionStatus::ResponseReady => "★",
         }
     }
@@ -117,6 +117,9 @@ pub struct Session {
     pub pinned: bool,
     /// Optional user comment displayed as a subtitle on the session row.
     pub comment: Option<String>,
+    /// Ephemeral: last meaningful output line from the terminal, updated
+    /// by the spinner tick timer. Not persisted.
+    pub status_text: Option<String>,
 }
 
 impl Session {
@@ -130,7 +133,7 @@ impl Session {
             id,
             label,
             terminal_view: Some(terminal_view),
-            status: SessionStatus::Running,
+            status: SessionStatus::Idle,
             started_at: now,
             last_active: now,
             clone_path: None,
@@ -147,6 +150,7 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
+            status_text: None,
         }
     }
 
@@ -184,6 +188,7 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
+            status_text: None,
         }
     }
 
