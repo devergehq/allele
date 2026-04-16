@@ -113,6 +113,10 @@ pub struct Session {
     /// the same adapter regardless of the current global default. `None`
     /// for pre-feature sessions — those fall back to the default.
     pub agent_id: Option<String>,
+    /// Pinned sessions sort to the top of their project's session list.
+    pub pinned: bool,
+    /// Optional user comment displayed as a subtitle on the session row.
+    pub comment: Option<String>,
 }
 
 impl Session {
@@ -141,6 +145,8 @@ impl Session {
             browser_tab_id: None,
             browser_last_url: None,
             agent_id: None,
+            pinned: false,
+            comment: None,
         }
     }
 
@@ -176,6 +182,8 @@ impl Session {
             browser_tab_id: None,
             browser_last_url: None,
             agent_id: None,
+            pinned: false,
+            comment: None,
         }
     }
 

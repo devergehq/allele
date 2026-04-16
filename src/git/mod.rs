@@ -864,6 +864,61 @@ pub fn rename_session_branch(
     Ok(())
 }
 
+/// Sanitise a user-provided branch name for git.
+///
+/// Unlike `slugify` which converts everything to lowercase hyphenated slugs,
+/// this preserves slashes (`feat/my-feature`) and mixed case. It only removes
+/// characters that are invalid in git branch names.
+pub fn sanitise_branch_name(input: &str, max_len: usize) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut last_was_sep = false;
+    for c in input.chars() {
+        if c.is_ascii_alphanumeric() || c == '/' || c == '-' || c == '_' || c == '.' {
+            result.push(c);
+            last_was_sep = false;
+        } else if !last_was_sep {
+            result.push('-');
+            last_was_sep = true;
+        }
+    }
+    // Trim leading/trailing separators and collapse double slashes.
+    let trimmed = result.trim_matches(|c: char| c == '-' || c == '/' || c == '.');
+    let collapsed: String = trimmed
+        .replace("//", "/")
+        .replace("..", ".")
+        .replace(".lock", "-lock");
+    if collapsed.len() > max_len {
+        collapsed[..max_len].trim_end_matches(|c: char| c == '-' || c == '/').to_string()
+    } else {
+        collapsed
+    }
+}
+
+/// Rename the current branch to an arbitrary new name.
+///
+/// Unlike `rename_session_branch` which assumes the Allele session naming
+/// convention, this function renames from whatever the current branch is
+/// to `new_branch_name` directly. Skips if already on `new_branch_name`.
+pub fn rename_current_branch(
+    clone: &Path,
+    new_branch_name: &str,
+) -> anyhow::Result<()> {
+    if !is_git_repo(clone) {
+        anyhow::bail!(
+            "rename_current_branch: not a git repo: {}",
+            clone.display()
+        );
+    }
+    let current = current_branch(clone).unwrap_or_default();
+    if current == new_branch_name {
+        return Ok(());
+    }
+    let mut cmd = git_cmd(Some(clone));
+    cmd.arg("branch").arg("-m").arg(&current).arg(new_branch_name);
+    run_git(cmd, "branch -m (rename current branch)")?;
+    Ok(())
+}
+
 // --- Tests --------------------------------------------------------------
 
 #[cfg(test)]
