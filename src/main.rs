@@ -19,7 +19,7 @@ mod trust;
 
 use gpui::*;
 use project::Project;
-actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction]);
+actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleRichMode]);
 use session::{DrawerTab, Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
@@ -144,6 +144,9 @@ enum PendingAction {
     /// writes `user_settings.font_size`, saves to disk, and broadcasts
     /// the new value to every open `TerminalView`.
     UpdateFontSize(f32),
+    /// Toggle the active session between PTY and Rich mode (Cmd+Shift+R).
+    /// Kills the current backend, spawns the alternative with --resume.
+    ToggleRichMode,
 }
 
 /// Position of a session in the project tree.
@@ -1426,6 +1429,136 @@ impl AppState {
         cx.notify();
     }
 
+    /// Toggle the active session between PTY and Rich mode.
+    ///
+    /// PTY → Rich: kill PTY process, create RichSession + RichView with --resume.
+    /// Rich → PTY: kill RichSession, create TerminalView with --resume.
+    fn toggle_rich_mode(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(cursor) = self.active else { return; };
+        let Some(project) = self.projects.get_mut(cursor.project_idx) else { return; };
+        let Some(session) = project.sessions.get_mut(cursor.session_idx) else { return; };
+
+        let session_id = session.id.clone();
+        let clone_path = match &session.clone_path {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("Cannot toggle rich mode — no clone_path");
+                return;
+            }
+        };
+
+        let font_size = self.user_settings.font_size;
+        let hooks_path = self.hooks_settings_path.clone();
+        let allowed_tools = "Read,Edit,Write,Grep,Glob".to_string();
+
+        if session.rich_view.is_some() {
+            // ── Rich → PTY ──────────────────────────────────────
+            // Kill the rich session
+            if let Some(rv) = session.rich_view.take() {
+                rv.update(cx, |view, _cx| view.kill_session());
+            }
+
+            // Resolve the agent for PTY resume
+            let stored_agent_id = session.agent_id.clone();
+            let project_override = config::ProjectConfig::load(&project.source_path)
+                .and_then(|c| c.agent);
+            let agent = agents::resolve(
+                &self.user_settings.agents,
+                self.user_settings.default_agent.as_deref(),
+                project_override.as_deref(),
+                stored_agent_id.as_deref(),
+            )
+            .cloned();
+
+            let hooks_path_str = hooks_path.as_ref().map(|p| p.to_string_lossy().to_string());
+            let ctx = agents::SpawnCtx {
+                session_id: &session_id,
+                label: &session.label,
+                hooks_settings_path: hooks_path_str.as_deref(),
+                has_history: true, // resuming
+            };
+            let command = agent
+                .as_ref()
+                .and_then(|a| agents::build_command(a, &ctx, false));
+
+            let terminal_view = cx.new(|cx| {
+                TerminalView::new(window, cx, command, Some(clone_path), font_size)
+            });
+            cx.subscribe(&terminal_view, |this: &mut Self, _tv: Entity<TerminalView>, event: &TerminalEvent, cx: &mut Context<Self>| {
+                match event {
+                    TerminalEvent::NewSession => {
+                        this.pending_action = Some(PendingAction::NewSessionInActiveProject);
+                        cx.notify();
+                    }
+                    TerminalEvent::CloseSession => {
+                        this.pending_action = Some(PendingAction::CloseActiveSession);
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            }).detach();
+
+            session.terminal_view = Some(terminal_view.clone());
+            session.status = SessionStatus::Running;
+            session.resuming_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(5));
+
+            // Focus the terminal
+            let fh = terminal_view.read(cx).focus_handle.clone();
+            fh.focus(window, cx);
+
+            eprintln!("Switched session {} to PTY mode", session_id);
+        } else {
+            // ── PTY → Rich ──────────────────────────────────────
+            // Kill the PTY
+            session.terminal_view = None;
+
+            // Create RichSession — initial prompt is "continue" for resume
+            let settings_path = hooks_path.as_deref();
+            match rich::RichSession::resume(
+                "Continue from where we left off.",
+                &session_id,
+                &clone_path,
+                &allowed_tools,
+                settings_path,
+            ) {
+                Ok(rich_session) => {
+                    let working_dir = clone_path.clone();
+                    let settings_pb = hooks_path.clone();
+                    let rich_view = cx.new(|cx| {
+                        rich::RichView::new(
+                            window,
+                            cx,
+                            rich_session,
+                            session_id.clone(),
+                            working_dir,
+                            allowed_tools.clone(),
+                            settings_pb,
+                            font_size,
+                        )
+                    });
+
+                    session.rich_view = Some(rich_view.clone());
+                    session.status = SessionStatus::Running;
+
+                    // Focus the rich view
+                    let fh = rich_view.read(cx).focus_handle().clone();
+                    fh.focus(window, cx);
+
+                    eprintln!("Switched session {} to Rich mode", session_id);
+                }
+                Err(e) => {
+                    eprintln!("Failed to switch to Rich mode: {e}");
+                    // Restore PTY as fallback
+                    // (session.terminal_view was already set to None — user
+                    // can click the session to cold-resume in PTY mode)
+                    session.status = SessionStatus::Suspended;
+                }
+            }
+        }
+
+        cx.notify();
+    }
+
     /// Spawn one drawer terminal tab in the given session with an optional
     /// pre-chosen name and optional shell command. Default name is
     /// "Terminal N" where N is 1-based; default command drops into the
@@ -2532,6 +2665,7 @@ fn install_app_menu(cx: &mut App) {
         KeyBinding::new("cmd-q", Quit, None),
         KeyBinding::new("cmd-b", ToggleSidebarAction, None),
         KeyBinding::new("cmd-j", ToggleDrawerAction, None),
+        KeyBinding::new("cmd-shift-r", ToggleRichMode, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-k", OpenScratchPadAction, None),
     ]);
@@ -2956,6 +3090,17 @@ fn main() {
                             handle
                                 .update(cx, |this: &mut AppState, cx| {
                                     this.pending_action = Some(PendingAction::ToggleDrawer);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    });
+                    App::on_action::<ToggleRichMode>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            handle
+                                .update(cx, |this: &mut AppState, cx| {
+                                    this.pending_action = Some(PendingAction::ToggleRichMode);
                                     cx.notify();
                                 })
                                 .ok();
@@ -3595,6 +3740,9 @@ impl Render for AppState {
                 PendingAction::ToggleRightSidebar => {
                     self.right_sidebar_visible = !self.right_sidebar_visible;
                     self.save_settings();
+                }
+                PendingAction::ToggleRichMode => {
+                    self.toggle_rich_mode(window, cx);
                 }
                 PendingAction::RelocateProject(project_idx) => {
                     let paths = cx.prompt_for_paths(PathPromptOptions {
