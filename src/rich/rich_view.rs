@@ -308,12 +308,14 @@ fn render_block(block: &Block, font_size: f32) -> Div {
             cost_usd,
             num_turns,
             is_error,
+            result_text,
         } => {
             wrapper = wrapper.child(render_session_end(
                 *duration_ms,
                 *cost_usd,
                 *num_turns,
                 *is_error,
+                result_text.as_deref(),
                 font_size,
             ));
         }
@@ -533,6 +535,7 @@ fn render_session_end(
     cost_usd: f64,
     num_turns: u32,
     is_error: bool,
+    result_text: Option<&str>,
     font_size: f32,
 ) -> Div {
     let color = if is_error { hex(RED) } else { hex(TEAL) };
@@ -543,7 +546,7 @@ fn render_session_end(
         format!("{}m {}s", secs / 60, secs % 60)
     };
 
-    div()
+    let mut block = div()
         .mt(px(8.0))
         .pt(px(8.0))
         .border_t_1()
@@ -564,5 +567,32 @@ fn render_session_end(
                         .text_size(px(font_size - 1.0))
                         .child(format!("{duration} | {num_turns} turns | ${cost_usd:.4}")),
                 ),
-        )
+        );
+
+    // Show error text if available
+    if let Some(text) = result_text {
+        if !text.is_empty() {
+            let preview = if text.len() > 500 {
+                format!("{}...", &text[..497])
+            } else {
+                text.to_string()
+            };
+            block = block.child(
+                div()
+                    .mt(px(6.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .bg(hex_alpha(SURFACE0, 0.4))
+                    .child(
+                        div()
+                            .text_color(if is_error { hex(RED) } else { hex(SUBTEXT0) })
+                            .text_size(px(font_size - 1.0))
+                            .child(preview),
+                    ),
+            );
+        }
+    }
+
+    block
 }

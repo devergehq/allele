@@ -55,8 +55,10 @@ impl RichSession {
 
         let mut child = cmd.spawn()?;
         let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
 
         let (tx, rx) = flume::bounded(512);
+        let sid = session_id.to_string();
 
         // Background OS thread: read stdout line-by-line, parse, send events.
         // Plain thread (not tokio) because we spawn from the GPUI main thread
@@ -70,13 +72,27 @@ impl RichSession {
                 for line in reader.lines() {
                     let line = match line {
                         Ok(l) => l,
-                        Err(_) => break, // pipe closed or IO error
+                        Err(_) => break,
                     };
                     let events = parser.feed_line(&line);
                     for event in events {
                         if tx.send(event).is_err() {
-                            return; // receiver dropped
+                            return;
                         }
+                    }
+                }
+            })?;
+
+        // Background thread: drain stderr and log it
+        let sid_for_stderr = sid.clone();
+        std::thread::Builder::new()
+            .name("rich-stderr-reader".into())
+            .spawn(move || {
+                let reader = std::io::BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => eprintln!("[rich-stderr {sid_for_stderr}] {l}"),
+                        Err(_) => break,
                     }
                 }
             })?;
@@ -84,7 +100,7 @@ impl RichSession {
         Ok(Self {
             child: Some(child),
             events_rx: rx,
-            session_id: session_id.to_string(),
+            session_id: sid,
             exited: false,
         })
     }
@@ -121,9 +137,12 @@ impl RichSession {
 
         let mut child = cmd.spawn()?;
         let stdout = child.stdout.take().expect("stdout piped");
+        let stderr = child.stderr.take().expect("stderr piped");
 
         let (tx, rx) = flume::bounded(512);
+        let sid = session_id.to_string();
 
+        // Background thread: read stdout NDJSON
         std::thread::Builder::new()
             .name("rich-stream-reader".into())
             .spawn(move || {
@@ -144,10 +163,24 @@ impl RichSession {
                 }
             })?;
 
+        // Background thread: drain stderr and log it
+        let sid_for_stderr = sid.clone();
+        std::thread::Builder::new()
+            .name("rich-stderr-reader".into())
+            .spawn(move || {
+                let reader = std::io::BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => eprintln!("[rich-stderr {sid_for_stderr}] {l}"),
+                        Err(_) => break,
+                    }
+                }
+            })?;
+
         Ok(Self {
             child: Some(child),
             events_rx: rx,
-            session_id: session_id.to_string(),
+            session_id: sid,
             exited: false,
         })
     }

@@ -281,6 +281,8 @@ pub enum RichEvent {
         cost_usd: f64,
         num_turns: u32,
         is_error: bool,
+        /// Error/result text from the CLI (if any).
+        result_text: Option<String>,
     },
 
     /// Status change from hooks (awaiting input, response ready, etc.).

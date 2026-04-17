@@ -183,6 +183,7 @@ impl StreamParser {
             cost_usd: result.total_cost_usd.unwrap_or(0.0),
             num_turns: result.num_turns.unwrap_or(0),
             is_error: result.is_error.unwrap_or(false),
+            result_text: result.result,
         }]
     }
 }
@@ -262,6 +263,7 @@ mod tests {
                 cost_usd,
                 num_turns,
                 is_error,
+                ..
             } => {
                 assert_eq!(*duration_ms, 5000);
                 assert!((cost_usd - 0.05).abs() < 0.001);

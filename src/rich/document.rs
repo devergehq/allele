@@ -63,6 +63,7 @@ pub enum BlockKind {
         cost_usd: f64,
         num_turns: u32,
         is_error: bool,
+        result_text: Option<String>,
     },
 }
 
@@ -213,7 +214,7 @@ impl RichDocument {
                 None
             }
 
-            RichEvent::SessionResult { duration_ms, cost_usd, num_turns, is_error } => {
+            RichEvent::SessionResult { duration_ms, cost_usd, num_turns, is_error, result_text } => {
                 self.close_text_stream();
                 let id = self.push_block(Block {
                     id: self.next_id,
@@ -222,6 +223,7 @@ impl RichDocument {
                         cost_usd,
                         num_turns,
                         is_error,
+                        result_text,
                     },
                     parent_agent_id: None,
                     collapsed: false,
