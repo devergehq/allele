@@ -1,19 +1,23 @@
 //! Process management for Rich Mode sessions.
 //!
-//! Spawns `claude -p --output-format stream-json`, reads NDJSON from stdout,
-//! parses into RichEvents, and feeds them through a channel to the GPUI view.
+//! Spawns `claude -p --output-format stream-json`, reads NDJSON from stdout
+//! on a background thread, parses into RichEvents, and feeds them through a
+//! flume channel to the GPUI view.
+//!
+//! Uses `std::process::Command` (not tokio) because the spawn runs on the
+//! GPUI main thread which has no tokio runtime. The background reader is a
+//! plain OS thread — same pattern as the PTY reader in alacritty_terminal.
 
 use crate::stream::{RichEvent, StreamParser};
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use std::io::BufRead;
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
 
 /// A Claude Code session running in stream-json mode.
 pub struct RichSession {
     /// The spawned CLI process.
     child: Option<Child>,
-    /// Channel receiving parsed events from the background reader.
+    /// Channel receiving parsed events from the background reader thread.
     events_rx: flume::Receiver<RichEvent>,
     /// Session UUID (same as used for PTY mode).
     session_id: String,
@@ -23,12 +27,6 @@ pub struct RichSession {
 
 impl RichSession {
     /// Spawn a new Rich Mode session.
-    ///
-    /// `prompt` — the user's initial message.
-    /// `session_id` — UUID shared with PTY mode for --resume switching.
-    /// `working_dir` — the APFS clone path (or project source).
-    /// `allowed_tools` — tools to auto-approve (e.g. "Read,Edit,Grep,Glob").
-    /// `settings_path` — path to hooks.json for hook configuration.
     pub fn spawn(
         prompt: &str,
         session_id: &str,
@@ -45,8 +43,7 @@ impl RichSession {
             .arg(session_id)
             .current_dir(working_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
 
         if !allowed_tools.is_empty() {
             cmd.arg("--allowedTools").arg(allowed_tools);
@@ -61,21 +58,28 @@ impl RichSession {
 
         let (tx, rx) = flume::bounded(512);
 
-        // Background task: read stdout line-by-line, parse, send events
-        tokio::spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            let mut parser = StreamParser::new();
+        // Background OS thread: read stdout line-by-line, parse, send events.
+        // Plain thread (not tokio) because we spawn from the GPUI main thread
+        // which has no async runtime.
+        std::thread::Builder::new()
+            .name("rich-stream-reader".into())
+            .spawn(move || {
+                let reader = std::io::BufReader::new(stdout);
+                let mut parser = StreamParser::new();
 
-            while let Ok(Some(line)) = lines.next_line().await {
-                let events = parser.feed_line(&line);
-                for event in events {
-                    if tx.send_async(event).await.is_err() {
-                        return; // receiver dropped
+                for line in reader.lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => break, // pipe closed or IO error
+                    };
+                    let events = parser.feed_line(&line);
+                    for event in events {
+                        if tx.send(event).is_err() {
+                            return; // receiver dropped
+                        }
                     }
                 }
-            }
-        });
+            })?;
 
         Ok(Self {
             child: Some(child),
@@ -105,8 +109,7 @@ impl RichSession {
             .arg(session_id)
             .current_dir(working_dir)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
 
         if !allowed_tools.is_empty() {
             cmd.arg("--allowedTools").arg(allowed_tools);
@@ -121,20 +124,25 @@ impl RichSession {
 
         let (tx, rx) = flume::bounded(512);
 
-        tokio::spawn(async move {
-            let reader = BufReader::new(stdout);
-            let mut lines = reader.lines();
-            let mut parser = StreamParser::new();
+        std::thread::Builder::new()
+            .name("rich-stream-reader".into())
+            .spawn(move || {
+                let reader = std::io::BufReader::new(stdout);
+                let mut parser = StreamParser::new();
 
-            while let Ok(Some(line)) = lines.next_line().await {
-                let events = parser.feed_line(&line);
-                for event in events {
-                    if tx.send_async(event).await.is_err() {
-                        return;
+                for line in reader.lines() {
+                    let line = match line {
+                        Ok(l) => l,
+                        Err(_) => break,
+                    };
+                    let events = parser.feed_line(&line);
+                    for event in events {
+                        if tx.send(event).is_err() {
+                            return;
+                        }
                     }
                 }
-            }
-        });
+            })?;
 
         Ok(Self {
             child: Some(child),
@@ -186,10 +194,10 @@ impl RichSession {
 
     /// Kill the process (for mode switching or shutdown).
     pub fn kill(&mut self) {
-        if let Some(mut child) = self.child.take() {
-            // kill_on_drop handles this, but be explicit
-            let _ = child.start_kill();
+        if let Some(ref mut child) = self.child {
+            let _ = child.kill();
         }
+        self.child = None;
         self.exited = true;
     }
 }
