@@ -2433,7 +2433,7 @@ impl AppState {
                 Some(SessionStatus::Running)
             }
             HookKind::UserPromptSubmit => Some(SessionStatus::Running),
-            HookKind::SessionStart => Some(SessionStatus::Running),
+            HookKind::SessionStart => Some(SessionStatus::Idle),
             HookKind::SessionEnd => Some(SessionStatus::Done),
             HookKind::Other => None,
         };
@@ -5191,6 +5191,7 @@ impl Render for AppState {
                             .flex_row()
                             .gap(px(6.0))
                             .items_center()
+                            .overflow_hidden()
                             .child({
                                 let icon_text = if session.status == SessionStatus::Running {
                                     SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()].to_string()
@@ -5213,12 +5214,18 @@ impl Render for AppState {
                         label_row = label_row
                             .child(
                                 div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
                                     .text_size(px(12.0))
                                     .text_color(label_color)
                                     .child(label),
                             )
                             .child(
                                 div()
+                                    .flex_shrink_0()
                                     .text_size(px(10.0))
                                     .text_color(rgb(0x585b70))
                                     .min_w(px(60.0))
@@ -5227,6 +5234,8 @@ impl Render for AppState {
 
                         let mut info_col = div()
                             .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
                             .flex()
                             .flex_col()
                             .gap(px(1.0))
@@ -5237,6 +5246,9 @@ impl Render for AppState {
                                     .pl(px(16.0))
                                     .text_size(px(10.0))
                                     .text_color(rgb(0x585b70))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
                                     .child(comment),
                             );
                         }
@@ -5247,6 +5259,8 @@ impl Render for AppState {
                                     .text_size(px(10.0))
                                     .text_color(rgb(0x6c7086))
                                     .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
                                     .child(status_text),
                             );
                         }
@@ -5258,6 +5272,7 @@ impl Render for AppState {
                     // prompt: Discard (destructive) + Cancel.
                     row = row.child(
                         div()
+                            .flex_shrink_0()
                             .flex()
                             .flex_row()
                             .gap(px(4.0))
@@ -5305,6 +5320,7 @@ impl Render for AppState {
                     // Normal state: Merge & Close, Close (keep clone), and Discard.
                     row = row.child(
                         div()
+                            .flex_shrink_0()
                             .flex()
                             .flex_row()
                             .gap(px(2.0))
