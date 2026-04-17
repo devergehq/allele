@@ -38,8 +38,11 @@ echo "==> Assembling Allele.app..."
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR"
 
-# Copy Info.plist
+# Copy Info.plist and stamp it with a monotonic build number so
+# macOS Launch Services invalidates its icon cache on each rebuild.
 cp "$PROJECT_DIR/resources/Info.plist" "$CONTENTS_DIR/Info.plist"
+BUILD_NUMBER="$(git -C "$PROJECT_DIR" rev-list --count HEAD 2>/dev/null || date +%s)"
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $BUILD_NUMBER" "$CONTENTS_DIR/Info.plist"
 
 # Copy app icon
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
@@ -50,6 +53,11 @@ cp "$PROJECT_DIR/resources/Allele.icns" "$RESOURCES_DIR/Allele.icns"
 cp "$BINARY" "$MACOS_DIR/Allele"
 
 echo "==> Done: $APP_DIR"
+
+# Nudge Launch Services so the Dock picks up the (possibly new) icon.
+touch "$APP_DIR"
+/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/LaunchServices.framework/Versions/A/Support/lsregister -f "$APP_DIR" >/dev/null 2>&1 || true
+
 echo ""
 echo "Launch with:"
 echo "  open $APP_DIR"
