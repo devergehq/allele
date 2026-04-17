@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::rich::RichView;
 use crate::terminal::TerminalView;
 
 /// Status of a session
@@ -62,6 +63,9 @@ pub struct Session {
     pub id: String,
     pub label: String,
     pub terminal_view: Option<Entity<TerminalView>>,
+    /// Rich mode view — mutually exclusive with terminal_view.
+    /// A session has one or the other (or neither if suspended).
+    pub rich_view: Option<Entity<RichView>>,
     pub status: SessionStatus,
     /// Wall-clock time the session was originally started. Serialisable.
     pub started_at: SystemTime,
@@ -126,6 +130,7 @@ impl Session {
             id,
             label,
             terminal_view: Some(terminal_view),
+            rich_view: None,
             status: SessionStatus::Running,
             started_at: now,
             last_active: now,
@@ -161,6 +166,7 @@ impl Session {
             id,
             label,
             terminal_view: None,
+            rich_view: None,
             status: SessionStatus::Suspended,
             started_at,
             last_active,

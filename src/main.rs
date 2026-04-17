@@ -7,11 +7,13 @@ mod config;
 mod git;
 mod hooks;
 mod project;
+mod rich;
 mod scratch_pad;
 mod session;
 mod settings;
 mod settings_window;
 mod state;
+mod stream;
 mod text_input;
 mod trust;
 
@@ -4748,9 +4750,11 @@ impl Render for AppState {
                     match self.main_tab {
                         MainTab::Claude => {
                             main_area = main_area.pt(px(6.0));
-                            if let Some(tv) = self.active_session().and_then(|s| s.terminal_view.clone()) {
-                                // Tell the main terminal how much space the drawer
-                                // reserves below it so the PTY resize is correct.
+                            if let Some(rv) = self.active_session().and_then(|s| s.rich_view.clone()) {
+                                // Rich mode — render the structured activity feed
+                                main_area = main_area.child(rv);
+                            } else if let Some(tv) = self.active_session().and_then(|s| s.terminal_view.clone()) {
+                                // PTY mode — render the terminal grid
                                 let inset = if drawer_visible {
                                     // 6px resize handle + ~30px header + drawer panel
                                     6.0 + 30.0 + self.drawer_height
