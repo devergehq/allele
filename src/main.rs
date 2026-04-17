@@ -2540,6 +2540,7 @@ fn install_app_menu(cx: &mut App) {
     // keys etc.) — gated by the `TextInput` key context so they only
     // fire while a Settings input is focused.
     text_input::bind_keys(cx);
+    rich::bind_compose_keys(cx);
 
     cx.set_menus(vec![
         Menu {

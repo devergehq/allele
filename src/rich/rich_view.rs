@@ -7,6 +7,7 @@
 
 use gpui::*;
 
+use super::compose_bar::{ComposeBar, ComposeBarEvent};
 use super::document::{Block, BlockKind, RichDocument};
 use super::rich_session::RichSession;
 
@@ -53,7 +54,11 @@ pub struct RichView {
     focus_handle: FocusHandle,
     document: RichDocument,
     session: Option<RichSession>,
+    compose_bar: Entity<ComposeBar>,
     session_id: String,
+    working_dir: std::path::PathBuf,
+    allowed_tools: String,
+    settings_path: Option<std::path::PathBuf>,
     font_size: f32,
     /// Auto-scroll to bottom on new content.
     auto_scroll: bool,
@@ -67,9 +72,25 @@ impl RichView {
         cx: &mut Context<Self>,
         session: RichSession,
         session_id: String,
+        working_dir: std::path::PathBuf,
+        allowed_tools: String,
+        settings_path: Option<std::path::PathBuf>,
         font_size: f32,
     ) -> Self {
         let focus_handle = cx.focus_handle();
+
+        // Create compose bar
+        let compose_bar = cx.new(|cx| ComposeBar::new(cx, font_size));
+
+        // Subscribe to compose bar submit events
+        cx.subscribe(&compose_bar, |this: &mut Self, _bar, event: &ComposeBarEvent, cx| {
+            match event {
+                ComposeBarEvent::Submit { text } => {
+                    this.handle_submit(text.clone(), cx);
+                }
+            }
+        })
+        .detach();
 
         // Start the 16ms poll loop (same pattern as TerminalView)
         cx.spawn_in(window, async |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
@@ -99,9 +120,45 @@ impl RichView {
             focus_handle,
             document: RichDocument::new(),
             session: Some(session),
+            compose_bar,
             session_id,
+            working_dir,
+            allowed_tools,
+            settings_path,
             font_size,
             auto_scroll: true,
+        }
+    }
+
+    /// Handle a prompt submission from the compose bar.
+    fn handle_submit(&mut self, text: String, cx: &mut Context<Self>) {
+        // Kill current session if still running
+        if let Some(ref mut session) = self.session {
+            if !session.is_exited() {
+                // Session still active — can't send a new prompt until it finishes
+                // TODO: support interrupting + sending follow-up
+                return;
+            }
+        }
+
+        // Mark compose bar as busy
+        self.compose_bar.update(cx, |bar, cx| bar.set_busy(true, cx));
+
+        // Start a new --resume invocation with the next prompt
+        match RichSession::resume(
+            &text,
+            &self.session_id,
+            &self.working_dir,
+            &self.allowed_tools,
+            self.settings_path.as_deref(),
+        ) {
+            Ok(new_session) => {
+                self.session = Some(new_session);
+            }
+            Err(e) => {
+                eprintln!("[rich] failed to resume session: {e}");
+                self.compose_bar.update(cx, |bar, cx| bar.set_busy(false, cx));
+            }
         }
     }
 
@@ -118,7 +175,10 @@ impl RichView {
             // Check if process exited
             if let Some(ref mut session) = self.session {
                 if session.check_exited() {
-                    return true; // trigger repaint for "session ended" state
+                    // Unset busy on compose bar so user can send follow-up
+                    // (can't borrow cx here — notify will trigger re-render
+                    // which re-evaluates busy state)
+                    return true;
                 }
             }
             return false;
@@ -150,12 +210,20 @@ impl Render for RichView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let font_size = self.font_size;
 
-        // Scrollable container
-        let mut content = div()
-            .id("rich-view-scroll")
+        // Update compose bar busy state based on session
+        let session_active = self
+            .session
+            .as_ref()
+            .map(|s| !s.is_exited())
+            .unwrap_or(false);
+        self.compose_bar.update(cx, |bar, cx| bar.set_busy(session_active, cx));
+
+        // Scrollable activity feed
+        let mut feed = div()
+            .id("rich-view-feed")
             .flex()
             .flex_col()
-            .size_full()
+            .flex_1()
             .overflow_y_scroll()
             .bg(hex(BASE))
             .p(px(12.0));
@@ -163,30 +231,40 @@ impl Render for RichView {
         // Render each block
         for block in self.document.blocks() {
             let element = render_block(block, font_size);
-            content = content.child(element);
+            feed = feed.child(element);
         }
 
-        // Session ended indicator
-        if let Some(ref session) = self.session {
-            if session.is_exited() && self.document.block_count() == 0 {
-                content = content.child(
-                    div()
-                        .p(px(16.0))
-                        .child(
-                            div()
-                                .text_color(hex(SUBTEXT0))
-                                .text_size(px(font_size))
-                                .child("Session ended with no output."),
-                        ),
-                );
-            }
+        // Empty state
+        if self.document.block_count() == 0 {
+            let message = if session_active {
+                "Waiting for response..."
+            } else {
+                "Send a message to start."
+            };
+            feed = feed.child(
+                div()
+                    .size_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_color(hex(SUBTEXT0))
+                            .text_size(px(font_size))
+                            .child(message),
+                    ),
+            );
         }
 
+        // Main layout: feed + compose bar
         div()
             .track_focus(&self.focus_handle)
             .size_full()
+            .flex()
+            .flex_col()
             .bg(hex(BASE))
-            .child(content)
+            .child(feed)
+            .child(self.compose_bar.clone())
     }
 }
 
