@@ -1755,6 +1755,9 @@ impl Render for TerminalView {
                     // trackpad remainder.
                     let lines = match event.delta {
                         ScrollDelta::Pixels(delta_px) => {
+                            // SAFETY: single-threaded access on the UI thread —
+                            // the Mutex is interior-mutability across closures,
+                            // not cross-thread sync. Poisoning is impossible.
                             let mut acc = accumulator.lock().unwrap();
                             *acc += f32::from(delta_px.y);
                             let whole = (*acc / cell_h).trunc() as i32;
@@ -1766,6 +1769,7 @@ impl Render for TerminalView {
                         ScrollDelta::Lines(delta_ln) => {
                             // Mouse wheel — reset any fractional trackpad remainder
                             // so direction changes between devices feel immediate.
+                            // SAFETY: same as above — UI-thread-only Mutex.
                             *accumulator.lock().unwrap() = 0.0;
                             delta_ln.y.round() as i32
                         }
@@ -1840,6 +1844,7 @@ pub(crate) fn parse_line_col_suffix(token: &str) -> (&str, Option<(u32, Option<u
         return (token, None);
     }
     // nums[0] is the rightmost (col if two), nums[last] is leftmost (line).
+    // SAFETY: is_empty early-return above guarantees nums has ≥ 1 element.
     let path_end = nums.last().unwrap().0;
     let path_part = &token[..path_end];
     if path_part.is_empty() {

@@ -1351,7 +1351,7 @@ fn main() {
                 })
             },
         )
-        .unwrap();
+        .expect("cx.open_window failed at startup — no window = unusable app");
     });
 }
 

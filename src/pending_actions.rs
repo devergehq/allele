@@ -129,13 +129,26 @@ impl AppState {
                         let needs_git = clone_path.as_ref().map_or(false, |cp| *cp != canonical);
 
                         if needs_git {
-                            let clone_path = clone_path.unwrap(); // safe: needs_git is true
+                            // SAFETY: `needs_git` is derived from
+                            // `clone_path.as_ref().map_or(false, ...)` above —
+                            // being true implies clone_path is Some.
+                            let clone_path = clone_path.expect(
+                                "needs_git implies clone_path is Some"
+                            );
                             let restore_clone = clone_path.clone();
 
                             // Show a placeholder while the background pipeline runs.
                             let placeholder_id = uuid::Uuid::new_v4().to_string();
                             {
-                                let project = self.projects.get_mut(cursor.project_idx).unwrap();
+                                // SAFETY: cursor.project_idx was validated by
+                                // the outer `if let Some(project) = ...
+                                // get_mut(cursor.project_idx)` check; no
+                                // mutation between there and here removes
+                                // projects.
+                                let project = self
+                                    .projects
+                                    .get_mut(cursor.project_idx)
+                                    .expect("project verified present above");
                                 project.loading_sessions.push(project::LoadingSession {
                                     id: placeholder_id.clone(),
                                     label: format!("{session_label} (rebasing & merging)"),

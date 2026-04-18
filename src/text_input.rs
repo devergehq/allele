@@ -638,6 +638,9 @@ impl Element for TextElement {
         if let Some(selection) = prepaint.selection.take() {
             window.paint_quad(selection);
         }
+        // SAFETY: GPUI invariant — prepaint() runs before paint() and
+        // always populates `line`. A None here means GPUI called paint
+        // without prepaint, which would be a framework bug.
         let line = prepaint.line.take().unwrap();
         let line_origin = point(bounds.origin.x - prepaint.scroll_x, bounds.origin.y);
         line.paint(
