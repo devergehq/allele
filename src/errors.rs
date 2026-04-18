@@ -15,8 +15,12 @@ use std::path::PathBuf;
 use thiserror::Error;
 
 /// Top-level error for operations that can fail in controlled ways.
+///
+/// Adoption is incremental — some variants are used today (`Io`, `Clone`,
+/// `Git`, `State`, `Other`), others exist for imminent uses
+/// (`PlatformUnsupported`, `Config`, `Agent`, `Json`). Lint is relaxed for
+/// the unused ones.
 #[derive(Debug, Error)]
-#[allow(dead_code)] // Variants introduced in step 1; adoption is incremental.
 pub(crate) enum AlleleError {
     #[error("I/O error at {path:?}: {source}")]
     Io {
@@ -31,15 +35,18 @@ pub(crate) enum AlleleError {
     #[error("git operation failed: {0}")]
     Git(String),
 
+    #[allow(dead_code)] // reserved for platform::unsupported paths
     #[error("platform operation unsupported on this OS: {0}")]
     PlatformUnsupported(&'static str),
 
     #[error("clone backend failed: {0}")]
     Clone(String),
 
+    #[allow(dead_code)] // reserved for agent spawn failures
     #[error("agent command build failed: {0}")]
     Agent(String),
 
+    #[allow(dead_code)] // reserved for config parse errors
     #[error("config parse failed at {path:?}: {reason}")]
     Config { path: PathBuf, reason: String },
 

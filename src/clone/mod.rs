@@ -3,6 +3,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::errors::{AlleleError, Result};
 use crate::git;
 use crate::platform::CloneBackend;
 
@@ -26,11 +27,14 @@ pub fn create_session_clone(
     source: &Path,
     project_name: &str,
     session_id: &str,
-) -> anyhow::Result<PathBuf> {
+) -> Result<PathBuf> {
     let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+        .ok_or_else(|| AlleleError::Other("home_dir() returned None".into()))?;
     let clone_dir = home.join(CLONE_BASE).join(project_name);
-    fs::create_dir_all(&clone_dir)?;
+    fs::create_dir_all(&clone_dir).map_err(|e| AlleleError::Io {
+        path: Some(clone_dir.clone()),
+        source: e,
+    })?;
 
     // Short session ID — first 8 chars of UUID
     let short_id: String = session_id.chars().take(8).collect();
@@ -40,9 +44,7 @@ pub fn create_session_clone(
         // Unlikely with UUIDs but handle by appending a random suffix
         create_clone(backend, source, &format!("{short_id}-alt"))?
     } else {
-        backend
-            .clone(source, &clone_path)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        backend.clone(source, &clone_path)?;
         clone_path
     };
 
@@ -68,9 +70,9 @@ pub fn create_clone(
     backend: &dyn CloneBackend,
     source: &Path,
     workspace_name: &str,
-) -> anyhow::Result<PathBuf> {
+) -> Result<PathBuf> {
     let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+        .ok_or_else(|| AlleleError::Other("home_dir() returned None".into()))?;
 
     // Derive a project name from the source path
     let project_name = source
@@ -79,7 +81,10 @@ pub fn create_clone(
         .unwrap_or("unknown");
 
     let clone_dir = home.join(CLONE_BASE).join(project_name);
-    fs::create_dir_all(&clone_dir)?;
+    fs::create_dir_all(&clone_dir).map_err(|e| AlleleError::Io {
+        path: Some(clone_dir.clone()),
+        source: e,
+    })?;
 
     let clone_path = clone_dir.join(workspace_name);
 
@@ -87,15 +92,13 @@ pub fn create_clone(
     // destination not exist; full-copy fallback also depends on it to
     // avoid silently merging into an existing directory.
     if clone_path.exists() {
-        anyhow::bail!(
-            "Clone destination already exists: {}",
+        return Err(AlleleError::Clone(format!(
+            "destination already exists: {}",
             clone_path.display()
-        );
+        )));
     }
 
-    backend
-        .clone(source, &clone_path)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    backend.clone(source, &clone_path)?;
     Ok(clone_path)
 }
 

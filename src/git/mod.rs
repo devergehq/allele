@@ -175,13 +175,17 @@ pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
 /// system gitconfig where macOS stores `credential.helper=osxkeychain`.
 /// Since `pull` is a user-facing operation that should honour the user's
 /// full git config, we build a plain `Command` here.
-pub fn pull(repo: &Path) -> anyhow::Result<()> {
+pub fn pull(repo: &Path) -> crate::errors::Result<()> {
+    use crate::errors::AlleleError;
     if !is_git_repo(repo) {
-        anyhow::bail!("pull: not a git repo: {}", repo.display());
+        return Err(AlleleError::Git(format!(
+            "pull: not a git repo: {}",
+            repo.display()
+        )));
     }
     let mut cmd = user_git_cmd(repo);
     cmd.arg("pull");
-    run_git(cmd, "pull")?;
+    run_git(cmd, "pull").map_err(|e| AlleleError::Git(e.to_string()))?;
     Ok(())
 }
 
@@ -539,16 +543,22 @@ pub enum MergeResult {
 /// Returns an error if there are merge conflicts or the working tree is
 /// dirty — the caller should display the error and let the user resolve
 /// conflicts manually.
-pub fn merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<MergeResult> {
+pub fn merge_archive(canonical: &Path, session_id: &str) -> crate::errors::Result<MergeResult> {
+    use crate::errors::AlleleError;
     if !is_git_repo(canonical) {
-        anyhow::bail!("merge_archive: not a git repo: {}", canonical.display());
+        return Err(AlleleError::Git(format!(
+            "merge_archive: not a git repo: {}",
+            canonical.display()
+        )));
     }
+
+    let to_git = |e: anyhow::Error| AlleleError::Git(e.to_string());
 
     // Record HEAD before merge to detect no-ops.
     let head_before = {
         let mut cmd = git_cmd(Some(canonical));
         cmd.arg("rev-parse").arg("HEAD");
-        run_git_stdout(cmd, "rev-parse HEAD (pre-merge)")?
+        run_git_stdout(cmd, "rev-parse HEAD (pre-merge)").map_err(to_git)?
     };
 
     let ref_name = archive_ref_name(session_id);
@@ -557,13 +567,13 @@ pub fn merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<Merge
         .arg("--no-ff")
         .arg("--no-edit")
         .arg(&ref_name);
-    run_git(cmd, "merge archive")?;
+    run_git(cmd, "merge archive").map_err(to_git)?;
 
     // Check if HEAD actually moved.
     let head_after = {
         let mut cmd = git_cmd(Some(canonical));
         cmd.arg("rev-parse").arg("HEAD");
-        run_git_stdout(cmd, "rev-parse HEAD (post-merge)")?
+        run_git_stdout(cmd, "rev-parse HEAD (post-merge)").map_err(to_git)?
     };
 
     if head_before == head_after {
@@ -578,10 +588,15 @@ pub fn merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<Merge
 /// Uses `git merge --squash` to stage all changes, then creates a single
 /// commit. Returns `MergeResult::AlreadyUpToDate` if the archive ref is
 /// already an ancestor of HEAD.
-pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<MergeResult> {
+pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> crate::errors::Result<MergeResult> {
+    use crate::errors::AlleleError;
     if !is_git_repo(canonical) {
-        anyhow::bail!("squash_merge_archive: not a git repo: {}", canonical.display());
+        return Err(AlleleError::Git(format!(
+            "squash_merge_archive: not a git repo: {}",
+            canonical.display()
+        )));
     }
+    let to_git = |e: anyhow::Error| AlleleError::Git(e.to_string());
 
     let ref_name = archive_ref_name(session_id);
 
@@ -590,7 +605,7 @@ pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Resul
     cmd.arg("merge")
         .arg("--squash")
         .arg(&ref_name);
-    run_git(cmd, "squash merge archive")?;
+    run_git(cmd, "squash merge archive").map_err(to_git)?;
 
     // Check if there's anything staged to commit.
     let mut cmd = git_cmd(Some(canonical));
@@ -609,7 +624,7 @@ pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Resul
         .arg("--no-edit")
         .arg("-m")
         .arg(format!("Squash merge session {session_id}"));
-    run_git(cmd, "squash commit")?;
+    run_git(cmd, "squash commit").map_err(to_git)?;
 
     Ok(MergeResult::Merged)
 }
@@ -624,10 +639,15 @@ pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Resul
 ///
 /// Returns `MergeResult::AlreadyUpToDate` if the archive ref is already
 /// an ancestor of HEAD.
-pub fn rebase_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<MergeResult> {
+pub fn rebase_merge_archive(canonical: &Path, session_id: &str) -> crate::errors::Result<MergeResult> {
+    use crate::errors::AlleleError;
     if !is_git_repo(canonical) {
-        anyhow::bail!("rebase_merge_archive: not a git repo: {}", canonical.display());
+        return Err(AlleleError::Git(format!(
+            "rebase_merge_archive: not a git repo: {}",
+            canonical.display()
+        )));
     }
+    let to_git = |e: anyhow::Error| AlleleError::Git(e.to_string());
 
     let ref_name = archive_ref_name(session_id);
 
@@ -643,13 +663,15 @@ pub fn rebase_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Resul
 
     // Record which branch we're on so we can return to it.
     let original_branch = current_branch(canonical)
-        .ok_or_else(|| anyhow::anyhow!("rebase_merge_archive: cannot determine current branch"))?;
+        .ok_or_else(|| AlleleError::Git(
+            "rebase_merge_archive: cannot determine current branch".into()
+        ))?;
 
     // Create a temporary branch from the archive ref for rebasing.
     let tmp_branch = format!("allele/rebase-tmp/{session_id}");
     let mut cmd = git_cmd(Some(canonical));
     cmd.arg("checkout").arg("-b").arg(&tmp_branch).arg(&ref_name);
-    run_git(cmd, "checkout tmp branch for rebase")?;
+    run_git(cmd, "checkout tmp branch for rebase").map_err(to_git)?;
 
     // Rebase onto the original branch.
     let mut cmd = git_cmd(Some(canonical));
@@ -666,17 +688,17 @@ pub fn rebase_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Resul
         let mut del = git_cmd(Some(canonical));
         del.arg("branch").arg("-D").arg(&tmp_branch);
         let _ = del.output();
-        return Err(e);
+        return Err(to_git(e));
     }
 
     // Fast-forward the original branch to the rebased tip.
     let mut cmd = git_cmd(Some(canonical));
     cmd.arg("checkout").arg(&original_branch);
-    run_git(cmd, "checkout original branch")?;
+    run_git(cmd, "checkout original branch").map_err(to_git)?;
 
     let mut cmd = git_cmd(Some(canonical));
     cmd.arg("merge").arg("--ff-only").arg(&tmp_branch);
-    run_git(cmd, "ff-merge rebased work")?;
+    run_git(cmd, "ff-merge rebased work").map_err(to_git)?;
 
     // Clean up the temporary branch.
     let mut cmd = git_cmd(Some(canonical));
