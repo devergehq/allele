@@ -7,6 +7,7 @@ mod sidebar;
 mod clone;
 mod config;
 mod drawer;
+mod editor;
 mod git;
 mod hooks;
 mod pending_actions;
@@ -320,512 +321,220 @@ impl AppState {
         strip
     }
 
-    /// Two-column Editor view: file tree on the left, file preview on the right.
-    fn render_editor_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let root = self.editor_workspace_root();
-
-        let tree_col = {
-            let mut col = div()
-                .id("editor-tree-scroll")
-                .w(px(240.0))
-                .flex_shrink_0()
-                .h_full()
-                .overflow_y_scroll()
-                .bg(rgb(0x181825))
-                .border_r_1()
-                .border_color(rgb(0x313244))
-                .py(px(6.0))
-                .text_size(px(12.0))
-                .text_color(rgb(0xcdd6f4));
-
-            if let Some(root_path) = root.clone() {
-                let mut rows: Vec<AnyElement> = Vec::new();
-                let mut counter: usize = 0;
-                self.collect_tree_rows(&root_path, 0, &mut rows, &mut counter, cx);
-                if rows.is_empty() {
-                    col = col.child(
-                        div()
-                            .px(px(10.0))
-                            .py(px(6.0))
-                            .text_color(rgb(0x6c7086))
-                            .child("(empty workspace)"),
-                    );
-                } else {
-                    for row in rows {
-                        col = col.child(row);
-                    }
-                }
-            } else {
-                col = col.child(
-                    div()
-                        .px(px(10.0))
-                        .py(px(6.0))
-                        .text_color(rgb(0x6c7086))
-                        .child("No active session"),
-                );
-            }
-
-            col
-        };
-
-        let preview_col = {
-            let mut col = div()
-                .id("editor-preview-scroll")
-                .flex_1()
-                .min_w(px(0.0))
-                .h_full()
-                .overflow_scroll()
-                .bg(rgb(0x1e1e2e))
-                .p(px(12.0))
-                .text_size(px(12.0))
-                .text_color(rgb(0xcdd6f4))
-                .font_family("monospace");
-
-            match (&self.editor_selected_path, &self.editor_preview) {
-                (Some(sel), Some((p, contents))) if p == sel => {
-                    col = col.child(
-                        div()
-                            .whitespace_normal()
-                            .child(contents.clone()),
-                    );
-                }
-                (Some(sel), _) => {
-                    col = col.child(format!("Loading {}…", sel.display()));
-                }
-                _ => {
-                    col = col
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .text_color(rgb(0x6c7086))
-                        .child("Select a file to preview");
-                }
-            }
-
-            col
-        };
-
-        let mut root = div()
-            .size_full()
-            .flex()
-            .flex_row()
-            .bg(rgb(0x1e1e2e))
-            .child(tree_col)
-            .child(preview_col);
-
-        if self.editor_context_menu.is_some() {
-            root = root.child(self.render_editor_context_menu(cx));
-        }
-
-        root
-    }
-
-    /// Compute the global-screen rect where Chrome should sit when the
-    /// Browser tab is active. Uses the Allele window's current bounds minus
-    /// the sidebar(s), tab strip, and drawer. Coords are top-left origin in
-    /// points, matching the macOS Accessibility API.
-    /// Status panel for the Browser tab. No Chrome process is embedded —
-    /// this panel only shows the current sync state (Chrome running?
-    /// session linked to a tab?) and exposes a Close button for the
-    /// current session's tab.
-    fn render_browser_placeholder(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        if !self.user_settings.browser_integration_enabled {
-            return div()
-                .size_full()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .gap(px(8.0))
-                .bg(rgb(0x1e1e2e))
-                .child(
-                    div()
-                        .text_size(px(13.0))
-                        .text_color(rgb(0xcdd6f4))
-                        .child("Chrome browser integration is disabled"),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(rgb(0x6c7086))
-                        .child(
-                            "Enable it in Allele → Settings → Browser to link \
-                             each session to a tab in your running Chrome.",
-                        ),
-                );
-        }
-        let active = self.active;
-        let chrome_up = browser::chrome_running();
-        let session_tab = self.active_session().and_then(|s| s.browser_tab_id);
-
-        let headline = if !chrome_up {
-            "Google Chrome is not running".to_string()
-        } else if let Some(id) = session_tab {
-            format!("Linked to Chrome tab #{id}")
-        } else if self.active_session().is_some() {
-            "No Chrome tab yet for this session".to_string()
-        } else {
-            "Open a session to use the Browser tab".to_string()
-        };
-
-        let mut root = div()
+/// Compute the global-screen rect where Chrome should sit when the
+/// Browser tab is active. Uses the Allele window's current bounds minus
+/// the sidebar(s), tab strip, and drawer. Coords are top-left origin in
+/// points, matching the macOS Accessibility API.
+/// Status panel for the Browser tab. No Chrome process is embedded —
+/// this panel only shows the current sync state (Chrome running?
+/// session linked to a tab?) and exposes a Close button for the
+/// current session's tab.
+fn render_browser_placeholder(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    if !self.user_settings.browser_integration_enabled {
+        return div()
             .size_full()
             .flex()
             .flex_col()
             .items_center()
             .justify_center()
-            .gap(px(10.0))
-            .bg(rgb(0x1e1e2e));
-
-        root = root.child(
-            div()
-                .text_size(px(13.0))
-                .text_color(rgb(0xcdd6f4))
-                .child(headline),
-        );
-
-        if let Some(url) = self
-            .active_session()
-            .and_then(|s| s.browser_last_url.as_ref())
-        {
-            root = root.child(
+            .gap(px(8.0))
+            .bg(rgb(0x1e1e2e))
+            .child(
                 div()
-                    .text_size(px(11.0))
-                    .text_color(rgb(0x89b4fa))
-                    .child(format!("Preview URL: {url}")),
-            );
-        }
-
-        if !self.browser_status.is_empty() {
-            root = root.child(
+                    .text_size(px(13.0))
+                    .text_color(rgb(0xcdd6f4))
+                    .child("Chrome browser integration is disabled"),
+            )
+            .child(
                 div()
                     .text_size(px(11.0))
                     .text_color(rgb(0x6c7086))
-                    .child(self.browser_status.clone()),
+                    .child(
+                        "Enable it in Allele → Settings → Browser to link \
+                         each session to a tab in your running Chrome.",
+                    ),
             );
-        }
+    }
+    let active = self.active;
+    let chrome_up = browser::chrome_running();
+    let session_tab = self.active_session().and_then(|s| s.browser_tab_id);
 
-        if chrome_up && self.active_session().is_some() {
-            let mut buttons = div().flex().flex_row().gap(px(8.0));
+    let headline = if !chrome_up {
+        "Google Chrome is not running".to_string()
+    } else if let Some(id) = session_tab {
+        format!("Linked to Chrome tab #{id}")
+    } else if self.active_session().is_some() {
+        "No Chrome tab yet for this session".to_string()
+    } else {
+        "Open a session to use the Browser tab".to_string()
+    };
 
+    let mut root = div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap(px(10.0))
+        .bg(rgb(0x1e1e2e));
+
+    root = root.child(
+        div()
+            .text_size(px(13.0))
+            .text_color(rgb(0xcdd6f4))
+            .child(headline),
+    );
+
+    if let Some(url) = self
+        .active_session()
+        .and_then(|s| s.browser_last_url.as_ref())
+    {
+        root = root.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(0x89b4fa))
+                .child(format!("Preview URL: {url}")),
+        );
+    }
+
+    if !self.browser_status.is_empty() {
+        root = root.child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(0x6c7086))
+                .child(self.browser_status.clone()),
+        );
+    }
+
+    if chrome_up && self.active_session().is_some() {
+        let mut buttons = div().flex().flex_row().gap(px(8.0));
+
+        buttons = buttons.child(
+            div()
+                .id("browser-sync-btn")
+                .cursor_pointer()
+                .px(px(10.0))
+                .py(px(4.0))
+                .rounded(px(4.0))
+                .bg(rgb(0x89b4fa))
+                .text_size(px(11.0))
+                .text_color(rgb(0x1e1e2e))
+                .hover(|s| s.bg(rgb(0x74c7ec)))
+                .child("Open in Chrome")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this: &mut Self, _event, _window, cx| {
+                        this.pending_action =
+                            Some(PendingAction::SyncBrowserToActiveSession);
+                        cx.notify();
+                    }),
+                ),
+        );
+
+        if let (Some(cur), Some(_)) = (active, session_tab) {
             buttons = buttons.child(
                 div()
-                    .id("browser-sync-btn")
+                    .id("browser-close-btn")
                     .cursor_pointer()
                     .px(px(10.0))
                     .py(px(4.0))
                     .rounded(px(4.0))
-                    .bg(rgb(0x89b4fa))
+                    .bg(rgb(0x45475a))
                     .text_size(px(11.0))
-                    .text_color(rgb(0x1e1e2e))
-                    .hover(|s| s.bg(rgb(0x74c7ec)))
-                    .child("Open in Chrome")
+                    .text_color(rgb(0xcdd6f4))
+                    .hover(|s| s.bg(rgb(0x585b70)))
+                    .child("Close Chrome tab")
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this: &mut Self, _event, _window, cx| {
-                            this.pending_action =
-                                Some(PendingAction::SyncBrowserToActiveSession);
+                        cx.listener(move |this: &mut Self, _event, _window, cx| {
+                            this.pending_action = Some(
+                                PendingAction::CloseBrowserTabForSession {
+                                    project_idx: cur.project_idx,
+                                    session_idx: cur.session_idx,
+                                },
+                            );
                             cx.notify();
                         }),
                     ),
             );
-
-            if let (Some(cur), Some(_)) = (active, session_tab) {
-                buttons = buttons.child(
-                    div()
-                        .id("browser-close-btn")
-                        .cursor_pointer()
-                        .px(px(10.0))
-                        .py(px(4.0))
-                        .rounded(px(4.0))
-                        .bg(rgb(0x45475a))
-                        .text_size(px(11.0))
-                        .text_color(rgb(0xcdd6f4))
-                        .hover(|s| s.bg(rgb(0x585b70)))
-                        .child("Close Chrome tab")
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this: &mut Self, _event, _window, cx| {
-                                this.pending_action = Some(
-                                    PendingAction::CloseBrowserTabForSession {
-                                        project_idx: cur.project_idx,
-                                        session_idx: cur.session_idx,
-                                    },
-                                );
-                                cx.notify();
-                            }),
-                        ),
-                );
-            }
-
-            root = root.child(buttons);
         }
 
-        root = root.child(
-            div()
-                .text_size(px(10.0))
-                .text_color(rgb(0x6c7086))
-                .child(
-                    "Allow Automation for Google Chrome in System Settings \
-                     → Privacy & Security → Automation if tab switching \
-                     fails silently.",
-                ),
-        );
-
-        root
+        root = root.child(buttons);
     }
 
-    /// Activate the active session's Chrome tab, creating one if the id
-    /// is unset or stale. Updates `browser_status` for UI feedback and
-    /// persists the resolved tab id.
-    fn sync_browser_to_active(&mut self) {
-        if !self.user_settings.browser_integration_enabled {
-            self.browser_status.clear();
+    root = root.child(
+        div()
+            .text_size(px(10.0))
+            .text_color(rgb(0x6c7086))
+            .child(
+                "Allow Automation for Google Chrome in System Settings \
+                 → Privacy & Security → Automation if tab switching \
+                 fails silently.",
+            ),
+    );
+
+    root
+}
+
+/// Activate the active session's Chrome tab, creating one if the id
+/// is unset or stale. Updates `browser_status` for UI feedback and
+/// persists the resolved tab id.
+fn sync_browser_to_active(&mut self) {
+    if !self.user_settings.browser_integration_enabled {
+        self.browser_status.clear();
+        return;
+    }
+    let Some(cursor) = self.active else {
+        self.browser_status.clear();
+        return;
+    };
+    if !browser::chrome_running() {
+        self.browser_status =
+            "Start Google Chrome and try again.".to_string();
+        return;
+    }
+
+    let stored = self
+        .projects
+        .get(cursor.project_idx)
+        .and_then(|p| p.sessions.get(cursor.session_idx))
+        .and_then(|s| s.browser_tab_id);
+    let fallback_url = self
+        .projects
+        .get(cursor.project_idx)
+        .and_then(|p| p.sessions.get(cursor.session_idx))
+        .and_then(|s| s.browser_last_url.clone())
+        .unwrap_or_else(|| "about:blank".to_string());
+
+    if let Some(id) = stored {
+        if browser::activate_tab(id) {
+            self.browser_status = format!("Activated tab #{id}");
             return;
         }
-        let Some(cursor) = self.active else {
-            self.browser_status.clear();
-            return;
-        };
-        if !browser::chrome_running() {
-            self.browser_status =
-                "Start Google Chrome and try again.".to_string();
-            return;
-        }
+    }
 
-        let stored = self
-            .projects
-            .get(cursor.project_idx)
-            .and_then(|p| p.sessions.get(cursor.session_idx))
-            .and_then(|s| s.browser_tab_id);
-        let fallback_url = self
-            .projects
-            .get(cursor.project_idx)
-            .and_then(|p| p.sessions.get(cursor.session_idx))
-            .and_then(|s| s.browser_last_url.clone())
-            .unwrap_or_else(|| "about:blank".to_string());
-
-        if let Some(id) = stored {
-            if browser::activate_tab(id) {
-                self.browser_status = format!("Activated tab #{id}");
-                return;
-            }
-        }
-
-        match browser::create_tab(&fallback_url) {
-            Some(new_id) => {
-                if let Some(session) = self
-                    .projects
-                    .get_mut(cursor.project_idx)
-                    .and_then(|p| p.sessions.get_mut(cursor.session_idx))
-                {
-                    session.browser_tab_id = Some(new_id);
-                    if session.browser_last_url.is_none() {
-                        session.browser_last_url = Some(fallback_url);
-                    }
+    match browser::create_tab(&fallback_url) {
+        Some(new_id) => {
+            if let Some(session) = self
+                .projects
+                .get_mut(cursor.project_idx)
+                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+            {
+                session.browser_tab_id = Some(new_id);
+                if session.browser_last_url.is_none() {
+                    session.browser_last_url = Some(fallback_url);
                 }
-                self.browser_status = format!("Created tab #{new_id}");
-                self.save_state();
             }
-            None => {
-                self.browser_status = "Could not create Chrome tab (check \
-                    Automation permission)."
-                    .to_string();
-            }
+            self.browser_status = format!("Created tab #{new_id}");
+            self.save_state();
+        }
+        None => {
+            self.browser_status = "Could not create Chrome tab (check \
+                Automation permission)."
+                .to_string();
         }
     }
-
-    /// Floating right-click menu for the file tree. Rendered via
-    /// `deferred` so it paints on top of sibling content, and positioned
-    /// in window coordinates at the click site.
-    fn render_editor_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (path, position) = self.editor_context_menu.clone().unwrap();
-
-        let item = |id: &'static str, label: &'static str, path: PathBuf, reveal: bool| {
-            div()
-                .id(id)
-                .px(px(14.0))
-                .py(px(6.0))
-                .text_size(px(12.0))
-                .text_color(rgb(0xcdd6f4))
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(0x45475a)))
-                .child(label)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this: &mut Self, _event, _window, cx| {
-                        cx.stop_propagation();
-                        if reveal {
-                            Self::reveal_in_finder(&path);
-                        } else {
-                            this.open_in_external_editor(&path);
-                        }
-                        this.editor_context_menu = None;
-                        cx.notify();
-                    }),
-                )
-        };
-
-        let menu = div()
-            .flex()
-            .flex_col()
-            .min_w(px(220.0))
-            .py(px(4.0))
-            .bg(rgb(0x181825))
-            .border_1()
-            .border_color(rgb(0x45475a))
-            .rounded(px(6.0))
-            .shadow_md()
-            .child(item(
-                "editor-ctx-reveal",
-                "Reveal in Finder",
-                path.clone(),
-                true,
-            ))
-            .child(item(
-                "editor-ctx-open-external",
-                "Open in External Editor",
-                path,
-                false,
-            ));
-
-        deferred(anchored().position(position).snap_to_window().child(menu))
-    }
-
-    /// Recursively build file-tree rows starting at `dir`.
-    /// Directories render as "▸"/"▾" rows; files as plain rows.
-    fn collect_tree_rows(
-        &self,
-        dir: &std::path::Path,
-        depth: usize,
-        out: &mut Vec<AnyElement>,
-        counter: &mut usize,
-        cx: &mut Context<Self>,
-    ) {
-        let read = match std::fs::read_dir(dir) {
-            Ok(r) => r,
-            Err(_) => return,
-        };
-        let mut entries: Vec<(PathBuf, bool, String)> = read
-            .filter_map(|e| e.ok())
-            .filter_map(|e| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    return None;
-                }
-                let is_dir = e.file_type().ok()?.is_dir();
-                Some((e.path(), is_dir, name))
-            })
-            .collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.2.cmp(&b.2)));
-
-        let indent = px((depth * 12) as f32 + 8.0);
-
-        for (path, is_dir, name) in entries {
-            let is_expanded = self.editor_expanded_dirs.contains(&path);
-            let is_selected = self.editor_selected_path.as_ref() == Some(&path);
-
-            let label = if is_dir {
-                let glyph = if is_expanded { "▾" } else { "▸" };
-                format!("{glyph} {name}")
-            } else {
-                format!("  {name}")
-            };
-
-            let row_bg = if is_selected { 0x313244 } else { 0x181825 };
-            let path_for_click = path.clone();
-
-            let row_id = *counter;
-            *counter += 1;
-            let path_for_right_click = path.clone();
-            let row = div()
-                .id(("editor-tree-row", row_id))
-                .flex()
-                .flex_row()
-                .items_center()
-                .pl(indent)
-                .pr(px(8.0))
-                .py(px(2.0))
-                .bg(rgb(row_bg))
-                .cursor_pointer()
-                .hover(|s| s.bg(rgb(0x313244)))
-                .child(label)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this: &mut Self, _event, _window, cx| {
-                        let p = path_for_click.clone();
-                        if p.is_dir() {
-                            if this.editor_expanded_dirs.contains(&p) {
-                                this.editor_expanded_dirs.remove(&p);
-                            } else {
-                                this.editor_expanded_dirs.insert(p);
-                            }
-                        } else {
-                            this.editor_selected_path = Some(p.clone());
-                            this.load_preview(p);
-                        }
-                        this.editor_context_menu = None;
-                        cx.notify();
-                    }),
-                )
-                .on_mouse_down(
-                    MouseButton::Right,
-                    cx.listener(move |this: &mut Self, event: &MouseDownEvent, _window, cx| {
-                        this.editor_context_menu =
-                            Some((path_for_right_click.clone(), event.position));
-                        cx.notify();
-                    }),
-                )
-                .into_any_element();
-
-            out.push(row);
-
-            if is_dir && is_expanded {
-                self.collect_tree_rows(&path, depth + 1, out, counter, cx);
-            }
-        }
-    }
-
-    /// Reveal a path in macOS Finder. For files, Finder selects the file
-    /// inside its containing folder; for directories, it opens them.
-    fn reveal_in_finder(path: &std::path::Path) {
-        let _ = std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn();
-    }
-
-    /// Spawn the user-configured external editor with `path` as an argument.
-    /// Defaults to Sublime Text's `subl` CLI when no override is set.
-    fn open_in_external_editor(&self, path: &std::path::Path) {
-        let cmd = self
-            .user_settings
-            .external_editor_command
-            .as_deref()
-            .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
-        settings::spawn_external_editor(cmd, path, None);
-    }
-
-    /// Load a file into the preview cache. Skips binary files and anything
-    /// over 512 KB with a placeholder string.
-    fn load_preview(&mut self, path: PathBuf) {
-        const MAX: u64 = 512 * 1024;
-        let contents = match std::fs::metadata(&path) {
-            Ok(meta) if meta.len() > MAX => "File too large to preview".to_string(),
-            Ok(_) => match std::fs::read(&path) {
-                Ok(bytes) => {
-                    if bytes.contains(&0) {
-                        "Binary file".to_string()
-                    } else {
-                        String::from_utf8_lossy(&bytes).into_owned()
-                    }
-                }
-                Err(e) => format!("Could not read file: {e}"),
-            },
-            Err(e) => format!("Could not stat file: {e}"),
-        };
-        self.editor_preview = Some((path, contents));
-    }
+}
 
     fn save_settings(&self) {
         // Start from the live user_settings so attention preferences
