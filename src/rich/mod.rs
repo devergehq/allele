@@ -9,6 +9,7 @@
 mod rich_session;
 pub mod compose_bar;
 mod document;
+mod markdown;
 mod rich_view;
 
 pub use rich_session::RichSession;

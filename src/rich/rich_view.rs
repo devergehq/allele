@@ -409,20 +409,11 @@ fn render_block(block: &Block, font_size: f32) -> Div {
 // ── Text block ────────────────────────────────────────────────────
 
 fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
-    let text_color = if streaming {
-        hex(SUBTEXT1)
-    } else {
-        hex(TEXT)
-    };
-
+    // Delegate to the markdown renderer. It handles body colour (streaming →
+    // SUBTEXT1, final → TEXT) internally via the TextRun colours.
     div()
         .py(px(4.0))
-        .child(
-            div()
-                .text_color(text_color)
-                .text_size(px(font_size))
-                .child(content.to_string()),
-        )
+        .child(super::markdown::render(content, streaming, font_size))
 }
 
 // ── Thinking block (collapsed by default, subtle) ─────────────────
