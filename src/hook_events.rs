@@ -126,7 +126,7 @@ pub(crate) fn apply_hook_event(&mut self, event: hooks::HookEvent, cx: &mut Cont
                     .awaiting_input_sound_path
                     .clone()
                     .unwrap_or_else(|| settings::DEFAULT_AWAITING_INPUT_SOUND.to_string());
-                hooks::play_sound(&sound_path);
+                self.platform.shell.play_sound(std::path::Path::new(&sound_path));
             }
             if self.user_settings.notifications_enabled {
                 hooks::show_notification(
@@ -142,7 +142,7 @@ pub(crate) fn apply_hook_event(&mut self, event: hooks::HookEvent, cx: &mut Cont
                     .response_ready_sound_path
                     .clone()
                     .unwrap_or_else(|| settings::DEFAULT_RESPONSE_READY_SOUND.to_string());
-                hooks::play_sound(&sound_path);
+                self.platform.shell.play_sound(std::path::Path::new(&sound_path));
             }
             if self.user_settings.notifications_enabled {
                 hooks::show_notification(

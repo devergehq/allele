@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::actions::{PendingAction, SessionCursor};
 use crate::app_state::AppState;
-use crate::{agents, browser, clone, config, git, project, session, settings, terminal};
+use crate::{agents, clone, config, git, project, session, settings, terminal};
 use session::{Session, SessionStatus};
 use crate::state::ArchivedSession;
 use terminal::{clamp_font_size, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
@@ -179,6 +179,9 @@ impl AppState {
         let session_id_for_session = session_id.clone();
         let display_label_for_task = display_label.clone();
         let agent_id_for_task = agent_id.clone();
+        // Capture the clone backend (Arc<dyn CloneBackend>) so the
+        // background closure can invoke it without borrowing self.
+        let clone_backend = self.platform.clone.clone();
 
         cx.spawn_in(window, async move |this, cx| {
             let (clone_result, pull_error) = cx
@@ -201,6 +204,7 @@ impl AppState {
                         None
                     };
                     let clone = clone::create_session_clone(
+                        &*clone_backend,
                         &source_for_task,
                         &project_name_for_task,
                         &session_id_for_clone,
@@ -550,11 +554,12 @@ impl AppState {
             .then_some(removed_browser_tab_id)
             .flatten();
         if let Some(id) = close_tab {
+            let browser = self.platform.browser.clone();
             match removed.terminal_view.as_ref() {
                 Some(tv) => tv.update(cx, |view, _| {
-                    view.on_close(move || { let _ = browser::close_tab(id); });
+                    view.on_close(move || { browser.close_tab(crate::platform::TabId(id)); });
                 }),
-                None => { let _ = browser::close_tab(id); }
+                None => { self.platform.browser.close_tab(crate::platform::TabId(id)); }
             }
         }
 
@@ -889,18 +894,15 @@ impl AppState {
                 // up on resume; if this session is active, run a full sync
                 // so Chrome ends up on the right tab.
                 if let Some(id) = tab_id {
-                    let _ = browser::navigate_tab(id, &url);
+                    self.platform.browser.navigate_tab(crate::platform::TabId(id), &url);
                 }
                 if self.active == Some(cursor) {
                     self.sync_browser_to_active();
                 }
             } else {
-                // Integration off — fall back to the legacy "open in
-                // default browser" behaviour so the preview URL still
-                // lands somewhere useful.
-                if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
-                    tracing::warn!("allele: failed to open preview URL {url}: {e}");
-                }
+                // Integration off — fall back to the system shell so
+                // the preview URL still lands somewhere useful.
+                self.platform.shell.open_url(&url);
             }
         }
     }

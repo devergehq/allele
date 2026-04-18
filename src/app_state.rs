@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::actions::{PendingAction, SessionCursor};
+use crate::platform::Platform;
 use crate::project::Project;
 use crate::scratch_pad;
 use crate::session::Session;
@@ -84,6 +85,10 @@ pub(crate) struct AppState {
     /// Loaded from state.json on startup, appended on submit, written back
     /// on every save_state. Filtered by project when the overlay opens.
     pub(crate) scratch_pad_history: Vec<state::ScratchPadEntry>,
+    /// Platform-abstraction bundle (COW clones, browser control, shell).
+    /// Selected once at startup via `Platform::detect()`; passed into
+    /// background tasks via `Clone` of the inner `Arc`s.
+    pub(crate) platform: Platform,
 }
 
 pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 160.0;

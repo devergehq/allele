@@ -129,7 +129,7 @@ pub(crate) fn render_editor_context_menu(&self, cx: &mut Context<Self>) -> impl 
                 cx.listener(move |this: &mut Self, _event, _window, cx| {
                     cx.stop_propagation();
                     if reveal {
-                        Self::reveal_in_finder(&path);
+                        this.platform.shell.reveal_in_files(&path);
                     } else {
                         this.open_in_external_editor(&path);
                     }
@@ -257,15 +257,6 @@ fn collect_tree_rows(
             self.collect_tree_rows(&path, depth + 1, out, counter, cx);
         }
     }
-}
-
-/// Reveal a path in macOS Finder. For files, Finder selects the file
-/// inside its containing folder; for directories, it opens them.
-fn reveal_in_finder(path: &std::path::Path) {
-    let _ = std::process::Command::new("open")
-        .arg("-R")
-        .arg(path)
-        .spawn();
 }
 
 /// Spawn the user-configured external editor with `path` as an argument.

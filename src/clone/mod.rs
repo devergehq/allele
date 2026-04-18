@@ -1,10 +1,10 @@
 use std::collections::{HashMap, HashSet};
-use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use crate::git;
+use crate::platform::CloneBackend;
 
 /// Base directory for all workspace clones
 const CLONE_BASE: &str = ".allele/workspaces";
@@ -18,8 +18,15 @@ const TRASH_BASE: &str = ".allele/trash";
 pub const TRASH_TTL_DAYS: u64 = 14;
 
 /// Create a clone for a session: uses a short unique session ID as the workspace name.
-/// Returns the clone path.
-pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str) -> anyhow::Result<PathBuf> {
+/// Returns the clone path. The raw copy-on-write primitive is delegated to
+/// the injected [`CloneBackend`] so non-macOS targets work via recursive
+/// copy fallback.
+pub fn create_session_clone(
+    backend: &dyn CloneBackend,
+    source: &Path,
+    project_name: &str,
+    session_id: &str,
+) -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     let clone_dir = home.join(CLONE_BASE).join(project_name);
@@ -31,29 +38,11 @@ pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str)
 
     let final_path = if clone_path.exists() {
         // Unlikely with UUIDs but handle by appending a random suffix
-        create_clone(source, &format!("{short_id}-alt"))?
+        create_clone(backend, source, &format!("{short_id}-alt"))?
     } else {
-        let src_cstr = CString::new(source.to_string_lossy().as_bytes())?;
-        let dst_cstr = CString::new(clone_path.to_string_lossy().as_bytes())?;
-
-        let result = unsafe {
-            libc::clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), 0)
-        };
-
-        if result != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EXDEV) {
-                anyhow::bail!(
-                    "Cannot clone: source ({}) and destination ({}) are on different \
-                     volumes. Both must be on the same APFS volume for clonefile(2) to work. \
-                     Move your project or ~/.allele/ so they share a volume.",
-                    source.display(),
-                    clone_path.display(),
-                );
-            }
-            anyhow::bail!("clonefile() failed: {err}");
-        }
-
+        backend
+            .clone(source, &clone_path)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         clone_path
     };
 
@@ -75,7 +64,11 @@ pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str)
 /// untracked files, node_modules, .env, everything.
 ///
 /// Returns the path to the clone.
-pub fn create_clone(source: &Path, workspace_name: &str) -> anyhow::Result<PathBuf> {
+pub fn create_clone(
+    backend: &dyn CloneBackend,
+    source: &Path,
+    workspace_name: &str,
+) -> anyhow::Result<PathBuf> {
     let home = dirs::home_dir()
         .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
 
@@ -85,16 +78,14 @@ pub fn create_clone(source: &Path, workspace_name: &str) -> anyhow::Result<PathB
         .and_then(|n| n.to_str())
         .unwrap_or("unknown");
 
-    let clone_dir = home
-        .join(CLONE_BASE)
-        .join(project_name);
-
-    // Ensure parent directory exists
+    let clone_dir = home.join(CLONE_BASE).join(project_name);
     fs::create_dir_all(&clone_dir)?;
 
     let clone_path = clone_dir.join(workspace_name);
 
-    // clonefile requires destination does NOT exist
+    // Backend-specific COW clones (clonefile/reflink) require the
+    // destination not exist; full-copy fallback also depends on it to
+    // avoid silently merging into an existing directory.
     if clone_path.exists() {
         anyhow::bail!(
             "Clone destination already exists: {}",
@@ -102,28 +93,9 @@ pub fn create_clone(source: &Path, workspace_name: &str) -> anyhow::Result<PathB
         );
     }
 
-    // Call clonefile(2) — macOS APFS copy-on-write clone
-    let src_cstr = CString::new(source.to_string_lossy().as_bytes())?;
-    let dst_cstr = CString::new(clone_path.to_string_lossy().as_bytes())?;
-
-    let result = unsafe {
-        libc::clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), 0)
-    };
-
-    if result != 0 {
-        let err = std::io::Error::last_os_error();
-        if err.raw_os_error() == Some(libc::EXDEV) {
-            anyhow::bail!(
-                "Cannot clone: source ({}) and destination ({}) are on different \
-                 volumes. Both must be on the same APFS volume for clonefile(2) to work. \
-                 Move your project or ~/.allele/ so they share a volume.",
-                source.display(),
-                clone_path.display(),
-            );
-        }
-        anyhow::bail!("clonefile() failed: {err}");
-    }
-
+    backend
+        .clone(source, &clone_path)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     Ok(clone_path)
 }
 

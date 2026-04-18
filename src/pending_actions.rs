@@ -4,7 +4,7 @@ use gpui::*;
 
 use crate::actions::{PendingAction, SessionCursor};
 use crate::app_state::AppState;
-use crate::{browser, clone, git, hooks, project, session, settings};
+use crate::{clone, git, hooks, project, session, settings};
 use crate::project::Project;
 use session::{Session, SessionStatus};
 use settings::{ProjectSave, Settings};
@@ -573,7 +573,7 @@ impl AppState {
                         .and_then(|p| p.sessions.get(cursor.session_idx))
                         .and_then(|s| s.browser_tab_id);
                     if let Some(id) = tab_id {
-                        let _ = browser::close_tab(id);
+                        self.platform.browser.close_tab(crate::platform::TabId(id));
                     }
                     if let Some(session) = self
                         .projects

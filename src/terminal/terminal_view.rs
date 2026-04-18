@@ -1164,10 +1164,7 @@ impl TerminalView {
                 "term-ctx-reveal",
                 "Reveal in Finder".to_string(),
                 Box::new(move |_this: &mut TerminalView, _cx: &mut Context<TerminalView>| {
-                    let _ = std::process::Command::new("open")
-                        .arg("-R")
-                        .arg(&path_for_reveal)
-                        .spawn();
+                    crate::platform::global().shell.reveal_in_files(&path_for_reveal);
                 }),
             ));
 
@@ -1489,7 +1486,7 @@ impl Render for TerminalView {
                     if event.modifiers.platform {
                         if let Some(cell) = this.pixel_to_cell(click_x, click_y) {
                             if let Some((_, _, _, url)) = this.url_at(cell) {
-                                let _ = std::process::Command::new("open").arg(&url).spawn();
+                                crate::platform::global().shell.open_url(&url);
                                 return;
                             }
                         }
@@ -1665,7 +1662,7 @@ impl Render for TerminalView {
 
                     // URL: open immediately in default browser, no menu.
                     if let Some((_, _, _, url)) = this.url_at(cell) {
-                        let _ = std::process::Command::new("open").arg(&url).spawn();
+                        crate::platform::global().shell.open_url(&url);
                         return;
                     }
 

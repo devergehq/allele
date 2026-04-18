@@ -13,6 +13,7 @@ mod git;
 mod hook_events;
 mod hooks;
 mod pending_actions;
+mod platform;
 mod project;
 mod scratch_pad;
 mod session;
@@ -357,7 +358,7 @@ fn render_browser_placeholder(&self, cx: &mut Context<Self>) -> impl IntoElement
             );
     }
     let active = self.active;
-    let chrome_up = browser::chrome_running();
+    let chrome_up = self.platform.browser.is_running();
     let session_tab = self.active_session().and_then(|s| s.browser_tab_id);
 
     let headline = if !chrome_up {
@@ -489,7 +490,7 @@ fn sync_browser_to_active(&mut self) {
         self.browser_status.clear();
         return;
     };
-    if !browser::chrome_running() {
+    if !self.platform.browser.is_running() {
         self.browser_status =
             "Start Google Chrome and try again.".to_string();
         return;
@@ -508,13 +509,13 @@ fn sync_browser_to_active(&mut self) {
         .unwrap_or_else(|| "about:blank".to_string());
 
     if let Some(id) = stored {
-        if browser::activate_tab(id) {
+        if self.platform.browser.activate_tab(platform::TabId(id)) {
             self.browser_status = format!("Activated tab #{id}");
             return;
         }
     }
 
-    match browser::create_tab(&fallback_url) {
+    match self.platform.browser.create_tab(&fallback_url).map(|t| t.0) {
         Some(new_id) => {
             if let Some(session) = self
                 .projects
@@ -829,13 +830,17 @@ fn main() {
     init_tracing();
     install_panic_hook();
 
+    // Platform must be selected before any fatal-dialog callsite so
+    // bootstrap failures route through the adapter.
+    let platform = platform::Platform::detect().install_global();
+
     // Hard dependency check: Allele treats git as non-optional. Fail
     // loudly before any window opens if it's missing.
     if !git::git_available() {
         const MSG: &str = "Allele requires git but none was found on PATH.\n\n\
                            Install the Xcode Command Line Tools with:\n\n    xcode-select --install";
-        tracing::info!("{MSG}");
-        hooks::show_fatal_dialog("Allele", MSG);
+        tracing::error!("{MSG}");
+        platform.shell.show_fatal_dialog("Allele", MSG);
         std::process::exit(1);
     }
 
@@ -849,6 +854,12 @@ fn main() {
             let _ = std::fs::remove_dir_all(&stale);
         }
     }
+
+    tracing::info!(
+        "Platform adapters: clone={}, browser={}",
+        platform.clone.name(),
+        if platform.browser.is_running() { "running" } else { "absent" }
+    );
 
     let application = Application::new();
 
@@ -959,6 +970,7 @@ fn main() {
         let settings_for_window = loaded_settings.clone();
         let loaded_state_for_window = loaded_state.clone();
         let hooks_settings_path_for_window = hooks_settings_path.clone();
+        let platform_for_window = platform.clone();
 
         cx.open_window(
             WindowOptions {
@@ -1303,6 +1315,7 @@ fn main() {
                         browser_status: String::new(),
                         scratch_pad: None,
                         scratch_pad_history: loaded_state.scratch_pad_history.clone(),
+                        platform: platform_for_window.clone(),
                     }
                 })
             },
