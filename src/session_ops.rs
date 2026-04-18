@@ -1,11 +1,13 @@
 //! Session lifecycle operations: creating, resuming, and terminal event wiring.
 
 use gpui::*;
+use std::path::PathBuf;
 
 use crate::actions::{PendingAction, SessionCursor};
 use crate::app_state::AppState;
-use crate::{agents, clone, config, git, project, session, settings, terminal};
+use crate::{agents, browser, clone, config, git, project, session, settings, terminal};
 use session::{Session, SessionStatus};
+use crate::state::ArchivedSession;
 use terminal::{clamp_font_size, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
 
 impl AppState {
@@ -407,5 +409,343 @@ impl AppState {
         self.apply_project_config(cursor, window, cx);
         self.save_state();
         cx.notify();
+    }
+
+    /// Close a session without deleting its clone.
+    ///
+    /// The PTY is killed (dropping the terminal_view entity triggers
+    /// `PtyTerminal::drop` → `Msg::Shutdown`), the clone stays on disk,
+    /// the session stays in `state.json` with status `Suspended`, and the
+    /// sidebar row stays visible with a ⏸ icon. A later click on that row
+    /// cold-resumes via `claude --resume <id>`.
+    pub(crate) fn close_session_keep_clone(
+        &mut self,
+        cursor: SessionCursor,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.get_mut(cursor.project_idx) else { return; };
+        let Some(session) = project.sessions.get_mut(cursor.session_idx) else { return; };
+
+        // Drop the terminal_view and drawer — Drop impl on PtyTerminal sends
+        // Msg::Shutdown, killing the subprocesses. The clone on disk is untouched.
+        session.terminal_view = None;
+        // Drop the drawer PTYs but preserve the names so the next open
+        // restores the same tab layout (matches the rehydration path).
+        let names: Vec<String> = session.drawer_tabs.iter().map(|t| t.name.clone()).collect();
+        session.drawer_tabs.clear();
+        session.pending_drawer_tab_names = names;
+        session.drawer_visible = false;
+        session.status = SessionStatus::Suspended;
+        session.last_active = std::time::SystemTime::now();
+
+        // If this was the active session, clear the active cursor — the main
+        // area will show the "No active session" placeholder until the user
+        // clicks something else.
+        if self.active == Some(cursor) {
+            self.active = None;
+        }
+
+        self.save_state();
+        cx.notify();
+    }
+
+    /// Cycle the active session pointer across all non-Suspended sessions
+    /// in the flat order they appear in the sidebar. `delta = -1` = previous,
+    /// `delta = 1` = next. Wraps at both ends. Suspended sessions are
+    /// deliberately skipped — quick-flicking shouldn't auto-spawn resumed
+    /// Claude processes; the user clicks the ⏸ row explicitly to resume.
+    pub(crate) fn navigate_session(&mut self, delta: i32, cx: &mut Context<Self>) {
+        // Build the flat list of (project_idx, session_idx) for every
+        // attached (non-Suspended) session. This is the nav surface.
+        let flat: Vec<SessionCursor> = self
+            .projects
+            .iter()
+            .enumerate()
+            .flat_map(|(p_idx, project)| {
+                project
+                    .sessions
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, s)| s.status != SessionStatus::Suspended)
+                    .map(move |(s_idx, _)| SessionCursor {
+                        project_idx: p_idx,
+                        session_idx: s_idx,
+                    })
+            })
+            .collect();
+
+        if flat.is_empty() {
+            return;
+        }
+
+        // Find the active cursor's position in the flat list. If the current
+        // active is None or points at a Suspended session (not in `flat`),
+        // treat it as an implicit position before index 0 when moving forward,
+        // and after the last index when moving backward.
+        let current_pos = self
+            .active
+            .and_then(|active| flat.iter().position(|c| *c == active));
+
+        let len = flat.len() as i32;
+        let new_pos = match current_pos {
+            Some(pos) => (pos as i32 + delta).rem_euclid(len) as usize,
+            None if delta >= 0 => 0,
+            None => (len - 1) as usize,
+        };
+
+        self.active = Some(flat[new_pos]);
+        self.pending_action = Some(PendingAction::FocusActive);
+        cx.notify();
+    }
+
+    /// Discard a session — kill the PTY, delete the APFS clone, remove from
+    /// the sidebar, and drop the corresponding entry from `state.json`.
+    ///
+    /// This is the *destructive* path, reached only through the explicit
+    /// Discard action with confirmation. The plain Close action uses
+    /// `close_session_keep_clone` instead.
+    pub(crate) fn remove_session(
+        &mut self,
+        cursor: SessionCursor,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(project) = self.projects.get_mut(cursor.project_idx) else { return; };
+        if cursor.session_idx >= project.sessions.len() { return; }
+
+        // Pull the session out of the list immediately
+        let removed = project.sessions.remove(cursor.session_idx);
+        let clone_path = removed.clone_path.clone();
+        let removed_label = removed.label.clone();
+        let already_merged = removed.merged;
+        let removed_session_id = removed.id.clone();
+        let removed_browser_tab_id = removed.browser_tab_id;
+        // Captured before drop(removed) / end of &mut project borrow.
+        let canonical_for_task = project.source_path.clone();
+        let session_id_for_task = removed.id.clone();
+
+        // Preserve the session's metadata in the archive list so the
+        // sidebar archive browser can show a human-readable label —
+        // but skip this if the session was already merged (work is in canonical).
+        if !already_merged {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            project.archives.push(ArchivedSession {
+                id: removed.id.clone(),
+                project_id: project.id.clone(),
+                label: removed_label.clone(),
+                archived_at: now,
+            });
+        }
+
+        // Register Chrome-tab cleanup as a hook on the PTY: when the
+        // terminal is dropped below, the tab closes as part of the same
+        // teardown sequence (alongside SIGTERM to any dev servers).
+        // Suspended sessions have no terminal_view, so fall back to the
+        // direct call. Integration-disabled case: still no-op.
+        let close_tab = self.user_settings.browser_integration_enabled
+            .then_some(removed_browser_tab_id)
+            .flatten();
+        if let Some(id) = close_tab {
+            match removed.terminal_view.as_ref() {
+                Some(tv) => tv.update(cx, |view, _| {
+                    view.on_close(move || { let _ = browser::close_tab(id); });
+                }),
+                None => { let _ = browser::close_tab(id); }
+            }
+        }
+
+        // Run the project-declared shutdown command (if any) before we
+        // drop the PTY and archive/trash the clone. Runs in-line — the
+        // Discard action is already destructive and user-confirmed, and
+        // the archive pipeline below is async, so a brief block here is
+        // acceptable. Failure is logged and teardown continues so a
+        // broken hook can't strand the clone on disk.
+        if let Some(clone_path) = clone_path.as_ref() {
+            if let Some(cfg) = config::ProjectConfig::load(clone_path) {
+                let shutdown = cfg
+                    .shutdown
+                    .as_ref()
+                    .map(|s| config::substitute(s, removed.allocated_port, clone_path))
+                    .filter(|s| !s.trim().is_empty());
+                if let Some(cmd) = shutdown {
+                    match std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&cmd)
+                        .current_dir(clone_path)
+                        .status()
+                    {
+                        Ok(s) if !s.success() => {
+                            eprintln!("allele: shutdown command exited with {s} — continuing");
+                        }
+                        Err(e) => {
+                            eprintln!("allele: failed to run shutdown command: {e} — continuing");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        // Drop the Session — this frees the terminal_view entity (if any),
+        // which fires cleanup hooks then kills the PTY process group via
+        // the Drop impl on PtyTerminal. Suspended sessions have
+        // `terminal_view = None` so there's no PTY to kill; only the
+        // clone needs cleanup.
+        drop(removed);
+        let _ = removed_session_id; // reserved for future use
+
+        // Show an "Archiving…" placeholder if there's a clone to clean up
+        let placeholder_id = uuid::Uuid::new_v4().to_string();
+        if clone_path.is_some() {
+            project.loading_sessions.push(project::LoadingSession {
+                id: placeholder_id.clone(),
+                label: format!("{removed_label} (archiving)"),
+            });
+        }
+
+        // If the removed session was the active one, clear active selection
+        // (so the main content area shows the empty state immediately).
+        if let Some(active) = self.active {
+            if active == cursor {
+                // Try to pick another session in the same project first
+                let project = &self.projects[cursor.project_idx];
+                self.active = if !project.sessions.is_empty() {
+                    let new_session_idx = cursor.session_idx.min(project.sessions.len() - 1);
+                    Some(SessionCursor { project_idx: cursor.project_idx, session_idx: new_session_idx })
+                } else {
+                    // Fall back to any session in any project
+                    self.projects.iter().enumerate().find_map(|(p_idx, p)| {
+                        if !p.sessions.is_empty() {
+                            Some(SessionCursor { project_idx: p_idx, session_idx: 0 })
+                        } else {
+                            None
+                        }
+                    })
+                };
+            } else if active.project_idx == cursor.project_idx && active.session_idx > cursor.session_idx {
+                // Active session in same project shifted down by one
+                self.active = Some(SessionCursor {
+                    project_idx: active.project_idx,
+                    session_idx: active.session_idx - 1,
+                });
+            }
+        }
+
+        // Persist the updated session list now that the entry is gone.
+        self.save_state();
+        cx.notify();
+
+        // Spawn the archive-then-delete pipeline on a background task
+        if let Some(clone_path) = clone_path {
+            let project_idx = cursor.project_idx;
+            let placeholder_id_for_task = placeholder_id.clone();
+            cx.spawn(async move |this, cx| {
+                let delete_result = cx
+                    .background_executor()
+                    .spawn(async move {
+                        // Degenerate case: if the session's "clone path"
+                        // is canonical itself (Phase C fallback when the
+                        // clonefile syscall failed), skip the archive
+                        // pipeline — no session branch exists, the fetch
+                        // would be a no-op self-fetch, and trash_clone
+                        // will bail on the workspace-dir safety check.
+                        if clone_path == canonical_for_task {
+                            return clone::delete_clone(&clone_path);
+                        }
+                        // Archive the session's work into canonical
+                        // before the clone is trashed. Order is
+                        // load-bearing — archive_session must run while
+                        // the clone still exists.
+                        if let Err(e) = git::archive_session(
+                            &canonical_for_task,
+                            &clone_path,
+                            &session_id_for_task,
+                        ) {
+                            eprintln!(
+                                "archive_session failed for {session_id_for_task}: {e}"
+                            );
+                        }
+                        clone::trash_clone(&clone_path).map(|_| ())
+                    })
+                    .await;
+
+                if let Err(e) = delete_result {
+                    eprintln!("Failed to delete clone: {e}");
+                }
+
+                // Remove the placeholder on the main thread
+                let _ = this.update(cx, |this: &mut Self, cx| {
+                    if let Some(project) = this.projects.get_mut(project_idx) {
+                        project.loading_sessions.retain(|l| l.id != placeholder_id_for_task);
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+    }
+
+    /// Remove a project and all its sessions (deleting all clones asynchronously).
+    pub(crate) fn remove_project(&mut self, project_idx: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        if project_idx >= self.projects.len() { return; }
+
+        // Remove the project from the list immediately. The terminal entities
+        // are dropped, which kills the PTYs.
+        let project = self.projects.remove(project_idx);
+
+        // Collect all clone paths for background deletion
+        let clone_paths: Vec<PathBuf> = project
+            .sessions
+            .iter()
+            .filter_map(|s| s.clone_path.clone())
+            .collect();
+
+        // Adjust the active cursor — if the removed project was active or
+        // before the active one, shift accordingly.
+        self.active = match self.active {
+            Some(active) if active.project_idx == project_idx => {
+                // Active was in the removed project — pick any other session
+                self.projects.iter().enumerate().find_map(|(p_idx, p)| {
+                    if !p.sessions.is_empty() {
+                        Some(SessionCursor { project_idx: p_idx, session_idx: 0 })
+                    } else {
+                        None
+                    }
+                })
+            }
+            Some(active) if active.project_idx > project_idx => {
+                Some(SessionCursor {
+                    project_idx: active.project_idx - 1,
+                    session_idx: active.session_idx,
+                })
+            }
+            other => other,
+        };
+
+        self.save_settings();
+        self.save_state();
+        cx.notify();
+
+        // Spawn background cleanup for all clones — trash (rename) instead
+        // of delete so this completes near-instantly. The trash purge at
+        // startup handles actual deletion asynchronously.
+        if !clone_paths.is_empty() {
+            cx.spawn(async move |_this, cx| {
+                cx.background_executor()
+                    .spawn(async move {
+                        for path in clone_paths {
+                            if let Err(e) = clone::trash_clone(&path) {
+                                eprintln!("Failed to trash clone at {}: {e}", path.display());
+                            }
+                        }
+                    })
+                    .await;
+            })
+            .detach();
+        }
     }
 }
