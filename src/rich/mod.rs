@@ -7,12 +7,14 @@
 //!   - Blocks — styled components (TextBlock, ToolCallCard, DiffElement, ThinkingAside)
 
 mod rich_session;
+pub mod attachments;
 pub mod compose_bar;
 mod document;
 mod markdown;
 mod rich_view;
 
 pub use rich_session::RichSession;
+pub use attachments::Attachment;
 pub use compose_bar::{ComposeBar, ComposeBarEvent};
 pub use document::*;
 pub use rich_view::{RichView, RichViewEvent};

@@ -2435,7 +2435,10 @@ impl AppState {
         // `terminal_view = None` so there's no PTY to kill; only the
         // clone needs cleanup.
         drop(removed);
-        let _ = removed_session_id; // reserved for future use
+        // Free the session's attachments dir on explicit discard. Failure
+        // is logged and swallowed — orphan attachments are cheap to leave
+        // on disk and the startup sweep catches them on next launch.
+        rich::attachments::cleanup_session(&removed_session_id);
 
         // Show an "Archiving…" placeholder if there's a clone to clean up
         let placeholder_id = uuid::Uuid::new_v4().to_string();
@@ -2821,6 +2824,11 @@ fn main() {
             .iter()
             .map(|p| p.source_path.clone())
             .collect();
+        let active_session_ids: Vec<String> = loaded_state
+            .sessions
+            .iter()
+            .map(|s| s.id.clone())
+            .collect();
         std::thread::spawn(move || {
             match clone::sweep_orphans(&referenced, &project_sources) {
                 Ok(0) => {}
@@ -2842,6 +2850,9 @@ fn main() {
                     );
                 }
             }
+            // Sweep orphan attachment dirs from force-quit or crashed sessions
+            // so disk usage doesn't accumulate indefinitely.
+            rich::attachments::sweep_orphans(&active_session_ids);
         });
 
         // Log resolved agent paths at startup for diagnostics. Agent

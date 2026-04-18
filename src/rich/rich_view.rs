@@ -103,14 +103,15 @@ impl RichView {
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
-        // Create compose bar
-        let compose_bar = cx.new(|cx| ComposeBar::new(cx, font_size));
+        // Create compose bar — pass session_id so attachments land in
+        // `~/.allele/attachments/<session_id>/`.
+        let compose_bar = cx.new(|cx| ComposeBar::new(cx, font_size, session_id.clone()));
 
         // Subscribe to compose bar submit events
         cx.subscribe(&compose_bar, |this: &mut Self, _bar, event: &ComposeBarEvent, cx| {
             match event {
-                ComposeBarEvent::Submit { text } => {
-                    this.handle_submit(text.clone(), cx);
+                ComposeBarEvent::Submit { text, attachments } => {
+                    this.handle_submit(text.clone(), attachments.clone(), cx);
                 }
             }
         })
@@ -155,7 +156,12 @@ impl RichView {
     }
 
     /// Handle a prompt submission from the compose bar.
-    fn handle_submit(&mut self, text: String, cx: &mut Context<Self>) {
+    fn handle_submit(
+        &mut self,
+        text: String,
+        attachments: Vec<super::attachments::Attachment>,
+        cx: &mut Context<Self>,
+    ) {
         // Kill current session if still running
         if let Some(ref mut session) = self.session {
             if !session.is_exited() {
@@ -165,9 +171,21 @@ impl RichView {
             }
         }
 
-        // Echo the user's prompt into the feed BEFORE spawning the CLI,
-        // so the user sees their message immediately.
-        self.document.push_user_prompt(text.clone());
+        // Assemble the final prompt. When attachments are present, prepend
+        // a preamble naming each on-disk path so Claude reads them via its
+        // Read tool. When there are none, the prompt is the user's text.
+        let assembled = assemble_prompt(&text, &attachments);
+
+        // Echo the user's visible text (not the preamble) into the feed
+        // BEFORE spawning the CLI so the user sees their message immediately.
+        // An attachment-only submit still echoes a visible hint so the feed
+        // isn't empty.
+        let echo = if text.is_empty() && !attachments.is_empty() {
+            format!("[attached {} file(s)]", attachments.len())
+        } else {
+            text.clone()
+        };
+        self.document.push_user_prompt(echo);
 
         // Mark compose bar as busy
         self.compose_bar.update(cx, |bar, cx| bar.set_busy(true, cx));
@@ -177,7 +195,7 @@ impl RichView {
         let has_history = session_history_exists(&self.session_id);
         let spawn_result = if has_history {
             RichSession::resume(
-                &text,
+                &assembled,
                 &self.session_id,
                 &self.working_dir,
                 &self.allowed_tools,
@@ -185,7 +203,7 @@ impl RichView {
             )
         } else {
             RichSession::spawn(
-                &text,
+                &assembled,
                 &self.session_id,
                 &self.working_dir,
                 &self.allowed_tools,
@@ -706,6 +724,39 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
         )
 }
 
+// ── Prompt assembly (text + attachments) ──────────────────────────
+
+/// Build the final prompt string sent to Claude.
+///
+/// Returns `text` verbatim when there are no attachments — the text-only
+/// path is byte-identical to the pre-attachments behaviour. With one or
+/// more attachments, prepends a preamble naming each on-disk path so
+/// Claude's Read tool ingests them before processing the user's request.
+fn assemble_prompt(text: &str, attachments: &[super::attachments::Attachment]) -> String {
+    if attachments.is_empty() {
+        return text.to_string();
+    }
+
+    let mut lines = String::from(
+        "[The user has attached the following files for this prompt. \
+         Read each file before processing the prompt below.]\n\n\
+         Attached files:\n",
+    );
+    for a in attachments {
+        let kind = if a.is_image { "Image" } else { "File" };
+        lines.push_str(&format!("- {}: {}\n", kind, a.path.display()));
+    }
+    lines.push_str("\n---\n\n");
+
+    if text.is_empty() {
+        // Attachment-only submit — give Claude a minimal default directive.
+        lines.push_str("Please review the attached file(s).");
+    } else {
+        lines.push_str(text);
+    }
+    lines
+}
+
 // ── Awaiting response (thinking indicator) ────────────────────────
 
 fn render_awaiting(font_size: f32) -> Div {
@@ -728,4 +779,48 @@ fn render_awaiting(font_size: f32) -> Div {
                 .text_size(px(font_size - 1.0))
                 .child("Thinking…"),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::assemble_prompt;
+    use super::super::attachments::Attachment;
+    use std::path::PathBuf;
+    use uuid::Uuid;
+
+    fn mk_attachment(name: &str, path: &str, is_image: bool) -> Attachment {
+        Attachment {
+            id: Uuid::new_v4(),
+            original_name: name.into(),
+            path: PathBuf::from(path),
+            is_image,
+        }
+    }
+
+    #[test]
+    fn no_attachments_returns_text_verbatim() {
+        assert_eq!(assemble_prompt("hello", &[]), "hello");
+        assert_eq!(assemble_prompt("", &[]), "");
+    }
+
+    #[test]
+    fn attachments_prepend_preamble_with_paths() {
+        let a = mk_attachment("screenshot.png", "/tmp/allele/abc.png", true);
+        let b = mk_attachment("notes.txt", "/tmp/allele/def.txt", false);
+        let result = assemble_prompt("please describe", &[a, b]);
+
+        assert!(result.contains("Attached files:"));
+        assert!(result.contains("Image: /tmp/allele/abc.png"));
+        assert!(result.contains("File: /tmp/allele/def.txt"));
+        assert!(result.contains("please describe"));
+        assert!(result.ends_with("please describe"));
+    }
+
+    #[test]
+    fn attachment_only_submit_gets_default_directive() {
+        let a = mk_attachment("photo.jpg", "/tmp/allele/xyz.jpg", true);
+        let result = assemble_prompt("", &[a]);
+        assert!(result.contains("Image: /tmp/allele/xyz.jpg"));
+        assert!(result.contains("Please review the attached file(s)."));
+    }
 }

@@ -21,15 +21,19 @@
 //! concrete action structs declared here.
 
 use std::ops::Range;
+use std::path::PathBuf;
 
 use gpui::{
-    actions, fill, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds, ClipboardItem,
-    Context, CursorStyle, ElementId, ElementInputHandler, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, GlobalElementId, Hsla, LayoutId, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Rgba, ShapedLine, SharedString, Style,
-    TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, fill, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds, ClipboardEntry,
+    ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, EntityInputHandler,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, GlobalElementId, Hsla, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, PathPromptOptions,
+    Pixels, Rgba, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
+use uuid::Uuid;
+
+use super::attachments::{self, Attachment};
 
 // ── Actions ───────────────────────────────────────────────────────
 
@@ -64,6 +68,7 @@ actions!(
         InsertNewline,
         Submit,
         ShowCharacterPalette,
+        AttachFiles,
     ]
 );
 
@@ -101,7 +106,10 @@ fn hex_alpha(c: u32, alpha: f32) -> Hsla {
 #[derive(Debug, Clone)]
 pub enum ComposeBarEvent {
     /// User submitted a prompt (Cmd+Enter or Send button).
-    Submit { text: String },
+    Submit {
+        text: String,
+        attachments: Vec<Attachment>,
+    },
 }
 
 // ── Layout state (computed during paint) ──────────────────────────
@@ -133,12 +141,21 @@ pub struct ComposeBar {
     is_selecting: bool,
     busy: bool,
     font_size: f32,
+    /// Namespaces attachment storage under `~/.allele/attachments/<session_id>/`.
+    /// Constructor-injected and never mutated — if a future refactor needs
+    /// to move attachments between sessions, that's a new API, not a setter.
+    session_id: String,
+    /// All mutations re-enter through `this.update(cx, ...)`, so GPUI's
+    /// single-threaded per-window event loop is the concurrency guarantee.
+    /// No `Arc<Mutex<...>>` needed. If this field ever gets touched from a
+    /// background thread, that invariant breaks.
+    attachments: Vec<Attachment>,
 }
 
 impl EventEmitter<ComposeBarEvent> for ComposeBar {}
 
 impl ComposeBar {
-    pub fn new(cx: &mut Context<Self>, font_size: f32) -> Self {
+    pub fn new(cx: &mut Context<Self>, font_size: f32, session_id: String) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
             content: String::new(),
@@ -151,6 +168,8 @@ impl ComposeBar {
             is_selecting: false,
             busy: false,
             font_size,
+            session_id,
+            attachments: Vec::new(),
         }
     }
 
@@ -474,9 +493,28 @@ impl ComposeBar {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            let t = text.clone();
-            self.replace_selection(&t, cx);
+        let Some(item) = cx.read_from_clipboard() else { return; };
+
+        // Prefer image payload when present — treat as an attachment instead
+        // of as text. Fall back to text paste for non-image clipboards so the
+        // existing Cmd+V behaviour is preserved when the clipboard is text.
+        for entry in item.entries() {
+            if let ClipboardEntry::Image(image) = entry {
+                match attachments::save_image(image, &self.session_id) {
+                    Ok(attachment) => {
+                        self.attachments.push(attachment);
+                        cx.notify();
+                    }
+                    Err(e) => {
+                        eprintln!("allele: failed to save pasted image: {e}");
+                    }
+                }
+                return;
+            }
+        }
+
+        if let Some(text) = item.text() {
+            self.replace_selection(&text, cx);
         }
     }
 
@@ -491,10 +529,12 @@ impl ComposeBar {
             return;
         }
         let text = self.content.trim().to_string();
-        if text.is_empty() {
+        // Allow attachment-only submits: non-empty text OR at least one attachment.
+        if text.is_empty() && self.attachments.is_empty() {
             return;
         }
-        cx.emit(ComposeBarEvent::Submit { text });
+        let attachments = std::mem::take(&mut self.attachments);
+        cx.emit(ComposeBarEvent::Submit { text, attachments });
         self.content.clear();
         self.selected_range = 0..0;
         self.selection_reversed = false;
@@ -509,6 +549,68 @@ impl ComposeBar {
         _: &mut Context<Self>,
     ) {
         window.show_character_palette();
+    }
+
+    // ── Actions: attachments ──────────────────────────────────────
+
+    /// Open the native file picker. Spawned async because
+    /// `cx.prompt_for_paths` returns a `oneshot::Receiver`.
+    fn attach_files(&mut self, _: &AttachFiles, _: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: None,
+        });
+        cx.spawn(async move |this, cx| {
+            let paths = match receiver.await {
+                Ok(Ok(Some(paths))) => paths,
+                // Cancelled or error — nothing to attach.
+                _ => return,
+            };
+            this.update(cx, |this: &mut Self, cx| {
+                this.add_paths(&paths, cx);
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    /// Best-effort batch copy from the given paths into this session's
+    /// attachments dir. Individual failures log to stderr and do not
+    /// abort the remaining files — the user sees cards for what
+    /// succeeded rather than an all-or-nothing failure dialog.
+    fn add_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        let mut any_added = false;
+        for src in paths {
+            match attachments::copy_file(src, &self.session_id) {
+                Ok(a) => {
+                    self.attachments.push(a);
+                    any_added = true;
+                }
+                Err(e) => eprintln!(
+                    "allele: failed to attach {}: {e}",
+                    src.display()
+                ),
+            }
+        }
+        if any_added {
+            cx.notify();
+        }
+    }
+
+    /// Remove one attachment card (and delete its on-disk file).
+    fn remove_attachment(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(pos) = self.attachments.iter().position(|a| a.id == id) {
+            let removed = self.attachments.remove(pos);
+            if let Err(e) = std::fs::remove_file(&removed.path) {
+                eprintln!(
+                    "allele: failed to delete attachment file {}: {e}",
+                    removed.path.display()
+                );
+            }
+            cx.notify();
+        }
     }
 
     // ── Mouse helpers ─────────────────────────────────────────────
@@ -1100,6 +1202,98 @@ impl Render for ComposeBar {
                 }),
             );
 
+        // 📎 attach button — opens the native file picker.
+        let attach_button = gpui::div()
+            .id("compose-attach-btn")
+            .flex()
+            .items_center()
+            .justify_center()
+            .px(px(12.0))
+            .py(px(6.0))
+            .rounded(px(4.0))
+            .bg(hex_alpha(SURFACE1, 0.4))
+            .cursor(CursorStyle::PointingHand)
+            .child(
+                gpui::div()
+                    .text_size(px(font_size + 1.0))
+                    .text_color(hex(SUBTEXT0))
+                    .child("📎"),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this: &mut Self, _event, window, cx| {
+                    this.attach_files(&AttachFiles, window, cx);
+                }),
+            );
+
+        // Right column: Send (top) + Attach (bottom).
+        let right_column = gpui::div()
+            .flex()
+            .flex_col()
+            .gap(px(4.0))
+            .child(send_button)
+            .child(attach_button);
+
+        // Attachment cards — one row, wraps. Rendered above the text input when
+        // there are attachments. Each card shows filename + ✕ remove button,
+        // and a ⚠ warning icon for binary-unreadable formats (PRD D7).
+        let attachments_row = if self.attachments.is_empty() {
+            None
+        } else {
+            let mut row = gpui::div()
+                .flex()
+                .flex_wrap()
+                .gap(px(4.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .border_b_1()
+                .border_color(hex_alpha(SURFACE1, 0.5));
+            for attachment in &self.attachments {
+                let id = attachment.id;
+                let label = attachment.display_label();
+                let is_image = attachment.is_image;
+                let warn = attachment.is_binary_unreadable();
+                let prefix = if warn {
+                    "⚠ "
+                } else if is_image {
+                    "🖼 "
+                } else {
+                    "📄 "
+                };
+                let card = gpui::div()
+                    .id(ElementId::Name(format!("attachment-card-{id}").into()))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .bg(hex_alpha(SURFACE1, 0.5))
+                    .child(
+                        gpui::div()
+                            .text_size(px(font_size - 2.0))
+                            .text_color(if warn { hex_alpha(TEXT, 0.9) } else { hex(TEXT) })
+                            .child(format!("{prefix}{label}")),
+                    )
+                    .child(
+                        gpui::div()
+                            .id(ElementId::Name(format!("attachment-x-{id}").into()))
+                            .cursor(CursorStyle::PointingHand)
+                            .text_size(px(font_size - 2.0))
+                            .text_color(hex(SUBTEXT0))
+                            .child("✕")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                    this.remove_attachment(id, cx);
+                                }),
+                            ),
+                    );
+                row = row.child(card);
+            }
+            Some(row)
+        };
+
         gpui::div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -1136,6 +1330,13 @@ impl Render for ComposeBar {
             .on_action(cx.listener(Self::insert_newline))
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::show_character_palette))
+            .on_action(cx.listener(Self::attach_files))
+            // External file drop → batch-copy into attachments dir
+            .on_drop::<ExternalPaths>(cx.listener(
+                |this: &mut Self, paths: &ExternalPaths, _window, cx| {
+                    this.add_paths(paths.paths(), cx);
+                },
+            ))
             // Mouse selection
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
             .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
@@ -1150,15 +1351,23 @@ impl Render for ComposeBar {
             .flex()
             .gap(px(8.0))
             .items_end()
-            .child(
-                gpui::div()
+            .child({
+                // Text-input column: optional attachments row on top, then
+                // the multi-line text area in a shared rounded container.
+                let mut input_col = gpui::div()
                     .flex_1()
+                    .flex()
+                    .flex_col()
                     .rounded(px(6.0))
                     .bg(hex_alpha(SURFACE0, 0.6))
                     .border_1()
                     .border_color(hex_alpha(SURFACE1, 0.5))
-                    .child(text_area),
-            )
-            .child(send_button)
+                    .overflow_hidden();
+                if let Some(row) = attachments_row {
+                    input_col = input_col.child(row);
+                }
+                input_col.child(text_area)
+            })
+            .child(right_column)
     }
 }
