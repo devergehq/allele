@@ -293,7 +293,7 @@ impl AppState {
                 let cursor = SessionCursor { project_idx, session_idx };
                 this.active = Some(cursor);
                 this.apply_project_config(cursor, window, cx);
-                this.save_state();
+                this.mark_state_dirty();
                 cx.notify();
             });
 
@@ -414,7 +414,7 @@ impl AppState {
         }
 
         self.apply_project_config(cursor, window, cx);
-        self.save_state();
+        self.mark_state_dirty();
         cx.notify();
     }
 
@@ -453,7 +453,7 @@ impl AppState {
             self.active = None;
         }
 
-        self.save_state();
+        self.mark_state_dirty();
         cx.notify();
     }
 
@@ -644,7 +644,7 @@ impl AppState {
         }
 
         // Persist the updated session list now that the entry is gone.
-        self.save_state();
+        self.mark_state_dirty();
         cx.notify();
 
         // Spawn the archive-then-delete pipeline on a background task
@@ -734,8 +734,8 @@ impl AppState {
             other => other,
         };
 
-        self.save_settings();
-        self.save_state();
+        self.mark_settings_dirty();
+        self.mark_state_dirty();
         cx.notify();
 
         // Spawn background cleanup for all clones — trash (rename) instead

@@ -170,7 +170,7 @@ impl AppState {
                         count += 1;
                         count <= state::SCRATCH_HISTORY_PER_PROJECT_LIMIT
                     });
-                    self.save_state();
+                    self.mark_state_dirty();
                 }
             }
         }
@@ -220,7 +220,7 @@ impl AppState {
         if self.scratch_pad_history.len() == before {
             return;
         }
-        self.save_state();
+        self.mark_state_dirty();
 
         // Refresh the overlay's in-memory history list so the UI updates
         // without waiting for re-open.
@@ -537,7 +537,7 @@ fn sync_browser_to_active(&mut self) {
                 }
             }
             self.browser_status = format!("Created tab #{new_id}");
-            self.save_state();
+            self.mark_state_dirty();
         }
         None => {
             self.browser_status = "Could not create Chrome tab (check \
@@ -646,7 +646,7 @@ fn sync_browser_to_active(&mut self) {
         let project = Project::new(name, source_path);
         self.projects.push(project);
         let idx = self.projects.len() - 1;
-        self.save_settings();
+        self.mark_settings_dirty();
         cx.notify();
         idx
     }
@@ -1335,6 +1335,8 @@ fn main() {
                         scratch_pad: None,
                         scratch_pad_history: loaded_state.scratch_pad_history.clone(),
                         platform: platform_for_window.clone(),
+                        state_dirty: false,
+                        settings_dirty: false,
                     }
                 })
             },
@@ -1405,7 +1407,7 @@ impl Render for AppState {
             }
         }
         if state_dirty {
-            self.save_state();
+            self.mark_state_dirty();
         }
 
         // Build sidebar items (extracted to sidebar/render.rs)
@@ -1965,7 +1967,7 @@ impl Render for AppState {
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
                         this.sidebar.resizing = false;
-                        this.save_settings();
+                        this.mark_settings_dirty();
                         cx.notify();
                     })),
             );
@@ -1995,7 +1997,7 @@ impl Render for AppState {
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
                         this.right_sidebar.resizing = false;
-                        this.save_settings();
+                        this.mark_settings_dirty();
                         cx.notify();
                     })),
             );
@@ -2025,7 +2027,7 @@ impl Render for AppState {
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
                         this.drawer.resizing = false;
-                        this.save_settings();
+                        this.mark_settings_dirty();
                         cx.notify();
                     })),
             );
@@ -2034,6 +2036,11 @@ impl Render for AppState {
         if let Some(pad) = self.scratch_pad.clone() {
             outer = outer.child(pad);
         }
+
+        // Flush any pending persistence writes coalesced this frame.
+        // Handlers set `state_dirty` / `settings_dirty` flags instead of
+        // writing inline; this is the single exit point where IO lands.
+        self.checkpoint_persistence();
 
         outer
     }

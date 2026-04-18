@@ -114,7 +114,7 @@ pub(crate) fn apply_hook_event(&mut self, event: hooks::HookEvent, cx: &mut Cont
         .unwrap_or_default();
 
     // Persist the updated status.
-    self.save_state();
+    self.mark_state_dirty();
 
     // Fire sound + notification affordances — ONLY on transitions INTO
     // an attention state, never on transitions out of one.
@@ -274,7 +274,7 @@ fn trigger_auto_naming(
                     }
                 }
             }
-            this.save_state();
+            this.mark_state_dirty();
             cx.notify();
         });
     })

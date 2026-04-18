@@ -7,10 +7,9 @@ use crate::actions::{
     ProjectAction, SessionAction, SessionCursor, SettingsAction, SidebarAction,
 };
 use crate::app_state::AppState;
-use crate::{clone, git, hooks, project, session, settings};
+use crate::{clone, git, hooks, project, session};
 use crate::project::Project;
 use session::{Session, SessionStatus};
-use settings::{ProjectSave, Settings};
 use crate::terminal::{clamp_font_size, TerminalView};
 
 impl AppState {
@@ -121,7 +120,7 @@ impl AppState {
                             }
                         }
                     }
-                    self.save_state();
+                    self.mark_state_dirty();
                     cx.notify();
                 }
                 PendingAction::Archive(ArchiveAction::Delete { project_idx, archive_idx }) => {
@@ -136,7 +135,7 @@ impl AppState {
                             tracing::info!("Deleted archive ref for {session_id}");
                         }
                     }
-                    self.save_state();
+                    self.mark_state_dirty();
                     cx.notify();
                 }
                 PendingAction::Session(SessionAction::MergeAndClose { project_idx, session_idx }) => {
@@ -202,7 +201,7 @@ impl AppState {
                                         });
                                     }
                                 }
-                                self.save_state();
+                                self.mark_state_dirty();
                                 cx.notify();
 
                                 // Clones for restoration on failure (originals move into the background task).
@@ -306,7 +305,7 @@ impl AppState {
                                             );
                                         }
 
-                                        this.save_state();
+                                        this.mark_state_dirty();
                                         cx.notify();
                                     });
                                 })
@@ -375,7 +374,7 @@ impl AppState {
                             }
                         }
                     }
-                    self.save_state();
+                    self.mark_state_dirty();
                 }
                 PendingAction::Drawer(DrawerAction::NewTab) => {
                     skip_refocus = true;
@@ -389,7 +388,7 @@ impl AppState {
                             session.drawer_visible = true;
                         }
                         self.focus_active_drawer_tab(cursor, window, cx);
-                        self.save_state();
+                        self.mark_state_dirty();
                     }
                 }
                 PendingAction::Drawer(DrawerAction::SwitchTab(idx)) => {
@@ -405,7 +404,7 @@ impl AppState {
                         }
                         self.drawer.rename = None;
                         self.focus_active_drawer_tab(cursor, window, cx);
-                        self.save_state();
+                        self.mark_state_dirty();
                     }
                 }
                 PendingAction::Drawer(DrawerAction::CloseTab(idx)) => {
@@ -446,7 +445,7 @@ impl AppState {
                         } else {
                             self.focus_active_drawer_tab(cursor, window, cx);
                         }
-                        self.save_state();
+                        self.mark_state_dirty();
                     }
                 }
                 PendingAction::Drawer(DrawerAction::StartRenameTab(idx)) => {
@@ -482,7 +481,7 @@ impl AppState {
                             }
                         }
                         self.focus_active_drawer_tab(cursor, window, cx);
-                        self.save_state();
+                        self.mark_state_dirty();
                     }
                 }
                 PendingAction::Drawer(DrawerAction::CancelRenameTab) => {
@@ -495,11 +494,11 @@ impl AppState {
                 }
                 PendingAction::Sidebar(SidebarAction::ToggleLeft) => {
                     self.sidebar.visible = !self.sidebar.visible;
-                    self.save_settings();
+                    self.mark_settings_dirty();
                 }
                 PendingAction::Sidebar(SidebarAction::ToggleRight) => {
                     self.right_sidebar.visible = !self.right_sidebar.visible;
-                    self.save_settings();
+                    self.mark_settings_dirty();
                 }
                 PendingAction::Project(ProjectAction::Relocate(project_idx)) => {
                     let paths = cx.prompt_for_paths(PathPromptOptions {
@@ -522,7 +521,7 @@ impl AppState {
                                         );
                                         project.source_path = new_path;
                                         project.name = Project::name_from_path(&project.source_path);
-                                        this.save_settings();
+                                        this.mark_settings_dirty();
                                     }
                                     cx.notify();
                                 });
@@ -547,16 +546,7 @@ impl AppState {
                     // projects/window-geometry fields — synthesise them
                     // from AppState before writing, mirroring the pattern
                     // used in observe_window_bounds.
-                    let snapshot = Settings {
-                        projects: self.projects.iter().map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        }).collect(),
-                        ..self.user_settings.clone()
-                    };
-                    snapshot.save();
+                    self.mark_settings_dirty();
                 }
                 PendingAction::Session(SessionAction::Resume { project_idx, session_idx }) => {
                     let cursor = SessionCursor { project_idx, session_idx };
@@ -586,7 +576,7 @@ impl AppState {
                         session.browser_tab_id = None;
                     }
                     self.browser_status = "Chrome tab closed.".to_string();
-                    self.save_state();
+                    self.mark_state_dirty();
                 }
                 PendingAction::Overlay(OverlayAction::OpenScratchPad) => {
                     skip_refocus = true;
@@ -598,16 +588,7 @@ impl AppState {
                     if !enabled {
                         self.browser_status.clear();
                     }
-                    let snapshot = Settings {
-                        projects: self.projects.iter().map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        }).collect(),
-                        ..self.user_settings.clone()
-                    };
-                    snapshot.save();
+                    self.mark_settings_dirty();
                 }
                 PendingAction::Settings(SettingsAction::UpdateAgents { agents, default_agent }) => {
                     skip_refocus = true;
@@ -617,16 +598,7 @@ impl AppState {
                 PendingAction::Settings(SettingsAction::UpdateGitPullBeforeNewSession(enabled)) => {
                     skip_refocus = true;
                     self.user_settings.git_pull_before_new_session = enabled;
-                    let snapshot = Settings {
-                        projects: self.projects.iter().map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        }).collect(),
-                        ..self.user_settings.clone()
-                    };
-                    snapshot.save();
+                    self.mark_settings_dirty();
                 }
                 PendingAction::Settings(SettingsAction::UpdateFontSize(size)) => {
                     skip_refocus = true;
@@ -653,16 +625,7 @@ impl AppState {
                             view.update(cx, |tv, cx| tv.set_font_size(new_size, window, cx));
                         }
                     }
-                    let snapshot = Settings {
-                        projects: self.projects.iter().map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        }).collect(),
-                        ..self.user_settings.clone()
-                    };
-                    snapshot.save();
+                    self.mark_settings_dirty();
                 }
                 PendingAction::Settings(SettingsAction::UpdateExternalEditor(cmd)) => {
                     skip_refocus = true;
@@ -672,16 +635,7 @@ impl AppState {
                     } else {
                         Some(trimmed.to_string())
                     };
-                    let snapshot = Settings {
-                        projects: self.projects.iter().map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        }).collect(),
-                        ..self.user_settings.clone()
-                    };
-                    snapshot.save();
+                    self.mark_settings_dirty();
                 }
             }
 

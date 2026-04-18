@@ -124,6 +124,39 @@ pub(crate) struct AppState {
     /// Selected once at startup via `Platform::detect()`; passed into
     /// background tasks via `Clone` of the inner `Arc`s.
     pub(crate) platform: Platform,
+    /// Persistence dirty flags. Handlers set these after mutating state
+    /// instead of invoking `save_state` / `save_settings` directly.
+    /// `AppState::checkpoint_persistence` (called at the end of every
+    /// render tick) drains them. See step 5 of the architecture refactor.
+    pub(crate) state_dirty: bool,
+    pub(crate) settings_dirty: bool,
+}
+
+impl AppState {
+    /// Mark the session-state file (state.json) as needing a write at
+    /// the next render checkpoint. Cheap — just a bool flip.
+    pub(crate) fn mark_state_dirty(&mut self) {
+        self.state_dirty = true;
+    }
+
+    /// Mark the settings file (settings.json) as needing a write at
+    /// the next render checkpoint.
+    pub(crate) fn mark_settings_dirty(&mut self) {
+        self.settings_dirty = true;
+    }
+
+    /// Drain dirty flags and perform any outstanding IO. Called once
+    /// per render tick. Keeping persistence out of the handler hot
+    /// path means we coalesce N mutations per frame into at most one
+    /// state.json write and one settings.json write.
+    pub(crate) fn checkpoint_persistence(&mut self) {
+        if std::mem::replace(&mut self.state_dirty, false) {
+            self.save_state();
+        }
+        if std::mem::replace(&mut self.settings_dirty, false) {
+            self.save_settings();
+        }
+    }
 }
 
 pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 160.0;
