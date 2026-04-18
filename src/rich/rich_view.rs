@@ -268,20 +268,22 @@ impl Render for RichView {
             .unwrap_or(false);
         self.compose_bar.update(cx, |bar, cx| bar.set_busy(session_active, cx));
 
-        // Scrollable activity feed
-        let mut feed = div()
-            .id("rich-view-feed")
+        // Scrollable activity feed.
+        //
+        // Separates concerns: outer = scroll container (flex child, bounded
+        // by parent); inner = content layout (flex-col with padding and the
+        // blocks). This avoids conflating the scroll viewport with the
+        // children's flex layout, which is what was preventing GPUI from
+        // activating the scroll behaviour.
+        let mut inner = div()
             .flex()
             .flex_col()
-            .flex_1()
-            .overflow_y_scroll()
-            .bg(hex(BASE))
             .p(px(12.0));
 
-        // Render each block
+        // Render each block into the inner content container.
         for block in self.document.blocks() {
             let element = render_block(block, font_size);
-            feed = feed.child(element);
+            inner = inner.child(element);
         }
 
         // Empty state
@@ -291,9 +293,9 @@ impl Render for RichView {
             } else {
                 "Send a message to start."
             };
-            feed = feed.child(
+            inner = inner.child(
                 div()
-                    .flex_1()
+                    .py(px(48.0))
                     .flex()
                     .items_center()
                     .justify_center()
@@ -306,16 +308,33 @@ impl Render for RichView {
             );
         }
 
+        // Scrollable viewport. `flex_1 + min_h(0)` is the correct sibling
+        // behaviour inside rich_view's flex-col (feed + compose_bar).
+        let feed = div()
+            .id("rich-view-feed")
+            .flex_1()
+            .min_h(px(0.0))
+            .overflow_y_scroll()
+            .bg(hex(BASE))
+            .child(inner);
+
         // Main layout: feed + compose bar.
-        // Uses flex_1 (take remaining space in the parent's flex-col main axis)
-        // rather than h_full (which is height:100% and doesn't resolve cleanly
-        // when the parent's height is itself flex-computed). The internal
-        // flex-col then gives the feed flex_1 (remaining space) and the compose
-        // bar its natural height via flex_shrink_0.
+        //
+        // `size_full()` is critical. GPUI's default display mode is `Block`,
+        // not `Flex`. The parent `main_area` in main.rs does NOT call
+        // `.flex()` — it's a Block container. In Block layout, a child's
+        // `flex_1` has NO effect; the child is sized by content and
+        // overflows silently (clipped by `overflow_hidden` on main_area).
+        //
+        // By using `size_full` (w:100% + h:100%) we get a definite size
+        // from main_area's bounded height regardless of its display mode.
+        // The internal `.flex().flex_col()` then correctly distributes
+        // that size between the feed (`flex_1`) and the compose bar
+        // (`flex_shrink_0`), and the feed's `overflow_y_scroll` finally
+        // has a bounded viewport to scroll within.
         div()
             .track_focus(&self.focus_handle)
-            .flex_1()
-            .w_full()
+            .size_full()
             .overflow_hidden()
             .flex()
             .flex_col()
