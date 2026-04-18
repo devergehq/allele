@@ -1512,48 +1512,33 @@ impl AppState {
             // Kill the PTY
             session.terminal_view = None;
 
-            // Create RichSession — initial prompt is "continue" for resume
-            let settings_path = hooks_path.as_deref();
-            match rich::RichSession::resume(
-                "Continue from where we left off.",
-                &session_id,
-                &clone_path,
-                &allowed_tools,
-                settings_path,
-            ) {
-                Ok(rich_session) => {
-                    let working_dir = clone_path.clone();
-                    let settings_pb = hooks_path.clone();
-                    let rich_view = cx.new(|cx| {
-                        rich::RichView::new(
-                            window,
-                            cx,
-                            rich_session,
-                            session_id.clone(),
-                            working_dir,
-                            allowed_tools.clone(),
-                            settings_pb,
-                            font_size,
-                        )
-                    });
+            eprintln!("[rich] switching session {} to Rich mode (idle)", session_id);
 
-                    session.rich_view = Some(rich_view.clone());
-                    session.status = SessionStatus::Running;
+            // Create the RichView with no active session. The user's first
+            // ComposeBar submission will spawn the first CLI process — this
+            // avoids a dummy introductory turn and lets the first real prompt
+            // be the user's actual message.
+            let working_dir = clone_path.clone();
+            let settings_pb = hooks_path.clone();
+            let rich_view = cx.new(|cx| {
+                rich::RichView::new(
+                    window,
+                    cx,
+                    None, // no active session yet
+                    session_id.clone(),
+                    working_dir,
+                    allowed_tools.clone(),
+                    settings_pb,
+                    font_size,
+                )
+            });
 
-                    // Focus the rich view
-                    let fh = rich_view.read(cx).focus_handle().clone();
-                    fh.focus(window, cx);
+            session.rich_view = Some(rich_view.clone());
+            session.status = SessionStatus::Idle;
 
-                    eprintln!("Switched session {} to Rich mode", session_id);
-                }
-                Err(e) => {
-                    eprintln!("Failed to switch to Rich mode: {e}");
-                    // Restore PTY as fallback
-                    // (session.terminal_view was already set to None — user
-                    // can click the session to cold-resume in PTY mode)
-                    session.status = SessionStatus::Suspended;
-                }
-            }
+            // Focus the compose bar so the user can start typing immediately
+            let fh = rich_view.read(cx).compose_focus_handle(cx);
+            fh.focus(window, cx);
         }
 
         cx.notify();
@@ -4732,9 +4717,19 @@ impl Render for AppState {
             .map(|tv| tv.read(cx).current_fps)
             .unwrap_or(0);
 
-        let active_is_done = self.active_session()
-            .map(|s| s.status == SessionStatus::Done)
+        // Done-state overlay ("Session ended" + Resume/New Session buttons)
+        // is a PTY-mode affordance — the terminal process exited and the user
+        // needs to decide what to do. In Rich Mode, each CLI turn ending is
+        // normal (it's a request/response model), and the compose bar is the
+        // "what next" UI. Don't show the overlay when a rich_view is active.
+        let active_in_rich_mode = self
+            .active_session()
+            .map(|s| s.rich_view.is_some())
             .unwrap_or(false);
+        let active_is_done = !active_in_rich_mode
+            && self.active_session()
+                .map(|s| s.status == SessionStatus::Done)
+                .unwrap_or(false);
 
         // Can the currently-Done session be revived with its prior conversation?
         // Needs both the clone directory still on disk *and* Claude's history

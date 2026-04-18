@@ -11,6 +11,25 @@ use super::compose_bar::{ComposeBar, ComposeBarEvent};
 use super::document::{Block, BlockKind, RichDocument};
 use super::rich_session::RichSession;
 
+/// Scan `~/.claude/projects/*/` for a jsonl file matching this session id.
+/// Returns false on any IO error so the caller falls back to `--session-id`.
+fn session_history_exists(session_id: &str) -> bool {
+    let Some(home) = dirs::home_dir() else { return false; };
+    let projects_dir = home.join(".claude").join("projects");
+    let needle = format!("{session_id}.jsonl");
+    let Ok(entries) = std::fs::read_dir(&projects_dir) else { return false; };
+    for entry in entries.flatten() {
+        let sub = entry.path();
+        if !sub.is_dir() {
+            continue;
+        }
+        if sub.join(&needle).exists() {
+            return true;
+        }
+    }
+    false
+}
+
 // ── Catppuccin Mocha palette (matching terminal) ──────────────────
 
 const BASE: u32 = 0x1e1e2e;
@@ -67,10 +86,15 @@ pub struct RichView {
 impl EventEmitter<RichViewEvent> for RichView {}
 
 impl RichView {
+    /// Create a new Rich Mode view.
+    ///
+    /// `session` is optional — pass `None` to create an idle RichView with no
+    /// active CLI process. The user's first ComposeBar submission will spawn
+    /// the first session (this avoids a dummy "Ready." introduction turn).
     pub fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
-        session: RichSession,
+        session: Option<RichSession>,
         session_id: String,
         working_dir: std::path::PathBuf,
         allowed_tools: String,
@@ -119,7 +143,7 @@ impl RichView {
         Self {
             focus_handle,
             document: RichDocument::new(),
-            session: Some(session),
+            session,
             compose_bar,
             session_id,
             working_dir,
@@ -141,22 +165,43 @@ impl RichView {
             }
         }
 
+        // Echo the user's prompt into the feed BEFORE spawning the CLI,
+        // so the user sees their message immediately.
+        self.document.push_user_prompt(text.clone());
+
         // Mark compose bar as busy
         self.compose_bar.update(cx, |bar, cx| bar.set_busy(true, cx));
 
-        // Start a new --resume invocation with the next prompt
-        match RichSession::resume(
-            &text,
-            &self.session_id,
-            &self.working_dir,
-            &self.allowed_tools,
-            self.settings_path.as_deref(),
-        ) {
+        // Decide whether to resume or start fresh based on whether the CLI
+        // has written a history file for this session id yet.
+        let has_history = session_history_exists(&self.session_id);
+        let spawn_result = if has_history {
+            RichSession::resume(
+                &text,
+                &self.session_id,
+                &self.working_dir,
+                &self.allowed_tools,
+                self.settings_path.as_deref(),
+            )
+        } else {
+            RichSession::spawn(
+                &text,
+                &self.session_id,
+                &self.working_dir,
+                &self.allowed_tools,
+                self.settings_path.as_deref(),
+            )
+        };
+
+        match spawn_result {
             Ok(new_session) => {
                 self.session = Some(new_session);
+                // Show the thinking indicator until first output arrives.
+                self.document.push_awaiting_indicator();
+                cx.notify();
             }
             Err(e) => {
-                eprintln!("[rich] failed to resume session: {e}");
+                eprintln!("[rich] failed to spawn session: {e}");
                 self.compose_bar.update(cx, |bar, cx| bar.set_busy(false, cx));
             }
         }
@@ -192,6 +237,11 @@ impl RichView {
 
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
+    }
+
+    /// Focus handle of the compose bar (what should receive keystrokes).
+    pub fn compose_focus_handle(&self, cx: &App) -> FocusHandle {
+        self.compose_bar.read(cx).focus_handle().clone()
     }
 
     pub fn session_id(&self) -> &str {
@@ -243,7 +293,7 @@ impl Render for RichView {
             };
             feed = feed.child(
                 div()
-                    .size_full()
+                    .flex_1()
                     .flex()
                     .items_center()
                     .justify_center()
@@ -256,10 +306,17 @@ impl Render for RichView {
             );
         }
 
-        // Main layout: feed + compose bar
+        // Main layout: feed + compose bar.
+        // Uses flex_1 (take remaining space in the parent's flex-col main axis)
+        // rather than h_full (which is height:100% and doesn't resolve cleanly
+        // when the parent's height is itself flex-computed). The internal
+        // flex-col then gives the feed flex_1 (remaining space) and the compose
+        // bar its natural height via flex_shrink_0.
         div()
             .track_focus(&self.focus_handle)
-            .size_full()
+            .flex_1()
+            .w_full()
+            .overflow_hidden()
             .flex()
             .flex_col()
             .bg(hex(BASE))
@@ -318,6 +375,12 @@ fn render_block(block: &Block, font_size: f32) -> Div {
                 result_text.as_deref(),
                 font_size,
             ));
+        }
+        BlockKind::UserPrompt { content } => {
+            wrapper = wrapper.child(render_user_prompt(content, font_size));
+        }
+        BlockKind::AwaitingResponse => {
+            wrapper = wrapper.child(render_awaiting(font_size));
         }
     }
 
@@ -546,26 +609,29 @@ fn render_session_end(
         format!("{}m {}s", secs / 60, secs % 60)
     };
 
+    // Subtle inline stats after each turn (cost/duration), NOT a "session
+    // complete" banner. The conversation isn't over — each claude -p
+    // invocation is one turn, and the user can keep sending follow-ups.
+    let label = if is_error { "Turn failed" } else { "Turn" };
     let mut block = div()
-        .mt(px(8.0))
-        .pt(px(8.0))
-        .border_t_1()
-        .border_color(hex_alpha(SURFACE1, 0.5))
+        .mt(px(4.0))
+        .mb(px(4.0))
+        .px(px(6.0))
         .child(
             div()
                 .flex()
-                .gap(px(16.0))
+                .gap(px(10.0))
                 .child(
                     div()
                         .text_color(color)
-                        .text_size(px(font_size - 1.0))
-                        .child(if is_error { "Session failed" } else { "Session complete" }),
+                        .text_size(px(font_size - 2.0))
+                        .child(label),
                 )
                 .child(
                     div()
-                        .text_color(hex(SUBTEXT0))
-                        .text_size(px(font_size - 1.0))
-                        .child(format!("{duration} | {num_turns} turns | ${cost_usd:.4}")),
+                        .text_color(hex_alpha(SUBTEXT0, 0.7))
+                        .text_size(px(font_size - 2.0))
+                        .child(format!("{duration} · ${cost_usd:.4}")),
                 ),
         );
 
@@ -595,4 +661,61 @@ fn render_session_end(
     }
 
     block
+}
+
+// ── User prompt (echoed when user submits) ────────────────────────
+
+fn render_user_prompt(content: &str, font_size: f32) -> Div {
+    div()
+        .my(px(6.0))
+        .px(px(10.0))
+        .py(px(6.0))
+        .rounded(px(4.0))
+        .bg(hex_alpha(BLUE, 0.08))
+        .border_l_2()
+        .border_color(hex_alpha(BLUE, 0.5))
+        .child(
+            div()
+                .flex()
+                .gap(px(8.0))
+                .items_start()
+                .child(
+                    div()
+                        .text_color(hex(BLUE))
+                        .text_size(px(font_size - 1.0))
+                        .font_weight(FontWeight::BOLD)
+                        .child("You"),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .text_color(hex(TEXT))
+                        .text_size(px(font_size))
+                        .child(content.to_string()),
+                ),
+        )
+}
+
+// ── Awaiting response (thinking indicator) ────────────────────────
+
+fn render_awaiting(font_size: f32) -> Div {
+    div()
+        .my(px(6.0))
+        .px(px(10.0))
+        .py(px(6.0))
+        .flex()
+        .gap(px(8.0))
+        .items_center()
+        .child(
+            div()
+                .text_color(hex(PEACH))
+                .text_size(px(font_size))
+                .child("●"),
+        )
+        .child(
+            div()
+                .text_color(hex(SUBTEXT0))
+                .text_size(px(font_size - 1.0))
+                .child("Thinking…"),
+        )
 }

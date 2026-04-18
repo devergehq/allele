@@ -365,9 +365,18 @@ impl Render for ComposeBar {
 
         let lines: Vec<&str> = display_text.split('\n').collect();
         let line_count = lines.len();
-        // Cap visible height at 8 lines, scroll beyond
+        // Cap visible height at 8 lines, scroll beyond.
         let visible_lines = line_count.min(8).max(1);
-        let text_height = visible_lines as f32 * line_height;
+
+        // Heights must include the vertical padding (py = 8px top + 8px bottom
+        // = 16px total) because GPUI uses border-box sizing — max_h/min_h
+        // include padding. Without the +16, one line of text (21px) had to
+        // fit inside a 21px box that lost 16px to padding, leaving only 5px
+        // for the glyphs and clipping the placeholder/content.
+        const VERTICAL_PADDING: f32 = 16.0;
+        let text_height_inner = visible_lines as f32 * line_height;
+        let text_height_total = text_height_inner + VERTICAL_PADDING;
+        let single_line_total = line_height + VERTICAL_PADDING;
 
         let text_color = if is_placeholder {
             hex(SUBTEXT0)
@@ -380,8 +389,8 @@ impl Render for ComposeBar {
             .id("compose-text-area")
             .overflow_y_scroll()
             .w_full()
-            .max_h(px(text_height))
-            .min_h(px(line_height))
+            .max_h(px(text_height_total))
+            .min_h(px(single_line_total))
             .py(px(8.0))
             .px(px(12.0));
 
@@ -419,6 +428,13 @@ impl Render for ComposeBar {
                     .text_size(px(font_size - 1.0))
                     .text_color(send_color)
                     .child(send_label),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this: &mut Self, _event, window, cx| {
+                    // Reuse the submit action handler
+                    this.submit(&ComposeSubmit, window, cx);
+                }),
             );
 
         // Compose bar container
@@ -441,19 +457,25 @@ impl Render for ComposeBar {
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::submit))
             .on_action(cx.listener(Self::newline))
-            // Typing — handle key_down for regular characters
+            // Typing — handle key_down for regular characters.
+            // Uses `key_char` (OS-resolved character with shift/IME applied),
+            // NOT `key` (which is the raw physical key, always lowercase).
             .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
                 if this.busy { return; }
-                // Let actions handle special keys; only insert printable characters
-                if event.keystroke.key.len() == 1
-                    && !event.keystroke.modifiers.platform
-                    && !event.keystroke.modifiers.control
-                {
-                    let ch = &event.keystroke.key;
-                    this.replace_range(this.selected_range.clone(), ch, cx);
+                // Skip when Cmd/Ctrl is held — those are shortcuts, not typing.
+                if event.keystroke.modifiers.platform || event.keystroke.modifiers.control {
+                    return;
+                }
+                // Use key_char if present (correct character, incl. shift/IME/space).
+                // Fall back to key only for simple cases.
+                if let Some(ch) = event.keystroke.key_char.as_deref() {
+                    if !ch.is_empty() {
+                        this.replace_range(this.selected_range.clone(), ch, cx);
+                    }
                 }
             }))
             .w_full()
+            .flex_shrink_0()
             .p(px(8.0))
             .border_t_1()
             .border_color(hex_alpha(SURFACE1, 0.5))

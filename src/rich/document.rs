@@ -65,6 +65,14 @@ pub enum BlockKind {
         is_error: bool,
         result_text: Option<String>,
     },
+
+    /// A prompt the user submitted (echoed into the feed on submit).
+    UserPrompt { content: String },
+
+    /// Transient "thinking" indicator shown while the CLI is processing
+    /// but hasn't produced any output blocks yet. Removed when the first
+    /// real block arrives or when the session ends.
+    AwaitingResponse,
 }
 
 #[derive(Debug, Clone)]
@@ -80,6 +88,8 @@ pub struct RichDocument {
     tool_use_index: HashMap<String, BlockId>,
     /// Current text block being streamed into (if any).
     current_text_block: Option<BlockId>,
+    /// Index of the active AwaitingResponse placeholder block (if any).
+    awaiting_block: Option<BlockId>,
     next_id: BlockId,
 }
 
@@ -89,7 +99,45 @@ impl RichDocument {
             blocks: Vec::new(),
             tool_use_index: HashMap::new(),
             current_text_block: None,
+            awaiting_block: None,
             next_id: 0,
+        }
+    }
+
+    /// Append a UserPrompt block (echoed when the user submits via ComposeBar).
+    pub fn push_user_prompt(&mut self, content: String) -> BlockId {
+        self.close_text_stream();
+        self.push_block(Block {
+            id: self.next_id,
+            kind: BlockKind::UserPrompt { content },
+            parent_agent_id: None,
+            collapsed: false,
+            cached_height: None,
+        })
+    }
+
+    /// Show the "thinking" indicator while waiting for the CLI to produce output.
+    /// No-op if one is already shown.
+    pub fn push_awaiting_indicator(&mut self) {
+        if self.awaiting_block.is_some() {
+            return;
+        }
+        let id = self.push_block(Block {
+            id: self.next_id,
+            kind: BlockKind::AwaitingResponse,
+            parent_agent_id: None,
+            collapsed: false,
+            cached_height: None,
+        });
+        self.awaiting_block = Some(id);
+    }
+
+    /// Remove the "thinking" indicator (call when first real output arrives).
+    pub fn clear_awaiting_indicator(&mut self) {
+        if let Some(id) = self.awaiting_block.take() {
+            if let Some(pos) = self.blocks.iter().position(|b| b.id == id) {
+                self.blocks.remove(pos);
+            }
         }
     }
 
@@ -104,6 +152,21 @@ impl RichDocument {
     /// Apply a RichEvent to the document, mutating in place.
     /// Returns the index of any newly created block (for scroll-to-bottom).
     pub fn apply_event(&mut self, event: RichEvent) -> Option<BlockId> {
+        // Any incoming content event means the CLI is producing output —
+        // clear the "thinking" indicator.
+        match &event {
+            RichEvent::TextDelta { .. }
+            | RichEvent::TextBlock { .. }
+            | RichEvent::ThinkingBlock { .. }
+            | RichEvent::ToolUse { .. }
+            | RichEvent::ToolResult { .. }
+            | RichEvent::EditDiff { .. }
+            | RichEvent::SessionResult { .. } => {
+                self.clear_awaiting_indicator();
+            }
+            _ => {}
+        }
+
         match event {
             RichEvent::TextDelta { text, parent_agent_id } => {
                 // Append to current streaming text block, or create one
