@@ -34,7 +34,7 @@ fn run_osascript(script: &str) -> Option<String> {
         .ok()?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        eprintln!("browser: osascript failed ({}): {}", out.status, err.trim());
+        tracing::warn!("browser: osascript failed ({}): {}", out.status, err.trim());
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())

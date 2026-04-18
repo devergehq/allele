@@ -173,7 +173,7 @@ impl TerminalView {
         let terminal = match PtyTerminal::spawn(TermSize::default(), command, working_dir) {
             Ok(t) => Some(t),
             Err(e) => {
-                eprintln!("Failed to create PTY: {e}");
+                tracing::warn!("Failed to create PTY: {e}");
                 return Self {
                     terminal: None,
                     error: Some(format!("Failed to create PTY: {e}")),
@@ -279,7 +279,7 @@ impl TerminalView {
                         let mut resize_committed = false;
                         if let Some((pending_size, recorded_at)) = this.pending_resize {
                             if recorded_at.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS) {
-                                eprintln!(
+                                tracing::info!(
                                     "[RESIZE-DIAG] COMMIT: {}x{} -> {}x{} | debounce={:.0}ms | {:?}",
                                     this.last_cols, this.last_rows,
                                     pending_size.cols, pending_size.rows,
@@ -302,9 +302,9 @@ impl TerminalView {
                                         .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
                                     if in_alt_screen {
                                         term.grid_mut().reset::<alacritty_terminal::vte::ansi::Color>();
-                                        eprintln!("[RESIZE-DIAG] RESET grid (alt-screen, pre-SIGWINCH)");
+                                        tracing::info!("[RESIZE-DIAG] RESET grid (alt-screen, pre-SIGWINCH)");
                                     } else {
-                                        eprintln!("[RESIZE-DIAG] SKIP reset (primary screen — preserve scrollback)");
+                                        tracing::info!("[RESIZE-DIAG] SKIP reset (primary screen — preserve scrollback)");
                                     }
                                 }
                                 this.last_cols = pending_size.cols;
@@ -1209,7 +1209,7 @@ impl Render for TerminalView {
                             None => true,
                         };
                         if should_record {
-                            eprintln!(
+                            tracing::info!(
                                 "[RESIZE-DIAG] RECORD: {}x{} -> {}x{} | origin=({:.1},{:.1}) viewport=({:.1},{:.1}) avail=({:.1},{:.1}) cell=({:.1},{:.1}) | {:?}",
                                 self.last_cols, self.last_rows,
                                 new_size.cols, new_size.rows,

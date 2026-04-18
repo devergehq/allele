@@ -150,7 +150,7 @@ impl PersistedState {
     /// happened, but we do NOT crash the app.
     pub fn load() -> Self {
         let Some(path) = Self::path() else {
-            eprintln!("state.json: no home directory — starting with empty state");
+            tracing::info!("state.json: no home directory — starting with empty state");
             return Self::default();
         };
 
@@ -162,7 +162,7 @@ impl PersistedState {
             Ok(contents) => match serde_json::from_str::<Self>(&contents) {
                 Ok(state) => state,
                 Err(e) => {
-                    eprintln!(
+                    tracing::warn!(
                         "state.json at {} failed to parse ({e}) — starting with empty state",
                         path.display()
                     );
@@ -170,7 +170,7 @@ impl PersistedState {
                 }
             },
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
                     "state.json at {} could not be read ({e}) — starting with empty state",
                     path.display()
                 );

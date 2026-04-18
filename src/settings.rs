@@ -271,7 +271,7 @@ pub fn spawn_external_editor(
     };
     command.arg(path_arg);
     if let Err(e) = command.spawn() {
-        eprintln!("Failed to launch external editor '{}': {e}", trimmed);
+        tracing::warn!("Failed to launch external editor '{}': {e}", trimmed);
     }
 }
 

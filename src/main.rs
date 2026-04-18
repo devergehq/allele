@@ -2,6 +2,7 @@ mod actions;
 mod app_state;
 mod agents;
 mod browser;
+mod errors;
 mod terminal;
 mod sidebar;
 mod clone;
@@ -587,7 +588,7 @@ fn sync_browser_to_active(&mut self) {
         });
         persisted.scratch_pad_history = self.scratch_pad_history.clone();
         if let Err(e) = persisted.save() {
-            eprintln!("Failed to save state.json: {e}");
+            tracing::warn!("Failed to save state.json: {e}");
         }
     }
 
@@ -626,7 +627,7 @@ fn sync_browser_to_active(&mut self) {
         // a base to anchor against. `git_init` is idempotent — a no-op on
         // existing repos — and non-fatal on failure.
         if let Err(e) = git::git_init(&source_path) {
-            eprintln!(
+            tracing::warn!(
                 "git_init: {} failed: {e} (continuing without git integration)",
                 source_path.display()
             );
@@ -641,6 +642,24 @@ fn sync_browser_to_active(&mut self) {
     }
 
 
+}
+
+/// Initialise structured logging via the `tracing` crate.
+///
+/// Filter is driven by the `ALLELE_LOG` environment variable; default is
+/// `info`. Output goes to stderr so it's captured by Console.app when
+/// Allele is launched as a bundled app and by the terminal in `cargo run`.
+fn init_tracing() {
+    use tracing_subscriber::{fmt, EnvFilter};
+
+    let filter = EnvFilter::try_from_env("ALLELE_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("info"));
+
+    let _ = fmt()
+        .with_env_filter(filter)
+        .with_target(true)
+        .with_writer(std::io::stderr)
+        .try_init();
 }
 
 fn install_panic_hook() {
@@ -681,9 +700,9 @@ fn install_panic_hook() {
                     f.write_all(entry.as_bytes())
                 });
 
-            eprintln!("\n*** allele crashed ***");
-            eprintln!("{entry}");
-            eprintln!("Crash log: {}", log_path.display());
+            tracing::error!("\n*** allele crashed ***");
+            tracing::error!("{entry}");
+            tracing::error!("Crash log: {}", log_path.display());
         }
 
         // Call the default hook to print the normal backtrace too
@@ -807,6 +826,7 @@ fn show_about_panel() {
 }
 
 fn main() {
+    init_tracing();
     install_panic_hook();
 
     // Hard dependency check: Allele treats git as non-optional. Fail
@@ -814,7 +834,7 @@ fn main() {
     if !git::git_available() {
         const MSG: &str = "Allele requires git but none was found on PATH.\n\n\
                            Install the Xcode Command Line Tools with:\n\n    xcode-select --install";
-        eprintln!("{MSG}");
+        tracing::info!("{MSG}");
         hooks::show_fatal_dialog("Allele", MSG);
         std::process::exit(1);
     }
@@ -852,25 +872,25 @@ fn main() {
 
         // Load persisted settings
         let loaded_settings = Settings::load();
-        eprintln!(
+        tracing::info!(
             "Loaded settings: sidebar_width={}, font_size={}",
             loaded_settings.sidebar_width, loaded_settings.font_size
         );
 
         // Load persisted session state (may be empty on first run).
         let loaded_state = PersistedState::load();
-        eprintln!("Loaded persisted state: {} sessions", loaded_state.sessions.len());
+        tracing::info!("Loaded persisted state: {} sessions", loaded_state.sessions.len());
 
         // Install the Allele hook receiver and settings file so every
         // claude spawn can route attention signals back into the UI. Failure
         // is non-fatal — the app still runs, it just won't get hook events.
         let hooks_settings_path: Option<PathBuf> = match hooks::install_if_missing() {
             Ok(path) => {
-                eprintln!("Installed Allele hooks at {}", path.display());
+                tracing::info!("Installed Allele hooks at {}", path.display());
                 Some(path)
             }
             Err(e) => {
-                eprintln!("Failed to install Allele hooks: {e} (attention routing disabled)");
+                tracing::warn!("Failed to install Allele hooks: {e} (attention routing disabled)");
                 None
             }
         };
@@ -894,19 +914,19 @@ fn main() {
         std::thread::spawn(move || {
             match clone::sweep_orphans(&referenced, &project_sources) {
                 Ok(0) => {}
-                Ok(n) => eprintln!("Orphan sweep trashed {n} unreferenced clone(s)"),
-                Err(e) => eprintln!("Orphan sweep failed: {e}"),
+                Ok(n) => tracing::info!("Orphan sweep trashed {n} unreferenced clone(s)"),
+                Err(e) => tracing::warn!("Orphan sweep failed: {e}"),
             }
             match clone::purge_trash_older_than_days(clone::TRASH_TTL_DAYS) {
                 Ok(0) => {}
-                Ok(n) => eprintln!("Trash purge removed {n} expired entry/entries"),
-                Err(e) => eprintln!("Trash purge failed: {e}"),
+                Ok(n) => tracing::info!("Trash purge removed {n} expired entry/entries"),
+                Err(e) => tracing::warn!("Trash purge failed: {e}"),
             }
             // Prune archive refs older than the trash TTL so they don't
             // accumulate indefinitely in canonical repos.
             for source_path in &project_paths_for_prune {
                 if let Err(e) = git::prune_archive_refs(source_path, clone::TRASH_TTL_DAYS) {
-                    eprintln!(
+                    tracing::warn!(
                         "prune_archive_refs failed for {}: {e}",
                         source_path.display()
                     );
@@ -918,8 +938,8 @@ fn main() {
         // detection is owned by the Settings seeder (runs on load).
         for agent in &loaded_settings.agents {
             match &agent.path {
-                Some(p) => eprintln!("Agent '{}' at: {p}", agent.id),
-                None => eprintln!("Agent '{}' not found", agent.id),
+                Some(p) => tracing::info!("Agent '{}' at: {p}", agent.id),
+                None => tracing::info!("Agent '{}' not found", agent.id),
             }
         }
 
@@ -1020,7 +1040,7 @@ fn main() {
                             .iter_mut()
                             .find(|p| p.id == persisted.project_id)
                         else {
-                            eprintln!(
+                            tracing::info!(
                                 "Dropping persisted session {} — owning project {} is gone",
                                 persisted.id, persisted.project_id
                             );
@@ -1198,7 +1218,7 @@ fn main() {
                                         });
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to open settings window: {e}");
+                                    tracing::warn!("Failed to open settings window: {e}");
                                 }
                             }
                         }
@@ -1333,7 +1353,7 @@ impl Render for AppState {
                         .map(|deadline| now < deadline)
                         .unwrap_or(false);
                     if resume_failed {
-                        eprintln!(
+                        tracing::warn!(
                             "Resume failed for session {} — PTY exited inside grace window",
                             session.id
                         );

@@ -114,7 +114,7 @@ impl ScratchPad {
                 true
             }
             Err(e) => {
-                eprintln!("scratch pad: failed to save pasted image: {e}");
+                tracing::warn!("scratch pad: failed to save pasted image: {e}");
                 false
             }
         }

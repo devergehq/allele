@@ -63,7 +63,7 @@ impl ProjectConfig {
         match serde_json::from_str::<Self>(&contents) {
             Ok(cfg) => Some(cfg),
             Err(e) => {
-                eprintln!(
+                tracing::warn!(
                     "allele.json at {} failed to parse ({e}) — ignoring",
                     path.display()
                 );
@@ -82,7 +82,7 @@ pub fn allocate_port() -> Option<u16> {
             return Some(port);
         }
     }
-    eprintln!(
+    tracing::info!(
         "allele: no free port in {PORT_RANGE_START}..={PORT_RANGE_END} — \
          {{unique_port}} will be left unsubstituted"
     );

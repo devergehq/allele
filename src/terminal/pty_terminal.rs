@@ -256,7 +256,7 @@ impl Drop for PtyTerminal {
         // Each hook is panic-caught so one failure doesn't skip the rest.
         while let Some(hook) = self.cleanup_hooks.pop() {
             if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook)) {
-                eprintln!("PtyTerminal cleanup hook panicked: {panic:?}");
+                tracing::info!("PtyTerminal cleanup hook panicked: {panic:?}");
             }
         }
 

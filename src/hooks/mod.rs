@@ -307,7 +307,7 @@ impl EventWatcher {
                         });
                     }
                     Err(e) => {
-                        eprintln!(
+                        tracing::info!(
                             "hooks: skipping malformed line in {}: {e}",
                             path.display()
                         );

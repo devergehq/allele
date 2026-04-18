@@ -102,7 +102,7 @@ impl AppState {
         // Guard: if the source directory no longer exists (e.g. repo was
         // moved), prompt the user to relocate rather than failing mid-clone.
         if !project.source_path.exists() {
-            eprintln!(
+            tracing::info!(
                 "Project source path missing: {} — prompting for relocation",
                 project.source_path.display()
             );
@@ -189,7 +189,7 @@ impl AppState {
                             Ok(()) => None,
                             Err(e) => {
                                 let msg = format!("{e}");
-                                eprintln!(
+                                tracing::warn!(
                                     "git pull on {} failed before new session: {msg} \
                                      (continuing with clone)",
                                     source_for_task.display()
@@ -219,11 +219,11 @@ impl AppState {
 
                 let clone_path = match clone_result {
                     Ok(p) => {
-                        eprintln!("Created APFS clone at: {}", p.display());
+                        tracing::info!("Created APFS clone at: {}", p.display());
                         p
                     }
                     Err(e) => {
-                        eprintln!("Failed to create APFS clone: {e}");
+                        tracing::warn!("Failed to create APFS clone: {e}");
                         source_path.clone()
                     }
                 };
@@ -258,7 +258,7 @@ impl AppState {
                         &clone_path,
                         &session_id_for_session,
                     ) {
-                        eprintln!(
+                        tracing::warn!(
                             "create_session_branch failed for {session_id_for_session}: {e}"
                         );
                     }
@@ -318,7 +318,7 @@ impl AppState {
         let Some(project) = self.projects.get(cursor.project_idx) else { return; };
         let Some(session) = project.sessions.get(cursor.session_idx) else { return; };
         let Some(clone_path) = session.clone_path.clone() else {
-            eprintln!(
+            tracing::warn!(
                 "Cannot resume session {} — no clone_path on record",
                 session.id
             );
@@ -326,7 +326,7 @@ impl AppState {
         };
 
         if !clone_path.exists() {
-            eprintln!(
+            tracing::warn!(
                 "Cannot resume session {} — clone_path is missing on disk: {}",
                 session.id,
                 clone_path.display()
@@ -579,10 +579,10 @@ impl AppState {
                         .status()
                     {
                         Ok(s) if !s.success() => {
-                            eprintln!("allele: shutdown command exited with {s} — continuing");
+                            tracing::warn!("allele: shutdown command exited with {s} — continuing");
                         }
                         Err(e) => {
-                            eprintln!("allele: failed to run shutdown command: {e} — continuing");
+                            tracing::warn!("allele: failed to run shutdown command: {e} — continuing");
                         }
                         _ => {}
                     }
@@ -665,7 +665,7 @@ impl AppState {
                             &clone_path,
                             &session_id_for_task,
                         ) {
-                            eprintln!(
+                            tracing::warn!(
                                 "archive_session failed for {session_id_for_task}: {e}"
                             );
                         }
@@ -674,7 +674,7 @@ impl AppState {
                     .await;
 
                 if let Err(e) = delete_result {
-                    eprintln!("Failed to delete clone: {e}");
+                    tracing::warn!("Failed to delete clone: {e}");
                 }
 
                 // Remove the placeholder on the main thread
@@ -739,7 +739,7 @@ impl AppState {
                     .spawn(async move {
                         for path in clone_paths {
                             if let Err(e) = clone::trash_clone(&path) {
-                                eprintln!("Failed to trash clone at {}: {e}", path.display());
+                                tracing::warn!("Failed to trash clone at {}: {e}", path.display());
                             }
                         }
                     })
@@ -804,10 +804,10 @@ impl AppState {
                     .await;
                 match status {
                     Ok(s) if !s.success() => {
-                        eprintln!("allele: startup command exited with {s} — continuing");
+                        tracing::warn!("allele: startup command exited with {s} — continuing");
                     }
                     Err(e) => {
-                        eprintln!("allele: failed to run startup command: {e} — continuing");
+                        tracing::warn!("allele: failed to run startup command: {e} — continuing");
                     }
                     _ => {}
                 }
@@ -899,7 +899,7 @@ impl AppState {
                 // default browser" behaviour so the preview URL still
                 // lands somewhere useful.
                 if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
-                    eprintln!("allele: failed to open preview URL {url}: {e}");
+                    tracing::warn!("allele: failed to open preview URL {url}: {e}");
                 }
             }
         }
