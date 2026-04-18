@@ -64,7 +64,11 @@ use actions::{
     SessionCursor, SidebarAction,
 };
 pub(crate) use actions::SettingsAction;
-pub(crate) use app_state::{AppState, MainTab, SIDEBAR_MIN_WIDTH, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH};
+pub(crate) use app_state::{
+    AppState, ConfirmationState, DrawerState, EditorState, MainTab,
+    RightPanelState, SidebarState, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH,
+    SIDEBAR_MIN_WIDTH,
+};
 
 impl AppState {
 
@@ -549,8 +553,8 @@ fn sync_browser_to_active(&mut self) {
         // override only the fields that the AppState is the source of truth
         // for (sidebar width, project list, etc.).
         let settings = Settings {
-            sidebar_visible: self.sidebar_visible,
-            sidebar_width: self.sidebar_width,
+            sidebar_visible: self.sidebar.visible,
+            sidebar_width: self.sidebar.width,
             window_x: None,
             window_y: None,
             window_width: None,
@@ -561,10 +565,10 @@ fn sync_browser_to_active(&mut self) {
                 source_path: p.source_path.clone(),
                 settings: p.settings.clone(),
             }).collect(),
-            drawer_height: self.drawer_height,
+            drawer_height: self.drawer.height,
             drawer_visible: false,
-            right_sidebar_visible: self.right_sidebar_visible,
-            right_sidebar_width: self.right_sidebar_width,
+            right_sidebar_visible: self.right_sidebar.visible,
+            right_sidebar_width: self.right_sidebar.width,
             ..self.user_settings.clone()
         };
         settings.save();
@@ -993,7 +997,7 @@ fn main() {
                     cx.observe_window_bounds(window, |this: &mut AppState, window, _cx| {
                         let viewport = window.viewport_size();
                         let settings = Settings {
-                            sidebar_width: this.sidebar_width,
+                            sidebar_width: this.sidebar.width,
                             window_x: None,
                             window_y: None,
                             window_width: Some(f32::from(viewport.width)),
@@ -1142,7 +1146,7 @@ fn main() {
                                         })
                                         .count();
                                     if active_count > 0 {
-                                        state.confirming_quit = true;
+                                        state.confirmations.quit = true;
                                         cx.notify();
                                         false
                                     } else {
@@ -1291,32 +1295,42 @@ fn main() {
                         projects,
                         active: initial_active,
                         pending_action: initial_pending,
-                        sidebar_visible: settings_for_window.sidebar_visible,
-                        sidebar_width: settings_for_window.sidebar_width
-                            .max(SIDEBAR_MIN_WIDTH),
-                        sidebar_resizing: false,
-                        confirming_discard: None,
-                        confirming_dirty_session: None,
+                        sidebar: SidebarState {
+                            visible: settings_for_window.sidebar_visible,
+                            width: settings_for_window.sidebar_width
+                                .max(SIDEBAR_MIN_WIDTH),
+                            resizing: false,
+                        },
+                        right_sidebar: RightPanelState {
+                            visible: settings_for_window.right_sidebar_visible,
+                            width: settings_for_window.right_sidebar_width
+                                .max(RIGHT_SIDEBAR_MIN_WIDTH),
+                            resizing: false,
+                        },
+                        drawer: DrawerState {
+                            height: settings_for_window.drawer_height
+                                .max(DRAWER_MIN_HEIGHT),
+                            resizing: false,
+                            rename: None,
+                            rename_focus: None,
+                        },
+                        editor: EditorState {
+                            selected_path: None,
+                            expanded_dirs: HashSet::new(),
+                            preview: None,
+                            context_menu: None,
+                        },
+                        confirmations: ConfirmationState {
+                            discard: None,
+                            dirty_session: None,
+                            quit: false,
+                        },
                         hooks_settings_path: hooks_settings_path_for_window,
-                        drawer_height: settings_for_window.drawer_height
-                            .max(DRAWER_MIN_HEIGHT),
-                        drawer_resizing: false,
-                        drawer_rename: None,
-                        drawer_rename_focus: None,
-                        right_sidebar_visible: settings_for_window.right_sidebar_visible,
-                        right_sidebar_width: settings_for_window.right_sidebar_width
-                            .max(RIGHT_SIDEBAR_MIN_WIDTH),
-                        right_sidebar_resizing: false,
-                        confirming_quit: false,
-                        editing_project_settings: None,
                         user_settings: settings_for_window.clone(),
+                        editing_project_settings: None,
                         settings_window: None,
                         pull_warning: None,
                         main_tab: MainTab::Claude,
-                        editor_selected_path: None,
-                        editor_expanded_dirs: HashSet::new(),
-                        editor_preview: None,
-                        editor_context_menu: None,
                         browser_status: String::new(),
                         scratch_pad: None,
                         scratch_pad_history: loaded_state.scratch_pad_history.clone(),
@@ -1437,16 +1451,16 @@ impl Render for AppState {
             })
             .unwrap_or(false);
 
-        let sidebar_w = self.sidebar_width;
-        let sidebar_visible = self.sidebar_visible;
-        let is_resizing = self.sidebar_resizing;
-        let drawer_is_resizing = self.drawer_resizing;
+        let sidebar_w = self.sidebar.width;
+        let sidebar_visible = self.sidebar.visible;
+        let is_resizing = self.sidebar.resizing;
+        let drawer_is_resizing = self.drawer.resizing;
         let drawer_visible = self.active_session()
             .map(|s| s.drawer_visible)
             .unwrap_or(false);
-        let right_sidebar_visible = self.right_sidebar_visible;
-        let right_sidebar_w = self.right_sidebar_width;
-        let right_sidebar_resizing = self.right_sidebar_resizing;
+        let right_sidebar_visible = self.right_sidebar.visible;
+        let right_sidebar_w = self.right_sidebar.width;
+        let right_sidebar_resizing = self.right_sidebar.resizing;
 
         // Outer non-flex container that hosts the flex row AND the drag overlay.
         // Keeping the overlay OUTSIDE the flex container ensures Taffy's layout
@@ -1555,7 +1569,7 @@ impl Render for AppState {
                     .cursor_col_resize()
                     .hover(|s| s.bg(rgb(0x45475a)))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                        this.sidebar_resizing = true;
+                        this.sidebar.resizing = true;
                         cx.notify();
                     })),
             );
@@ -1590,7 +1604,7 @@ impl Render for AppState {
                                 // reserves below it so the PTY resize is correct.
                                 let inset = if drawer_visible {
                                     // 6px resize handle + ~30px header + drawer panel
-                                    6.0 + 30.0 + self.drawer_height
+                                    6.0 + 30.0 + self.drawer.height
                                 } else {
                                     0.0
                                 };
@@ -1709,7 +1723,7 @@ impl Render for AppState {
                     }
 
                     // --- Quit confirmation banner (absolute overlay at top) ---
-                    if self.confirming_quit {
+                    if self.confirmations.quit {
                         let active_count = self
                             .projects
                             .iter()
@@ -1765,7 +1779,7 @@ impl Render for AppState {
                                                 .hover(|s| s.bg(rgb(0xeba0ac)))
                                                 .child("Quit")
                                                 .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                                    this.confirming_quit = false;
+                                                    this.confirmations.quit = false;
                                                     cx.quit();
                                                 })),
                                         )
@@ -1782,7 +1796,7 @@ impl Render for AppState {
                                                 .hover(|s| s.bg(rgb(0x585b70)))
                                                 .child("Cancel")
                                                 .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                                    this.confirming_quit = false;
+                                                    this.confirmations.quit = false;
                                                     cx.notify();
                                                 })),
                                         ),
@@ -1858,7 +1872,7 @@ impl Render for AppState {
                     .cursor_col_resize()
                     .hover(|s| s.bg(rgb(0x45475a)))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                        this.right_sidebar_resizing = true;
+                        this.right_sidebar.resizing = true;
                         cx.notify();
                     })),
             );
@@ -1943,14 +1957,14 @@ impl Render for AppState {
                         let viewport_w = f32::from(window.viewport_size().width);
                         let max = (viewport_w - 100.0).max(SIDEBAR_MIN_WIDTH);
                         let new_width = f32::from(event.position.x).clamp(SIDEBAR_MIN_WIDTH, max);
-                        if (new_width - this.sidebar_width).abs() > 0.5 {
-                            this.sidebar_width = new_width;
+                        if (new_width - this.sidebar.width).abs() > 0.5 {
+                            this.sidebar.width = new_width;
                             window.refresh();
                             cx.notify();
                         }
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
-                        this.sidebar_resizing = false;
+                        this.sidebar.resizing = false;
                         this.save_settings();
                         cx.notify();
                     })),
@@ -1973,14 +1987,14 @@ impl Render for AppState {
                         let mouse_x = f32::from(event.position.x);
                         // Right sidebar width = distance from right edge to mouse
                         let new_width = (viewport_w - mouse_x).clamp(RIGHT_SIDEBAR_MIN_WIDTH, viewport_w - 200.0);
-                        if (new_width - this.right_sidebar_width).abs() > 0.5 {
-                            this.right_sidebar_width = new_width;
+                        if (new_width - this.right_sidebar.width).abs() > 0.5 {
+                            this.right_sidebar.width = new_width;
                             window.refresh();
                             cx.notify();
                         }
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
-                        this.right_sidebar_resizing = false;
+                        this.right_sidebar.resizing = false;
                         this.save_settings();
                         cx.notify();
                     })),
@@ -2003,14 +2017,14 @@ impl Render for AppState {
                         let mouse_y = f32::from(event.position.y);
                         // Drawer height = distance from bottom of viewport to mouse
                         let new_height = (viewport_h - mouse_y).clamp(DRAWER_MIN_HEIGHT, viewport_h - 200.0);
-                        if (new_height - this.drawer_height).abs() > 0.5 {
-                            this.drawer_height = new_height;
+                        if (new_height - this.drawer.height).abs() > 0.5 {
+                            this.drawer.height = new_height;
                             window.refresh();
                             cx.notify();
                         }
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
-                        this.drawer_resizing = false;
+                        this.drawer.resizing = false;
                         this.save_settings();
                         cx.notify();
                     })),

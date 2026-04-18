@@ -64,15 +64,15 @@ impl AppState {
                 PendingAction::Session(SessionAction::RequestDiscard { project_idx, session_idx }) => {
                     // Arm the inline confirmation gate. The sidebar row will
                     // render Confirm/Cancel buttons on the next frame.
-                    self.confirming_discard = Some(SessionCursor { project_idx, session_idx });
+                    self.confirmations.discard = Some(SessionCursor { project_idx, session_idx });
                     cx.notify();
                 }
                 PendingAction::Session(SessionAction::CancelDiscard) => {
-                    self.confirming_discard = None;
+                    self.confirmations.discard = None;
                     cx.notify();
                 }
                 PendingAction::Session(SessionAction::Discard { project_idx, session_idx }) => {
-                    self.confirming_discard = None;
+                    self.confirmations.discard = None;
                     self.remove_session(
                         SessionCursor { project_idx, session_idx },
                         window,
@@ -403,7 +403,7 @@ impl AppState {
                                 session.drawer_active_tab = idx;
                             }
                         }
-                        self.drawer_rename = None;
+                        self.drawer.rename = None;
                         self.focus_active_drawer_tab(cursor, window, cx);
                         self.save_state();
                     }
@@ -431,9 +431,9 @@ impl AppState {
                                 (0, true)
                             }
                         };
-                        if let Some((rc, ri, _)) = &self.drawer_rename {
+                        if let Some((rc, ri, _)) = &self.drawer.rename {
                             if *rc == cursor && *ri >= remaining {
-                                self.drawer_rename = None;
+                                self.drawer.rename = None;
                             }
                         }
                         if hide_drawer {
@@ -458,8 +458,8 @@ impl AppState {
                             .and_then(|s| s.drawer_tabs.get(idx))
                             .map(|t| t.name.clone());
                         if let Some(name) = initial {
-                            self.drawer_rename = Some((cursor, idx, name));
-                            let fh = self.drawer_rename_focus
+                            self.drawer.rename = Some((cursor, idx, name));
+                            let fh = self.drawer.rename_focus
                                 .get_or_insert_with(|| cx.focus_handle())
                                 .clone();
                             fh.focus(window, cx);
@@ -469,7 +469,7 @@ impl AppState {
                 }
                 PendingAction::Drawer(DrawerAction::CommitRenameTab) => {
                     skip_refocus = true;
-                    if let Some((cursor, idx, buf)) = self.drawer_rename.take() {
+                    if let Some((cursor, idx, buf)) = self.drawer.rename.take() {
                         let trimmed = buf.trim().to_string();
                         if !trimmed.is_empty() {
                             if let Some(session) = self.projects
@@ -487,18 +487,18 @@ impl AppState {
                 }
                 PendingAction::Drawer(DrawerAction::CancelRenameTab) => {
                     skip_refocus = true;
-                    let cursor_opt = self.drawer_rename.take().map(|(c, _, _)| c);
+                    let cursor_opt = self.drawer.rename.take().map(|(c, _, _)| c);
                     if let Some(cursor) = cursor_opt {
                         self.focus_active_drawer_tab(cursor, window, cx);
                     }
                     cx.notify();
                 }
                 PendingAction::Sidebar(SidebarAction::ToggleLeft) => {
-                    self.sidebar_visible = !self.sidebar_visible;
+                    self.sidebar.visible = !self.sidebar.visible;
                     self.save_settings();
                 }
                 PendingAction::Sidebar(SidebarAction::ToggleRight) => {
-                    self.right_sidebar_visible = !self.right_sidebar_visible;
+                    self.right_sidebar.visible = !self.right_sidebar.visible;
                     self.save_settings();
                 }
                 PendingAction::Project(ProjectAction::Relocate(project_idx)) => {
@@ -537,7 +537,7 @@ impl AppState {
                     self.add_session_to_project(project_idx, window, cx);
                 }
                 PendingAction::Session(SessionAction::CancelDirty) => {
-                    self.confirming_dirty_session = None;
+                    self.confirmations.dirty_session = None;
                     cx.notify();
                 }
                 PendingAction::Settings(SettingsAction::UpdateCleanupPaths(paths)) => {

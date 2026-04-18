@@ -19,20 +19,79 @@ pub(crate) enum MainTab {
     Browser,
 }
 
+// -----------------------------------------------------------------------
+// Cohesive sub-struct state bundles
+// -----------------------------------------------------------------------
+
+/// Left sidebar visibility + resize state.
+pub(crate) struct SidebarState {
+    pub(crate) visible: bool,
+    pub(crate) width: f32,
+    pub(crate) resizing: bool,
+}
+
+/// Right-hand inspector panel. Same shape as `SidebarState` but kept as
+/// a separate type so the two can diverge (e.g. different min widths,
+/// content renderers) without swapping field names.
+pub(crate) struct RightPanelState {
+    pub(crate) visible: bool,
+    pub(crate) width: f32,
+    pub(crate) resizing: bool,
+}
+
+/// Bottom drawer terminal panel. Visibility is per-session on
+/// `Session::drawer_visible`; this struct covers global chrome
+/// (height, resize handle, tab-rename input).
+pub(crate) struct DrawerState {
+    pub(crate) height: f32,
+    pub(crate) resizing: bool,
+    /// Active inline tab rename: (session cursor, tab index, current buffer).
+    /// When Some, the tab strip renders that tab as an editable label.
+    pub(crate) rename: Option<(SessionCursor, usize, String)>,
+    /// Focus handle for the inline rename input. Created lazily when rename
+    /// mode first activates in a given AppState instance.
+    pub(crate) rename_focus: Option<FocusHandle>,
+}
+
+/// Editor tab state — file tree selection, preview cache, right-click menu.
+pub(crate) struct EditorState {
+    /// File path currently selected in the Editor tab's file tree.
+    pub(crate) selected_path: Option<PathBuf>,
+    /// Directories expanded in the Editor tab's file tree.
+    pub(crate) expanded_dirs: HashSet<PathBuf>,
+    /// Cached (path, contents) of the currently previewed file.
+    pub(crate) preview: Option<(PathBuf, String)>,
+    /// Right-click context menu target for the Editor file tree.
+    /// Stores (right-clicked path, window-space position of the click).
+    pub(crate) context_menu: Option<(PathBuf, Point<Pixels>)>,
+}
+
+/// Inline confirmation gates. Each is `Some` / `true` while a user is
+/// being prompted before a destructive action proceeds.
+pub(crate) struct ConfirmationState {
+    /// When `Some(cursor)` the sidebar row at that cursor shows a
+    /// confirm/cancel prompt instead of the usual buttons.
+    pub(crate) discard: Option<SessionCursor>,
+    /// Project index awaiting dirty-state confirmation before session create.
+    pub(crate) dirty_session: Option<usize>,
+    /// When true, a quit confirmation banner is shown because running
+    /// sessions exist.
+    pub(crate) quit: bool,
+}
+
+// -----------------------------------------------------------------------
+// Top-level AppState
+// -----------------------------------------------------------------------
+
 pub(crate) struct AppState {
     pub(crate) projects: Vec<Project>,
     pub(crate) active: Option<SessionCursor>,
     pub(crate) pending_action: Option<PendingAction>,
-    // Sidebar state
-    pub(crate) sidebar_visible: bool,
-    pub(crate) sidebar_width: f32,
-    pub(crate) sidebar_resizing: bool,
-    /// Inline confirmation gate for the Discard action. When `Some(cursor)`
-    /// the sidebar row at that cursor shows a confirm/cancel prompt instead
-    /// of the usual buttons.
-    pub(crate) confirming_discard: Option<SessionCursor>,
-    /// Project index awaiting dirty-state confirmation before session create.
-    pub(crate) confirming_dirty_session: Option<usize>,
+    pub(crate) sidebar: SidebarState,
+    pub(crate) right_sidebar: RightPanelState,
+    pub(crate) drawer: DrawerState,
+    pub(crate) editor: EditorState,
+    pub(crate) confirmations: ConfirmationState,
     /// Absolute path to the Allele hooks.json, passed to claude via
     /// `--settings <path>` at every spawn. `None` if install_if_missing
     /// failed — in that case hooks are silently disabled and the app still
@@ -40,21 +99,6 @@ pub(crate) struct AppState {
     pub(crate) hooks_settings_path: Option<PathBuf>,
     /// Current user settings (sound/notification preferences).
     pub(crate) user_settings: Settings,
-    // Drawer terminal state (visibility is per-session on Session struct)
-    pub(crate) drawer_height: f32,
-    pub(crate) drawer_resizing: bool,
-    /// Active inline tab rename: (session cursor, tab index, current buffer).
-    /// When Some, the tab strip renders that tab as an editable label.
-    pub(crate) drawer_rename: Option<(SessionCursor, usize, String)>,
-    /// Focus handle for the inline rename input. Created lazily when rename
-    /// mode first activates in a given AppState instance.
-    pub(crate) drawer_rename_focus: Option<FocusHandle>,
-    // Right sidebar state
-    pub(crate) right_sidebar_visible: bool,
-    pub(crate) right_sidebar_width: f32,
-    pub(crate) right_sidebar_resizing: bool,
-    /// When true, a quit confirmation banner is shown because running sessions exist.
-    pub(crate) confirming_quit: bool,
     /// Project index whose settings panel is currently open in the sidebar.
     pub(crate) editing_project_settings: Option<usize>,
     /// Live handle to an open Settings window. Keeps ⌘, from spawning
@@ -66,15 +110,6 @@ pub(crate) struct AppState {
     pub(crate) pull_warning: Option<String>,
     /// Which view the center column is currently showing.
     pub(crate) main_tab: MainTab,
-    /// File path currently selected in the Editor tab's file tree.
-    pub(crate) editor_selected_path: Option<PathBuf>,
-    /// Directories expanded in the Editor tab's file tree.
-    pub(crate) editor_expanded_dirs: HashSet<PathBuf>,
-    /// Cached (path, contents) of the currently previewed file.
-    pub(crate) editor_preview: Option<(PathBuf, String)>,
-    /// Right-click context menu target for the Editor file tree.
-    /// Stores (right-clicked path, window-space position of the click).
-    pub(crate) editor_context_menu: Option<(PathBuf, Point<Pixels>)>,
     /// Status text for the Browser tab panel (e.g. "Chrome is not
     /// running", "Linked to tab #…"). Updated by SyncBrowserToActiveSession
     /// and rendered by render_browser_placeholder.

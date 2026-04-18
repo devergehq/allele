@@ -12,7 +12,7 @@ impl AppState {
     /// and the active tab's terminal view. Returns a vec of elements to
     /// append to the content column. Empty if the drawer is hidden.
     pub(crate) fn render_drawer(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let drawer_h = self.drawer_height;
+        let drawer_h = self.drawer.height;
         let mut elements: Vec<AnyElement> = Vec::new();
 
         // Resize handle — 6px tall invisible hover zone above drawer
@@ -25,7 +25,7 @@ impl AppState {
                 .bg(rgb(0x313244))
                 .hover(|s| s.bg(rgb(0x45475a)))
                 .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                    this.drawer_resizing = true;
+                    this.drawer.resizing = true;
                     cx.notify();
                 }))
                 .into_any_element(),
@@ -54,17 +54,19 @@ impl AppState {
         };
 
         let renaming_idx = self
-            .drawer_rename
+            .drawer
+            .rename
             .as_ref()
             .filter(|(c, _, _)| Some(*c) == active_cursor)
             .map(|(_, i, _)| *i);
         let rename_buf = self
-            .drawer_rename
+            .drawer
+            .rename
             .as_ref()
             .filter(|(c, _, _)| Some(*c) == active_cursor)
             .map(|(_, _, buf)| buf.clone())
             .unwrap_or_default();
-        let rename_focus = self.drawer_rename_focus.clone();
+        let rename_focus = self.drawer.rename_focus.clone();
 
         let mut tab_strip = div()
             .flex()
@@ -130,7 +132,7 @@ impl AppState {
                                     }
                                     "backspace" => {
                                         if let Some((_, _, buf)) =
-                                            this.drawer_rename.as_mut()
+                                            this.drawer.rename.as_mut()
                                         {
                                             buf.pop();
                                             cx.notify();
@@ -140,7 +142,7 @@ impl AppState {
                                         if let Some(ref ch) = event.keystroke.key_char {
                                             if !mods.control && !mods.platform {
                                                 if let Some((_, _, buf)) =
-                                                    this.drawer_rename.as_mut()
+                                                    this.drawer.rename.as_mut()
                                                 {
                                                     buf.push_str(ch);
                                                     cx.notify();

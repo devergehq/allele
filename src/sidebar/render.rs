@@ -109,7 +109,7 @@ impl AppState {
             );
 
             // Dirty-state confirmation prompt
-            if self.confirming_dirty_session == Some(p_idx) {
+            if self.confirmations.dirty_session == Some(p_idx) {
                 sidebar_items.push(
                     div()
                         .id(SharedString::from(format!("dirty-confirm-{p_idx}")))
@@ -415,7 +415,7 @@ impl AppState {
                         .unwrap_or_else(|| session.label.clone())
                 };
                 let elapsed = session.elapsed_display();
-                let is_confirming = self.confirming_discard
+                let is_confirming = self.confirmations.discard
                     == Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
 
                 let label_color = if is_suspended {
