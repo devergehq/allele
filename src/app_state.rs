@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use crate::actions::{PendingAction, SessionCursor};
 use crate::platform::Platform;
 use crate::project::Project;
+use crate::repositories::Repositories;
 use crate::scratch_pad;
 use crate::session::Session;
 use crate::settings::Settings;
@@ -124,6 +125,10 @@ pub(crate) struct AppState {
     /// Selected once at startup via `Platform::detect()`; passed into
     /// background tasks via `Clone` of the inner `Arc`s.
     pub(crate) platform: Platform,
+    /// Persistence repositories — Settings + PersistedState IO behind
+    /// swappable traits. Injected at startup; cloned (Arc-only) for
+    /// background tasks. See step 6 of the architecture refactor.
+    pub(crate) repos: Repositories,
     /// Persistence dirty flags. Handlers set these after mutating state
     /// instead of invoking `save_state` / `save_settings` directly.
     /// `AppState::checkpoint_persistence` (called at the end of every

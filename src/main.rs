@@ -15,6 +15,7 @@ mod hooks;
 mod pending_actions;
 mod platform;
 mod project;
+mod repositories;
 mod scratch_pad;
 mod session;
 mod session_ops;
@@ -571,7 +572,9 @@ fn sync_browser_to_active(&mut self) {
             right_sidebar_width: self.right_sidebar.width,
             ..self.user_settings.clone()
         };
-        settings.save();
+        if let Err(e) = self.repos.settings.save(&settings) {
+            tracing::warn!("settings save failed: {e}");
+        }
     }
 
     /// Persist every session across every project to `~/.allele/state.json`.
@@ -597,8 +600,8 @@ fn sync_browser_to_active(&mut self) {
                 .map(|s| s.id.clone())
         });
         persisted.scratch_pad_history = self.scratch_pad_history.clone();
-        if let Err(e) = persisted.save() {
-            tracing::warn!("Failed to save state.json: {e}");
+        if let Err(e) = self.repos.state.save(&persisted) {
+            tracing::warn!("state save failed: {e}");
         }
     }
 
@@ -890,15 +893,19 @@ fn main() {
 
         install_app_menu(cx);
 
-        // Load persisted settings
-        let loaded_settings = Settings::load();
+        // Assemble the persistence repositories. Held by AppState so
+        // production and tests can swap implementations.
+        let repos = repositories::Repositories::production();
+
+        // Load persisted settings via the repository.
+        let loaded_settings = repos.settings.load();
         tracing::info!(
             "Loaded settings: sidebar_width={}, font_size={}",
             loaded_settings.sidebar_width, loaded_settings.font_size
         );
 
         // Load persisted session state (may be empty on first run).
-        let loaded_state = PersistedState::load();
+        let loaded_state = repos.state.load();
         tracing::info!("Loaded persisted state: {} sessions", loaded_state.sessions.len());
 
         // Install the Allele hook receiver and settings file so every
@@ -980,6 +987,7 @@ fn main() {
         let loaded_state_for_window = loaded_state.clone();
         let hooks_settings_path_for_window = hooks_settings_path.clone();
         let platform_for_window = platform.clone();
+        let repos_for_window = repos.clone();
 
         cx.open_window(
             WindowOptions {
@@ -1335,6 +1343,7 @@ fn main() {
                         scratch_pad: None,
                         scratch_pad_history: loaded_state.scratch_pad_history.clone(),
                         platform: platform_for_window.clone(),
+                        repos: repos_for_window.clone(),
                         state_dirty: false,
                         settings_dirty: false,
                     }
