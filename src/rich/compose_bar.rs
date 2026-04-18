@@ -4,8 +4,9 @@
 //! composition, and click-to-position — the same pattern as
 //! `src/text_input.rs`, extended to multiple lines.
 //!
-//! All macOS text-editing conventions are registered as GPUI actions and
-//! bound to keystrokes in `bind_compose_keys`:
+//! All macOS text-editing conventions are declared as GPUI actions in
+//! this file (see the `actions!` block below) and bound to keystrokes in
+//! `assets/default-keymap.json` via the loader in `src/keymap.rs`.
 //!
 //! - Cursor movement: arrow keys, Option+arrow (word), Cmd+arrow (line)
 //! - Selection: Shift+variants of all movement commands
@@ -15,17 +16,18 @@
 //! - Submit: Cmd+Enter
 //! - Character palette: Ctrl+Cmd+Space
 //!
-//! Actions are namespaced under `compose.*` so they can be migrated to
-//! `assets/default-keymap.json` in a follow-up without renames.
+//! Action names use the `compose.*` namespace (dotted snake_case) in the
+//! keymap — the dispatch table in `keymap.rs` maps those strings to the
+//! concrete action structs declared here.
 
 use std::ops::Range;
 
 use gpui::{
     actions, fill, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds, ClipboardItem,
     Context, CursorStyle, ElementId, ElementInputHandler, EntityInputHandler, EventEmitter,
-    FocusHandle, Focusable, GlobalElementId, Hsla, KeyBinding, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Rgba, ShapedLine, SharedString,
-    Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    FocusHandle, Focusable, GlobalElementId, Hsla, LayoutId, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Rgba, ShapedLine, SharedString, Style,
+    TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -65,53 +67,11 @@ actions!(
     ]
 );
 
+/// Key context gating compose-bar bindings. Must match the `"context"`
+/// value in `assets/default-keymap.json`. The render fn applies it via
+/// `div().key_context(KEY_CONTEXT)` so bindings fire only when a compose
+/// bar is focused.
 const KEY_CONTEXT: &str = "ComposeBar";
-
-/// Register compose bar key bindings. Call once during app startup.
-pub fn bind_compose_keys(cx: &mut App) {
-    cx.bind_keys([
-        // Cursor movement — character
-        KeyBinding::new("left", CursorLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("right", CursorRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("up", CursorUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("down", CursorDown, Some(KEY_CONTEXT)),
-        // Cursor movement — word (Option+arrow)
-        KeyBinding::new("alt-left", CursorWordLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("alt-right", CursorWordRight, Some(KEY_CONTEXT)),
-        // Cursor movement — line (Cmd+arrow, Home/End)
-        KeyBinding::new("cmd-left", CursorLineStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-right", CursorLineEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("home", CursorLineStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("end", CursorLineEnd, Some(KEY_CONTEXT)),
-        // Selection — character
-        KeyBinding::new("shift-left", SelectLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-right", SelectRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-up", SelectUp, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-down", SelectDown, Some(KEY_CONTEXT)),
-        // Selection — word
-        KeyBinding::new("alt-shift-left", SelectWordLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("alt-shift-right", SelectWordRight, Some(KEY_CONTEXT)),
-        // Selection — line
-        KeyBinding::new("cmd-shift-left", SelectLineStart, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-shift-right", SelectLineEnd, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-a", SelectAll, Some(KEY_CONTEXT)),
-        // Deletion
-        KeyBinding::new("backspace", DeleteLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("delete", DeleteRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("alt-backspace", DeleteWordLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("alt-delete", DeleteWordRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-backspace", DeleteLineLeft, Some(KEY_CONTEXT)),
-        // Clipboard
-        KeyBinding::new("cmd-c", Copy, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-x", Cut, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-v", Paste, Some(KEY_CONTEXT)),
-        // Newline / submit
-        KeyBinding::new("enter", InsertNewline, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-enter", Submit, Some(KEY_CONTEXT)),
-        // macOS character palette
-        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(KEY_CONTEXT)),
-    ]);
-}
 
 // ── Colours (Catppuccin Mocha) ────────────────────────────────────
 

@@ -6,6 +6,7 @@ mod clone;
 mod config;
 mod git;
 mod hooks;
+mod keymap;
 mod project;
 mod rich;
 mod scratch_pad;
@@ -2646,20 +2647,9 @@ fn install_app_menu(cx: &mut App) {
     // block inside main()) so it can check for running sessions first.
     cx.on_action(|_: &About, _cx| show_about_panel());
 
-    cx.bind_keys([
-        KeyBinding::new("cmd-q", Quit, None),
-        KeyBinding::new("cmd-b", ToggleSidebarAction, None),
-        KeyBinding::new("cmd-j", ToggleDrawerAction, None),
-        KeyBinding::new("cmd-shift-r", ToggleRichMode, None),
-        KeyBinding::new("cmd-,", OpenSettings, None),
-        KeyBinding::new("cmd-k", OpenScratchPadAction, None),
-    ]);
-
-    // Reusable text-input bindings (cursor / selection / paste / arrow
-    // keys etc.) — gated by the `TextInput` key context so they only
-    // fire while a Settings input is focused.
-    text_input::bind_keys(cx);
-    rich::bind_compose_keys(cx);
+    // All key bindings — app-wide, ComposeBar-scoped, and TextInput-scoped
+    // — are declared in `assets/default-keymap.json` and registered here.
+    keymap::load(cx);
 
     cx.set_menus(vec![
         Menu {

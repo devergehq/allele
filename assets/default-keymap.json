@@ -1,0 +1,88 @@
+// Allele default keymap. Loaded at app startup by src/keymap.rs.
+//
+// Action names stabilise at v0.3 — until then, renames ship with aliases
+// for 2 releases. Format: array of { "context": "…" | null, "bindings": {...} }
+// where keys are keystrokes (GPUI syntax) and values are namespaced action
+// names in dotted snake_case (e.g. "compose.cursor_left"). An entry with
+// "context": null (or the field omitted) applies app-wide.
+//
+// USER OVERRIDES: create ~/.allele/keymap.json with the same schema to
+// override any of the bindings below. Merge is per-(context, keystroke) —
+// your entry replaces the default at the same key, all other defaults
+// stay. Unknown action names panic at startup with the offending file
+// named in the error; fix the JSON and relaunch. See src/keymap.rs for
+// the full merge semantics.
+//
+// To deprecate an action name, add an entry to DEPRECATED_ALIASES in
+// src/keymap.rs — the old name will continue to work while callers migrate.
+//
+// NOTE: the loader strips `//` line comments before JSON parsing. Do not
+// put `//` inside string values (no URLs, no file paths with protocol
+// prefixes). Block comments (`/* */`) are NOT supported.
+[
+  {
+    "context": "ComposeBar",
+    "bindings": {
+      "left":               "compose.cursor_left",
+      "right":              "compose.cursor_right",
+      "up":                 "compose.cursor_up",
+      "down":               "compose.cursor_down",
+      "alt-left":           "compose.cursor_word_left",
+      "alt-right":          "compose.cursor_word_right",
+      "cmd-left":           "compose.cursor_line_start",
+      "cmd-right":          "compose.cursor_line_end",
+      "home":               "compose.cursor_line_start",
+      "end":                "compose.cursor_line_end",
+      "shift-left":         "compose.select_left",
+      "shift-right":        "compose.select_right",
+      "shift-up":           "compose.select_up",
+      "shift-down":         "compose.select_down",
+      "alt-shift-left":     "compose.select_word_left",
+      "alt-shift-right":    "compose.select_word_right",
+      "cmd-shift-left":     "compose.select_line_start",
+      "cmd-shift-right":    "compose.select_line_end",
+      "cmd-a":              "compose.select_all",
+      "backspace":          "compose.delete_left",
+      "delete":             "compose.delete_right",
+      "alt-backspace":      "compose.delete_word_left",
+      "alt-delete":         "compose.delete_word_right",
+      "cmd-backspace":      "compose.delete_line_left",
+      "cmd-c":              "compose.copy",
+      "cmd-x":              "compose.cut",
+      "cmd-v":              "compose.paste",
+      "enter":              "compose.insert_newline",
+      "cmd-enter":          "compose.submit",
+      "ctrl-cmd-space":     "compose.show_character_palette"
+    }
+  },
+  {
+    "context": "TextInput",
+    "bindings": {
+      "backspace":          "text_input.backspace",
+      "delete":              "text_input.delete",
+      "left":                "text_input.left",
+      "right":               "text_input.right",
+      "shift-left":          "text_input.select_left",
+      "shift-right":         "text_input.select_right",
+      "cmd-a":               "text_input.select_all",
+      "cmd-v":               "text_input.paste",
+      "cmd-c":               "text_input.copy",
+      "cmd-x":               "text_input.cut",
+      "home":                "text_input.home",
+      "end":                 "text_input.end",
+      "ctrl-cmd-space":      "text_input.show_character_palette",
+      "enter":               "text_input.submit"
+    }
+  },
+  {
+    "context": null,
+    "bindings": {
+      "cmd-q":               "allele.quit",
+      "cmd-b":               "allele.toggle_sidebar",
+      "cmd-j":               "allele.toggle_drawer",
+      "cmd-shift-r":         "allele.toggle_rich_mode",
+      "cmd-,":               "allele.open_settings",
+      "cmd-k":               "allele.open_scratch_pad"
+    }
+  }
+]
