@@ -150,7 +150,25 @@ pub struct ComposeBar {
     /// No `Arc<Mutex<...>>` needed. If this field ever gets touched from a
     /// background thread, that invariant breaks.
     attachments: Vec<Attachment>,
+    /// Chunks from large clipboard pastes, referenced by sentinel tokens
+    /// (`⟪paste-N-K⟫`) embedded in `content`. Expanded back into the
+    /// submitted prompt by `expand_paste_tokens`.
+    pasted_chunks: Vec<PastedChunk>,
+    /// Monotonic counter for new paste chunk ids.
+    next_paste_id: u32,
 }
+
+/// A large paste that's been collapsed to a token in the visible content.
+/// The line-count shown to the user is encoded in the token text itself,
+/// so only `id` and `full_text` are needed to round-trip on submit.
+#[derive(Debug, Clone)]
+struct PastedChunk {
+    id: u32,
+    full_text: String,
+}
+
+/// Line-count threshold at which a paste gets collapsed into a token.
+const LONG_PASTE_THRESHOLD: usize = 20;
 
 impl EventEmitter<ComposeBarEvent> for ComposeBar {}
 
@@ -170,6 +188,8 @@ impl ComposeBar {
             font_size,
             session_id,
             attachments: Vec::new(),
+            pasted_chunks: Vec::new(),
+            next_paste_id: 0,
         }
     }
 
@@ -514,7 +534,19 @@ impl ComposeBar {
         }
 
         if let Some(text) = item.text() {
-            self.replace_selection(&text, cx);
+            let line_count = text.lines().count().max(1);
+            if line_count > LONG_PASTE_THRESHOLD {
+                let id = self.next_paste_id;
+                self.next_paste_id = self.next_paste_id.wrapping_add(1);
+                let token = format!("⟪paste-{id}-{line_count}⟫");
+                self.pasted_chunks.push(PastedChunk {
+                    id,
+                    full_text: text,
+                });
+                self.replace_selection(&token, cx);
+            } else {
+                self.replace_selection(&text, cx);
+            }
         }
     }
 
@@ -528,12 +560,15 @@ impl ComposeBar {
         if self.busy {
             return;
         }
-        let text = self.content.trim().to_string();
+        let raw = self.content.trim().to_string();
+        let expanded = expand_paste_tokens(&raw, &self.pasted_chunks);
+        let text = expanded.trim().to_string();
         // Allow attachment-only submits: non-empty text OR at least one attachment.
         if text.is_empty() && self.attachments.is_empty() {
             return;
         }
         let attachments = std::mem::take(&mut self.attachments);
+        self.pasted_chunks.clear();
         cx.emit(ComposeBarEvent::Submit { text, attachments });
         self.content.clear();
         self.selected_range = 0..0;
@@ -1369,5 +1404,100 @@ impl Render for ComposeBar {
                 input_col.child(text_area)
             })
             .child(right_column)
+    }
+}
+
+/// Replace every `⟪paste-{id}-{n}⟫` sentinel in `content` with the matching
+/// chunk's `full_text`. Non-matching sentinels (e.g. user typed one, or the
+/// chunk was already consumed) are left as-is.
+///
+/// Pure function — no GPUI. Tested directly.
+fn expand_paste_tokens(content: &str, chunks: &[PastedChunk]) -> String {
+    // Fast path: no chunks tracked → no substitution possible.
+    if chunks.is_empty() {
+        return content.to_string();
+    }
+
+    let mut out = String::with_capacity(content.len());
+    let mut rest = content;
+
+    while let Some(start) = rest.find("⟪paste-") {
+        out.push_str(&rest[..start]);
+        // Look for the closing `⟫` after the start marker.
+        let after_open = &rest[start..];
+        if let Some(close) = after_open.find('⟫') {
+            let token = &after_open[..close + '⟫'.len_utf8()];
+            // Extract the id between "⟪paste-" and the next "-".
+            let inner = &token["⟪paste-".len()..token.len() - '⟫'.len_utf8()];
+            let id = inner.split('-').next().and_then(|s| s.parse::<u32>().ok());
+            match id.and_then(|id| chunks.iter().find(|c| c.id == id)) {
+                Some(chunk) => out.push_str(&chunk.full_text),
+                None => out.push_str(token),
+            }
+            rest = &after_open[close + '⟫'.len_utf8()..];
+        } else {
+            // Malformed / truncated — bail and append the rest as-is.
+            out.push_str(after_open);
+            return out;
+        }
+    }
+
+    out.push_str(rest);
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expansion_no_chunks_returns_verbatim() {
+        let chunks: Vec<PastedChunk> = vec![];
+        assert_eq!(expand_paste_tokens("hello world", &chunks), "hello world");
+        assert_eq!(expand_paste_tokens("", &chunks), "");
+    }
+
+    #[test]
+    fn expansion_replaces_matching_token() {
+        let chunks = vec![PastedChunk {
+            id: 0,
+            full_text: "line1\nline2\nline3".to_string(),
+        }];
+        let input = "Look at this: ⟪paste-0-3⟫ please.";
+        let out = expand_paste_tokens(input, &chunks);
+        assert_eq!(out, "Look at this: line1\nline2\nline3 please.");
+    }
+
+    #[test]
+    fn expansion_handles_multiple_tokens() {
+        let chunks = vec![
+            PastedChunk { id: 0, full_text: "FIRST".into() },
+            PastedChunk { id: 1, full_text: "SECOND".into() },
+        ];
+        let input = "A ⟪paste-0-1⟫ B ⟪paste-1-1⟫ C";
+        assert_eq!(expand_paste_tokens(input, &chunks), "A FIRST B SECOND C");
+    }
+
+    #[test]
+    fn expansion_leaves_unknown_id_intact() {
+        let chunks = vec![PastedChunk {
+            id: 0,
+            full_text: "KNOWN".into(),
+        }];
+        let input = "X ⟪paste-0-1⟫ Y ⟪paste-99-1⟫ Z";
+        assert_eq!(expand_paste_tokens(input, &chunks), "X KNOWN Y ⟪paste-99-1⟫ Z");
+    }
+
+    #[test]
+    fn expansion_tolerates_malformed_token() {
+        let chunks = vec![PastedChunk { id: 0, full_text: "OK".into() }];
+        // Missing close bracket — we emit what we have and return.
+        let input = "before ⟪paste-0-1 tail";
+        assert_eq!(expand_paste_tokens(input, &chunks), "before ⟪paste-0-1 tail");
+    }
+
+    #[test]
+    fn threshold_constant_is_20() {
+        assert_eq!(LONG_PASTE_THRESHOLD, 20);
     }
 }
