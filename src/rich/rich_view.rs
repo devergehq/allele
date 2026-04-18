@@ -156,73 +156,81 @@ impl RichView {
     }
 
     /// Handle a prompt submission from the compose bar.
+    ///
+    /// The RichSession stays alive across turns — we spawn once (cold-start
+    /// or fresh) and push each new prompt through the persistent stdin
+    /// pipe. Only on the first turn or after an unexpected exit do we spawn
+    /// a new process.
     fn handle_submit(
         &mut self,
         text: String,
         attachments: Vec<super::attachments::Attachment>,
         cx: &mut Context<Self>,
     ) {
-        // Kill current session if still running
-        if let Some(ref mut session) = self.session {
-            if !session.is_exited() {
-                // Session still active — can't send a new prompt until it finishes
-                // TODO: support interrupting + sending follow-up
+        // If we already have an in-progress turn, refuse — Claude hasn't
+        // finished responding to the previous prompt yet.
+        if let Some(ref session) = self.session {
+            if session.is_in_progress() && !session.is_exited() {
                 return;
             }
         }
 
-        // Assemble the final prompt. When attachments are present, prepend
-        // a preamble naming each on-disk path so Claude reads them via its
-        // Read tool. When there are none, the prompt is the user's text.
         let assembled = assemble_prompt(&text, &attachments);
 
         // Echo the user's visible text (not the preamble) into the feed
-        // BEFORE spawning the CLI so the user sees their message immediately.
-        // An attachment-only submit still echoes a visible hint so the feed
-        // isn't empty.
+        // BEFORE pushing the prompt through so the user sees their message
+        // immediately. Attachment-only submits get a placeholder hint.
         let echo = if text.is_empty() && !attachments.is_empty() {
             format!("[attached {} file(s)]", attachments.len())
         } else {
             text.clone()
         };
         self.document.push_user_prompt(echo);
-
-        // Mark compose bar as busy
         self.compose_bar.update(cx, |bar, cx| bar.set_busy(true, cx));
 
-        // Decide whether to resume or start fresh based on whether the CLI
-        // has written a history file for this session id yet.
-        let has_history = session_history_exists(&self.session_id);
-        let spawn_result = if has_history {
-            RichSession::resume(
-                &assembled,
-                &self.session_id,
-                &self.working_dir,
-                &self.allowed_tools,
-                self.settings_path.as_deref(),
-            )
-        } else {
-            RichSession::spawn(
-                &assembled,
-                &self.session_id,
-                &self.working_dir,
-                &self.allowed_tools,
-                self.settings_path.as_deref(),
-            )
+        // Spawn a process only if we don't have a live one.
+        let needs_spawn = match self.session.as_mut() {
+            Some(s) => s.is_exited(),
+            None => true,
         };
-
-        match spawn_result {
-            Ok(new_session) => {
-                self.session = Some(new_session);
-                // Show the thinking indicator until first output arrives.
-                self.document.push_awaiting_indicator();
-                cx.notify();
-            }
-            Err(e) => {
-                eprintln!("[rich] failed to spawn session: {e}");
-                self.compose_bar.update(cx, |bar, cx| bar.set_busy(false, cx));
+        if needs_spawn {
+            let has_history = session_history_exists(&self.session_id);
+            let spawn_result = if has_history {
+                RichSession::resume(
+                    &self.session_id,
+                    &self.working_dir,
+                    &self.allowed_tools,
+                    self.settings_path.as_deref(),
+                )
+            } else {
+                RichSession::spawn(
+                    &self.session_id,
+                    &self.working_dir,
+                    &self.allowed_tools,
+                    self.settings_path.as_deref(),
+                )
+            };
+            match spawn_result {
+                Ok(new_session) => self.session = Some(new_session),
+                Err(e) => {
+                    eprintln!("[rich] failed to spawn session: {e}");
+                    self.compose_bar.update(cx, |bar, cx| bar.set_busy(false, cx));
+                    return;
+                }
             }
         }
+
+        // Send the prompt through the persistent stdin pipe.
+        if let Some(session) = self.session.as_mut() {
+            if let Err(e) = session.send_prompt(&assembled) {
+                eprintln!("[rich] failed to send prompt: {e}");
+                self.compose_bar.update(cx, |bar, cx| bar.set_busy(false, cx));
+                return;
+            }
+        }
+
+        self.document.push_awaiting_indicator();
+        cx.notify();
     }
 
     /// Drain events from the RichSession and apply to the document.
@@ -278,13 +286,15 @@ impl Render for RichView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let font_size = self.font_size;
 
-        // Update compose bar busy state based on session
-        let session_active = self
+        // Update compose bar busy state: only BUSY when a turn is actually
+        // in flight. The session process stays alive between turns, so
+        // `is_exited` alone is the wrong signal.
+        let session_busy = self
             .session
             .as_ref()
-            .map(|s| !s.is_exited())
+            .map(|s| s.is_in_progress())
             .unwrap_or(false);
-        self.compose_bar.update(cx, |bar, cx| bar.set_busy(session_active, cx));
+        self.compose_bar.update(cx, |bar, cx| bar.set_busy(session_busy, cx));
 
         // Scrollable activity feed.
         //
@@ -312,7 +322,7 @@ impl Render for RichView {
 
         // Empty state
         if self.document.block_count() == 0 {
-            let message = if session_active {
+            let message = if session_busy {
                 "Waiting for response..."
             } else {
                 "Send a message to start."
