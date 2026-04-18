@@ -235,7 +235,9 @@ impl RichDocument {
                         result: None,
                     },
                     parent_agent_id,
-                    collapsed: false,
+                    // Collapsed by default — header shows name + summary; click
+                    // expands to the full JSON input.
+                    collapsed: true,
                     cached_height: None,
                 });
                 self.tool_use_index.insert(tool_use_id, id);

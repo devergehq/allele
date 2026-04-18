@@ -299,8 +299,14 @@ impl Render for RichView {
             .p(px(12.0));
 
         // Render each block into the inner content container.
-        for block in self.document.blocks() {
-            let element = render_block(block, font_size);
+        //
+        // Collect block IDs + cloned block snapshots first so we can drop the
+        // borrow on `self.document` before attaching `cx.listener` handlers
+        // to the rendered elements (the listeners only need a weak entity
+        // handle; they don't borrow the document).
+        let blocks: Vec<Block> = self.document.blocks().to_vec();
+        for block in &blocks {
+            let element = render_block(block, font_size, cx);
             inner = inner.child(element);
         }
 
@@ -364,7 +370,7 @@ impl Render for RichView {
 
 // ── Block renderers ───────────────────────────────────────────────
 
-fn render_block(block: &Block, font_size: f32) -> Div {
+fn render_block(block: &Block, font_size: f32, cx: &mut Context<RichView>) -> Div {
     let indent = if block.parent_agent_id.is_some() {
         px(24.0)
     } else {
@@ -373,20 +379,38 @@ fn render_block(block: &Block, font_size: f32) -> Div {
 
     let mut wrapper = div().pl(indent).mb(px(4.0));
 
+    let block_id = block.id;
+
     match &block.kind {
         BlockKind::Text { content, streaming } => {
             wrapper = wrapper.child(render_text_block(content, *streaming, font_size));
         }
         BlockKind::Thinking { content } => {
-            wrapper = wrapper.child(render_thinking_block(content, block.collapsed, font_size));
+            wrapper = wrapper.child(render_thinking_block(
+                block_id,
+                content,
+                block.collapsed,
+                font_size,
+                cx,
+            ));
         }
         BlockKind::ToolCall {
             tool_name,
             input_summary,
+            input_full,
             result,
             ..
         } => {
-            wrapper = wrapper.child(render_tool_call(tool_name, input_summary, result.as_ref(), font_size));
+            wrapper = wrapper.child(render_tool_call(
+                block_id,
+                tool_name,
+                input_summary,
+                input_full,
+                block.collapsed,
+                result.as_ref(),
+                font_size,
+                cx,
+            ));
         }
         BlockKind::Diff {
             file_path,
@@ -395,7 +419,16 @@ fn render_block(block: &Block, font_size: f32) -> Div {
             result,
             ..
         } => {
-            wrapper = wrapper.child(render_diff(file_path, old_string, new_string, result.as_ref(), font_size));
+            wrapper = wrapper.child(render_diff(
+                block_id,
+                file_path,
+                old_string,
+                new_string,
+                block.collapsed,
+                result.as_ref(),
+                font_size,
+                cx,
+            ));
         }
         BlockKind::SessionEnd {
             duration_ms,
@@ -436,22 +469,42 @@ fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
 
 // ── Thinking block (collapsed by default, subtle) ─────────────────
 
-fn render_thinking_block(content: &str, collapsed: bool, font_size: f32) -> Div {
+/// Chevron for collapsible blocks. `▸` = collapsed, `▾` = expanded.
+fn chevron(collapsed: bool) -> &'static str {
+    if collapsed { "▸" } else { "▾" }
+}
+
+fn render_thinking_block(
+    block_id: super::document::BlockId,
+    content: &str,
+    collapsed: bool,
+    font_size: f32,
+    cx: &mut Context<RichView>,
+) -> Div {
     let header = div()
+        .id(ElementId::Name(format!("thinking-header-{block_id}").into()))
         .flex()
         .gap(px(6.0))
         .items_center()
+        .cursor(gpui::CursorStyle::PointingHand)
+        .child(
+            div()
+                .text_color(hex(OVERLAY0))
+                .text_size(px(font_size - 2.0))
+                .child(chevron(collapsed)),
+        )
         .child(
             div()
                 .text_color(hex(OVERLAY0))
                 .text_size(px(font_size - 1.0))
                 .child("thinking"),
         )
-        .child(
-            div()
-                .text_color(hex(OVERLAY0))
-                .text_size(px(font_size - 2.0))
-                .child(if collapsed { "+" } else { "-" }),
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, _window, cx| {
+                this.document.toggle_collapsed(block_id);
+                cx.notify();
+            }),
         );
 
     let mut block = div()
@@ -477,10 +530,14 @@ fn render_thinking_block(content: &str, collapsed: bool, font_size: f32) -> Div 
 // ── Tool call card ────────────────────────────────────────────────
 
 fn render_tool_call(
+    block_id: super::document::BlockId,
     tool_name: &str,
     input_summary: &str,
+    input_full: &serde_json::Value,
+    collapsed: bool,
     result: Option<&super::document::ToolCallResult>,
     font_size: f32,
+    cx: &mut Context<RichView>,
 ) -> Div {
     let status_color = match result {
         Some(r) if r.is_error => hex(RED),
@@ -496,12 +553,20 @@ fn render_tool_call(
         .border_l_2()
         .border_color(status_color);
 
-    // Header: tool name + summary
+    // Header: chevron + tool name + summary (clickable).
     card = card.child(
         div()
+            .id(ElementId::Name(format!("toolcall-header-{block_id}").into()))
             .flex()
             .gap(px(8.0))
             .items_center()
+            .cursor(gpui::CursorStyle::PointingHand)
+            .child(
+                div()
+                    .text_color(hex(SUBTEXT0))
+                    .text_size(px(font_size - 2.0))
+                    .child(chevron(collapsed)),
+            )
             .child(
                 div()
                     .text_color(hex(BLUE))
@@ -514,10 +579,36 @@ fn render_tool_call(
                     .text_color(hex(SUBTEXT0))
                     .text_size(px(font_size - 1.0))
                     .child(input_summary.to_string()),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.document.toggle_collapsed(block_id);
+                    cx.notify();
+                }),
             ),
     );
 
-    // Result (if available and is error)
+    // Expanded: pretty-printed input JSON. Falls back to Debug repr on
+    // serialisation failure so we never panic on malformed input.
+    if !collapsed {
+        let pretty = serde_json::to_string_pretty(input_full)
+            .unwrap_or_else(|_| format!("{input_full:?}"));
+        card = card.child(
+            div()
+                .mt(px(6.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(3.0))
+                .bg(hex_alpha(SURFACE1, 0.4))
+                .text_color(hex(SUBTEXT1))
+                .text_size(px(font_size - 2.0))
+                .child(pretty),
+        );
+    }
+
+    // Result (if available and is error) — always shown regardless of
+    // collapsed state so errors are never hidden.
     if let Some(r) = result {
         if r.is_error {
             let preview = if r.content.len() > 200 {
@@ -541,11 +632,14 @@ fn render_tool_call(
 // ── Diff view ─────────────────────────────────────────────────────
 
 fn render_diff(
+    block_id: super::document::BlockId,
     file_path: &str,
     old_string: &str,
     new_string: &str,
+    collapsed: bool,
     _result: Option<&super::document::ToolCallResult>,
     font_size: f32,
+    cx: &mut Context<RichView>,
 ) -> Div {
     let code_size = font_size - 1.0;
 
@@ -554,19 +648,43 @@ fn render_diff(
         .bg(hex_alpha(SURFACE0, 0.4))
         .overflow_hidden();
 
-    // File path header
+    // File path header (clickable — toggles collapsed state).
     diff = diff.child(
         div()
+            .id(ElementId::Name(format!("diff-header-{block_id}").into()))
+            .flex()
+            .items_center()
+            .gap(px(6.0))
             .px(px(10.0))
             .py(px(4.0))
             .bg(hex_alpha(SURFACE1, 0.6))
+            .cursor(gpui::CursorStyle::PointingHand)
+            .child(
+                div()
+                    .text_color(hex(SUBTEXT0))
+                    .text_size(px(code_size - 1.0))
+                    .child(chevron(collapsed)),
+            )
             .child(
                 div()
                     .text_color(hex(SUBTEXT1))
                     .text_size(px(code_size))
                     .child(file_path.to_string()),
+            )
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.document.toggle_collapsed(block_id);
+                    cx.notify();
+                }),
             ),
     );
+
+    // +/- body hidden when collapsed — header + chevron stay visible so
+    // the user still sees the file path and an affordance to expand.
+    if collapsed {
+        return diff;
+    }
 
     // Old lines (red)
     for line in old_string.lines() {
