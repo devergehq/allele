@@ -326,7 +326,10 @@ impl EventWatcher {
 
 /// Play a macOS system sound asynchronously via `afplay`. Spawns as a
 /// fully detached background process — never blocks the UI thread.
-/// Silently does nothing on non-macOS.
+/// Only compiled on macOS; the Linux/Windows paths use
+/// `platform::unsupported::PortableSystemShell::play_sound` which logs
+/// rather than playing.
+#[cfg(target_os = "macos")]
 pub fn play_sound(path: &str) {
     #[cfg(target_os = "macos")]
     {
@@ -375,8 +378,10 @@ pub fn show_notification(title: &str, body: &str) {
 
 /// Show a blocking modal dialog via `osascript -e 'display dialog ...'`
 /// with a stop icon and a single OK button. Used for fatal startup errors
-/// that must block before the caller exits the process. Silently no-ops
-/// on non-macOS.
+/// that must block before the caller exits the process. macOS-only; the
+/// Linux/Windows paths route through
+/// `platform::unsupported::PortableSystemShell::show_fatal_dialog`.
+#[cfg(target_os = "macos")]
 pub fn show_fatal_dialog(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     {

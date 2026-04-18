@@ -8,6 +8,12 @@
 // All communication goes through `osascript`. The first call that targets
 // Chrome will trigger a one-time Automation permission prompt in
 // System Settings → Privacy & Security → Automation.
+//
+// This whole module is macOS-only; non-macOS callers go through
+// `platform::unsupported::UnsupportedBrowser`. Module-level gate
+// keeps the Linux build clean of AppleScript dead-code.
+
+#![cfg(target_os = "macos")]
 
 use std::process::{Command, Stdio};
 

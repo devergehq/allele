@@ -1,6 +1,7 @@
 mod actions;
 mod app_state;
 mod agents;
+#[cfg(target_os = "macos")]
 mod browser;
 mod errors;
 mod terminal;
