@@ -149,7 +149,7 @@ impl SettingsWindowState {
         self.app
             .update(cx, |state: &mut AppState, cx| {
                 state.pending_action =
-                    Some(crate::PendingAction::UpdateCleanupPaths(paths));
+                    Some(crate::SettingsAction::UpdateCleanupPaths(paths).into());
                 cx.notify();
             })
             .ok();
@@ -181,7 +181,7 @@ impl SettingsWindowState {
         self.app
             .update(cx, |state: &mut AppState, cx| {
                 state.pending_action =
-                    Some(crate::PendingAction::UpdateExternalEditor(value));
+                    Some(crate::SettingsAction::UpdateExternalEditor(value).into());
                 cx.notify();
             })
             .ok();
@@ -193,7 +193,7 @@ impl SettingsWindowState {
         let value = self.font_size;
         self.app
             .update(cx, |state: &mut AppState, cx| {
-                state.pending_action = Some(crate::PendingAction::UpdateFontSize(value));
+                state.pending_action = Some(crate::SettingsAction::UpdateFontSize(value).into());
                 cx.notify();
             })
             .ok();
@@ -224,7 +224,7 @@ impl SettingsWindowState {
         self.app
             .update(cx, |state: &mut AppState, cx| {
                 state.pending_action =
-                    Some(crate::PendingAction::UpdateGitPullBeforeNewSession(value));
+                    Some(crate::SettingsAction::UpdateGitPullBeforeNewSession(value).into());
                 cx.notify();
             })
             .ok();
@@ -237,7 +237,7 @@ impl SettingsWindowState {
         self.app
             .update(cx, |state: &mut AppState, cx| {
                 state.pending_action =
-                    Some(crate::PendingAction::UpdateBrowserIntegration(value));
+                    Some(crate::SettingsAction::UpdateBrowserIntegration(value).into());
                 cx.notify();
             })
             .ok();
@@ -251,7 +251,7 @@ impl SettingsWindowState {
         self.app
             .update(cx, |state: &mut AppState, cx| {
                 state.pending_action =
-                    Some(crate::PendingAction::UpdateAgents { agents, default_agent });
+                    Some(crate::SettingsAction::UpdateAgents { agents, default_agent }.into());
                 cx.notify();
             })
             .ok();

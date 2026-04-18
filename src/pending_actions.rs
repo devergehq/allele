@@ -2,7 +2,10 @@
 
 use gpui::*;
 
-use crate::actions::{PendingAction, SessionCursor};
+use crate::actions::{
+    ArchiveAction, BrowserAction, DrawerAction, OverlayAction, PendingAction,
+    ProjectAction, SessionAction, SessionCursor, SettingsAction, SidebarAction,
+};
 use crate::app_state::AppState;
 use crate::{clone, git, hooks, project, session, settings};
 use crate::project::Project;
@@ -20,19 +23,19 @@ impl AppState {
     ) {
         let mut skip_refocus = false;
             match action {
-                PendingAction::NewSessionInActiveProject => {
+                PendingAction::Session(SessionAction::NewInActive) => {
                     if let Some(active) = self.active {
                         self.add_session_to_project(active.project_idx, window, cx);
                     }
                 }
-                PendingAction::CloseActiveSession => {
+                PendingAction::Session(SessionAction::CloseActive) => {
                     // Keyboard/menu "close" — preserve the clone so the user
                     // can cold-resume later. Discard is an explicit gesture only.
                     if let Some(active) = self.active {
                         self.close_session_keep_clone(active, window, cx);
                     }
                 }
-                PendingAction::FocusActive => {
+                PendingAction::Session(SessionAction::FocusActive) => {
                     if let Some(session) = self.active_session() {
                         if let Some(tv) = session.terminal_view.as_ref() {
                             let fh = tv.read(cx).focus_handle.clone();
@@ -40,35 +43,35 @@ impl AppState {
                         }
                     }
                 }
-                PendingAction::OpenProjectAtPath(path) => {
+                PendingAction::Project(ProjectAction::OpenAtPath(path)) => {
                     let idx = self.create_project(path, cx);
                     // Auto-create first session for the new project
                     self.add_session_to_project(idx, window, cx);
                 }
-                PendingAction::AddSessionToProject(project_idx) => {
+                PendingAction::Session(SessionAction::AddToProject(project_idx)) => {
                     self.add_session_to_project(project_idx, window, cx);
                 }
-                PendingAction::RemoveProject(project_idx) => {
+                PendingAction::Project(ProjectAction::Remove(project_idx)) => {
                     self.remove_project(project_idx, window, cx);
                 }
-                PendingAction::CloseSessionKeepClone { project_idx, session_idx } => {
+                PendingAction::Session(SessionAction::CloseKeepClone { project_idx, session_idx }) => {
                     self.close_session_keep_clone(
                         SessionCursor { project_idx, session_idx },
                         window,
                         cx,
                     );
                 }
-                PendingAction::RequestDiscardSession { project_idx, session_idx } => {
+                PendingAction::Session(SessionAction::RequestDiscard { project_idx, session_idx }) => {
                     // Arm the inline confirmation gate. The sidebar row will
                     // render Confirm/Cancel buttons on the next frame.
                     self.confirming_discard = Some(SessionCursor { project_idx, session_idx });
                     cx.notify();
                 }
-                PendingAction::CancelDiscard => {
+                PendingAction::Session(SessionAction::CancelDiscard) => {
                     self.confirming_discard = None;
                     cx.notify();
                 }
-                PendingAction::DiscardSession { project_idx, session_idx } => {
+                PendingAction::Session(SessionAction::Discard { project_idx, session_idx }) => {
                     self.confirming_discard = None;
                     self.remove_session(
                         SessionCursor { project_idx, session_idx },
@@ -76,7 +79,7 @@ impl AppState {
                         cx,
                     );
                 }
-                PendingAction::MergeArchive { project_idx, archive_idx } => {
+                PendingAction::Archive(ArchiveAction::Merge { project_idx, archive_idx }) => {
                     if let Some(project) = self.projects.get_mut(project_idx) {
                         if let Some(entry) = project.archives.get(archive_idx) {
                             let session_id = entry.id.clone();
@@ -121,7 +124,7 @@ impl AppState {
                     self.save_state();
                     cx.notify();
                 }
-                PendingAction::DeleteArchive { project_idx, archive_idx } => {
+                PendingAction::Archive(ArchiveAction::Delete { project_idx, archive_idx }) => {
                     if let Some(project) = self.projects.get_mut(project_idx) {
                         if let Some(entry) = project.archives.get(archive_idx) {
                             let session_id = entry.id.clone();
@@ -136,7 +139,7 @@ impl AppState {
                     self.save_state();
                     cx.notify();
                 }
-                PendingAction::MergeAndClose { project_idx, session_idx } => {
+                PendingAction::Session(SessionAction::MergeAndClose { project_idx, session_idx }) => {
                     let cursor = SessionCursor { project_idx, session_idx };
                     if let Some(project) = self.projects.get_mut(cursor.project_idx) {
                         if cursor.session_idx < project.sessions.len() {
@@ -321,7 +324,7 @@ impl AppState {
                         }
                     }
                 }
-                PendingAction::SelectSession { project_idx, session_idx } => {
+                PendingAction::Session(SessionAction::Select { project_idx, session_idx }) => {
                     let cursor = SessionCursor { project_idx, session_idx };
                     // Clicking a Suspended session cold-resumes it; clicking
                     // any other session just makes it the active one.
@@ -346,7 +349,7 @@ impl AppState {
                     // Keep Chrome's active tab aligned with the active session.
                     self.sync_browser_to_active();
                 }
-                PendingAction::ToggleDrawer => {
+                PendingAction::Drawer(DrawerAction::Toggle) => {
                     skip_refocus = true;
                     if let Some(cursor) = self.active {
                         let now_visible = {
@@ -374,7 +377,7 @@ impl AppState {
                     }
                     self.save_state();
                 }
-                PendingAction::NewDrawerTab => {
+                PendingAction::Drawer(DrawerAction::NewTab) => {
                     skip_refocus = true;
                     if let Some(cursor) = self.active {
                         self.spawn_drawer_tab(cursor, None, None, window, cx);
@@ -389,7 +392,7 @@ impl AppState {
                         self.save_state();
                     }
                 }
-                PendingAction::SwitchDrawerTab(idx) => {
+                PendingAction::Drawer(DrawerAction::SwitchTab(idx)) => {
                     skip_refocus = true;
                     if let Some(cursor) = self.active {
                         if let Some(session) = self.projects
@@ -405,7 +408,7 @@ impl AppState {
                         self.save_state();
                     }
                 }
-                PendingAction::CloseDrawerTab(idx) => {
+                PendingAction::Drawer(DrawerAction::CloseTab(idx)) => {
                     skip_refocus = true;
                     if let Some(cursor) = self.active {
                         let (remaining, hide_drawer) = {
@@ -446,7 +449,7 @@ impl AppState {
                         self.save_state();
                     }
                 }
-                PendingAction::StartRenameDrawerTab(idx) => {
+                PendingAction::Drawer(DrawerAction::StartRenameTab(idx)) => {
                     skip_refocus = true;
                     if let Some(cursor) = self.active {
                         let initial = self.projects
@@ -464,7 +467,7 @@ impl AppState {
                         }
                     }
                 }
-                PendingAction::CommitRenameDrawerTab => {
+                PendingAction::Drawer(DrawerAction::CommitRenameTab) => {
                     skip_refocus = true;
                     if let Some((cursor, idx, buf)) = self.drawer_rename.take() {
                         let trimmed = buf.trim().to_string();
@@ -482,7 +485,7 @@ impl AppState {
                         self.save_state();
                     }
                 }
-                PendingAction::CancelRenameDrawerTab => {
+                PendingAction::Drawer(DrawerAction::CancelRenameTab) => {
                     skip_refocus = true;
                     let cursor_opt = self.drawer_rename.take().map(|(c, _, _)| c);
                     if let Some(cursor) = cursor_opt {
@@ -490,15 +493,15 @@ impl AppState {
                     }
                     cx.notify();
                 }
-                PendingAction::ToggleSidebar => {
+                PendingAction::Sidebar(SidebarAction::ToggleLeft) => {
                     self.sidebar_visible = !self.sidebar_visible;
                     self.save_settings();
                 }
-                PendingAction::ToggleRightSidebar => {
+                PendingAction::Sidebar(SidebarAction::ToggleRight) => {
                     self.right_sidebar_visible = !self.right_sidebar_visible;
                     self.save_settings();
                 }
-                PendingAction::RelocateProject(project_idx) => {
+                PendingAction::Project(ProjectAction::Relocate(project_idx)) => {
                     let paths = cx.prompt_for_paths(PathPromptOptions {
                         files: false,
                         directories: true,
@@ -528,16 +531,16 @@ impl AppState {
                     })
                     .detach();
                 }
-                PendingAction::ProceedDirtySession(project_idx) => {
+                PendingAction::Session(SessionAction::ProceedDirty(project_idx)) => {
                     // confirming_dirty_session stays Some so
                     // add_session_to_project skips the dirty check.
                     self.add_session_to_project(project_idx, window, cx);
                 }
-                PendingAction::CancelDirtySession => {
+                PendingAction::Session(SessionAction::CancelDirty) => {
                     self.confirming_dirty_session = None;
                     cx.notify();
                 }
-                PendingAction::UpdateCleanupPaths(paths) => {
+                PendingAction::Settings(SettingsAction::UpdateCleanupPaths(paths)) => {
                     skip_refocus = true;
                     self.user_settings.session_cleanup_paths = paths;
                     // Persist. Settings::save() also needs the up-to-date
@@ -555,16 +558,16 @@ impl AppState {
                     };
                     snapshot.save();
                 }
-                PendingAction::ResumeSession { project_idx, session_idx } => {
+                PendingAction::Session(SessionAction::Resume { project_idx, session_idx }) => {
                     let cursor = SessionCursor { project_idx, session_idx };
                     self.resume_session(cursor, window, cx);
                     self.sync_browser_to_active();
                 }
-                PendingAction::SyncBrowserToActiveSession => {
+                PendingAction::Browser(BrowserAction::SyncToActive) => {
                     skip_refocus = true;
                     self.sync_browser_to_active();
                 }
-                PendingAction::CloseBrowserTabForSession { project_idx, session_idx } => {
+                PendingAction::Browser(BrowserAction::CloseForSession { project_idx, session_idx }) => {
                     skip_refocus = true;
                     let cursor = SessionCursor { project_idx, session_idx };
                     let tab_id = self
@@ -585,11 +588,11 @@ impl AppState {
                     self.browser_status = "Chrome tab closed.".to_string();
                     self.save_state();
                 }
-                PendingAction::OpenScratchPad => {
+                PendingAction::Overlay(OverlayAction::OpenScratchPad) => {
                     skip_refocus = true;
                     self.open_scratch_pad(window, cx);
                 }
-                PendingAction::UpdateBrowserIntegration(enabled) => {
+                PendingAction::Settings(SettingsAction::UpdateBrowserIntegration(enabled)) => {
                     skip_refocus = true;
                     self.user_settings.browser_integration_enabled = enabled;
                     if !enabled {
@@ -606,12 +609,12 @@ impl AppState {
                     };
                     snapshot.save();
                 }
-                PendingAction::UpdateAgents { agents, default_agent } => {
+                PendingAction::Settings(SettingsAction::UpdateAgents { agents, default_agent }) => {
                     skip_refocus = true;
                     self.user_settings.agents = agents;
                     self.user_settings.default_agent = default_agent;
                 }
-                PendingAction::UpdateGitPullBeforeNewSession(enabled) => {
+                PendingAction::Settings(SettingsAction::UpdateGitPullBeforeNewSession(enabled)) => {
                     skip_refocus = true;
                     self.user_settings.git_pull_before_new_session = enabled;
                     let snapshot = Settings {
@@ -625,7 +628,7 @@ impl AppState {
                     };
                     snapshot.save();
                 }
-                PendingAction::UpdateFontSize(size) => {
+                PendingAction::Settings(SettingsAction::UpdateFontSize(size)) => {
                     skip_refocus = true;
                     let new_size = clamp_font_size(size);
                     let changed = (self.user_settings.font_size - new_size).abs() > f32::EPSILON;
@@ -661,7 +664,7 @@ impl AppState {
                     };
                     snapshot.save();
                 }
-                PendingAction::UpdateExternalEditor(cmd) => {
+                PendingAction::Settings(SettingsAction::UpdateExternalEditor(cmd)) => {
                     skip_refocus = true;
                     let trimmed = cmd.trim();
                     self.user_settings.external_editor_command = if trimmed.is_empty() {

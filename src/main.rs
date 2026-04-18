@@ -57,9 +57,13 @@ fn claude_session_history_exists(session_id: &str) -> bool {
     false
 }
 
-// Re-export so `crate::PendingAction` / `crate::SessionCursor` still resolves
-// for other modules (e.g. settings_window.rs).
-pub(crate) use actions::{PendingAction, SessionCursor};
+// Re-export action types main.rs itself references, plus SettingsAction
+// which settings_window.rs reaches for via `crate::SettingsAction::…`.
+use actions::{
+    BrowserAction, DrawerAction, OverlayAction, ProjectAction, SessionAction,
+    SessionCursor, SidebarAction,
+};
+pub(crate) use actions::SettingsAction;
 pub(crate) use app_state::{AppState, MainTab, SIDEBAR_MIN_WIDTH, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH};
 
 impl AppState {
@@ -99,12 +103,12 @@ impl AppState {
                         scratch_pad::ScratchPadEvent::Send { text, attachments } => {
                             this.scratch_pad_send(text.clone(), attachments.clone(), cx);
                             this.scratch_pad = None;
-                            this.pending_action = Some(PendingAction::FocusActive);
+                            this.pending_action = Some(SessionAction::FocusActive.into());
                             cx.notify();
                         }
                         scratch_pad::ScratchPadEvent::Close => {
                             this.scratch_pad = None;
-                            this.pending_action = Some(PendingAction::FocusActive);
+                            this.pending_action = Some(SessionAction::FocusActive.into());
                             cx.notify();
                         }
                         scratch_pad::ScratchPadEvent::DeleteHistoryEntry { id } => {
@@ -296,7 +300,7 @@ impl AppState {
                         // active session (activates its tab or creates one).
                         if tab == MainTab::Browser && previous != MainTab::Browser {
                             this.pending_action =
-                                Some(PendingAction::SyncBrowserToActiveSession);
+                                Some(BrowserAction::SyncToActive.into());
                         }
                         cx.notify();
                     }),
@@ -427,7 +431,7 @@ fn render_browser_placeholder(&self, cx: &mut Context<Self>) -> impl IntoElement
                     MouseButton::Left,
                     cx.listener(|this: &mut Self, _event, _window, cx| {
                         this.pending_action =
-                            Some(PendingAction::SyncBrowserToActiveSession);
+                            Some(BrowserAction::SyncToActive.into());
                         cx.notify();
                     }),
                 ),
@@ -450,10 +454,11 @@ fn render_browser_placeholder(&self, cx: &mut Context<Self>) -> impl IntoElement
                         MouseButton::Left,
                         cx.listener(move |this: &mut Self, _event, _window, cx| {
                             this.pending_action = Some(
-                                PendingAction::CloseBrowserTabForSession {
+                                BrowserAction::CloseForSession {
                                     project_idx: cur.project_idx,
                                     session_idx: cur.session_idx,
-                                },
+                                }
+                                .into(),
                             );
                             cx.notify();
                         }),
@@ -606,7 +611,7 @@ fn sync_browser_to_active(&mut self) {
             if let Ok(Ok(Some(paths))) = paths.await {
                 if let Some(path) = paths.into_iter().next() {
                     let _ = this.update(cx, |this: &mut Self, cx| {
-                        this.pending_action = Some(PendingAction::OpenProjectAtPath(path));
+                        this.pending_action = Some(ProjectAction::OpenAtPath(path).into());
                         cx.notify();
                     });
                 }
@@ -1155,7 +1160,7 @@ fn main() {
                         move |_, cx| {
                             handle
                                 .update(cx, |this: &mut AppState, cx| {
-                                    this.pending_action = Some(PendingAction::ToggleSidebar);
+                                    this.pending_action = Some(SidebarAction::ToggleLeft.into());
                                     cx.notify();
                                 })
                                 .ok();
@@ -1166,7 +1171,7 @@ fn main() {
                         move |_, cx| {
                             handle
                                 .update(cx, |this: &mut AppState, cx| {
-                                    this.pending_action = Some(PendingAction::ToggleDrawer);
+                                    this.pending_action = Some(DrawerAction::Toggle.into());
                                     cx.notify();
                                 })
                                 .ok();
@@ -1177,7 +1182,7 @@ fn main() {
                         move |_, cx| {
                             handle
                                 .update(cx, |this: &mut AppState, cx| {
-                                    this.pending_action = Some(PendingAction::OpenScratchPad);
+                                    this.pending_action = Some(OverlayAction::OpenScratchPad.into());
                                     cx.notify();
                                 })
                                 .ok();
@@ -1267,10 +1272,10 @@ fn main() {
                                             session_idx: s_idx,
                                         };
                                         let pending = if resumable {
-                                            Some(PendingAction::ResumeSession {
+                                            Some(SessionAction::Resume {
                                                 project_idx: p_idx,
                                                 session_idx: s_idx,
-                                            })
+                                            }.into())
                                         } else {
                                             None
                                         };
@@ -1647,10 +1652,10 @@ impl Render for AppState {
                                     .child("Resume")
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                         if let Some(active) = this.active {
-                                            this.pending_action = Some(PendingAction::ResumeSession {
+                                            this.pending_action = Some(SessionAction::Resume {
                                                 project_idx: active.project_idx,
                                                 session_idx: active.session_idx,
-                                            });
+                                            }.into());
                                             cx.notify();
                                         }
                                     })),
@@ -1671,7 +1676,7 @@ impl Render for AppState {
                                 .child("New Session")
                                 .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                     if let Some(active) = this.active {
-                                        this.pending_action = Some(PendingAction::AddSessionToProject(active.project_idx));
+                                        this.pending_action = Some(SessionAction::AddToProject(active.project_idx).into());
                                         cx.notify();
                                     }
                                 })),
@@ -1896,7 +1901,7 @@ impl Render for AppState {
                                     .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
                                     .child("×")
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                        this.pending_action = Some(PendingAction::ToggleRightSidebar);
+                                        this.pending_action = Some(SidebarAction::ToggleRight.into());
                                         cx.notify();
                                     })),
                             ),

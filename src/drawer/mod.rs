@@ -2,7 +2,7 @@
 
 use gpui::*;
 
-use crate::actions::{PendingAction, SessionCursor};
+use crate::actions::{DrawerAction, SessionCursor, SettingsAction};
 use crate::app_state::AppState;
 use crate::session::DrawerTab;
 use crate::terminal::{clamp_font_size, ShellCommand, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
@@ -120,12 +120,12 @@ impl AppState {
                                 match key {
                                     "enter" => {
                                         this.pending_action =
-                                            Some(PendingAction::CommitRenameDrawerTab);
+                                            Some(DrawerAction::CommitRenameTab.into());
                                         cx.notify();
                                     }
                                     "escape" => {
                                         this.pending_action =
-                                            Some(PendingAction::CancelRenameDrawerTab);
+                                            Some(DrawerAction::CancelRenameTab.into());
                                         cx.notify();
                                     }
                                     "backspace" => {
@@ -163,10 +163,10 @@ impl AppState {
                                 cx.listener(move |this: &mut Self, event: &MouseDownEvent, _window, cx| {
                                     if event.click_count >= 2 {
                                         this.pending_action =
-                                            Some(PendingAction::StartRenameDrawerTab(idx));
+                                            Some(DrawerAction::StartRenameTab(idx).into());
                                     } else {
                                         this.pending_action =
-                                            Some(PendingAction::SwitchDrawerTab(idx));
+                                            Some(DrawerAction::SwitchTab(idx).into());
                                     }
                                     cx.notify();
                                 }),
@@ -188,7 +188,7 @@ impl AppState {
                                 MouseButton::Left,
                                 cx.listener(move |this: &mut Self, _event, _window, cx| {
                                     this.pending_action =
-                                        Some(PendingAction::CloseDrawerTab(idx));
+                                        Some(DrawerAction::CloseTab(idx).into());
                                     cx.notify();
                                 }),
                             ),
@@ -213,7 +213,7 @@ impl AppState {
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(|this: &mut Self, _event, _window, cx| {
-                        this.pending_action = Some(PendingAction::NewDrawerTab);
+                        this.pending_action = Some(DrawerAction::NewTab.into());
                         cx.notify();
                     }),
                 ),
@@ -245,7 +245,7 @@ impl AppState {
                         .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
                         .child("×")
                         .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                            this.pending_action = Some(PendingAction::ToggleDrawer);
+                            this.pending_action = Some(DrawerAction::Toggle.into());
                             cx.notify();
                         })),
                 )
@@ -306,17 +306,17 @@ impl AppState {
              cx: &mut Context<Self>| {
                 match event {
                     TerminalEvent::ToggleDrawer => {
-                        this.pending_action = Some(PendingAction::ToggleDrawer);
+                        this.pending_action = Some(DrawerAction::Toggle.into());
                         cx.notify();
                     }
                     TerminalEvent::AdjustFontSize(delta) => {
                         let new_size = clamp_font_size(this.user_settings.font_size + delta);
-                        this.pending_action = Some(PendingAction::UpdateFontSize(new_size));
+                        this.pending_action = Some(SettingsAction::UpdateFontSize(new_size).into());
                         cx.notify();
                     }
                     TerminalEvent::ResetFontSize => {
                         this.pending_action =
-                            Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
+                            Some(SettingsAction::UpdateFontSize(DEFAULT_FONT_SIZE).into());
                         cx.notify();
                     }
                     _ => {}

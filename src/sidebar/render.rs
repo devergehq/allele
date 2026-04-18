@@ -2,7 +2,7 @@
 
 use gpui::*;
 
-use crate::actions::{PendingAction, SessionCursor};
+use crate::actions::{ArchiveAction, ProjectAction, SessionAction, SessionCursor};
 use crate::app_state::AppState;
 use crate::session::SessionStatus;
 
@@ -61,7 +61,7 @@ impl AppState {
                             .child("+")
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                 cx.stop_propagation();
-                                this.pending_action = Some(PendingAction::AddSessionToProject(p_idx));
+                                this.pending_action = Some(SessionAction::AddToProject(p_idx).into());
                                 cx.notify();
                             })),
                     )
@@ -101,7 +101,7 @@ impl AppState {
                             .child("✕")
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                 cx.stop_propagation();
-                                this.pending_action = Some(PendingAction::RemoveProject(p_idx));
+                                this.pending_action = Some(ProjectAction::Remove(p_idx).into());
                                 cx.notify();
                             })),
                     )
@@ -142,7 +142,7 @@ impl AppState {
                                 .child("Proceed")
                                 .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                     cx.stop_propagation();
-                                    this.pending_action = Some(PendingAction::ProceedDirtySession(p_idx));
+                                    this.pending_action = Some(SessionAction::ProceedDirty(p_idx).into());
                                     cx.notify();
                                 })),
                         )
@@ -160,7 +160,7 @@ impl AppState {
                                 .child("Cancel")
                                 .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                     cx.stop_propagation();
-                                    this.pending_action = Some(PendingAction::CancelDirtySession);
+                                    this.pending_action = Some(SessionAction::CancelDirty.into());
                                     cx.notify();
                                 })),
                         )
@@ -448,10 +448,10 @@ impl AppState {
                     .items_center()
                     .justify_between()
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
-                        this.pending_action = Some(PendingAction::SelectSession {
+                        this.pending_action = Some(SessionAction::Select {
                             project_idx: p_idx,
                             session_idx: s_idx,
-                        });
+                        }.into());
                         cx.notify();
                     }))
                     .child(
@@ -505,10 +505,10 @@ impl AppState {
                                     .child("Discard")
                                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                         cx.stop_propagation();
-                                        this.pending_action = Some(PendingAction::DiscardSession {
+                                        this.pending_action = Some(SessionAction::Discard {
                                             project_idx: p_idx,
                                             session_idx: s_idx,
-                                        });
+                                        }.into());
                                         cx.notify();
                                     })),
                             )
@@ -525,7 +525,7 @@ impl AppState {
                                     .child("Cancel")
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                         cx.stop_propagation();
-                                        this.pending_action = Some(PendingAction::CancelDiscard);
+                                        this.pending_action = Some(SessionAction::CancelDiscard.into());
                                         cx.notify();
                                     })),
                             ),
@@ -549,10 +549,10 @@ impl AppState {
                                     .child("✓")
                                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                         cx.stop_propagation();
-                                        this.pending_action = Some(PendingAction::MergeAndClose {
+                                        this.pending_action = Some(SessionAction::MergeAndClose {
                                             project_idx: p_idx,
                                             session_idx: s_idx,
-                                        });
+                                        }.into());
                                         cx.notify();
                                     })),
                             )
@@ -567,10 +567,10 @@ impl AppState {
                                     .child("✕")
                                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                         cx.stop_propagation();
-                                        this.pending_action = Some(PendingAction::CloseSessionKeepClone {
+                                        this.pending_action = Some(SessionAction::CloseKeepClone {
                                             project_idx: p_idx,
                                             session_idx: s_idx,
-                                        });
+                                        }.into());
                                         cx.notify();
                                     })),
                             )
@@ -585,10 +585,10 @@ impl AppState {
                                     .child("🗑")
                                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                         cx.stop_propagation();
-                                        this.pending_action = Some(PendingAction::RequestDiscardSession {
+                                        this.pending_action = Some(SessionAction::RequestDiscard {
                                             project_idx: p_idx,
                                             session_idx: s_idx,
-                                        });
+                                        }.into());
                                         cx.notify();
                                     })),
                             ),
@@ -687,10 +687,10 @@ impl AppState {
                                             .child("merge")
                                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                                 cx.stop_propagation();
-                                                this.pending_action = Some(PendingAction::MergeArchive {
+                                                this.pending_action = Some(ArchiveAction::Merge {
                                                     project_idx: p_idx,
                                                     archive_idx: a_idx,
-                                                });
+                                                }.into());
                                                 cx.notify();
                                             })),
                                     )
@@ -706,10 +706,10 @@ impl AppState {
                                             .child("×")
                                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                                                 cx.stop_propagation();
-                                                this.pending_action = Some(PendingAction::DeleteArchive {
+                                                this.pending_action = Some(ArchiveAction::Delete {
                                                     project_idx: p_idx,
                                                     archive_idx: a_idx,
-                                                });
+                                                }.into());
                                                 cx.notify();
                                             })),
                                     ),
