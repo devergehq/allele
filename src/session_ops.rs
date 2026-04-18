@@ -1,7 +1,7 @@
 //! Session lifecycle operations: creating, resuming, and terminal event wiring.
 
 use gpui::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::actions::{PendingAction, SessionCursor};
 use crate::app_state::AppState;
@@ -746,6 +746,162 @@ impl AppState {
                     .await;
             })
             .detach();
+        }
+    }
+    /// allocate a port, pre-spawn a drawer tab per `terminals[]` entry, show
+    /// the drawer, and open the preview URL in the system browser.
+    ///
+    /// No-op when the file is missing or malformed. Called from both
+    /// `add_session_to_project` (after the clone lands) and `resume_session`
+    /// (on every cold-resume), so edits to allele.json pick up naturally.
+    pub(crate) fn apply_project_config(
+        &mut self,
+        cursor: SessionCursor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let clone_path = self
+            .projects
+            .get(cursor.project_idx)
+            .and_then(|p| p.sessions.get(cursor.session_idx))
+            .and_then(|s| s.clone_path.clone());
+        let Some(clone_path) = clone_path else { return };
+        let Some(cfg) = config::ProjectConfig::load(&clone_path) else { return };
+
+        let port = config::allocate_port();
+
+        // Drop any pre-existing drawer tabs from a prior materialisation —
+        // the config is the source of truth for this session's layout.
+        if let Some(session) = self
+            .projects
+            .get_mut(cursor.project_idx)
+            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+        {
+            session.drawer_tabs.clear();
+            session.pending_drawer_tab_names.clear();
+            session.drawer_active_tab = 0;
+            session.allocated_port = port;
+        }
+
+        let startup = cfg
+            .startup
+            .as_ref()
+            .map(|s| config::substitute(s, port, &clone_path))
+            .filter(|s| !s.trim().is_empty());
+
+        if let Some(startup_cmd) = startup {
+            let clone_for_task = clone_path.clone();
+            cx.spawn_in(window, async move |this, cx| {
+                let status = cx
+                    .background_executor()
+                    .spawn(async move {
+                        std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(&startup_cmd)
+                            .current_dir(&clone_for_task)
+                            .status()
+                    })
+                    .await;
+                match status {
+                    Ok(s) if !s.success() => {
+                        eprintln!("allele: startup command exited with {s} — continuing");
+                    }
+                    Err(e) => {
+                        eprintln!("allele: failed to run startup command: {e} — continuing");
+                    }
+                    _ => {}
+                }
+                let _ = this.update_in(cx, move |this: &mut Self, window, cx| {
+                    this.spawn_terminals_and_preview(cursor, &cfg, port, &clone_path, window, cx);
+                });
+            })
+            .detach();
+        } else {
+            self.spawn_terminals_and_preview(cursor, &cfg, port, &clone_path, window, cx);
+        }
+    }
+
+    /// Spawn the drawer terminals and open the preview URL for a session
+    /// whose `allele.json` has already been loaded. Split out of
+    /// `apply_project_config` so it can be deferred until after an
+    /// optional `startup` command has finished running.
+    pub(crate) fn spawn_terminals_and_preview(
+        &mut self,
+        cursor: SessionCursor,
+        cfg: &config::ProjectConfig,
+        port: Option<u16>,
+        clone_path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for term in &cfg.terminals {
+            let substituted = config::substitute(&term.command, port, clone_path);
+            // Always spawn an interactive shell (inherit default — None).
+            // If a startup command was declared, push it into the PTY's
+            // stdin buffer so the freshly-loaded shell reads and executes
+            // it as if the user had typed it. When the command exits or is
+            // interrupted (Ctrl+C), the shell is still there for the user
+            // to restart or run anything else.
+            self.spawn_drawer_tab(cursor, Some(term.label.clone()), None, window, cx);
+            if !substituted.trim().is_empty() {
+                if let Some(session) = self
+                    .projects
+                    .get(cursor.project_idx)
+                    .and_then(|p| p.sessions.get(cursor.session_idx))
+                {
+                    if let Some(tab) = session.drawer_tabs.last() {
+                        let mut line = substituted.into_bytes();
+                        line.push(b'\n');
+                        tab.view.read(cx).send_input(&line);
+                    }
+                }
+            }
+        }
+
+        if !cfg.terminals.is_empty() {
+            if let Some(session) = self
+                .projects
+                .get_mut(cursor.project_idx)
+                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+            {
+                session.drawer_active_tab = 0;
+                session.drawer_visible = true;
+            }
+        }
+
+        if let Some(preview) = &cfg.preview {
+            let url = config::substitute(&preview.url, port, clone_path);
+            // Always record the preview URL on the session so the Browser
+            // tab visibility logic can key off it regardless of whether
+            // Chrome integration is on right now.
+            let tab_id = if let Some(session) = self
+                .projects
+                .get_mut(cursor.project_idx)
+                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+            {
+                session.browser_last_url = Some(url.clone());
+                session.browser_tab_id
+            } else {
+                None
+            };
+            if self.user_settings.browser_integration_enabled {
+                // Navigate an existing linked tab so allele.json edits pick
+                // up on resume; if this session is active, run a full sync
+                // so Chrome ends up on the right tab.
+                if let Some(id) = tab_id {
+                    let _ = browser::navigate_tab(id, &url);
+                }
+                if self.active == Some(cursor) {
+                    self.sync_browser_to_active();
+                }
+            } else {
+                // Integration off — fall back to the legacy "open in
+                // default browser" behaviour so the preview URL still
+                // lands somewhere useful.
+                if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
+                    eprintln!("allele: failed to open preview URL {url}: {e}");
+                }
+            }
         }
     }
 }

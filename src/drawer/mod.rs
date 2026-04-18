@@ -2,9 +2,10 @@
 
 use gpui::*;
 
-use crate::actions::PendingAction;
+use crate::actions::{PendingAction, SessionCursor};
 use crate::app_state::AppState;
-use crate::terminal::TerminalView;
+use crate::session::DrawerTab;
+use crate::terminal::{clamp_font_size, ShellCommand, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
 
 impl AppState {
     /// Render the drawer panel elements: resize handle, tab-strip header,
@@ -275,5 +276,129 @@ impl AppState {
         elements.push(drawer_panel.into_any_element());
 
         elements
+    }
+
+
+    /// Spawn one drawer terminal tab in the given session with an optional
+    /// pre-chosen name and optional shell command. Default name is
+    /// "Terminal N" where N is 1-based; default command drops into the
+    /// user's shell.
+    pub(crate) fn spawn_drawer_tab(
+        &mut self,
+        cursor: SessionCursor,
+        name: Option<String>,
+        command: Option<ShellCommand>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let working_dir = self.projects
+            .get(cursor.project_idx)
+            .and_then(|p| p.sessions.get(cursor.session_idx))
+            .and_then(|s| s.clone_path.clone());
+        let initial_font_size = self.user_settings.font_size;
+        let drawer_tv =
+            cx.new(|cx| TerminalView::new(window, cx, command, working_dir, initial_font_size));
+        cx.subscribe(
+            &drawer_tv,
+            |this: &mut Self,
+             _tv: Entity<TerminalView>,
+             event: &TerminalEvent,
+             cx: &mut Context<Self>| {
+                match event {
+                    TerminalEvent::ToggleDrawer => {
+                        this.pending_action = Some(PendingAction::ToggleDrawer);
+                        cx.notify();
+                    }
+                    TerminalEvent::AdjustFontSize(delta) => {
+                        let new_size = clamp_font_size(this.user_settings.font_size + delta);
+                        this.pending_action = Some(PendingAction::UpdateFontSize(new_size));
+                        cx.notify();
+                    }
+                    TerminalEvent::ResetFontSize => {
+                        this.pending_action =
+                            Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
+                        cx.notify();
+                    }
+                    _ => {}
+                }
+            },
+        )
+        .detach();
+
+        if let Some(session) = self.projects
+            .get_mut(cursor.project_idx)
+            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+        {
+            let tab_name = name.unwrap_or_else(|| {
+                format!("Terminal {}", session.drawer_tabs.len() + 1)
+            });
+            session.drawer_tabs.push(DrawerTab {
+                view: drawer_tv,
+                name: tab_name,
+            });
+        }
+    }
+
+    /// Materialise drawer tabs for a session that has none yet. Uses saved
+    /// names from `pending_drawer_tab_names` if present, else creates one
+    /// default "Terminal 1" tab.
+    pub(crate) fn ensure_drawer_tabs(
+        &mut self,
+        cursor: SessionCursor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (needs_default, pending) = {
+            let session = self.projects
+                .get(cursor.project_idx)
+                .and_then(|p| p.sessions.get(cursor.session_idx));
+            match session {
+                Some(s) if !s.drawer_tabs.is_empty() => (false, Vec::new()),
+                Some(s) => {
+                    if s.pending_drawer_tab_names.is_empty() {
+                        (true, Vec::new())
+                    } else {
+                        (false, s.pending_drawer_tab_names.clone())
+                    }
+                }
+                None => return,
+            }
+        };
+
+        if needs_default {
+            self.spawn_drawer_tab(cursor, None, None, window, cx);
+        } else if !pending.is_empty() {
+            for name in pending {
+                self.spawn_drawer_tab(cursor, Some(name), None, window, cx);
+            }
+            if let Some(session) = self.projects
+                .get_mut(cursor.project_idx)
+                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+            {
+                session.pending_drawer_tab_names.clear();
+                if session.drawer_active_tab >= session.drawer_tabs.len() {
+                    session.drawer_active_tab = session.drawer_tabs.len().saturating_sub(1);
+                }
+            }
+        }
+    }
+
+
+    /// Focus the currently active drawer tab's terminal view (if any).
+    pub(crate) fn focus_active_drawer_tab(
+        &self,
+        cursor: SessionCursor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(session) = self.projects
+            .get(cursor.project_idx)
+            .and_then(|p| p.sessions.get(cursor.session_idx))
+        {
+            if let Some(tab) = session.drawer_tabs.get(session.drawer_active_tab) {
+                let fh = tab.view.read(cx).focus_handle.clone();
+                fh.focus(window, cx);
+            }
+        }
     }
 }
