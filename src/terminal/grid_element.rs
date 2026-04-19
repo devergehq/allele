@@ -178,6 +178,7 @@ pub struct GridPrepaintState {
     rows: Vec<PreparedRow>,
     cursor_point: Option<(usize, usize)>, // (row, col) in visible coords
     cursor_shape: CursorShape,
+    hitbox: Hitbox,
     // Scroll state for scrollbar
     display_offset: usize,
     total_lines: usize,
@@ -249,6 +250,8 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         _cx: &mut App,
     ) -> Self::PrepaintState {
+
+        let hitbox = window.insert_hitbox(_bounds, HitboxBehavior::Normal);
 
         let term = self.term.lock();
         let cursor_shape_raw = term.cursor_style().shape;
@@ -435,6 +438,7 @@ impl Element for TerminalGridElement {
             rows: prepared_rows,
             cursor_point: cursor_pos,
             cursor_shape,
+            hitbox,
             display_offset: offset,
             total_lines: total,
             screen_lines: screen,
@@ -454,6 +458,10 @@ impl Element for TerminalGridElement {
         let cell_w = layout_state.cell_width;
         let cell_h = layout_state.cell_height;
         let origin = bounds.origin;
+
+        if self.hovered_url.is_some() || self.hovered_path.is_some() {
+            window.set_cursor_style(CursorStyle::PointingHand, &prepaint_state.hitbox);
+        }
 
         // Publish origin so mouse handlers can translate window coordinates.
         if let (Some(ox), Some(oy)) = (&self.origin_x_out, &self.origin_y_out) {

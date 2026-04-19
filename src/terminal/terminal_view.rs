@@ -2,7 +2,8 @@ use super::grid_element::TerminalGridElement;
 use super::keymap::{self, AppAction, KeymapConfig};
 use super::pty_terminal::{PtyTerminal, ShellCommand, TermSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
-use alacritty_terminal::index::{Column, Line};
+use alacritty_terminal::index::{Column, Line, Point as AlacPoint};
+use alacritty_terminal::term::TermMode;
 use gpui::*;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -594,6 +595,143 @@ impl TerminalView {
         // (Same formula the renderer uses: grid_line = line_idx - display_offset)
         let line_offset = row as i32 - display_offset;
         Some((line_offset, col))
+    }
+
+    fn terminal_mode(&self) -> Option<TermMode> {
+        self.terminal.as_ref().map(|terminal| {
+            let term = terminal.term.lock();
+            *term.mode()
+        })
+    }
+
+    fn mouse_reporting_active(&self) -> bool {
+        self.terminal_mode()
+            .is_some_and(|mode| mode.intersects(TermMode::MOUSE_MODE))
+    }
+
+    fn pixel_to_term_point(&self, x: f32, y: f32) -> Option<AlacPoint> {
+        let (line, col) = self.pixel_to_line_cell(x, y)?;
+        Some(AlacPoint::new(Line(line), Column(col)))
+    }
+
+    fn scroll_lines_from_event(&self, event: &ScrollWheelEvent) -> i32 {
+        match event.delta {
+            ScrollDelta::Pixels(delta_px) => {
+                let mut acc = self.scroll_pixel_accumulator.lock().unwrap();
+                *acc += f32::from(delta_px.y);
+                let whole = (*acc / self.cell_height).trunc() as i32;
+                if whole != 0 {
+                    *acc -= whole as f32 * self.cell_height;
+                }
+                whole
+            }
+            ScrollDelta::Lines(delta_ln) => {
+                *self.scroll_pixel_accumulator.lock().unwrap() = 0.0;
+                delta_ln.y.round() as i32
+            }
+        }
+    }
+
+    fn forward_mouse_button(
+        &self,
+        button: MouseButton,
+        pressed: bool,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+    ) -> bool {
+        let Some(mode) = self.terminal_mode() else { return false };
+        if !mode.intersects(TermMode::MOUSE_MODE) {
+            return false;
+        }
+        let Some(point) = self.pixel_to_term_point(f32::from(position.x), f32::from(position.y)) else {
+            return false;
+        };
+        let Some(report) = mouse_report_bytes(
+            point,
+            AlacMouseButton::from_button(button),
+            pressed,
+            modifiers,
+            MouseFormat::from_mode(mode),
+        ) else {
+            return false;
+        };
+        let Some(terminal) = self.terminal.as_ref() else { return false };
+        terminal.write(&report);
+        true
+    }
+
+    fn forward_mouse_move(&self, event: &MouseMoveEvent) -> bool {
+        let Some(mode) = self.terminal_mode() else { return false };
+        if !mode.intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
+            return false;
+        }
+        let button = AlacMouseButton::from_move_button(event.pressed_button);
+        if mode.contains(TermMode::MOUSE_DRAG) && matches!(button, AlacMouseButton::NoneMove) {
+            return false;
+        }
+        let Some(point) = self.pixel_to_term_point(
+            f32::from(event.position.x),
+            f32::from(event.position.y),
+        ) else {
+            return false;
+        };
+        let Some(report) = mouse_report_bytes(
+            point,
+            button,
+            true,
+            event.modifiers,
+            MouseFormat::from_mode(mode),
+        ) else {
+            return false;
+        };
+        let Some(terminal) = self.terminal.as_ref() else { return false };
+        terminal.write(&report);
+        true
+    }
+
+    fn forward_scroll_input(&self, event: &ScrollWheelEvent, lines: i32) -> bool {
+        if lines == 0 {
+            return false;
+        }
+        let Some(mode) = self.terminal_mode() else { return false };
+        let Some(terminal) = self.terminal.as_ref() else { return false };
+
+        if mode.intersects(TermMode::MOUSE_MODE) {
+            let Some(point) = self.pixel_to_term_point(
+                f32::from(event.position.x),
+                f32::from(event.position.y),
+            ) else {
+                return false;
+            };
+            let Some(button) = AlacMouseButton::from_scroll_lines(lines) else {
+                return false;
+            };
+            let Some(report) = mouse_report_bytes(
+                point,
+                button,
+                true,
+                event.modifiers,
+                MouseFormat::from_mode(mode),
+            ) else {
+                return false;
+            };
+            for _ in 0..lines.abs() {
+                terminal.write(&report);
+            }
+            return true;
+        }
+
+        if mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
+            && !event.modifiers.shift
+        {
+            let report = alt_scroll_bytes(lines);
+            if !report.is_empty() {
+                terminal.write(&report);
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Get selected text from the terminal grid using alacritty line coordinates.
@@ -1375,13 +1513,22 @@ impl Render for TerminalView {
 
         let bell_active = self.bell_flash_start.is_some();
         let bg_color = if bell_active { rgb(0x3a2e3a) } else { rgb(0x1e1e2e) };
+        let clickable_hover = self.hovered_url.is_some() || self.hovered_path.is_some();
 
-        div()
+        let terminal = div()
             .id("terminal")
             .size_full()
             .bg(bg_color)
             .overflow_hidden()
-            .track_focus(&self.focus_handle)
+            .track_focus(&self.focus_handle);
+
+        let terminal = if clickable_hover {
+            terminal.cursor_pointer()
+        } else {
+            terminal
+        };
+
+        terminal
             .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
                 this.last_keypress = Instant::now();
                 this.cursor_visible = true;
@@ -1567,14 +1714,27 @@ impl Render for TerminalView {
                     let term_width = f32::from(viewport.width) - origin_x;
                     let scrollbar_zone = origin_x + term_width - 12.0;
 
-                    // Cmd+click to open URLs
+                    // Cmd+click to open terminal links without disturbing selection.
                     if event.modifiers.platform {
                         if let Some(cell) = this.pixel_to_cell(click_x, click_y) {
                             if let Some((_, _, _, url)) = this.url_at(cell) {
                                 let _ = std::process::Command::new("open").arg(&url).spawn();
                                 return;
                             }
+                            if let Some((_, _, _, path, line_col)) = this.path_at(cell) {
+                                cx.emit(TerminalEvent::OpenExternalEditor { path, line_col });
+                                return;
+                            }
                         }
+                    }
+
+                    if this.forward_mouse_button(
+                        MouseButton::Left,
+                        true,
+                        event.position,
+                        event.modifiers,
+                    ) {
+                        return;
                     }
 
                     // Clear any existing selection on a non-shift click
@@ -1656,6 +1816,16 @@ impl Render for TerminalView {
                 }),
             )
             .on_mouse_move(cx.listener(|this: &mut Self, event: &MouseMoveEvent, window, cx| {
+                if this.mouse_reporting_active() && !event.modifiers.platform {
+                    this.forward_mouse_move(event);
+                    if this.hovered_url.is_some() || this.hovered_path.is_some() {
+                        this.hovered_url = None;
+                        this.hovered_path = None;
+                        cx.notify();
+                    }
+                    return;
+                }
+
                 // Handle selection drag
                 if this.selecting {
                     let x = f32::from(event.position.x);
@@ -1741,6 +1911,15 @@ impl Render for TerminalView {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this: &mut Self, event: &MouseDownEvent, _window, cx| {
+                    if this.forward_mouse_button(
+                        MouseButton::Right,
+                        true,
+                        event.position,
+                        event.modifiers,
+                    ) {
+                        return;
+                    }
+
                     let x = f32::from(event.position.x);
                     let y = f32::from(event.position.y);
                     let Some(cell) = this.pixel_to_cell(x, y) else { return };
@@ -1767,7 +1946,18 @@ impl Render for TerminalView {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
+                cx.listener(|this: &mut Self, event: &MouseUpEvent, _window, cx| {
+                    if this.forward_mouse_button(
+                        MouseButton::Left,
+                        false,
+                        event.position,
+                        event.modifiers,
+                    ) {
+                        this.scrollbar_dragging = false;
+                        this.selecting = false;
+                        return;
+                    }
+
                     let was_selecting = this.selecting;
                     this.scrollbar_dragging = false;
                     this.selecting = false;
@@ -1797,9 +1987,31 @@ impl Render for TerminalView {
                     }
                 }),
             )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this: &mut Self, event: &MouseUpEvent, _window, _cx| {
+                    let _ = this.forward_mouse_button(
+                        MouseButton::Right,
+                        false,
+                        event.position,
+                        event.modifiers,
+                    );
+                }),
+            )
             .on_mouse_up_out(
                 MouseButton::Left,
-                cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
+                cx.listener(|this: &mut Self, event: &MouseUpEvent, _window, cx| {
+                    if this.forward_mouse_button(
+                        MouseButton::Left,
+                        false,
+                        event.position,
+                        event.modifiers,
+                    ) {
+                        this.scrollbar_dragging = false;
+                        this.selecting = false;
+                        return;
+                    }
+
                     let was_selecting = this.selecting;
                     this.scrollbar_dragging = false;
                     this.selecting = false;
@@ -1826,41 +2038,18 @@ impl Render for TerminalView {
                     }
                 }),
             )
-            .on_scroll_wheel({
-                let term = self.terminal.as_ref().map(|t| t.term.clone());
-                let scroll_dirty = self.scroll_dirty.clone();
-                let accumulator = self.scroll_pixel_accumulator.clone();
-                let cell_h = self.cell_height;
-                move |event: &ScrollWheelEvent, _window: &mut Window, _cx: &mut App| {
-                    let Some(ref term) = term else { return };
-                    // Trackpad (Pixels) delivers small sub-cell deltas per frame;
-                    // we must accumulate them to produce fluid scrolling. Mouse
-                    // wheel (Lines) delivers discrete line counts and must bypass
-                    // the accumulator so its precision isn't diluted by a stale
-                    // trackpad remainder.
-                    let lines = match event.delta {
-                        ScrollDelta::Pixels(delta_px) => {
-                            let mut acc = accumulator.lock().unwrap();
-                            *acc += f32::from(delta_px.y);
-                            let whole = (*acc / cell_h).trunc() as i32;
-                            if whole != 0 {
-                                *acc -= whole as f32 * cell_h;
-                            }
-                            whole
-                        }
-                        ScrollDelta::Lines(delta_ln) => {
-                            // Mouse wheel — reset any fractional trackpad remainder
-                            // so direction changes between devices feel immediate.
-                            *accumulator.lock().unwrap() = 0.0;
-                            delta_ln.y.round() as i32
-                        }
-                    };
-                    if lines != 0 {
-                        term.lock().scroll_display(Scroll::Delta(lines));
-                        scroll_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
+            .on_scroll_wheel(cx.listener(|this: &mut Self, event: &ScrollWheelEvent, _window, _cx| {
+                let lines = this.scroll_lines_from_event(event);
+                if lines == 0 {
+                    return;
                 }
-            })
+                if this.forward_scroll_input(event, lines) {
+                    return;
+                }
+                let Some(ref terminal) = this.terminal else { return };
+                terminal.term.lock().scroll_display(Scroll::Delta(lines));
+                this.scroll_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+            }))
             .child(grid_element)
             .children(self.render_terminal_context_menu(cx))
             .children(if self.search_active {
@@ -1892,6 +2081,159 @@ impl Render for TerminalView {
             })
             .into_any_element()
     }
+}
+
+#[derive(Clone, Copy)]
+enum MouseFormat {
+    Sgr,
+    Normal(bool),
+}
+
+impl MouseFormat {
+    fn from_mode(mode: TermMode) -> Self {
+        if mode.contains(TermMode::SGR_MOUSE) {
+            Self::Sgr
+        } else if mode.contains(TermMode::UTF8_MOUSE) {
+            Self::Normal(true)
+        } else {
+            Self::Normal(false)
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum AlacMouseButton {
+    LeftButton = 0,
+    MiddleButton = 1,
+    RightButton = 2,
+    LeftMove = 32,
+    MiddleMove = 33,
+    RightMove = 34,
+    NoneMove = 35,
+    ScrollUp = 64,
+    ScrollDown = 65,
+    Other = 99,
+}
+
+impl AlacMouseButton {
+    fn from_button(button: MouseButton) -> Self {
+        match button {
+            MouseButton::Left => Self::LeftButton,
+            MouseButton::Right => Self::MiddleButton,
+            MouseButton::Middle => Self::RightButton,
+            MouseButton::Navigate(_) => Self::Other,
+        }
+    }
+
+    fn from_move_button(button: Option<MouseButton>) -> Self {
+        match button {
+            Some(MouseButton::Left) => Self::LeftMove,
+            Some(MouseButton::Middle) => Self::MiddleMove,
+            Some(MouseButton::Right) => Self::RightMove,
+            Some(MouseButton::Navigate(_)) => Self::Other,
+            None => Self::NoneMove,
+        }
+    }
+
+    fn from_scroll_lines(lines: i32) -> Option<Self> {
+        if lines > 0 {
+            Some(Self::ScrollUp)
+        } else if lines < 0 {
+            Some(Self::ScrollDown)
+        } else {
+            None
+        }
+    }
+
+    fn is_other(self) -> bool {
+        matches!(self, Self::Other)
+    }
+}
+
+fn mouse_report_bytes(
+    point: AlacPoint,
+    button: AlacMouseButton,
+    pressed: bool,
+    modifiers: Modifiers,
+    format: MouseFormat,
+) -> Option<Vec<u8>> {
+    if point.line.0 < 0 || button.is_other() {
+        return None;
+    }
+
+    let mut mods = 0;
+    if modifiers.shift {
+        mods += 4;
+    }
+    if modifiers.alt {
+        mods += 8;
+    }
+    if modifiers.control {
+        mods += 16;
+    }
+
+    match format {
+        MouseFormat::Sgr => Some(sgr_mouse_report(point, button as u8 + mods, pressed).into_bytes()),
+        MouseFormat::Normal(utf8) => {
+            if pressed {
+                normal_mouse_report(point, button as u8 + mods, utf8)
+            } else {
+                normal_mouse_report(point, 3 + mods, utf8)
+            }
+        }
+    }
+}
+
+fn normal_mouse_report(point: AlacPoint, button: u8, utf8: bool) -> Option<Vec<u8>> {
+    let max_point: usize = if utf8 { 2015 } else { 223 };
+    if point.line.0 as usize >= max_point || point.column.0 >= max_point {
+        return None;
+    }
+
+    let mut msg = vec![b'\x1b', b'[', b'M', 32 + button];
+
+    let mouse_pos_encode = |pos: usize| -> Vec<u8> {
+        let pos = 32 + 1 + pos;
+        let first = 0xC0 + pos / 64;
+        let second = 0x80 + (pos & 63);
+        vec![first as u8, second as u8]
+    };
+
+    if utf8 && point.column.0 >= 95 {
+        msg.extend(mouse_pos_encode(point.column.0));
+    } else {
+        msg.push(32 + 1 + point.column.0 as u8);
+    }
+
+    if utf8 && point.line.0 >= 95 {
+        msg.extend(mouse_pos_encode(point.line.0 as usize));
+    } else {
+        msg.push(32 + 1 + point.line.0 as u8);
+    }
+
+    Some(msg)
+}
+
+fn sgr_mouse_report(point: AlacPoint, button: u8, pressed: bool) -> String {
+    let suffix = if pressed { 'M' } else { 'm' };
+    format!(
+        "\x1b[<{};{};{}{}",
+        button,
+        point.column.0 + 1,
+        point.line.0 + 1,
+        suffix,
+    )
+}
+
+fn alt_scroll_bytes(lines: i32) -> Vec<u8> {
+    let cmd = if lines > 0 { b'A' } else { b'B' };
+    let mut bytes = Vec::with_capacity(lines.unsigned_abs() as usize * 3);
+    for _ in 0..lines.abs() {
+        bytes.push(0x1b);
+        bytes.push(b'O');
+        bytes.push(cmd);
+    }
+    bytes
 }
 
 /// Split `foo.rs:12:34` into (`foo.rs`, Some((12, Some(34)))).
