@@ -288,9 +288,6 @@ struct AppState {
     sidebar_filter_input: Entity<text_input::TextInput>,
     /// Current sidebar filter text (lowercased for matching).
     sidebar_filter: String,
-    /// Frame counter for the animated spinner icon on Running sessions.
-    /// Incremented by a 120ms recurring timer.
-    spinner_frame: usize,
     /// Right-click context menu on a session row: (cursor, click position).
     session_context_menu: Option<(SessionCursor, Point<Pixels>)>,
     /// "Edit session" modal for renaming/commenting an existing session.
@@ -304,8 +301,6 @@ struct AppState {
 const SIDEBAR_MIN_WIDTH: f32 = 160.0;
 const DRAWER_MIN_HEIGHT: f32 = 100.0;
 const RIGHT_SIDEBAR_MIN_WIDTH: f32 = 160.0;
-/// Braille-pattern spinner frames for Running session status.
-const SPINNER_FRAMES: &[&str] = &["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"];
 
 impl AppState {
     /// Get the currently active session, if any.
@@ -3678,42 +3673,25 @@ fn main() {
                     })
                     .detach();
 
-                    // Spinner + status-text tick timer. Runs every 120ms to
-                    // animate the Braille spinner on Running sessions and
-                    // update each session's status_text from terminal output.
+                    // Rich Sidecar transcript tailer poll. Runs on a much
+                    // gentler cadence than the old 120ms spinner timer so
+                    // it doesn't drive full AppState re-renders that trigger
+                    // spurious terminal resizes and destroy scrollback.
                     cx.spawn(async move |this, cx| {
                         loop {
                             cx.background_executor()
-                                .timer(std::time::Duration::from_millis(120))
+                                .timer(std::time::Duration::from_millis(500))
                                 .await;
 
                             if this
                                 .update(cx, |state: &mut AppState, cx| {
-                                    state.spinner_frame = state.spinner_frame.wrapping_add(1);
-
-                                    // Update status_text from terminal output.
-                                    let mut any_running = false;
-                                    for project in &mut state.projects {
-                                        for session in &mut project.sessions {
-                                            if session.status == SessionStatus::Running {
-                                                any_running = true;
-                                            }
-                                            if let Some(tv) = &session.terminal_view {
-                                                session.status_text = tv.read(cx).last_output_line();
-                                            }
-                                        }
-                                    }
-
-                                    // Drain the Rich Sidecar transcript tailer (if
-                                    // built) and feed events into the RichView.
-                                    // Runs regardless of which main tab is visible
-                                    // so the document stays current when the user
-                                    // flips to Transcript.
+                                    // Drain the transcript tailer (if built) and
+                                    // feed events into the RichView. Runs
+                                    // regardless of which main tab is visible so
+                                    // the document stays current when the user
+                                    // flips to Transcript. No cx.notify() here —
+                                    // the RichView entity updates itself.
                                     state.poll_transcript_tailer(cx);
-
-                                    if any_running {
-                                        cx.notify();
-                                    }
                                 })
                                 .is_err()
                             {
@@ -3722,7 +3700,6 @@ fn main() {
                         }
                     })
                     .detach();
-
                     // App-level handlers for menu-dispatched actions. Registering
                     // at App scope (not on the element tree) guarantees the
                     // menu items stay enabled regardless of focus state.
@@ -3958,7 +3935,6 @@ fn main() {
                         edit_session_modal: None,
                         sidebar_filter_input,
                         sidebar_filter: String::new(),
-                        spinner_frame: 0,
                     }
                 })
             },
@@ -5340,24 +5316,18 @@ impl Render for AppState {
                     .child({
                         let session_pinned = session.pinned;
                         let session_comment = session.comment.clone();
-                        let session_status_text = session.status_text.clone();
                         let mut label_row = div()
                             .flex()
                             .flex_row()
                             .gap(px(6.0))
                             .items_center()
                             .overflow_hidden()
-                            .child({
-                                let icon_text = if session.status == SessionStatus::Running {
-                                    SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()].to_string()
-                                } else {
-                                    status_icon.to_string()
-                                };
+                            .child(
                                 div()
                                     .text_size(px(10.0))
                                     .text_color(rgb(status_color))
-                                    .child(icon_text)
-                            });
+                                    .child(status_icon.to_string())
+                            );
                         if session_pinned {
                             label_row = label_row.child(
                                 div()
@@ -5405,18 +5375,6 @@ impl Render for AppState {
                                     .text_ellipsis()
                                     .whitespace_nowrap()
                                     .child(comment),
-                            );
-                        }
-                        if let Some(status_text) = session_status_text {
-                            info_col = info_col.child(
-                                div()
-                                    .pl(px(16.0))
-                                    .text_size(px(10.0))
-                                    .text_color(rgb(0x6c7086))
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(status_text),
                             );
                         }
                         info_col

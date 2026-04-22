@@ -117,9 +117,6 @@ pub struct Session {
     pub pinned: bool,
     /// Optional user comment displayed as a subtitle on the session row.
     pub comment: Option<String>,
-    /// Ephemeral: last meaningful output line from the terminal, updated
-    /// by the spinner tick timer. Not persisted.
-    pub status_text: Option<String>,
 }
 
 impl Session {
@@ -150,7 +147,6 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
-            status_text: None,
         }
     }
 
@@ -188,7 +184,6 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
-            status_text: None,
         }
     }
 
