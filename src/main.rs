@@ -8,17 +8,20 @@ mod git;
 mod hooks;
 mod new_session_modal;
 mod project;
+mod rich;
 mod scratch_pad;
 mod session;
 mod settings;
 mod settings_window;
 mod state;
+mod stream;
 mod text_input;
+mod transcript;
 mod trust;
 
 use gpui::*;
 use project::Project;
-actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction]);
+actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction]);
 use session::{DrawerTab, Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
@@ -52,6 +55,10 @@ enum MainTab {
     Claude,
     Editor,
     Browser,
+    /// Read-only structured view of the active session's Claude Code
+    /// transcript — rendered by `rich::RichView`, fed by `transcript::
+    /// TranscriptTailer`. Toggled with ⌘⇧R.
+    Transcript,
 }
 
 /// Check whether Claude Code has on-disk history for a given session ID.
@@ -249,6 +256,17 @@ struct AppState {
     pull_warning: Option<String>,
     /// Which view the center column is currently showing.
     main_tab: MainTab,
+    /// Rich Sidecar state. Lazily created the first time the Transcript
+    /// tab is rendered. Rebuilt when the active session changes (the
+    /// tailer is scoped to one session's JSONL).
+    rich_view: Option<Entity<rich::RichView>>,
+    /// Tails `~/.claude/projects/<dashed-cwd>/<session>.jsonl` for the
+    /// active session. `None` until the first Transcript-tab render.
+    transcript_tailer: Option<transcript::TranscriptTailer>,
+    /// The allele session cursor the current `rich_view`/`transcript_tailer`
+    /// was built for. Used to detect when the active session has changed
+    /// and the sidecar needs to be rebuilt from a fresh JSONL.
+    rich_view_cursor: Option<SessionCursor>,
     /// File path currently selected in the Editor tab's file tree.
     editor_selected_path: Option<PathBuf>,
     /// Directories expanded in the Editor tab's file tree.
@@ -551,7 +569,8 @@ impl AppState {
             .items_center()
             .gap(px(4.0))
             .child(tab("main-tab-claude", "Claude", MainTab::Claude))
-            .child(tab("main-tab-editor", "Editor", MainTab::Editor));
+            .child(tab("main-tab-editor", "Editor", MainTab::Editor))
+            .child(tab("main-tab-transcript", "Transcript", MainTab::Transcript));
         if self.browser_tab_available() {
             strip = strip.child(tab("main-tab-browser", "Browser", MainTab::Browser));
         }
@@ -656,6 +675,117 @@ impl AppState {
         }
 
         root
+    }
+
+    // ── Rich Sidecar (Transcript tab) ────────────────────────────────
+    //
+    // A read-only structured view of the active session's Claude Code
+    // transcript. Tails `~/.claude/projects/<dashed-cwd>/<session>.jsonl`
+    // (+ subagent sidechains) and renders via `rich::RichView`. Prompts
+    // composed here are routed into the active PTY via `scratch_pad_send`
+    // — identical path to the Scratch Pad overlay, never any programmatic
+    // drive of `claude`.
+
+    /// Called on every spinner tick. No-op when no tailer has been built
+    /// yet (user hasn't opened the Transcript tab on this session).
+    fn poll_transcript_tailer(&mut self, cx: &mut Context<Self>) {
+        let Some(tailer) = self.transcript_tailer.as_mut() else { return };
+        let events = tailer.poll();
+        if events.is_empty() { return; }
+        let Some(view) = self.rich_view.as_ref().cloned() else { return };
+        view.update(cx, |rv, cx| {
+            for ev in events {
+                match ev {
+                    transcript::TranscriptEvent::Rich(event) => rv.apply_event(event, cx),
+                    transcript::TranscriptEvent::UserPrompt(text) => rv.push_user_prompt(text, cx),
+                }
+            }
+        });
+    }
+
+    /// Build the RichView + TranscriptTailer for the active session,
+    /// rebuilding when the active session changes. Returns the entity
+    /// to render, or `None` when there is no active session.
+    fn ensure_rich_view(&mut self, cx: &mut Context<Self>) -> Option<Entity<rich::RichView>> {
+        let active = self.active?;
+        let changed = self.rich_view_cursor != Some(active);
+        if !changed && self.rich_view.is_some() {
+            return self.rich_view.clone();
+        }
+
+        let (allele_session_id, cwd) = {
+            let project = self.projects.get(active.project_idx)?;
+            let session = project.sessions.get(active.session_idx)?;
+            let cwd = session
+                .clone_path
+                .clone()
+                .unwrap_or_else(|| project.source_path.clone());
+            (session.id.clone(), cwd)
+        };
+        let font_size = self.user_settings.font_size;
+
+        let view = cx.new(|cx| rich::RichView::new(cx, allele_session_id.clone(), font_size));
+
+        // ComposeBar submits bubble up as RichViewEvent::Submit. Route
+        // them into the active PTY via the same bracketed-paste path
+        // the Scratch Pad uses. Nothing here spawns or talks to the
+        // `claude` binary directly.
+        cx.subscribe(&view, |this: &mut Self, _v, event: &rich::RichViewEvent, cx| {
+            match event {
+                rich::RichViewEvent::Submit { text, attachments } => {
+                    let paths: Vec<PathBuf> =
+                        attachments.iter().map(|a| a.path.clone()).collect();
+                    this.scratch_pad_send(text.clone(), paths, cx);
+                }
+            }
+        })
+        .detach();
+
+        // Scope the tailer to the active session's JSONL. We point at
+        // the ANTICIPATED path (derived from session id + dashed cwd)
+        // even if the file doesn't exist yet — `TailedFile::read_new`
+        // silently no-ops on a missing file and picks up content from
+        // byte 0 the moment Claude Code writes it. This means opening
+        // the Transcript tab on a brand-new session shows the internal
+        // empty state ("Send a message to start.") and auto-populates
+        // as soon as the first turn lands on disk, without any re-wire.
+        self.transcript_tailer = transcript::expected_session_jsonl(&cwd, &allele_session_id)
+            .map(transcript::TranscriptTailer::new);
+        self.rich_view = Some(view);
+        self.rich_view_cursor = Some(active);
+        self.rich_view.clone()
+    }
+
+    /// Render the Transcript tab. Shows a "no active session" placeholder
+    /// when nothing is selected; otherwise renders the RichView, which
+    /// handles its own empty state internally (e.g. "Send a message to
+    /// start.") and auto-populates as soon as the tailer sees the first
+    /// appended line.
+    fn render_transcript_view(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let Some(view) = self.ensure_rich_view(cx) else {
+            return div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(8.0))
+                .bg(rgb(0x1e1e2e))
+                .child(
+                    div()
+                        .text_size(px(13.0))
+                        .text_color(rgb(0xcdd6f4))
+                        .child("No active session"),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x6c7086))
+                        .child("Open a project and start a session to see its transcript here."),
+                )
+                .into_any_element();
+        };
+        view.into_any_element()
     }
 
     /// Compute the global-screen rect where Chrome should sit when the
@@ -3171,6 +3301,7 @@ fn install_app_menu(cx: &mut App) {
         KeyBinding::new("cmd-j", ToggleDrawerAction, None),
         KeyBinding::new("cmd-,", OpenSettings, None),
         KeyBinding::new("cmd-k", OpenScratchPadAction, None),
+        KeyBinding::new("cmd-shift-r", ToggleTranscriptTabAction, None),
     ]);
 
     // Reusable text-input bindings (cursor / selection / paste / arrow
@@ -3573,6 +3704,13 @@ fn main() {
                                         }
                                     }
 
+                                    // Drain the Rich Sidecar transcript tailer (if
+                                    // built) and feed events into the RichView.
+                                    // Runs regardless of which main tab is visible
+                                    // so the document stays current when the user
+                                    // flips to Transcript.
+                                    state.poll_transcript_tailer(cx);
+
                                     if any_running {
                                         cx.notify();
                                     }
@@ -3650,6 +3788,20 @@ fn main() {
                             handle
                                 .update(cx, |this: &mut AppState, cx| {
                                     this.pending_action = Some(PendingAction::OpenScratchPad);
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    });
+                    App::on_action::<ToggleTranscriptTabAction>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            handle
+                                .update(cx, |this: &mut AppState, cx| {
+                                    this.main_tab = match this.main_tab {
+                                        MainTab::Transcript => MainTab::Claude,
+                                        _ => MainTab::Transcript,
+                                    };
                                     cx.notify();
                                 })
                                 .ok();
@@ -3791,6 +3943,9 @@ fn main() {
                         settings_window: None,
                         pull_warning: None,
                         main_tab: MainTab::Claude,
+                        rich_view: None,
+                        transcript_tailer: None,
+                        rich_view_cursor: None,
                         editor_selected_path: None,
                         editor_expanded_dirs: HashSet::new(),
                         editor_preview: None,
@@ -5776,6 +5931,9 @@ impl Render for AppState {
                         }
                         MainTab::Browser => {
                             main_area = main_area.child(self.render_browser_placeholder(cx));
+                        }
+                        MainTab::Transcript => {
+                            main_area = main_area.child(self.render_transcript_view(cx));
                         }
                     }
 
