@@ -7,17 +7,17 @@
 //! composition, and paste through the standard text-input pathway.
 //!
 //! Consumers wrap the input in their own styling div and subscribe to
-//! `TextInputEvent` for change/submit notifications. Key bindings for
-//! Backspace/Delete/Arrows/Home/End/Cmd+A/Cmd+C/Cmd+V/Cmd+X are
-//! registered globally by `bind_keys` and gated by the `"TextInput"`
-//! key context — they fire only when a TextInput is focused.
+//! `TextInputEvent` for change/submit notifications. Key bindings are
+//! declared in `assets/default-keymap.json` under the `"TextInput"`
+//! context and loaded by `src/keymap.rs` — this file only declares the
+//! action types and the `on_action` listener wiring.
 
 use std::ops::Range;
 
 use gpui::{
     actions, fill, hsla, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds,
     ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding, LayoutId, MouseButton,
+    EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, ShapedLine, SharedString,
     Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
@@ -43,29 +43,11 @@ actions!(
     ]
 );
 
+/// Key context gating text-input bindings. Must match the `"context"`
+/// value in `assets/default-keymap.json`. The render fn applies it via
+/// `div().key_context(KEY_CONTEXT)` so bindings fire only when a
+/// TextInput is focused.
 const KEY_CONTEXT: &str = "TextInput";
-
-/// Register the text-input key bindings on the global app. Call once
-/// during app startup. Bindings are scoped to the `TextInput` key
-/// context so they only fire when an input is focused.
-pub fn bind_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("backspace", Backspace, Some(KEY_CONTEXT)),
-        KeyBinding::new("delete", Delete, Some(KEY_CONTEXT)),
-        KeyBinding::new("left", Left, Some(KEY_CONTEXT)),
-        KeyBinding::new("right", Right, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-left", SelectLeft, Some(KEY_CONTEXT)),
-        KeyBinding::new("shift-right", SelectRight, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-a", SelectAll, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-v", Paste, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-c", Copy, Some(KEY_CONTEXT)),
-        KeyBinding::new("cmd-x", Cut, Some(KEY_CONTEXT)),
-        KeyBinding::new("home", Home, Some(KEY_CONTEXT)),
-        KeyBinding::new("end", End, Some(KEY_CONTEXT)),
-        KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some(KEY_CONTEXT)),
-        KeyBinding::new("enter", Submit, Some(KEY_CONTEXT)),
-    ]);
-}
 
 #[derive(Debug, Clone)]
 pub enum TextInputEvent {
