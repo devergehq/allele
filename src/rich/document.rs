@@ -175,6 +175,22 @@ impl RichDocument {
         self.blocks.len()
     }
 
+    /// Look up a block by its stable id.
+    ///
+    /// `BlockId` is a monotonic counter assigned at creation; it is NOT a
+    /// vec index. Any `remove()` on `self.blocks` (e.g. clearing the
+    /// awaiting-indicator) shifts indices but leaves ids untouched, so
+    /// `blocks.get(id)` returns the wrong block. Always route id-based
+    /// lookups through these helpers.
+    fn index_of(&self, id: BlockId) -> Option<usize> {
+        self.blocks.iter().position(|b| b.id == id)
+    }
+
+    fn block_mut_by_id(&mut self, id: BlockId) -> Option<&mut Block> {
+        let idx = self.index_of(id)?;
+        self.blocks.get_mut(idx)
+    }
+
     /// Apply a RichEvent to the document, mutating in place.
     /// Returns the index of any newly created block (for scroll-to-bottom).
     pub fn apply_event(&mut self, event: RichEvent) -> Option<BlockId> {
@@ -197,7 +213,7 @@ impl RichDocument {
             RichEvent::TextDelta { text, parent_agent_id } => {
                 // Append to current streaming text block, or create one
                 if let Some(block_id) = self.current_text_block {
-                    if let Some(block) = self.blocks.get_mut(block_id) {
+                    if let Some(block) = self.block_mut_by_id(block_id) {
                         if let BlockKind::Text { content, .. } = &mut block.kind {
                             content.push_str(&text);
                             block.cached_height = None; // invalidate
@@ -282,7 +298,11 @@ impl RichDocument {
                         result: None,
                     },
                     parent_agent_id,
-                    collapsed: false,
+                    // Collapsed by default — header shows path + line deltas;
+                    // click expands to the old/new body. A noisy edit turn
+                    // should look like a short list of file names, not a
+                    // wall of coloured lines.
+                    collapsed: true,
                     cached_height: None,
                 });
                 self.tool_use_index.insert(tool_use_id, id);
@@ -292,7 +312,7 @@ impl RichDocument {
             RichEvent::ToolResult { tool_use_id, content, is_error, .. } => {
                 // Attach result to existing tool call block
                 if let Some(&block_id) = self.tool_use_index.get(&tool_use_id) {
-                    if let Some(block) = self.blocks.get_mut(block_id) {
+                    if let Some(block) = self.block_mut_by_id(block_id) {
                         let result = ToolCallResult { content, is_error };
                         match &mut block.kind {
                             BlockKind::ToolCall { result: r, .. } => *r = Some(result),
@@ -329,7 +349,7 @@ impl RichDocument {
 
     /// Toggle collapsed state of a block.
     pub fn toggle_collapsed(&mut self, block_id: BlockId) {
-        if let Some(block) = self.blocks.get_mut(block_id) {
+        if let Some(block) = self.block_mut_by_id(block_id) {
             block.collapsed = !block.collapsed;
             block.cached_height = None;
         }
@@ -354,7 +374,7 @@ impl RichDocument {
 
     fn close_text_stream(&mut self) {
         if let Some(block_id) = self.current_text_block.take() {
-            if let Some(block) = self.blocks.get_mut(block_id) {
+            if let Some(block) = self.block_mut_by_id(block_id) {
                 if let BlockKind::Text { streaming, .. } = &mut block.kind {
                     *streaming = false;
                 }
@@ -430,7 +450,7 @@ fn summarise_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
 }
 
 /// Shorten a file path to just the last 2 components.
-fn short_path(path: &str) -> String {
+pub fn short_path(path: &str) -> String {
     let parts: Vec<&str> = path.rsplit('/').take(2).collect();
     if parts.len() == 2 {
         format!("{}/{}", parts[1], parts[0])

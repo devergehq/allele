@@ -17,7 +17,7 @@
 use gpui::*;
 
 use super::compose_bar::{ComposeBar, ComposeBarEvent};
-use super::document::{Block, BlockKind, RichDocument};
+use super::document::{short_path, Block, BlockKind, RichDocument};
 use crate::stream::RichEvent;
 
 // ── Catppuccin Mocha palette (matching terminal) ──────────────────
@@ -309,7 +309,12 @@ fn render_block(block: &Block, font_size: f32, cx: &mut Context<RichView>) -> Di
         px(0.0)
     };
 
-    let mut wrapper = div().pl(indent).mb(px(4.0));
+    // `w_full()` + `min_w_0()` are load-bearing: without them the list's
+    // `Auto` sizing lets each block grow to the intrinsic width of its
+    // widest text run (long diff lines, stringified JSON, etc.) and the
+    // viewport has no horizontal scroll — so text runs off the page.
+    // Constrained here, long text wraps at the list's own width.
+    let mut wrapper = div().w_full().min_w_0().pl(indent).mb(px(4.0));
 
     let block_id = block.id;
 
@@ -392,11 +397,33 @@ fn render_block(block: &Block, font_size: f32, cx: &mut Context<RichView>) -> Di
 // ── Text block ────────────────────────────────────────────────────
 
 fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
-    // Delegate to the markdown renderer. It handles body colour (streaming →
-    // SUBTEXT1, final → TEXT) internally via the TextRun colours.
+    // Claude's prose IS the main content of the transcript — tool calls
+    // and thinking are supporting context. Visually: a speaker pill on
+    // the left mirroring the "You" user-prompt pattern, and generous
+    // vertical rhythm to separate it from surrounding cards.
     div()
-        .py(px(4.0))
-        .child(super::markdown::render(content, streaming, font_size))
+        .w_full()
+        .min_w_0()
+        .my(px(8.0))
+        .px(px(10.0))
+        .py(px(6.0))
+        .flex()
+        .gap(px(8.0))
+        .items_start()
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(hex(LAVENDER))
+                .text_size(px(font_size - 1.0))
+                .font_weight(FontWeight::BOLD)
+                .child("Claude"),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .child(super::markdown::render(content, streaming, font_size)),
+        )
 }
 
 // ── Thinking block (collapsed by default, subtle) ─────────────────
@@ -440,6 +467,8 @@ fn render_thinking_block(
         );
 
     let mut block = div()
+        .w_full()
+        .min_w_0()
         .py(px(2.0))
         .pl(px(8.0))
         .border_l_2()
@@ -449,6 +478,8 @@ fn render_thinking_block(
     if !collapsed {
         block = block.child(
             div()
+                .w_full()
+                .min_w_0()
                 .mt(px(4.0))
                 .text_color(hex_alpha(OVERLAY0, 0.7))
                 .text_size(px(font_size - 1.0))
@@ -478,6 +509,8 @@ fn render_tool_call(
     };
 
     let mut card = div()
+        .w_full()
+        .min_w_0()
         .px(px(10.0))
         .py(px(6.0))
         .rounded(px(4.0))
@@ -489,18 +522,22 @@ fn render_tool_call(
     card = card.child(
         div()
             .id(ElementId::Name(format!("toolcall-header-{block_id}").into()))
+            .w_full()
+            .min_w_0()
             .flex()
             .gap(px(8.0))
             .items_center()
             .cursor(gpui::CursorStyle::PointingHand)
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_color(hex(SUBTEXT0))
                     .text_size(px(font_size - 2.0))
                     .child(chevron(collapsed)),
             )
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_color(hex(BLUE))
                     .text_size(px(font_size - 1.0))
                     .font_weight(FontWeight::BOLD)
@@ -508,6 +545,8 @@ fn render_tool_call(
             )
             .child(
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .text_color(hex(SUBTEXT0))
                     .text_size(px(font_size - 1.0))
                     .child(input_summary.to_string()),
@@ -521,22 +560,34 @@ fn render_tool_call(
             ),
     );
 
-    // Expanded: pretty-printed input JSON. Falls back to Debug repr on
-    // serialisation failure so we never panic on malformed input.
+    // Expanded: pretty-printed input JSON. Each line becomes its own
+    // child so long values wrap at the card's width instead of the
+    // whole blob being rendered as one un-wrappable run. Falls back to
+    // Debug repr on serialisation failure so we never panic on
+    // malformed input.
     if !collapsed {
         let pretty = serde_json::to_string_pretty(input_full)
             .unwrap_or_else(|_| format!("{input_full:?}"));
-        card = card.child(
-            div()
-                .mt(px(6.0))
-                .px(px(8.0))
-                .py(px(4.0))
-                .rounded(px(3.0))
-                .bg(hex_alpha(SURFACE1, 0.4))
-                .text_color(hex(SUBTEXT1))
-                .text_size(px(font_size - 2.0))
-                .child(pretty),
-        );
+        let mut json_block = div()
+            .w_full()
+            .min_w_0()
+            .mt(px(6.0))
+            .px(px(8.0))
+            .py(px(4.0))
+            .rounded(px(3.0))
+            .bg(hex_alpha(SURFACE1, 0.4))
+            .text_color(hex(SUBTEXT1))
+            .text_size(px(font_size - 2.0))
+            .font_family("JetBrains Mono");
+        for line in pretty.lines() {
+            json_block = json_block.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .child(line.to_string()),
+            );
+        }
+        card = card.child(json_block);
     }
 
     // Result (if available and is error) — always shown regardless of
@@ -550,6 +601,8 @@ fn render_tool_call(
             };
             card = card.child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .mt(px(4.0))
                     .text_color(hex(RED))
                     .text_size(px(font_size - 1.0))
@@ -575,33 +628,75 @@ fn render_diff(
 ) -> Div {
     let code_size = font_size - 1.0;
 
+    // Line-delta summary for the collapsed header. Newline count is a
+    // good-enough proxy for git-style +/- since Edit replaces a chunk;
+    // it lets a long edit turn read as a tidy list instead of a wall.
+    let removed = old_string.lines().count();
+    let added = new_string.lines().count();
+
     let mut diff = div()
+        .w_full()
+        .min_w_0()
         .rounded(px(4.0))
         .bg(hex_alpha(SURFACE0, 0.4))
         .overflow_hidden();
 
     // File path header (clickable — toggles collapsed state).
+    // When collapsed, the header IS the whole card: chevron, "Edit"
+    // verb, shortened path, then line-delta pills. When expanded the
+    // before/after body follows below.
+    let short = short_path(file_path);
     diff = diff.child(
         div()
             .id(ElementId::Name(format!("diff-header-{block_id}").into()))
+            .w_full()
+            .min_w_0()
             .flex()
             .items_center()
-            .gap(px(6.0))
+            .gap(px(8.0))
             .px(px(10.0))
             .py(px(4.0))
             .bg(hex_alpha(SURFACE1, 0.6))
             .cursor(gpui::CursorStyle::PointingHand)
             .child(
                 div()
+                    .flex_shrink_0()
                     .text_color(hex(SUBTEXT0))
                     .text_size(px(code_size - 1.0))
                     .child(chevron(collapsed)),
             )
             .child(
                 div()
+                    .flex_shrink_0()
+                    .text_color(hex(PEACH))
+                    .text_size(px(code_size))
+                    .font_weight(FontWeight::BOLD)
+                    .child("Edit"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
                     .text_color(hex(SUBTEXT1))
                     .text_size(px(code_size))
-                    .child(file_path.to_string()),
+                    .font_family("JetBrains Mono")
+                    .child(short),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(hex(GREEN))
+                    .text_size(px(code_size - 1.0))
+                    .font_family("JetBrains Mono")
+                    .child(format!("+{added}")),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(hex(RED))
+                    .text_size(px(code_size - 1.0))
+                    .font_family("JetBrains Mono")
+                    .child(format!("−{removed}")),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -618,10 +713,14 @@ fn render_diff(
         return diff;
     }
 
-    // Old lines (red)
+    // Old lines (red). `flex_1().min_w_0()` on the line text lets it
+    // wrap at the card width instead of pushing the row past the
+    // viewport. Monospace + ligatures-off matches the terminal feel.
     for line in old_string.lines() {
         diff = diff.child(
             div()
+                .w_full()
+                .min_w_0()
                 .px(px(10.0))
                 .py(px(1.0))
                 .bg(hex_alpha(RED, 0.1))
@@ -629,14 +728,19 @@ fn render_diff(
                 .gap(px(6.0))
                 .child(
                     div()
+                        .flex_shrink_0()
                         .text_color(hex(RED))
                         .text_size(px(code_size))
+                        .font_family("JetBrains Mono")
                         .child("-"),
                 )
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
                         .text_color(hex_alpha(RED, 0.8))
                         .text_size(px(code_size))
+                        .font_family("JetBrains Mono")
                         .child(line.to_string()),
                 ),
         );
@@ -646,6 +750,8 @@ fn render_diff(
     for line in new_string.lines() {
         diff = diff.child(
             div()
+                .w_full()
+                .min_w_0()
                 .px(px(10.0))
                 .py(px(1.0))
                 .bg(hex_alpha(GREEN, 0.1))
@@ -653,14 +759,19 @@ fn render_diff(
                 .gap(px(6.0))
                 .child(
                     div()
+                        .flex_shrink_0()
                         .text_color(hex(GREEN))
                         .text_size(px(code_size))
+                        .font_family("JetBrains Mono")
                         .child("+"),
                 )
                 .child(
                     div()
+                        .flex_1()
+                        .min_w_0()
                         .text_color(hex_alpha(GREEN, 0.8))
                         .text_size(px(code_size))
+                        .font_family("JetBrains Mono")
                         .child(line.to_string()),
                 ),
         );
@@ -692,21 +803,27 @@ fn render_session_end(
     // invocation is one turn, and the user can keep sending follow-ups.
     let label = if is_error { "Turn failed" } else { "Turn" };
     let mut block = div()
+        .w_full()
+        .min_w_0()
         .mt(px(4.0))
         .mb(px(4.0))
         .px(px(6.0))
         .child(
             div()
+                .w_full()
+                .min_w_0()
                 .flex()
                 .gap(px(10.0))
                 .child(
                     div()
+                        .flex_shrink_0()
                         .text_color(color)
                         .text_size(px(font_size - 2.0))
                         .child(label),
                 )
                 .child(
                     div()
+                        .flex_shrink_0()
                         .text_color(hex_alpha(SUBTEXT0, 0.7))
                         .text_size(px(font_size - 2.0))
                         .child(format!("{duration} · ${cost_usd:.4}")),
@@ -723,6 +840,8 @@ fn render_session_end(
             };
             block = block.child(
                 div()
+                    .w_full()
+                    .min_w_0()
                     .mt(px(6.0))
                     .px(px(8.0))
                     .py(px(4.0))
@@ -730,6 +849,8 @@ fn render_session_end(
                     .bg(hex_alpha(SURFACE0, 0.4))
                     .child(
                         div()
+                            .w_full()
+                            .min_w_0()
                             .text_color(if is_error { hex(RED) } else { hex(SUBTEXT0) })
                             .text_size(px(font_size - 1.0))
                             .child(preview),
@@ -745,6 +866,8 @@ fn render_session_end(
 
 fn render_user_prompt(content: &str, font_size: f32) -> Div {
     div()
+        .w_full()
+        .min_w_0()
         .my(px(6.0))
         .px(px(10.0))
         .py(px(6.0))
@@ -754,11 +877,14 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
         .border_color(hex_alpha(BLUE, 0.5))
         .child(
             div()
+                .w_full()
+                .min_w_0()
                 .flex()
                 .gap(px(8.0))
                 .items_start()
                 .child(
                     div()
+                        .flex_shrink_0()
                         .text_color(hex(BLUE))
                         .text_size(px(font_size - 1.0))
                         .font_weight(FontWeight::BOLD)
@@ -767,6 +893,7 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .text_color(hex(TEXT))
                         .text_size(px(font_size))
                         .child(content.to_string()),

@@ -718,7 +718,12 @@ impl AppState {
                 .unwrap_or_else(|| project.source_path.clone());
             (session.id.clone(), cwd)
         };
-        let font_size = self.user_settings.font_size;
+        // Transcript density differs from terminal density — the
+        // terminal is tuned for cramming rows, whereas the Rich view is
+        // reading prose with nested cards. Bias the transcript font up
+        // relative to the terminal setting, with a 15pt floor so it
+        // stays legible even when the user has shrunk the terminal.
+        let font_size = (self.user_settings.font_size + 2.0).max(15.0);
 
         let view = cx.new(|cx| rich::RichView::new(cx, allele_session_id.clone(), font_size));
 
