@@ -1,5 +1,6 @@
 mod actions;
 mod agents;
+mod app_state;
 mod browser;
 mod terminal;
 mod sidebar;
@@ -22,6 +23,7 @@ mod transcript;
 mod trust;
 
 use actions::{PendingAction, SessionCursor};
+use app_state::{AppState, MainTab, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MIN_WIDTH};
 use gpui::*;
 use project::Project;
 actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction]);
@@ -52,18 +54,6 @@ impl Render for SimpleTooltip {
     }
 }
 
-/// Which view is shown in the main (center) column.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum MainTab {
-    Claude,
-    Editor,
-    Browser,
-    /// Read-only structured view of the active session's Claude Code
-    /// transcript — rendered by `rich::RichView`, fed by `transcript::
-    /// TranscriptTailer`. Toggled with ⌘⇧R.
-    Transcript,
-}
-
 /// Check whether Claude Code has on-disk history for a given session ID.
 ///
 /// Claude stores each conversation at `~/.claude/projects/<slug>/<id>.jsonl`,
@@ -87,99 +77,6 @@ fn claude_session_history_exists(session_id: &str) -> bool {
     }
     false
 }
-
-struct AppState {
-    projects: Vec<Project>,
-    active: Option<SessionCursor>,
-    pending_action: Option<PendingAction>,
-    // Sidebar state
-    sidebar_visible: bool,
-    sidebar_width: f32,
-    sidebar_resizing: bool,
-    /// Inline confirmation gate for the Discard action. When `Some(cursor)`
-    /// the sidebar row at that cursor shows a confirm/cancel prompt instead
-    /// of the usual buttons.
-    confirming_discard: Option<SessionCursor>,
-    /// Project index awaiting dirty-state confirmation before session create.
-    confirming_dirty_session: Option<usize>,
-    /// Absolute path to the Allele hooks.json, passed to claude via
-    /// `--settings <path>` at every spawn. `None` if install_if_missing
-    /// failed — in that case hooks are silently disabled and the app still
-    /// functions normally.
-    hooks_settings_path: Option<PathBuf>,
-    /// Current user settings (sound/notification preferences).
-    user_settings: Settings,
-    // Drawer terminal state (visibility is per-session on Session struct)
-    drawer_height: f32,
-    drawer_resizing: bool,
-    /// Active inline tab rename: (session cursor, tab index, current buffer).
-    /// When Some, the tab strip renders that tab as an editable label.
-    drawer_rename: Option<(SessionCursor, usize, String)>,
-    /// Focus handle for the inline rename input. Created lazily when rename
-    /// mode first activates in a given AppState instance.
-    drawer_rename_focus: Option<FocusHandle>,
-    // Right sidebar state
-    right_sidebar_visible: bool,
-    right_sidebar_width: f32,
-    right_sidebar_resizing: bool,
-    /// When true, a quit confirmation banner is shown because running sessions exist.
-    confirming_quit: bool,
-    /// Project index whose settings panel is currently open in the sidebar.
-    editing_project_settings: Option<usize>,
-    /// Live handle to an open Settings window. Keeps ⌘, from spawning
-    /// duplicates — when set, the action re-activates the existing window
-    /// instead of opening a new one. Cleared when the window closes.
-    settings_window: Option<WindowHandle<settings_window::SettingsWindowState>>,
-    /// Transient warning shown when `git pull` on the source root fails
-    /// before session creation. Auto-dismissed after a few seconds.
-    pull_warning: Option<String>,
-    /// Which view the center column is currently showing.
-    main_tab: MainTab,
-    /// Rich Sidecar state. Lazily created the first time the Transcript
-    /// tab is rendered. Rebuilt when the active session changes (the
-    /// tailer is scoped to one session's JSONL).
-    rich_view: Option<Entity<rich::RichView>>,
-    /// Tails `~/.claude/projects/<dashed-cwd>/<session>.jsonl` for the
-    /// active session. `None` until the first Transcript-tab render.
-    transcript_tailer: Option<transcript::TranscriptTailer>,
-    /// The allele session cursor the current `rich_view`/`transcript_tailer`
-    /// was built for. Used to detect when the active session has changed
-    /// and the sidecar needs to be rebuilt from a fresh JSONL.
-    rich_view_cursor: Option<SessionCursor>,
-    /// File path currently selected in the Editor tab's file tree.
-    editor_selected_path: Option<PathBuf>,
-    /// Directories expanded in the Editor tab's file tree.
-    editor_expanded_dirs: HashSet<PathBuf>,
-    /// Cached (path, contents) of the currently previewed file.
-    editor_preview: Option<(PathBuf, String)>,
-    /// Right-click context menu target for the Editor file tree.
-    /// Stores (right-clicked path, window-space position of the click).
-    editor_context_menu: Option<(PathBuf, Point<Pixels>)>,
-    /// Status text for the Browser tab panel (e.g. "Chrome is not
-    /// running", "Linked to tab #…"). Updated by SyncBrowserToActiveSession
-    /// and rendered by render_browser_placeholder.
-    browser_status: String,
-    /// Scratch pad compose overlay. `Some` while the overlay is visible.
-    scratch_pad: Option<Entity<scratch_pad::ScratchPad>>,
-    /// "New session with details" modal. `Some` while the overlay is visible.
-    new_session_modal: Option<Entity<new_session_modal::NewSessionModal>>,
-    /// Sidebar search/filter input entity.
-    sidebar_filter_input: Entity<text_input::TextInput>,
-    /// Current sidebar filter text (lowercased for matching).
-    sidebar_filter: String,
-    /// Right-click context menu on a session row: (cursor, click position).
-    session_context_menu: Option<(SessionCursor, Point<Pixels>)>,
-    /// "Edit session" modal for renaming/commenting an existing session.
-    edit_session_modal: Option<Entity<new_session_modal::EditSessionModal>>,
-    /// Persistent Scratch Pad submission history across all projects.
-    /// Loaded from state.json on startup, appended on submit, written back
-    /// on every save_state. Filtered by project when the overlay opens.
-    scratch_pad_history: Vec<state::ScratchPadEntry>,
-}
-
-const SIDEBAR_MIN_WIDTH: f32 = 160.0;
-const DRAWER_MIN_HEIGHT: f32 = 100.0;
-const RIGHT_SIDEBAR_MIN_WIDTH: f32 = 160.0;
 
 impl AppState {
     /// Get the currently active session, if any.
