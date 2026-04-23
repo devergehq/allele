@@ -200,10 +200,6 @@ impl ComposeBar {
         }
     }
 
-    pub fn focus_handle(&self) -> &FocusHandle {
-        &self.focus_handle
-    }
-
     // ── Cursor / selection helpers ────────────────────────────────
 
     fn cursor_offset(&self) -> usize {
@@ -271,7 +267,6 @@ impl ComposeBar {
 
     /// Next word boundary from `offset` (Option+Right behaviour).
     fn next_word_boundary(&self, offset: usize) -> usize {
-        let mut passed_word = false;
         for (idx, word) in self.content.split_word_bound_indices() {
             let end = idx + word.len();
             if end <= offset {
@@ -279,21 +274,8 @@ impl ComposeBar {
             }
             // Is this segment a "real" word?
             let is_word = word.chars().any(|c| c.is_alphanumeric() || c == '_');
-            if is_word && idx <= offset {
-                // Currently inside a word — jump to its end.
-                passed_word = true;
-                return end;
-            }
-            if is_word && passed_word {
-                return end;
-            }
             if is_word {
-                // Skip to end of this next word.
                 return end;
-            }
-            if idx >= offset && !is_word {
-                // Whitespace after cursor — continue until we find a word.
-                continue;
             }
         }
         self.content.len()
@@ -887,8 +869,6 @@ struct PrepaintState {
     layout: MultilineLayout,
     cursor: Option<PaintQuad>,
     selection_rects: Vec<PaintQuad>,
-    /// Total height (lines × line_height).
-    total_height: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -1072,8 +1052,6 @@ impl Element for TextElement {
             }
         }
 
-        let total_height = line_height * (shaped_lines.len() as f32);
-
         PrepaintState {
             layout: MultilineLayout {
                 lines: shaped_lines,
@@ -1082,7 +1060,6 @@ impl Element for TextElement {
             },
             cursor: cursor_quad,
             selection_rects,
-            total_height,
         }
     }
 

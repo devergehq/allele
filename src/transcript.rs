@@ -262,6 +262,7 @@ impl TranscriptTailer {
         out
     }
 
+    #[allow(dead_code)]
     pub fn main_path(&self) -> &Path {
         &self.main.path
     }

@@ -25,6 +25,7 @@ pub struct Block {
 
 /// The content variants — each gets a distinct visual treatment.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum BlockKind {
     /// Streaming or complete text from the assistant.
     Text {
@@ -356,6 +357,7 @@ impl RichDocument {
     }
 
     /// Invalidate all cached heights (e.g. on resize).
+    #[allow(dead_code)]
     pub fn invalidate_heights(&mut self) {
         for block in &mut self.blocks {
             block.cached_height = None;

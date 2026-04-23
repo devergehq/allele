@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 /// Top-level discriminator. Every NDJSON line has a `type` field.
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 #[serde(tag = "type")]
 pub enum StreamLine {
     /// System events: init, hooks, plugins.
@@ -45,6 +46,7 @@ pub enum StreamLine {
 // ── System events ─────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct SystemEvent {
     pub subtype: String,
     pub session_id: Option<String>,
@@ -65,6 +67,7 @@ pub struct SystemEvent {
 // ── Assistant message ─────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct AssistantMessage {
     pub message: AssistantMessageBody,
     pub parent_tool_use_id: Option<String>,
@@ -72,6 +75,7 @@ pub struct AssistantMessage {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct AssistantMessageBody {
     pub id: Option<String>,
     pub model: Option<String>,
@@ -81,6 +85,7 @@ pub struct AssistantMessageBody {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     #[serde(rename = "text")]
@@ -109,6 +114,7 @@ pub enum ContentBlock {
 // ── User message (tool results) ───────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct UserMessage {
     pub message: UserMessageBody,
     pub parent_tool_use_id: Option<String>,
@@ -118,6 +124,7 @@ pub struct UserMessage {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct UserMessageBody {
     pub role: Option<String>,
     pub content: serde_json::Value,
@@ -131,6 +138,7 @@ pub struct StreamEventWrapper {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 #[serde(tag = "type")]
 pub enum StreamEventInner {
     #[serde(rename = "message_start")]
@@ -160,6 +168,7 @@ pub enum StreamEventInner {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 #[serde(tag = "type")]
 pub enum ContentBlockHeader {
     #[serde(rename = "text")]
@@ -173,6 +182,7 @@ pub enum ContentBlockHeader {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 #[serde(tag = "type")]
 pub enum Delta {
     #[serde(rename = "text_delta")]
@@ -190,6 +200,7 @@ pub enum Delta {
 // ── Result event ──────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct ResultEvent {
     pub subtype: Option<String>,
     pub is_error: Option<bool>,
@@ -205,6 +216,7 @@ pub struct ResultEvent {
 // ── Shared types ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
 pub struct Usage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -215,6 +227,7 @@ pub struct Usage {
 // ── Rate limit ────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct RateLimitEvent {
     pub rate_limit_info: Option<serde_json::Value>,
 }
@@ -224,6 +237,7 @@ pub struct RateLimitEvent {
 /// High-level events consumed by the GPUI rendering layer.
 /// These are the "spans" in the trace model.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum RichEvent {
     /// Session initialised — tools, model, etc.
     Init {

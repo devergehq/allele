@@ -135,6 +135,7 @@ pub fn save_image(image: &Image, session_id: &str) -> std::io::Result<Attachment
 
 /// Recursively remove the session's attachment dir. Best-effort — missing
 /// directories are not errors.
+#[allow(dead_code)]
 pub fn cleanup_session(session_id: &str) {
     if let Some(dir) = attachments_dir(session_id) {
         if dir.exists() {
@@ -149,6 +150,7 @@ pub fn cleanup_session(session_id: &str) {
 
 /// Remove any per-session attachment dir whose session_id is not in
 /// `active_session_ids`. Catches force-quit leftovers.
+#[allow(dead_code)]
 pub fn sweep_orphans(active_session_ids: &[String]) {
     let Some(root) = attachments_root() else { return; };
     let Ok(entries) = fs::read_dir(&root) else { return; };

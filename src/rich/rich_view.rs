@@ -70,7 +70,6 @@ pub struct RichView {
     focus_handle: FocusHandle,
     document: RichDocument,
     compose_bar: Entity<ComposeBar>,
-    session_id: String,
     font_size: f32,
     /// Whether the compose bar is locked because a turn is in flight.
     /// Driven externally via `set_busy` — the sidecar view itself never
@@ -119,7 +118,6 @@ impl RichView {
             focus_handle,
             document: RichDocument::new(),
             compose_bar,
-            session_id,
             font_size,
             busy: false,
             list_state,
@@ -207,27 +205,6 @@ impl RichView {
             )
     }
 
-    /// Lock / unlock the compose bar. Set to `true` when a turn is in
-    /// flight (Claude Code is still writing) and `false` once the turn
-    /// has completed. The parent derives this from its transcript-tail
-    /// observation.
-    pub fn set_busy(&mut self, busy: bool, cx: &mut Context<Self>) {
-        self.busy = busy;
-        self.compose_bar.update(cx, |bar, cx| bar.set_busy(busy, cx));
-    }
-
-    pub fn focus_handle(&self) -> &FocusHandle {
-        &self.focus_handle
-    }
-
-    /// Focus handle of the compose bar (what should receive keystrokes).
-    pub fn compose_focus_handle(&self, cx: &App) -> FocusHandle {
-        self.compose_bar.read(cx).focus_handle().clone()
-    }
-
-    pub fn session_id(&self) -> &str {
-        &self.session_id
-    }
 }
 
 impl Render for RichView {
@@ -785,7 +762,7 @@ fn render_diff(
 fn render_session_end(
     duration_ms: u64,
     cost_usd: f64,
-    num_turns: u32,
+    _num_turns: u32,
     is_error: bool,
     result_text: Option<&str>,
     font_size: f32,

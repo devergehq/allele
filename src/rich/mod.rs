@@ -24,7 +24,4 @@ mod document;
 mod markdown;
 mod rich_view;
 
-pub use attachments::Attachment;
-pub use compose_bar::{ComposeBar, ComposeBarEvent};
-pub use document::*;
 pub use rich_view::{RichView, RichViewEvent};
