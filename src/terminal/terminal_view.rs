@@ -290,13 +290,15 @@ impl TerminalView {
                                         .map(|d| d.as_millis())
                                         .unwrap_or(0),
                                 );
-                                // Reset the entire grid before sending SIGWINCH.
-                                // CC's ink re-renders the full conversation on resize —
-                                // that repaint IS the correct canonical state at the new
-                                // terminal width. clear_history() alone leaves the visible
-                                // grid intact, so the old content persists as a single
-                                // ghost copy when CC repaints on top. reset() clears both
-                                // scrollback AND visible cells, giving CC a blank canvas.
+                                // In alt-screen, reset the visible grid before SIGWINCH so
+                                // CC's repaint lands on a blank canvas. Alt-screen has no
+                                // scrollback (max_scroll_limit=0), so this loses nothing.
+                                //
+                                // In primary screen, scrollback preservation across CC's
+                                // SIGWINCH-triggered repaint is handled in the alacritty
+                                // fork: the CSI 2J handler now uses reset_region(..) only,
+                                // which clears the viewport in place without pushing into
+                                // or clearing history.
                                 if let Some(ref terminal) = this.terminal {
                                     let mut term = terminal.term.lock();
                                     let in_alt_screen = term.mode()
@@ -305,7 +307,7 @@ impl TerminalView {
                                         term.grid_mut().reset::<alacritty_terminal::vte::ansi::Color>();
                                         eprintln!("[RESIZE-DIAG] RESET grid (alt-screen, pre-SIGWINCH)");
                                     } else {
-                                        eprintln!("[RESIZE-DIAG] SKIP reset (primary screen — preserve scrollback)");
+                                        eprintln!("[RESIZE-DIAG] SKIP reset (primary screen — fork CSI 2J preserves history)");
                                     }
                                 }
                                 this.last_cols = pending_size.cols;
