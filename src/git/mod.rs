@@ -25,6 +25,8 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing::warn;
 
+use crate::errors::AlleleError;
+
 /// Build a `git` command with the standard Allele environment — inline
 /// identity flags so commits work even when the user has no global git
 /// identity configured, `GIT_CONFIG_NOSYSTEM=1` so `/etc/gitconfig` is
@@ -176,13 +178,13 @@ pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
 /// system gitconfig where macOS stores `credential.helper=osxkeychain`.
 /// Since `pull` is a user-facing operation that should honour the user's
 /// full git config, we build a plain `Command` here.
-pub fn pull(repo: &Path) -> anyhow::Result<()> {
+pub fn pull(repo: &Path) -> crate::errors::Result<()> {
     if !is_git_repo(repo) {
-        anyhow::bail!("pull: not a git repo: {}", repo.display());
+        return Err(AlleleError::Git(format!("pull: not a git repo: {}", repo.display())));
     }
     let mut cmd = user_git_cmd(repo);
     cmd.arg("pull");
-    run_git(cmd, "pull")?;
+    run_git(cmd, "pull").map_err(|e| AlleleError::Git(e.to_string()))?;
     Ok(())
 }
 
@@ -190,12 +192,12 @@ pub fn fetch_and_rebase_onto_remote_branch(
     repo: &Path,
     remote: &str,
     branch_override: Option<&str>,
-) -> anyhow::Result<bool> {
+) -> crate::errors::Result<bool> {
     if !is_git_repo(repo) {
-        anyhow::bail!(
+        return Err(AlleleError::Git(format!(
             "fetch_and_rebase_onto_remote: not a git repo: {}",
             repo.display()
-        );
+        )));
     }
 
     let branch = match branch_override {
@@ -207,14 +209,16 @@ pub fn fetch_and_rebase_onto_remote_branch(
     let head_before = {
         let mut cmd = git_cmd(Some(repo));
         cmd.arg("rev-parse").arg("HEAD");
-        run_git_stdout(cmd, "rev-parse HEAD (pre-rebase)")?
+        run_git_stdout(cmd, "rev-parse HEAD (pre-rebase)")
+            .map_err(|e| AlleleError::Git(e.to_string()))?
     };
 
     // 1. Fetch the remote branch — use user_git_cmd so the user's
     //    credential helpers (osxkeychain, SSH agent) are available.
     let mut cmd = user_git_cmd(repo);
     cmd.arg("fetch").arg(remote).arg(&branch);
-    run_git(cmd, &format!("fetch {remote} {branch}"))?;
+    run_git(cmd, &format!("fetch {remote} {branch}"))
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
 
     // 2. Rebase onto the fetched remote branch
     let rebase_ref = format!("{remote}/{branch}");
@@ -228,16 +232,17 @@ pub fn fetch_and_rebase_onto_remote_branch(
         abort_cmd.arg("rebase").arg("--abort");
         let _ = run_git(abort_cmd, "rebase --abort");
 
-        anyhow::bail!(
+        return Err(AlleleError::Git(format!(
             "Rebase onto {rebase_ref} failed (conflicts likely). \
              Rebase has been aborted, repo is unchanged. Error: {e}"
-        );
+        )));
     }
 
     let head_after = {
         let mut cmd = git_cmd(Some(repo));
         cmd.arg("rev-parse").arg("HEAD");
-        run_git_stdout(cmd, "rev-parse HEAD (post-rebase)")?
+        run_git_stdout(cmd, "rev-parse HEAD (post-rebase)")
+            .map_err(|e| AlleleError::Git(e.to_string()))?
     };
 
     Ok(head_before != head_after)
@@ -253,27 +258,27 @@ pub fn fetch_and_rebase_onto_remote_branch(
 /// The initial commit uses Allele's inline identity, so no global git
 /// config is required. `--no-verify` bypasses any pre-commit hooks the
 /// user might have configured via `core.hooksPath`.
-pub fn git_init(path: &Path) -> anyhow::Result<()> {
+pub fn git_init(path: &Path) -> crate::errors::Result<()> {
     if is_git_repo(path) {
         return Ok(());
     }
 
     if !path.exists() {
-        anyhow::bail!(
+        return Err(AlleleError::Git(format!(
             "git_init: path does not exist: {}",
             path.display()
-        );
+        )));
     }
 
     // git init
     let mut cmd = git_cmd(Some(path));
     cmd.arg("init").arg("--quiet");
-    run_git(cmd, "init")?;
+    run_git(cmd, "init").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     // git add -A
     let mut cmd = git_cmd(Some(path));
     cmd.arg("add").arg("-A");
-    run_git(cmd, "add")?;
+    run_git(cmd, "add").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     // Check if there's anything to commit — empty dirs need --allow-empty
     let mut cmd = git_cmd(Some(path));
@@ -290,7 +295,7 @@ pub fn git_init(path: &Path) -> anyhow::Result<()> {
     if !has_staged {
         cmd.arg("--allow-empty");
     }
-    run_git(cmd, "commit")?;
+    run_git(cmd, "commit").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     Ok(())
 }
@@ -303,12 +308,12 @@ pub fn git_init(path: &Path) -> anyhow::Result<()> {
 pub fn create_session_branch(
     clone: &Path,
     session_id: &str,
-) -> anyhow::Result<()> {
+) -> crate::errors::Result<()> {
     if !is_git_repo(clone) {
-        anyhow::bail!(
+        return Err(AlleleError::Git(format!(
             "create_session_branch: not a git repo: {}",
             clone.display()
-        );
+        )));
     }
 
     let branch = session_branch_name(session_id);
@@ -321,7 +326,7 @@ pub fn create_session_branch(
         .arg("-B")
         .arg(&branch)
         .arg("HEAD");
-    run_git(cmd, "checkout -B (session)")?;
+    run_git(cmd, "checkout -B (session)").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     Ok(())
 }
@@ -338,18 +343,18 @@ pub fn fetch_session_branch(
     canonical: &Path,
     clone: &Path,
     session_id: &str,
-) -> anyhow::Result<()> {
+) -> crate::errors::Result<()> {
     if !is_git_repo(canonical) {
-        anyhow::bail!(
+        return Err(AlleleError::Git(format!(
             "fetch_session_branch: canonical is not a git repo: {}",
             canonical.display()
-        );
+        )));
     }
     if !is_git_repo(clone) {
-        anyhow::bail!(
+        return Err(AlleleError::Git(format!(
             "fetch_session_branch: clone is not a git repo: {}",
             clone.display()
-        );
+        )));
     }
 
     // Use the clone's actual current branch — after auto-naming it may be
@@ -363,7 +368,7 @@ pub fn fetch_session_branch(
         .arg("--no-tags")
         .arg(clone)
         .arg(format!("{src}:{dst}"));
-    run_git(cmd, "fetch (session → archive)")?;
+    run_git(cmd, "fetch (session → archive)").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     Ok(())
 }
@@ -371,13 +376,13 @@ pub fn fetch_session_branch(
 /// If the clone's working tree has uncommitted changes, stage everything
 /// and create a commit so the work is captured on the session branch
 /// before archiving. Returns `true` if a commit was created.
-pub fn auto_commit_if_dirty(clone: &Path) -> anyhow::Result<bool> {
+pub fn auto_commit_if_dirty(clone: &Path) -> crate::errors::Result<bool> {
     if !is_working_tree_dirty(clone) {
         return Ok(false);
     }
     let mut add = git_cmd(Some(clone));
     add.arg("add").arg("-A");
-    run_git(add, "add -A (auto-commit)")?;
+    run_git(add, "add -A (auto-commit)").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     let mut commit = git_cmd(Some(clone));
     commit
@@ -385,7 +390,7 @@ pub fn auto_commit_if_dirty(clone: &Path) -> anyhow::Result<bool> {
         .arg("--no-verify")
         .arg("-m")
         .arg("allele: auto-commit uncommitted work before archive");
-    run_git(commit, "commit (auto-commit)")?;
+    run_git(commit, "commit (auto-commit)").map_err(|e| AlleleError::Git(e.to_string()))?;
     Ok(true)
 }
 
@@ -401,7 +406,7 @@ pub fn archive_session(
     canonical: &Path,
     clone: &Path,
     session_id: &str,
-) -> anyhow::Result<()> {
+) -> crate::errors::Result<()> {
     // Capture any uncommitted work before fetching the branch.
     if let Err(e) = auto_commit_if_dirty(clone) {
         warn!("auto_commit_if_dirty failed for {session_id}: {e}");
@@ -410,13 +415,13 @@ pub fn archive_session(
 }
 
 /// Delete a ref. Equivalent to `git update-ref -d <ref>`.
-pub fn delete_ref(repo: &Path, ref_name: &str) -> anyhow::Result<()> {
+pub fn delete_ref(repo: &Path, ref_name: &str) -> crate::errors::Result<()> {
     if !is_git_repo(repo) {
-        anyhow::bail!("delete_ref: not a git repo: {}", repo.display());
+        return Err(AlleleError::Git(format!("delete_ref: not a git repo: {}", repo.display())));
     }
     let mut cmd = git_cmd(Some(repo));
     cmd.arg("update-ref").arg("-d").arg(ref_name);
-    run_git(cmd, "update-ref -d")?;
+    run_git(cmd, "update-ref -d").map_err(|e| AlleleError::Git(e.to_string()))?;
     Ok(())
 }
 
@@ -426,12 +431,12 @@ pub fn delete_ref(repo: &Path, ref_name: &str) -> anyhow::Result<()> {
 /// Matches the trash bin TTL so archived session work is preserved for
 /// the same window as the trash. Intended to be called once at startup
 /// alongside [`crate::clone::purge_trash_older_than_days`].
-pub fn prune_archive_refs(canonical: &Path, ttl_days: u64) -> anyhow::Result<usize> {
+pub fn prune_archive_refs(canonical: &Path, ttl_days: u64) -> crate::errors::Result<usize> {
     if !is_git_repo(canonical) {
-        anyhow::bail!(
+        return Err(AlleleError::Git(format!(
             "prune_archive_refs: not a git repo: {}",
             canonical.display()
-        );
+        )));
     }
 
     // List archive refs with committer dates as unix timestamps.
@@ -440,7 +445,8 @@ pub fn prune_archive_refs(canonical: &Path, ttl_days: u64) -> anyhow::Result<usi
     cmd.arg("for-each-ref")
         .arg("--format=%(refname)%09%(committerdate:unix)")
         .arg("refs/allele/archive/");
-    let listing = run_git_stdout(cmd, "for-each-ref (prune)")?;
+    let listing = run_git_stdout(cmd, "for-each-ref (prune)")
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
 
     if listing.is_empty() {
         return Ok(0);
@@ -489,7 +495,7 @@ pub struct ArchiveEntry {
 /// List all `refs/allele/archive/*` refs in `canonical`, sorted by
 /// timestamp (most recent first). Returns an empty vec if canonical is
 /// not a git repo or has no archive refs.
-pub fn list_archive_refs(canonical: &Path) -> anyhow::Result<Vec<ArchiveEntry>> {
+pub fn list_archive_refs(canonical: &Path) -> crate::errors::Result<Vec<ArchiveEntry>> {
     if !is_git_repo(canonical) {
         return Ok(Vec::new());
     }
@@ -497,7 +503,8 @@ pub fn list_archive_refs(canonical: &Path) -> anyhow::Result<Vec<ArchiveEntry>> 
     cmd.arg("for-each-ref")
         .arg("--format=%(refname)%09%(objectname:short)%09%(committerdate:unix)")
         .arg("refs/allele/archive/");
-    let listing = run_git_stdout(cmd, "for-each-ref (list archives)")?;
+    let listing = run_git_stdout(cmd, "for-each-ref (list archives)")
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
     if listing.is_empty() {
         return Ok(Vec::new());
     }
@@ -540,16 +547,20 @@ pub enum MergeResult {
 /// Returns an error if there are merge conflicts or the working tree is
 /// dirty — the caller should display the error and let the user resolve
 /// conflicts manually.
-pub fn merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<MergeResult> {
+pub fn merge_archive(canonical: &Path, session_id: &str) -> crate::errors::Result<MergeResult> {
     if !is_git_repo(canonical) {
-        anyhow::bail!("merge_archive: not a git repo: {}", canonical.display());
+        return Err(AlleleError::Git(format!(
+            "merge_archive: not a git repo: {}",
+            canonical.display()
+        )));
     }
 
     // Record HEAD before merge to detect no-ops.
     let head_before = {
         let mut cmd = git_cmd(Some(canonical));
         cmd.arg("rev-parse").arg("HEAD");
-        run_git_stdout(cmd, "rev-parse HEAD (pre-merge)")?
+        run_git_stdout(cmd, "rev-parse HEAD (pre-merge)")
+            .map_err(|e| AlleleError::Git(e.to_string()))?
     };
 
     let ref_name = archive_ref_name(session_id);
@@ -558,13 +569,14 @@ pub fn merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<Merge
         .arg("--no-ff")
         .arg("--no-edit")
         .arg(&ref_name);
-    run_git(cmd, "merge archive")?;
+    run_git(cmd, "merge archive").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     // Check if HEAD actually moved.
     let head_after = {
         let mut cmd = git_cmd(Some(canonical));
         cmd.arg("rev-parse").arg("HEAD");
-        run_git_stdout(cmd, "rev-parse HEAD (post-merge)")?
+        run_git_stdout(cmd, "rev-parse HEAD (post-merge)")
+            .map_err(|e| AlleleError::Git(e.to_string()))?
     };
 
     if head_before == head_after {
@@ -579,9 +591,12 @@ pub fn merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<Merge
 /// Uses `git merge --squash` to stage all changes, then creates a single
 /// commit. Returns `MergeResult::AlreadyUpToDate` if the archive ref is
 /// already an ancestor of HEAD.
-pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<MergeResult> {
+pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> crate::errors::Result<MergeResult> {
     if !is_git_repo(canonical) {
-        anyhow::bail!("squash_merge_archive: not a git repo: {}", canonical.display());
+        return Err(AlleleError::Git(format!(
+            "squash_merge_archive: not a git repo: {}",
+            canonical.display()
+        )));
     }
 
     let ref_name = archive_ref_name(session_id);
@@ -591,7 +606,7 @@ pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Resul
     cmd.arg("merge")
         .arg("--squash")
         .arg(&ref_name);
-    run_git(cmd, "squash merge archive")?;
+    run_git(cmd, "squash merge archive").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     // Check if there's anything staged to commit.
     let mut cmd = git_cmd(Some(canonical));
@@ -610,7 +625,7 @@ pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Resul
         .arg("--no-edit")
         .arg("-m")
         .arg(format!("Squash merge session {session_id}"));
-    run_git(cmd, "squash commit")?;
+    run_git(cmd, "squash commit").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     Ok(MergeResult::Merged)
 }
@@ -625,9 +640,12 @@ pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Resul
 ///
 /// Returns `MergeResult::AlreadyUpToDate` if the archive ref is already
 /// an ancestor of HEAD.
-pub fn rebase_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Result<MergeResult> {
+pub fn rebase_merge_archive(canonical: &Path, session_id: &str) -> crate::errors::Result<MergeResult> {
     if !is_git_repo(canonical) {
-        anyhow::bail!("rebase_merge_archive: not a git repo: {}", canonical.display());
+        return Err(AlleleError::Git(format!(
+            "rebase_merge_archive: not a git repo: {}",
+            canonical.display()
+        )));
     }
 
     let ref_name = archive_ref_name(session_id);
@@ -644,13 +662,14 @@ pub fn rebase_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Resul
 
     // Record which branch we're on so we can return to it.
     let original_branch = current_branch(canonical)
-        .ok_or_else(|| anyhow::anyhow!("rebase_merge_archive: cannot determine current branch"))?;
+        .ok_or_else(|| AlleleError::Git("rebase_merge_archive: cannot determine current branch".to_string()))?;
 
     // Create a temporary branch from the archive ref for rebasing.
     let tmp_branch = format!("allele/rebase-tmp/{session_id}");
     let mut cmd = git_cmd(Some(canonical));
     cmd.arg("checkout").arg("-b").arg(&tmp_branch).arg(&ref_name);
-    run_git(cmd, "checkout tmp branch for rebase")?;
+    run_git(cmd, "checkout tmp branch for rebase")
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
 
     // Rebase onto the original branch.
     let mut cmd = git_cmd(Some(canonical));
@@ -667,17 +686,17 @@ pub fn rebase_merge_archive(canonical: &Path, session_id: &str) -> anyhow::Resul
         let mut del = git_cmd(Some(canonical));
         del.arg("branch").arg("-D").arg(&tmp_branch);
         let _ = del.output();
-        return Err(e);
+        return Err(AlleleError::Git(e.to_string()));
     }
 
     // Fast-forward the original branch to the rebased tip.
     let mut cmd = git_cmd(Some(canonical));
     cmd.arg("checkout").arg(&original_branch);
-    run_git(cmd, "checkout original branch")?;
+    run_git(cmd, "checkout original branch").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     let mut cmd = git_cmd(Some(canonical));
     cmd.arg("merge").arg("--ff-only").arg(&tmp_branch);
-    run_git(cmd, "ff-merge rebased work")?;
+    run_git(cmd, "ff-merge rebased work").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     // Clean up the temporary branch.
     let mut cmd = git_cmd(Some(canonical));
@@ -840,12 +859,12 @@ pub fn rename_session_branch(
     clone: &Path,
     session_id: &str,
     slug: &str,
-) -> anyhow::Result<()> {
+) -> crate::errors::Result<()> {
     if !is_git_repo(clone) {
-        anyhow::bail!(
+        return Err(AlleleError::Git(format!(
             "rename_session_branch: not a git repo: {}",
             clone.display()
-        );
+        )));
     }
 
     let old_branch = session_branch_name(session_id);
@@ -860,7 +879,7 @@ pub fn rename_session_branch(
 
     let mut cmd = git_cmd(Some(clone));
     cmd.arg("branch").arg("-m").arg(&old_branch).arg(&new_branch);
-    run_git(cmd, "branch -m (session rename)")?;
+    run_git(cmd, "branch -m (session rename)").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     Ok(())
 }
@@ -903,12 +922,12 @@ pub fn sanitise_branch_name(input: &str, max_len: usize) -> String {
 pub fn rename_current_branch(
     clone: &Path,
     new_branch_name: &str,
-) -> anyhow::Result<()> {
+) -> crate::errors::Result<()> {
     if !is_git_repo(clone) {
-        anyhow::bail!(
+        return Err(AlleleError::Git(format!(
             "rename_current_branch: not a git repo: {}",
             clone.display()
-        );
+        )));
     }
     let current = current_branch(clone).unwrap_or_default();
     if current == new_branch_name {
@@ -916,7 +935,7 @@ pub fn rename_current_branch(
     }
     let mut cmd = git_cmd(Some(clone));
     cmd.arg("branch").arg("-m").arg(&current).arg(new_branch_name);
-    run_git(cmd, "branch -m (rename current branch)")?;
+    run_git(cmd, "branch -m (rename current branch)").map_err(|e| AlleleError::Git(e.to_string()))?;
     Ok(())
 }
 
