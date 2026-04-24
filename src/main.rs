@@ -16,6 +16,7 @@ mod keymap;
 mod new_session_modal;
 mod pending_actions;
 mod project;
+mod repositories;
 mod rich;
 mod scratch_pad;
 mod session;
@@ -906,7 +907,9 @@ impl AppState {
             right_sidebar_width: self.right_panel.width,
             ..self.user_settings.clone()
         };
-        settings.save();
+        if let Err(e) = self.repos.settings.save(&settings) {
+            warn!("Failed to save settings.json: {e}");
+        }
     }
 
     /// Persist every session across every project to `~/.allele/state.json`.
@@ -935,7 +938,7 @@ impl AppState {
                 .map(|s| s.id.clone())
         });
         persisted.scratch_pad_history = self.scratch_pad_history.clone();
-        if let Err(e) = persisted.save() {
+        if let Err(e) = self.repos.state.save(&persisted) {
             warn!("Failed to save state.json: {e}");
         }
     }
@@ -1616,7 +1619,9 @@ fn main() {
                             }).collect(),
                             ..this.user_settings.clone()
                         };
-                        settings.save();
+                        if let Err(e) = this.repos.settings.save(&settings) {
+                            warn!("Failed to save settings.json on window-bounds change: {e}");
+                        }
                     }).detach();
 
                     // Rehydrate projects from settings.
@@ -2006,6 +2011,7 @@ fn main() {
                         sidebar_filter: String::new(),
                         state_dirty: false,
                         settings_dirty: false,
+                        repos: repositories::Repositories::production(),
                     }
                 })
             },

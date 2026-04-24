@@ -153,6 +153,10 @@ pub(crate) struct AppState {
     pub(crate) state_dirty: bool,
     /// Same contract as `state_dirty` but for the settings.json file.
     pub(crate) settings_dirty: bool,
+    /// Persistence backends for settings.json and state.json. Arc-cloned
+    /// into background tasks so they can write without borrowing AppState.
+    /// See `src/repositories.rs` and ARCHITECTURE.md §3.3.
+    pub(crate) repos: crate::repositories::Repositories,
 }
 
 impl AppState {
