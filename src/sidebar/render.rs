@@ -6,7 +6,7 @@
 
 use gpui::*;
 
-use crate::actions::{PendingAction, SessionCursor};
+use crate::actions::{ArchiveAction, ProjectAction, SessionAction, SessionCursor};
 use crate::app_state::AppState;
 use crate::session::SessionStatus;
 use crate::SimpleTooltip;
@@ -87,7 +87,7 @@ pub(crate) fn build_sidebar_items(
                         })
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                             cx.stop_propagation();
-                            this.pending_action = Some(PendingAction::AddSessionToProject(p_idx));
+                            this.pending_action = Some(SessionAction::AddSessionToProject(p_idx).into());
                             cx.notify();
                         })),
                 )
@@ -106,7 +106,7 @@ pub(crate) fn build_sidebar_items(
                         })
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                             cx.stop_propagation();
-                            this.pending_action = Some(PendingAction::OpenNewSessionModal(p_idx));
+                            this.pending_action = Some(SessionAction::OpenNewSessionModal(p_idx).into());
                             cx.notify();
                         })),
                 )
@@ -152,7 +152,7 @@ pub(crate) fn build_sidebar_items(
                         })
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                             cx.stop_propagation();
-                            this.pending_action = Some(PendingAction::RemoveProject(p_idx));
+                            this.pending_action = Some(ProjectAction::RemoveProject(p_idx).into());
                             cx.notify();
                         })),
                 )
@@ -193,7 +193,7 @@ pub(crate) fn build_sidebar_items(
                             .child("Proceed")
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                 cx.stop_propagation();
-                                this.pending_action = Some(PendingAction::ProceedDirtySession(p_idx));
+                                this.pending_action = Some(SessionAction::ProceedDirtySession(p_idx).into());
                                 cx.notify();
                             })),
                     )
@@ -211,7 +211,7 @@ pub(crate) fn build_sidebar_items(
                             .child("Cancel")
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                 cx.stop_propagation();
-                                this.pending_action = Some(PendingAction::CancelDirtySession);
+                                this.pending_action = Some(SessionAction::CancelDirtySession.into());
                                 cx.notify();
                             })),
                     )
@@ -530,10 +530,10 @@ pub(crate) fn build_sidebar_items(
                 .justify_between()
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                     this.session_context_menu = None;
-                    this.pending_action = Some(PendingAction::SelectSession {
+                    this.pending_action = Some(SessionAction::SelectSession {
                         project_idx: p_idx,
                         session_idx: s_idx,
-                    });
+                    }.into());
                     cx.notify();
                 }))
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
@@ -635,10 +635,10 @@ pub(crate) fn build_sidebar_items(
                                 .child("Discard")
                                 .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                     cx.stop_propagation();
-                                    this.pending_action = Some(PendingAction::DiscardSession {
+                                    this.pending_action = Some(SessionAction::DiscardSession {
                                         project_idx: p_idx,
                                         session_idx: s_idx,
-                                    });
+                                    }.into());
                                     cx.notify();
                                 })),
                         )
@@ -655,7 +655,7 @@ pub(crate) fn build_sidebar_items(
                                 .child("Cancel")
                                 .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
                                     cx.stop_propagation();
-                                    this.pending_action = Some(PendingAction::CancelDiscard);
+                                    this.pending_action = Some(SessionAction::CancelDiscard.into());
                                     cx.notify();
                                 })),
                         ),
@@ -683,10 +683,10 @@ pub(crate) fn build_sidebar_items(
                                 })
                                 .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                     cx.stop_propagation();
-                                    this.pending_action = Some(PendingAction::MergeAndClose {
+                                    this.pending_action = Some(SessionAction::MergeAndClose {
                                         project_idx: p_idx,
                                         session_idx: s_idx,
-                                    });
+                                    }.into());
                                     cx.notify();
                                 })),
                         )
@@ -704,10 +704,10 @@ pub(crate) fn build_sidebar_items(
                                 })
                                 .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                     cx.stop_propagation();
-                                    this.pending_action = Some(PendingAction::CloseSessionKeepClone {
+                                    this.pending_action = Some(SessionAction::CloseSessionKeepClone {
                                         project_idx: p_idx,
                                         session_idx: s_idx,
-                                    });
+                                    }.into());
                                     cx.notify();
                                 })),
                         )
@@ -725,10 +725,10 @@ pub(crate) fn build_sidebar_items(
                                 })
                                 .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                     cx.stop_propagation();
-                                    this.pending_action = Some(PendingAction::RequestDiscardSession {
+                                    this.pending_action = Some(SessionAction::RequestDiscardSession {
                                         project_idx: p_idx,
                                         session_idx: s_idx,
-                                    });
+                                    }.into());
                                     cx.notify();
                                 })),
                         ),
@@ -830,10 +830,10 @@ pub(crate) fn build_sidebar_items(
                                         })
                                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                             cx.stop_propagation();
-                                            this.pending_action = Some(PendingAction::MergeArchive {
+                                            this.pending_action = Some(ArchiveAction::MergeArchive {
                                                 project_idx: p_idx,
                                                 archive_idx: a_idx,
-                                            });
+                                            }.into());
                                             cx.notify();
                                         })),
                                 )
@@ -852,10 +852,10 @@ pub(crate) fn build_sidebar_items(
                                         })
                                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                             cx.stop_propagation();
-                                            this.pending_action = Some(PendingAction::DeleteArchive {
+                                            this.pending_action = Some(ArchiveAction::DeleteArchive {
                                                 project_idx: p_idx,
                                                 archive_idx: a_idx,
-                                            });
+                                            }.into());
                                             cx.notify();
                                         })),
                                 ),
