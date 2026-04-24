@@ -137,7 +137,7 @@ impl AppState {
             .unwrap_or_default();
 
         // Persist the updated status.
-        self.save_state();
+        self.mark_state_dirty();
 
         // Fire sound + notification affordances — ONLY on transitions INTO
         // an attention state, never on transitions out of one.
@@ -297,7 +297,7 @@ impl AppState {
                         }
                     }
                 }
-                this.save_state();
+                this.mark_state_dirty();
                 cx.notify();
             });
         })

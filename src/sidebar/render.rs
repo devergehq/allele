@@ -318,7 +318,7 @@ pub(crate) fn build_sidebar_items(
                                 crate::settings::MergeStrategy::RebaseThenMerge => crate::settings::MergeStrategy::Merge,
                             };
                         }
-                        this.save_settings();
+                        this.mark_settings_dirty();
                         cx.notify();
                     }))
                     .into_any_element(),
@@ -359,7 +359,7 @@ pub(crate) fn build_sidebar_items(
                         if let Some(project) = this.projects.get_mut(p_idx) {
                             project.settings.rebase_before_merge = !project.settings.rebase_before_merge;
                         }
-                        this.save_settings();
+                        this.mark_settings_dirty();
                         cx.notify();
                     }))
                     .into_any_element(),
