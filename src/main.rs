@@ -8,6 +8,7 @@ mod clone;
 mod config;
 mod drawer;
 mod editor;
+mod errors;
 mod git;
 mod hook_events;
 mod hooks;
@@ -37,6 +38,7 @@ use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use tracing::{error, info, warn};
 
 /// A minimal tooltip view for hover text on buttons.
 pub(crate) struct SimpleTooltip {
@@ -922,7 +924,7 @@ impl AppState {
         });
         persisted.scratch_pad_history = self.scratch_pad_history.clone();
         if let Err(e) = persisted.save() {
-            eprintln!("Failed to save state.json: {e}");
+            warn!("Failed to save state.json: {e}");
         }
     }
 
@@ -961,7 +963,7 @@ impl AppState {
         // a base to anchor against. `git_init` is idempotent — a no-op on
         // existing repos — and non-fatal on failure.
         if let Err(e) = git::git_init(&source_path) {
-            eprintln!(
+            warn!(
                 "git_init: {} failed: {e} (continuing without git integration)",
                 source_path.display()
             );
@@ -1121,10 +1123,10 @@ impl AppState {
                     .await;
                 match status {
                     Ok(s) if !s.success() => {
-                        eprintln!("allele: startup command exited with {s} — continuing");
+                        warn!("allele: startup command exited with {s} — continuing");
                     }
                     Err(e) => {
-                        eprintln!("allele: failed to run startup command: {e} — continuing");
+                        warn!("allele: failed to run startup command: {e} — continuing");
                     }
                     _ => {}
                 }
@@ -1216,7 +1218,7 @@ impl AppState {
                 // default browser" behaviour so the preview URL still
                 // lands somewhere useful.
                 if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
-                    eprintln!("allele: failed to open preview URL {url}: {e}");
+                    warn!("allele: failed to open preview URL {url}: {e}");
                 }
             }
         }
@@ -1272,7 +1274,7 @@ impl AppState {
                     .spawn(async move {
                         for path in clone_paths {
                             if let Err(e) = clone::trash_clone(&path) {
-                                eprintln!("Failed to trash clone at {}: {e}", path.display());
+                                warn!("Failed to trash clone at {}: {e}", path.display());
                             }
                         }
                     })
@@ -1321,9 +1323,9 @@ fn install_panic_hook() {
                     f.write_all(entry.as_bytes())
                 });
 
-            eprintln!("\n*** allele crashed ***");
-            eprintln!("{entry}");
-            eprintln!("Crash log: {}", log_path.display());
+            error!("\n*** allele crashed ***");
+            error!("{entry}");
+            error!("Crash log: {}", log_path.display());
         }
 
         // Call the default hook to print the normal backtrace too
@@ -1439,6 +1441,7 @@ fn show_about_panel() {
 }
 
 fn main() {
+    errors::init_tracing();
     install_panic_hook();
 
     // Hard dependency check: Allele treats git as non-optional. Fail
@@ -1446,7 +1449,7 @@ fn main() {
     if !git::git_available() {
         const MSG: &str = "Allele requires git but none was found on PATH.\n\n\
                            Install the Xcode Command Line Tools with:\n\n    xcode-select --install";
-        eprintln!("{MSG}");
+        error!("{MSG}");
         hooks::show_fatal_dialog("Allele", MSG);
         std::process::exit(1);
     }
@@ -1484,25 +1487,25 @@ fn main() {
 
         // Load persisted settings
         let loaded_settings = Settings::load();
-        eprintln!(
+        info!(
             "Loaded settings: sidebar_width={}, font_size={}",
             loaded_settings.sidebar_width, loaded_settings.font_size
         );
 
         // Load persisted session state (may be empty on first run).
         let loaded_state = PersistedState::load();
-        eprintln!("Loaded persisted state: {} sessions", loaded_state.sessions.len());
+        info!("Loaded persisted state: {} sessions", loaded_state.sessions.len());
 
         // Install the Allele hook receiver and settings file so every
         // claude spawn can route attention signals back into the UI. Failure
         // is non-fatal — the app still runs, it just won't get hook events.
         let hooks_settings_path: Option<PathBuf> = match hooks::install_if_missing() {
             Ok(path) => {
-                eprintln!("Installed Allele hooks at {}", path.display());
+                info!("Installed Allele hooks at {}", path.display());
                 Some(path)
             }
             Err(e) => {
-                eprintln!("Failed to install Allele hooks: {e} (attention routing disabled)");
+                warn!("Failed to install Allele hooks: {e} (attention routing disabled)");
                 None
             }
         };
@@ -1526,19 +1529,19 @@ fn main() {
         std::thread::spawn(move || {
             match clone::sweep_orphans(&referenced, &project_sources) {
                 Ok(0) => {}
-                Ok(n) => eprintln!("Orphan sweep trashed {n} unreferenced clone(s)"),
-                Err(e) => eprintln!("Orphan sweep failed: {e}"),
+                Ok(n) => info!("Orphan sweep trashed {n} unreferenced clone(s)"),
+                Err(e) => warn!("Orphan sweep failed: {e}"),
             }
             match clone::purge_trash_older_than_days(clone::TRASH_TTL_DAYS) {
                 Ok(0) => {}
-                Ok(n) => eprintln!("Trash purge removed {n} expired entry/entries"),
-                Err(e) => eprintln!("Trash purge failed: {e}"),
+                Ok(n) => info!("Trash purge removed {n} expired entry/entries"),
+                Err(e) => warn!("Trash purge failed: {e}"),
             }
             // Prune archive refs older than the trash TTL so they don't
             // accumulate indefinitely in canonical repos.
             for source_path in &project_paths_for_prune {
                 if let Err(e) = git::prune_archive_refs(source_path, clone::TRASH_TTL_DAYS) {
-                    eprintln!(
+                    warn!(
                         "prune_archive_refs failed for {}: {e}",
                         source_path.display()
                     );
@@ -1550,8 +1553,8 @@ fn main() {
         // detection is owned by the Settings seeder (runs on load).
         for agent in &loaded_settings.agents {
             match &agent.path {
-                Some(p) => eprintln!("Agent '{}' at: {p}", agent.id),
-                None => eprintln!("Agent '{}' not found", agent.id),
+                Some(p) => info!("Agent '{}' at: {p}", agent.id),
+                None => warn!("Agent '{}' not found", agent.id),
             }
         }
 
@@ -1652,7 +1655,7 @@ fn main() {
                             .iter_mut()
                             .find(|p| p.id == persisted.project_id)
                         else {
-                            eprintln!(
+                            warn!(
                                 "Dropping persisted session {} — owning project {} is gone",
                                 persisted.id, persisted.project_id
                             );
@@ -1874,7 +1877,7 @@ fn main() {
                                         });
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to open settings window: {e}");
+                                    warn!("Failed to open settings window: {e}");
                                 }
                             }
                         }
@@ -2025,7 +2028,7 @@ impl Render for AppState {
                         .map(|deadline| now < deadline)
                         .unwrap_or(false);
                     if resume_failed {
-                        eprintln!(
+                        warn!(
                             "Resume failed for session {} — PTY exited inside grace window",
                             session.id
                         );

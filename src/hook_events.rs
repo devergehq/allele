@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use gpui::*;
+use tracing::{info, warn};
 
 use crate::app_state::AppState;
 use crate::{git, hooks, session, settings};
@@ -38,7 +39,7 @@ impl AppState {
                 .map(|s_idx| (p_idx, s_idx))
         }) else {
             // Event for an unknown session — probably stale, drop it.
-            eprintln!(
+            warn!(
                 "hook-event: no matching session for {:?} kind={:?}",
                 event.session_id, event.kind
             );
@@ -71,7 +72,7 @@ impl AppState {
             if !session.auto_naming_fired {
                 // First attempt — start polling for the prompt file.
                 session.auto_naming_fired = true;
-                eprintln!(
+                info!(
                     "auto-naming: triggered for {} label={:?} on {:?}",
                     session.id, session.label, event.kind
                 );
@@ -79,7 +80,7 @@ impl AppState {
             } else if matches!(event.kind, HookKind::UserPromptSubmit) {
                 // Retry — first attempt likely timed out before user typed.
                 // The .prompt file is guaranteed to exist now.
-                eprintln!(
+                info!(
                     "auto-naming: retrying for {} on UserPromptSubmit (label still {:?})",
                     session.id, session.label
                 );
@@ -111,7 +112,7 @@ impl AppState {
         let Some(new_status) = new_status else {
             // No status change, but still trigger auto-naming if applicable.
             if let Some((session_id, clone_path)) = auto_name_data {
-                eprintln!("auto-naming: trigger fired for session {session_id}");
+                info!("auto-naming: trigger fired for session {session_id}");
                 self.trigger_auto_naming(session_id, clone_path, cx);
             }
             return;
@@ -119,7 +120,7 @@ impl AppState {
         if new_status == prior {
             // No status transition, but still trigger auto-naming if applicable.
             if let Some((session_id, clone_path)) = auto_name_data {
-                eprintln!("auto-naming: trigger fired for session {session_id}");
+                info!("auto-naming: trigger fired for session {session_id}");
                 self.trigger_auto_naming(session_id, clone_path, cx);
             }
             return;
@@ -180,7 +181,7 @@ impl AppState {
 
         // Trigger auto-naming after all borrows are released.
         if let Some((session_id, clone_path)) = auto_name_data {
-            eprintln!("auto-naming: trigger fired for session {session_id}");
+            info!("auto-naming: trigger fired for session {session_id}");
             self.trigger_auto_naming(session_id, clone_path, cx);
         }
     }
@@ -216,15 +217,15 @@ impl AppState {
                     .timer(std::time::Duration::from_millis(2000))
                     .await;
                 if attempt == 0 {
-                    eprintln!("auto-naming: waiting for prompt file for {session_id}");
+                    info!("auto-naming: waiting for prompt file for {session_id}");
                 }
             }
 
             let Some(prompt) = prompt_text else {
-                eprintln!("auto-naming: no prompt file found after 4min for {session_id}");
+                warn!("auto-naming: no prompt file found after 4min for {session_id}");
                 return;
             };
-            eprintln!(
+            info!(
                 "auto-naming: prompt file read for {session_id} ({} chars)",
                 prompt.len()
             );
@@ -232,9 +233,9 @@ impl AppState {
             // Extract keywords — pure Rust, no LLM needed.
             let slug_raw = git::extract_slug_from_prompt(&prompt, 4);
 
-            eprintln!("auto-naming: extracted slug_raw={slug_raw:?} for {session_id}");
+            info!("auto-naming: extracted slug_raw={slug_raw:?} for {session_id}");
             if slug_raw.is_empty() {
-                eprintln!("auto-naming: empty slug from keyword extraction");
+                warn!("auto-naming: empty slug from keyword extraction");
                 return;
             }
 
@@ -272,22 +273,22 @@ impl AppState {
 
             // Rename the git branch in the background (non-blocking).
             if let Some(ref cp) = clone_path {
-                eprintln!("auto-naming: renaming branch for {session_id} with slug={slug:?}");
+                info!("auto-naming: renaming branch for {session_id} with slug={slug:?}");
                 if let Err(e) = git::rename_session_branch(cp, &session_id, &slug) {
-                    eprintln!("auto-naming: branch rename failed: {e}");
+                    warn!("auto-naming: branch rename failed: {e}");
                     // Continue — label update is still valuable
                 } else {
-                    eprintln!("auto-naming: branch rename succeeded for {session_id}");
+                    info!("auto-naming: branch rename succeeded for {session_id}");
                 }
             }
 
             // Update session label on the main thread.
-            eprintln!("auto-naming: updating label to {display_label:?} for {session_id}");
+            info!("auto-naming: updating label to {display_label:?} for {session_id}");
             let _ = this.update(cx, |this: &mut AppState, cx| {
                 for project in &mut this.projects {
                     for session in &mut project.sessions {
                         if session.id == session_id {
-                            eprintln!(
+                            info!(
                                 "auto-naming: label updated {:?} -> {:?} for {session_id}",
                                 session.label, display_label
                             );

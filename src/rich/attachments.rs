@@ -16,6 +16,7 @@
 use gpui::{Image, ImageFormat};
 use std::fs;
 use std::path::{Path, PathBuf};
+use tracing::warn;
 use uuid::Uuid;
 
 /// One attached file tracked by the compose bar.
@@ -140,7 +141,7 @@ pub fn cleanup_session(session_id: &str) {
     if let Some(dir) = attachments_dir(session_id) {
         if dir.exists() {
             if let Err(e) = fs::remove_dir_all(&dir) {
-                eprintln!(
+                warn!(
                     "allele: attachments cleanup failed for session {session_id}: {e}"
                 );
             }
@@ -166,7 +167,7 @@ pub fn sweep_orphans(active_session_ids: &[String]) {
             continue;
         }
         if let Err(e) = fs::remove_dir_all(&path) {
-            eprintln!(
+            warn!(
                 "allele: orphan attachment sweep failed for {}: {e}",
                 path.display()
             );

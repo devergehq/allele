@@ -7,6 +7,7 @@ use alacritty_terminal::term::TermMode;
 use gpui::*;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
+use tracing::{info, warn};
 
 const FONT_FAMILY: &str = "JetBrains Mono";
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
@@ -174,7 +175,7 @@ impl TerminalView {
         let terminal = match PtyTerminal::spawn(TermSize::default(), command, working_dir) {
             Ok(t) => Some(t),
             Err(e) => {
-                eprintln!("Failed to create PTY: {e}");
+                warn!("Failed to create PTY: {e}");
                 return Self {
                     terminal: None,
                     error: Some(format!("Failed to create PTY: {e}")),
@@ -280,7 +281,7 @@ impl TerminalView {
                         let mut resize_committed = false;
                         if let Some((pending_size, recorded_at)) = this.pending_resize {
                             if recorded_at.elapsed() >= Duration::from_millis(RESIZE_DEBOUNCE_MS) {
-                                eprintln!(
+                                info!(
                                     "[RESIZE-DIAG] COMMIT: {}x{} -> {}x{} | debounce={:.0}ms | {:?}",
                                     this.last_cols, this.last_rows,
                                     pending_size.cols, pending_size.rows,
@@ -305,9 +306,9 @@ impl TerminalView {
                                         .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
                                     if in_alt_screen {
                                         term.grid_mut().reset::<alacritty_terminal::vte::ansi::Color>();
-                                        eprintln!("[RESIZE-DIAG] RESET grid (alt-screen, pre-SIGWINCH)");
+                                        info!("[RESIZE-DIAG] RESET grid (alt-screen, pre-SIGWINCH)");
                                     } else {
-                                        eprintln!("[RESIZE-DIAG] SKIP reset (primary screen — fork CSI 2J preserves history)");
+                                        info!("[RESIZE-DIAG] SKIP reset (primary screen — fork CSI 2J preserves history)");
                                     }
                                 }
                                 this.last_cols = pending_size.cols;
@@ -1349,7 +1350,7 @@ impl Render for TerminalView {
                             None => true,
                         };
                         if should_record {
-                            eprintln!(
+                            info!(
                                 "[RESIZE-DIAG] RECORD: {}x{} -> {}x{} | origin=({:.1},{:.1}) viewport=({:.1},{:.1}) avail=({:.1},{:.1}) cell=({:.1},{:.1}) | {:?}",
                                 self.last_cols, self.last_rows,
                                 new_size.cols, new_size.rows,

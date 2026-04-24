@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use tracing::warn;
 
 /// Which built-in adapter drives an agent's command building. `Generic`
 /// is used for custom user-added entries that just run a binary with the
@@ -276,7 +277,7 @@ pub fn spawn_external_editor(
     };
     command.arg(path_arg);
     if let Err(e) = command.spawn() {
-        eprintln!("Failed to launch external editor '{}': {e}", trimmed);
+        warn!("Failed to launch external editor '{}': {e}", trimmed);
     }
 }
 

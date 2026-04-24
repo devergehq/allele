@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tracing::warn;
 
 /// Grace window between SIGTERM and SIGKILL when tearing down a PTY's
 /// child process group on drop. Short enough that a UI "close tab" feels
@@ -256,7 +257,7 @@ impl Drop for PtyTerminal {
         // Each hook is panic-caught so one failure doesn't skip the rest.
         while let Some(hook) = self.cleanup_hooks.pop() {
             if let Err(panic) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(hook)) {
-                eprintln!("PtyTerminal cleanup hook panicked: {panic:?}");
+                warn!("PtyTerminal cleanup hook panicked: {panic:?}");
             }
         }
 

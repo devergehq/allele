@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
+use tracing::warn;
 
 /// Canonical on-disk locations for the hook infrastructure.
 pub fn base_dir() -> Option<PathBuf> {
@@ -307,7 +308,7 @@ impl EventWatcher {
                         });
                     }
                     Err(e) => {
-                        eprintln!(
+                        warn!(
                             "hooks: skipping malformed line in {}: {e}",
                             path.display()
                         );

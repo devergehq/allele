@@ -13,6 +13,7 @@
 use serde::Deserialize;
 use std::net::TcpListener;
 use std::path::Path;
+use tracing::warn;
 
 const PORT_RANGE_START: u16 = 40000;
 const PORT_RANGE_END: u16 = 49999;
@@ -63,7 +64,7 @@ impl ProjectConfig {
         match serde_json::from_str::<Self>(&contents) {
             Ok(cfg) => Some(cfg),
             Err(e) => {
-                eprintln!(
+                warn!(
                     "allele.json at {} failed to parse ({e}) — ignoring",
                     path.display()
                 );
@@ -82,7 +83,7 @@ pub fn allocate_port() -> Option<u16> {
             return Some(port);
         }
     }
-    eprintln!(
+    warn!(
         "allele: no free port in {PORT_RANGE_START}..={PORT_RANGE_END} — \
          {{unique_port}} will be left unsubstituted"
     );

@@ -3,6 +3,7 @@ use std::ffi::CString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
+use tracing::{info, warn};
 
 use crate::git;
 
@@ -62,7 +63,7 @@ pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str)
     // here just means the user sees the trust dialog once, which is the
     // current baseline behaviour.
     if let Err(e) = crate::trust::trust_workspace(&final_path) {
-        eprintln!("trust_workspace({}) failed: {e}", final_path.display());
+        warn!("trust_workspace({}) failed: {e}", final_path.display());
     }
 
     Ok(final_path)
@@ -150,7 +151,7 @@ pub fn cleanup_stale_runtime(clone_path: &Path, paths: &[String]) {
 
         let rel = Path::new(trimmed);
         if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-            eprintln!(
+            warn!(
                 "cleanup_stale_runtime: refusing entry '{trimmed}' — must be a \
                  relative path with no '..' segments"
             );
@@ -162,7 +163,7 @@ pub fn cleanup_stale_runtime(clone_path: &Path, paths: &[String]) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                eprintln!("cleanup_stale_runtime: stat {} failed: {e}", target.display());
+                warn!("cleanup_stale_runtime: stat {} failed: {e}", target.display());
                 continue;
             }
         };
@@ -178,7 +179,7 @@ pub fn cleanup_stale_runtime(clone_path: &Path, paths: &[String]) {
         };
 
         if let Err(e) = result {
-            eprintln!("cleanup_stale_runtime: remove {} failed: {e}", target.display());
+            warn!("cleanup_stale_runtime: remove {} failed: {e}", target.display());
         }
     }
 }
@@ -310,11 +311,11 @@ pub fn purge_trash_older_than_days(ttl_days: u64) -> anyhow::Result<usize> {
 
         if path.is_dir() {
             if let Err(e) = fs::remove_dir_all(&path) {
-                eprintln!("Failed to purge trash entry {}: {e}", path.display());
+                warn!("Failed to purge trash entry {}: {e}", path.display());
                 continue;
             }
         } else if let Err(e) = fs::remove_file(&path) {
-            eprintln!("Failed to purge trash file {}: {e}", path.display());
+            warn!("Failed to purge trash file {}: {e}", path.display());
             continue;
         }
 
@@ -387,7 +388,7 @@ pub fn sweep_orphans(
                     .and_then(git::session_id_from_branch)
                 {
                     if let Err(e) = git::archive_session(source_path, &clone_path, session_id) {
-                        eprintln!(
+                        warn!(
                             "Orphan sweep: archive_session failed for {session_id}: {e}"
                         );
                     }
@@ -396,7 +397,7 @@ pub fn sweep_orphans(
 
             match trash_clone(&clone_path) {
                 Ok(dest) => {
-                    eprintln!(
+                    info!(
                         "Orphan sweep: trashed {} → {}",
                         clone_path.display(),
                         dest.display()
@@ -404,7 +405,7 @@ pub fn sweep_orphans(
                     trashed += 1;
                 }
                 Err(e) => {
-                    eprintln!(
+                    warn!(
                         "Orphan sweep: failed to trash {}: {e}",
                         clone_path.display()
                     );

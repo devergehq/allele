@@ -21,6 +21,13 @@ flume = "0.11"
 # Error handling
 anyhow = "1"
 
+# Typed errors
+thiserror = "2"
+
+# Structured logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
 # System FFI (clonefile)
 libc = "0.2"
 

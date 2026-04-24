@@ -12,6 +12,7 @@ use editor::{KeyOutcome, Pos, ScratchEditor};
 use gpui::*;
 use std::path::PathBuf;
 use std::time::SystemTime;
+use tracing::warn;
 
 /// One saved Scratch Pad submission shown in the history panel. Mirrors
 /// the shape of `state::ScratchPadEntry` so the caller (AppState) can
@@ -114,7 +115,7 @@ impl ScratchPad {
                 true
             }
             Err(e) => {
-                eprintln!("scratch pad: failed to save pasted image: {e}");
+                warn!("scratch pad: failed to save pasted image: {e}");
                 false
             }
         }

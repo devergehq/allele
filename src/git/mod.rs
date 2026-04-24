@@ -23,6 +23,7 @@
 use std::path::Path;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing::warn;
 
 /// Build a `git` command with the standard Allele environment — inline
 /// identity flags so commits work even when the user has no global git
@@ -403,7 +404,7 @@ pub fn archive_session(
 ) -> anyhow::Result<()> {
     // Capture any uncommitted work before fetching the branch.
     if let Err(e) = auto_commit_if_dirty(clone) {
-        eprintln!("auto_commit_if_dirty failed for {session_id}: {e}");
+        warn!("auto_commit_if_dirty failed for {session_id}: {e}");
     }
     fetch_session_branch(canonical, clone, session_id)
 }
@@ -466,7 +467,7 @@ pub fn prune_archive_refs(canonical: &Path, ttl_days: u64) -> anyhow::Result<usi
 
         // Expired — delete the ref.
         if let Err(e) = delete_ref(canonical, ref_name) {
-            eprintln!("prune_archive_refs: failed to delete {ref_name}: {e}");
+            warn!("prune_archive_refs: failed to delete {ref_name}: {e}");
             continue;
         }
         pruned += 1;
