@@ -160,7 +160,7 @@ pub(crate) fn build_sidebar_items(
         );
 
         // Dirty-state confirmation prompt
-        if state.confirming_dirty_session == Some(p_idx) {
+        if state.confirming.dirty_session == Some(p_idx) {
             sidebar_items.push(
                 div()
                     .id(SharedString::from(format!("dirty-confirm-{p_idx}")))
@@ -496,7 +496,7 @@ pub(crate) fn build_sidebar_items(
                     .unwrap_or_else(|| session.label.clone())
             };
             let elapsed = session.elapsed_display();
-            let is_confirming = state.confirming_discard
+            let is_confirming = state.confirming.discard
                 == Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
 
             let label_color = if is_suspended {

@@ -45,13 +45,13 @@ impl AppState {
         // If the working tree has uncommitted changes, prompt the user
         // before creating a session. The user can choose to proceed (the
         // dirty state will be present in the clone) or cancel to clean up.
-        if git::is_working_tree_dirty(&project.source_path) && self.confirming_dirty_session.is_none() {
-            self.confirming_dirty_session = Some(project_idx);
+        if git::is_working_tree_dirty(&project.source_path) && self.confirming.dirty_session.is_none() {
+            self.confirming.dirty_session = Some(project_idx);
             cx.notify();
             return;
         }
         // Clear any prior dirty confirmation (user chose to proceed).
-        self.confirming_dirty_session = None;
+        self.confirming.dirty_session = None;
 
         let source_path = project.source_path.clone();
         let project_name = project.name.clone();

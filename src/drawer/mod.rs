@@ -153,7 +153,7 @@ pub(crate) fn build_drawer_items(
     _window: &mut Window,
     cx: &mut Context<AppState>,
 ) -> Vec<AnyElement> {
-    let drawer_h = state.drawer_height;
+    let drawer_h = state.drawer.height;
     let mut items: Vec<AnyElement> = Vec::new();
 
     // Resize handle — 6px tall invisible hover zone above drawer
@@ -166,7 +166,7 @@ pub(crate) fn build_drawer_items(
             .bg(rgb(0x313244))
             .hover(|s| s.bg(rgb(0x45475a)))
             .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
-                this.drawer_resizing = true;
+                this.drawer.resizing = true;
                 cx.notify();
             }))
             .into_any_element(),
@@ -195,17 +195,19 @@ pub(crate) fn build_drawer_items(
     };
 
     let renaming_idx = state
-        .drawer_rename
+        .drawer
+        .rename
         .as_ref()
         .filter(|(c, _, _)| Some(*c) == active_cursor)
         .map(|(_, i, _)| *i);
     let rename_buf = state
-        .drawer_rename
+        .drawer
+        .rename
         .as_ref()
         .filter(|(c, _, _)| Some(*c) == active_cursor)
         .map(|(_, _, buf)| buf.clone())
         .unwrap_or_default();
-    let rename_focus = state.drawer_rename_focus.clone();
+    let rename_focus = state.drawer.rename_focus.clone();
 
     let mut tab_strip = div()
         .flex()
@@ -271,7 +273,7 @@ pub(crate) fn build_drawer_items(
                                 }
                                 "backspace" => {
                                     if let Some((_, _, buf)) =
-                                        this.drawer_rename.as_mut()
+                                        this.drawer.rename.as_mut()
                                     {
                                         buf.pop();
                                         cx.notify();
@@ -281,7 +283,7 @@ pub(crate) fn build_drawer_items(
                                     if let Some(ref ch) = event.keystroke.key_char {
                                         if !mods.control && !mods.platform {
                                             if let Some((_, _, buf)) =
-                                                this.drawer_rename.as_mut()
+                                                this.drawer.rename.as_mut()
                                             {
                                                 buf.push_str(ch);
                                                 cx.notify();
@@ -450,14 +452,14 @@ pub(crate) fn build_drawer_drag_overlay(
             let mouse_y = f32::from(event.position.y);
             // Drawer height = distance from bottom of viewport to mouse
             let new_height = (viewport_h - mouse_y).clamp(DRAWER_MIN_HEIGHT, viewport_h - 200.0);
-            if (new_height - this.drawer_height).abs() > 0.5 {
-                this.drawer_height = new_height;
+            if (new_height - this.drawer.height).abs() > 0.5 {
+                this.drawer.height = new_height;
                 window.refresh();
                 cx.notify();
             }
         }))
         .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut AppState, _event: &MouseUpEvent, _window, cx| {
-            this.drawer_resizing = false;
+            this.drawer.resizing = false;
             this.save_settings();
             cx.notify();
         }))
