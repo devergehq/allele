@@ -84,7 +84,7 @@ impl AppState {
                 .text_color(rgb(0xcdd6f4))
                 .font_family("monospace");
 
-            match (&self.editor_selected_path, &self.editor_preview) {
+            match (&self.editor.selected_path, &self.editor.preview) {
                 (Some(sel), Some((p, contents))) if p == sel => {
                     col = col.child(
                         div()
@@ -116,7 +116,7 @@ impl AppState {
             .child(tree_col)
             .child(preview_col);
 
-        if self.editor_context_menu.is_some() {
+        if self.editor.context_menu.is_some() {
             root = root.child(self.render_editor_context_menu(cx));
         }
 
@@ -127,7 +127,7 @@ impl AppState {
     /// `deferred` so it paints on top of sibling content, and positioned
     /// in window coordinates at the click site.
     pub(crate) fn render_editor_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (path, position) = self.editor_context_menu.clone().unwrap();
+        let (path, position) = self.editor.context_menu.clone().unwrap();
 
         let item = |id: &'static str, label: &'static str, path: PathBuf, reveal: bool| {
             div()
@@ -148,7 +148,7 @@ impl AppState {
                         } else {
                             this.open_in_external_editor(&path);
                         }
-                        this.editor_context_menu = None;
+                        this.editor.context_menu = None;
                         cx.notify();
                     }),
                 )
@@ -210,8 +210,8 @@ impl AppState {
         let indent = px((depth * 12) as f32 + 8.0);
 
         for (path, is_dir, name) in entries {
-            let is_expanded = self.editor_expanded_dirs.contains(&path);
-            let is_selected = self.editor_selected_path.as_ref() == Some(&path);
+            let is_expanded = self.editor.expanded_dirs.contains(&path);
+            let is_selected = self.editor.selected_path.as_ref() == Some(&path);
 
             let label = if is_dir {
                 let glyph = if is_expanded { "▾" } else { "▸" };
@@ -243,23 +243,23 @@ impl AppState {
                     cx.listener(move |this: &mut Self, _event, _window, cx| {
                         let p = path_for_click.clone();
                         if p.is_dir() {
-                            if this.editor_expanded_dirs.contains(&p) {
-                                this.editor_expanded_dirs.remove(&p);
+                            if this.editor.expanded_dirs.contains(&p) {
+                                this.editor.expanded_dirs.remove(&p);
                             } else {
-                                this.editor_expanded_dirs.insert(p);
+                                this.editor.expanded_dirs.insert(p);
                             }
                         } else {
-                            this.editor_selected_path = Some(p.clone());
+                            this.editor.selected_path = Some(p.clone());
                             this.load_preview(p);
                         }
-                        this.editor_context_menu = None;
+                        this.editor.context_menu = None;
                         cx.notify();
                     }),
                 )
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this: &mut Self, event: &MouseDownEvent, _window, cx| {
-                        this.editor_context_menu =
+                        this.editor.context_menu =
                             Some((path_for_right_click.clone(), event.position));
                         cx.notify();
                     }),
@@ -292,6 +292,6 @@ impl AppState {
             },
             Err(e) => format!("Could not stat file: {e}"),
         };
-        self.editor_preview = Some((path, contents));
+        self.editor.preview = Some((path, contents));
     }
 }
