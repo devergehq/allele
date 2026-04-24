@@ -164,7 +164,7 @@ impl AppState {
                                         });
                                     }
                                 }
-                                self.save_state();
+                                self.mark_state_dirty();
                                 cx.notify();
 
                                 // Clones for restoration on failure (originals move into the background task).
@@ -268,7 +268,7 @@ impl AppState {
                                             );
                                         }
 
-                                        this.save_state();
+                                        this.mark_state_dirty();
                                         cx.notify();
                                     });
                                 })
@@ -355,7 +355,7 @@ impl AppState {
                     {
                         session.pinned = !session.pinned;
                     }
-                    self.save_state();
+                    self.mark_state_dirty();
                 }
                 SessionAction::ApplySessionEdit {
                     project_idx,
@@ -389,7 +389,7 @@ impl AppState {
                             }
                         }
                     }
-                    self.save_state();
+                    self.mark_state_dirty();
                 }
             },
             PendingAction::Archive(a) => match a {
@@ -435,7 +435,7 @@ impl AppState {
                             }
                         }
                     }
-                    self.save_state();
+                    self.mark_state_dirty();
                     cx.notify();
                 }
                 ArchiveAction::DeleteArchive { project_idx, archive_idx } => {
@@ -450,7 +450,7 @@ impl AppState {
                             info!("Deleted archive ref for {session_id}");
                         }
                     }
-                    self.save_state();
+                    self.mark_state_dirty();
                     cx.notify();
                 }
             },
@@ -481,7 +481,7 @@ impl AppState {
                             }
                         }
                     }
-                    self.save_state();
+                    self.mark_state_dirty();
                 }
                 DrawerAction::NewDrawerTab => {
                     skip_refocus = true;
@@ -495,7 +495,7 @@ impl AppState {
                             session.drawer_visible = true;
                         }
                         self.focus_active_drawer_tab(cursor, window, cx);
-                        self.save_state();
+                        self.mark_state_dirty();
                     }
                 }
                 DrawerAction::SwitchDrawerTab(idx) => {
@@ -511,7 +511,7 @@ impl AppState {
                         }
                         self.drawer.rename = None;
                         self.focus_active_drawer_tab(cursor, window, cx);
-                        self.save_state();
+                        self.mark_state_dirty();
                     }
                 }
                 DrawerAction::CloseDrawerTab(idx) => {
@@ -552,7 +552,7 @@ impl AppState {
                         } else {
                             self.focus_active_drawer_tab(cursor, window, cx);
                         }
-                        self.save_state();
+                        self.mark_state_dirty();
                     }
                 }
                 DrawerAction::StartRenameDrawerTab(idx) => {
@@ -588,7 +588,7 @@ impl AppState {
                             }
                         }
                         self.focus_active_drawer_tab(cursor, window, cx);
-                        self.save_state();
+                        self.mark_state_dirty();
                     }
                 }
                 DrawerAction::CancelRenameDrawerTab => {
@@ -603,11 +603,11 @@ impl AppState {
             PendingAction::Sidebar(a) => match a {
                 SidebarAction::ToggleSidebar => {
                     self.sidebar.visible = !self.sidebar.visible;
-                    self.save_settings();
+                    self.mark_settings_dirty();
                 }
                 SidebarAction::ToggleRightSidebar => {
                     self.right_panel.visible = !self.right_panel.visible;
-                    self.save_settings();
+                    self.mark_settings_dirty();
                 }
             },
             PendingAction::Project(a) => match a {
@@ -640,7 +640,7 @@ impl AppState {
                                         );
                                         project.source_path = new_path;
                                         project.name = Project::name_from_path(&project.source_path);
-                                        this.save_settings();
+                                        this.mark_settings_dirty();
                                     }
                                     cx.notify();
                                 });
@@ -799,7 +799,7 @@ impl AppState {
                         session.browser_tab_id = None;
                     }
                     self.browser_status = "Chrome tab closed.".to_string();
-                    self.save_state();
+                    self.mark_state_dirty();
                 }
             },
             PendingAction::Overlay(a) => match a {

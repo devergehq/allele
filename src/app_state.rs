@@ -147,4 +147,40 @@ pub(crate) struct AppState {
     /// Loaded from state.json on startup, appended on submit, written back
     /// on every save_state. Filtered by project when the overlay opens.
     pub(crate) scratch_pad_history: Vec<state::ScratchPadEntry>,
+    /// Set by `mark_state_dirty()`; drained by `checkpoint_persistence()`
+    /// at the end of each render tick. Coalesces N mutations-per-frame
+    /// into at most one state.json write. See ARCHITECTURE.md §3.4.
+    pub(crate) state_dirty: bool,
+    /// Same contract as `state_dirty` but for the settings.json file.
+    pub(crate) settings_dirty: bool,
+}
+
+impl AppState {
+    /// Flag that persisted state (`state.json`) has been mutated and
+    /// should be written on the next `checkpoint_persistence()` call.
+    /// Do NOT call `save_state()` directly — see ARCHITECTURE.md §7.2.
+    pub(crate) fn mark_state_dirty(&mut self) {
+        self.state_dirty = true;
+    }
+
+    /// Flag that user settings (`settings.json`) have been mutated
+    /// and should be written on the next `checkpoint_persistence()`.
+    /// Do NOT call `save_settings()` directly — see ARCHITECTURE.md §7.2.
+    pub(crate) fn mark_settings_dirty(&mut self) {
+        self.settings_dirty = true;
+    }
+
+    /// Drain the dirty flags and flush pending writes. Called once at
+    /// the end of every `Render::render` tick so N mutations per frame
+    /// coalesce to at most one write per file.
+    pub(crate) fn checkpoint_persistence(&mut self) {
+        if self.state_dirty {
+            self.save_state();
+            self.state_dirty = false;
+        }
+        if self.settings_dirty {
+            self.save_settings();
+            self.settings_dirty = false;
+        }
+    }
 }

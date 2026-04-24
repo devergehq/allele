@@ -460,7 +460,7 @@ pub(crate) fn build_drawer_drag_overlay(
         }))
         .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut AppState, _event: &MouseUpEvent, _window, cx| {
             this.drawer.resizing = false;
-            this.save_settings();
+            this.mark_settings_dirty();
             cx.notify();
         }))
         .into_any_element()

@@ -198,7 +198,7 @@ impl AppState {
                         count += 1;
                         count <= state::SCRATCH_HISTORY_PER_PROJECT_LIMIT
                     });
-                    self.save_state();
+                    self.mark_state_dirty();
                 }
             }
         }
@@ -248,7 +248,7 @@ impl AppState {
         if self.scratch_pad_history.len() == before {
             return;
         }
-        self.save_state();
+        self.mark_state_dirty();
 
         // Refresh the overlay's in-memory history list so the UI updates
         // without waiting for re-open.
@@ -668,7 +668,7 @@ impl AppState {
                     }
                 }
                 self.browser_status = format!("Created tab #{new_id}");
-                self.save_state();
+                self.mark_state_dirty();
             }
             None => {
                 self.browser_status = "Could not create Chrome tab (check \
@@ -880,6 +880,8 @@ impl AppState {
         settings::spawn_external_editor(cmd, path, None);
     }
 
+    /// Private to `checkpoint_persistence()`. External callers must use
+    /// `mark_settings_dirty()` — see ARCHITECTURE.md §4.4.
     pub(crate) fn save_settings(&self) {
         // Start from the live user_settings so attention preferences
         // (sound/notification opt-ins) are preserved on every write, then
@@ -911,6 +913,9 @@ impl AppState {
     /// Called after any mutation that creates, removes, or transitions a session.
     /// Errors are logged but not surfaced — losing a state write is survivable,
     /// the orphan sweep will clean up any mismatch on next startup.
+    ///
+    /// Private to `checkpoint_persistence()`. External callers must use
+    /// `mark_state_dirty()` — see ARCHITECTURE.md §4.4.
     pub(crate) fn save_state(&self) {
         let mut persisted = PersistedState::default();
         for project in &self.projects {
@@ -979,7 +984,7 @@ impl AppState {
         let project = Project::new(name, source_path);
         self.projects.push(project);
         let idx = self.projects.len() - 1;
-        self.save_settings();
+        self.mark_settings_dirty();
         cx.notify();
         idx
     }
@@ -1268,8 +1273,8 @@ impl AppState {
             other => other,
         };
 
-        self.save_settings();
-        self.save_state();
+        self.mark_settings_dirty();
+        self.mark_state_dirty();
         cx.notify();
 
         // Spawn background cleanup for all clones — trash (rename) instead
@@ -1999,6 +2004,8 @@ fn main() {
                         edit_session_modal: None,
                         sidebar_filter_input,
                         sidebar_filter: String::new(),
+                        state_dirty: false,
+                        settings_dirty: false,
                     }
                 })
             },
@@ -2025,7 +2032,7 @@ impl Render for AppState {
         // can transition to Done when its PTY actually exits. Done and
         // Suspended sessions are already terminal/attached-less and are
         // skipped.
-        let mut state_dirty = false;
+        let mut pty_state_dirty = false;
         let now = std::time::Instant::now();
         for project in &mut self.projects {
             for session in &mut project.sessions {
@@ -2058,7 +2065,7 @@ impl Render for AppState {
                     }
                     session.last_active = std::time::SystemTime::now();
                     session.resuming_until = None;
-                    state_dirty = true;
+                    pty_state_dirty = true;
                 } else if let Some(deadline) = session.resuming_until {
                     if now >= deadline {
                         session.resuming_until = None;
@@ -2066,8 +2073,8 @@ impl Render for AppState {
                 }
             }
         }
-        if state_dirty {
-            self.save_state();
+        if pty_state_dirty {
+            self.mark_state_dirty();
         }
 
         // Build sidebar items: for each project, a header then its sessions
@@ -2655,7 +2662,7 @@ impl Render for AppState {
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
                         this.sidebar.resizing = false;
-                        this.save_settings();
+                        this.mark_settings_dirty();
                         cx.notify();
                     })),
             );
@@ -2685,7 +2692,7 @@ impl Render for AppState {
                     }))
                     .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
                         this.right_panel.resizing = false;
-                        this.save_settings();
+                        this.mark_settings_dirty();
                         cx.notify();
                     })),
             );
@@ -2711,6 +2718,10 @@ impl Render for AppState {
         if self.session_context_menu.is_some() {
             outer = outer.child(self.render_session_context_menu(cx));
         }
+
+        // Coalesce per-frame mutations into at most one write per file.
+        // See ARCHITECTURE.md §3.4.
+        self.checkpoint_persistence();
 
         outer
     }
