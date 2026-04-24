@@ -157,6 +157,10 @@ pub(crate) struct AppState {
     /// into background tasks so they can write without borrowing AppState.
     /// See `src/repositories.rs` and ARCHITECTURE.md §3.3.
     pub(crate) repos: crate::repositories::Repositories,
+    /// OS-abstraction layer. Arc-cloned per subsystem; detected once at
+    /// startup. Background tasks get cheap Arc clones. See
+    /// ARCHITECTURE.md §3.2 + §4.1.
+    pub(crate) platform: crate::platform::Platform,
 }
 
 impl AppState {

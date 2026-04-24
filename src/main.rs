@@ -15,6 +15,7 @@ mod hooks;
 mod keymap;
 mod new_session_modal;
 mod pending_actions;
+mod platform;
 mod project;
 mod repositories;
 mod rich;
@@ -1231,10 +1232,10 @@ impl AppState {
             } else {
                 // Integration off — fall back to the legacy "open in
                 // default browser" behaviour so the preview URL still
-                // lands somewhere useful.
-                if let Err(e) = std::process::Command::new("open").arg(&url).spawn() {
-                    warn!("allele: failed to open preview URL {url}: {e}");
-                }
+                // lands somewhere useful. Routed through the Platform
+                // adapter trait (phase 14 wiring); on macOS this ends
+                // up as `open(1)`, on other OSes as `xdg-open`.
+                self.platform.shell.open_url(&url);
             }
         }
     }
@@ -1458,6 +1459,14 @@ fn show_about_panel() {
 fn main() {
     errors::init_tracing();
     install_panic_hook();
+
+    // OS-abstraction layer. Detected once and installed into the
+    // process-wide OnceLock so call sites without an AppState handle
+    // (panic hooks, early-error paths) can still reach the platform
+    // via platform::global(). AppState construction reads the global
+    // via clone_arcs() to obtain its own owned bundle. See
+    // ARCHITECTURE.md §3.2 + §4.1.
+    platform::Platform::detect().install_global();
 
     // Hard dependency check: Allele treats git as non-optional. Fail
     // loudly before any window opens if it's missing.
@@ -2012,6 +2021,7 @@ fn main() {
                         state_dirty: false,
                         settings_dirty: false,
                         repos: repositories::Repositories::production(),
+                        platform: crate::platform::global().clone_arcs(),
                     }
                 })
             },
