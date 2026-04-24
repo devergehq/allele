@@ -1,16 +1,17 @@
 # Allele architecture
 
-> **Status: Target architecture / blueprint.**
+> **Status: Applied.**
 >
-> This document describes the *intended* architecture of Allele — the patterns, module
-> layout, invariants, and extension recipes that the codebase is being shaped toward.
-> It was originally authored during the 2026-04-19 decomposition session
-> (see `docs/session-2026-04-19.md`), and then re-harvested against current master
-> after the original branch diverged too far to merge cleanly.
+> This document describes the architecture of Allele — the patterns, module layout,
+> invariants, and extension recipes the codebase implements. It was originally authored
+> during the 2026-04-19 decomposition session
+> (see [`docs/session-2026-04-19.md`](docs/session-2026-04-19.md)), re-harvested against
+> current master when that branch diverged too far to merge cleanly, and then re-applied
+> via the 19-phase playbook tracked in [`docs/RE-DECOMPOSITION-PLAN.md`](docs/RE-DECOMPOSITION-PLAN.md).
 >
-> **The "Adoption status" checkmarks in later sections describe the target state,
-> not what has already shipped on master.** For current progress against this target,
-> see [`docs/RE-DECOMPOSITION-PLAN.md`](docs/RE-DECOMPOSITION-PLAN.md).
+> The six patterns in §3, the module layout in §2, and the invariants in §4 all
+> correspond to code that is live on the branch. Phase-by-phase adoption progress
+> is in §3.6 (for typed errors) and in the plan doc.
 >
 > For system-level / tech-stack architecture (GPUI vs alternatives, PTY flow,
 > process model, vendor decisions), see [`docs/architecture.md`](docs/architecture.md).
@@ -297,12 +298,22 @@ used for both diagnostics and errors.
 with variants for the real failure categories: `Io`, `Json`, `Git`,
 `Clone`, `Agent`, `Config`, `State`, `PlatformUnsupported`, `Other`.
 
-**Adoption status** (as of this writing):
-- ✅ `clone::create_session_clone` / `create_clone`
-- ✅ `git::pull`
-- ✅ `git::merge_archive` / `squash_merge_archive` / `rebase_merge_archive`
-- ⏳ remaining `git::*` functions still on `anyhow::Result`
-- ⏳ `config`, `agents`, `hooks` still on `anyhow::Result`
+**Adoption status** (as of the re-decomposition phase 17 landing):
+- ✅ `clone::*` — all 7 public fns (`create_session_clone`, `create_clone`,
+  `delete_clone`, `trash_base`, `trash_clone`, `purge_trash_older_than_days`,
+  `sweep_orphans`)
+- ✅ `git::*` public fns — 15 of them (`pull`,
+  `fetch_and_rebase_onto_remote_branch`, `git_init`, `create_session_branch`,
+  `fetch_session_branch`, `auto_commit_if_dirty`, `archive_session`,
+  `delete_ref`, `prune_archive_refs`, `list_archive_refs`, `merge_archive`,
+  `squash_merge_archive`, `rebase_merge_archive`, `rename_session_branch`,
+  `rename_current_branch`)
+- ⏳ `git::run_git` / `run_git_stdout` internal helpers remain on
+  `anyhow::Result` — bridged at each public call site via
+  `.map_err(|e| AlleleError::Git(e.to_string()))`. These stay on anyhow by
+  design; they're implementation detail, not boundary API.
+- ⏳ `config`, `agents`, `hooks` still on `anyhow::Result` — deferred to a
+  follow-up commit.
 
 Migration strategy: convert one boundary function at a time. When
 bridging to an `anyhow` internal helper, use
