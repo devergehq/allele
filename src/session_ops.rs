@@ -6,6 +6,7 @@
 //! AppState sub-struct composition.
 
 use gpui::*;
+use tracing::{info, warn};
 
 use crate::actions::{PendingAction, SessionCursor};
 use crate::app_state::AppState;
@@ -29,7 +30,7 @@ impl AppState {
         // Guard: if the source directory no longer exists (e.g. repo was
         // moved), prompt the user to relocate rather than failing mid-clone.
         if !project.source_path.exists() {
-            eprintln!(
+            warn!(
                 "Project source path missing: {} — prompting for relocation",
                 project.source_path.display()
             );
@@ -116,7 +117,7 @@ impl AppState {
                             Ok(()) => None,
                             Err(e) => {
                                 let msg = format!("{e}");
-                                eprintln!(
+                                warn!(
                                     "git pull on {} failed before new session: {msg} \
                                      (continuing with clone)",
                                     source_for_task.display()
@@ -146,11 +147,11 @@ impl AppState {
 
                 let clone_path = match clone_result {
                     Ok(p) => {
-                        eprintln!("Created APFS clone at: {}", p.display());
+                        info!("Created APFS clone at: {}", p.display());
                         p
                     }
                     Err(e) => {
-                        eprintln!("Failed to create APFS clone: {e}");
+                        warn!("Failed to create APFS clone: {e}");
                         source_path.clone()
                     }
                 };
@@ -185,7 +186,7 @@ impl AppState {
                         &clone_path,
                         &session_id_for_session,
                     ) {
-                        eprintln!(
+                        warn!(
                             "create_session_branch failed for {session_id_for_session}: {e}"
                         );
                     }
@@ -387,7 +388,7 @@ impl AppState {
                             Ok(()) => None,
                             Err(e) => {
                                 let msg = format!("{e}");
-                                eprintln!(
+                                warn!(
                                     "git pull on {} failed before new session: {msg} \
                                      (continuing with clone)",
                                     source_for_task.display()
@@ -415,11 +416,11 @@ impl AppState {
 
                 let clone_path = match clone_result {
                     Ok(p) => {
-                        eprintln!("Created APFS clone at: {}", p.display());
+                        info!("Created APFS clone at: {}", p.display());
                         p
                     }
                     Err(e) => {
-                        eprintln!("Failed to create APFS clone: {e}");
+                        warn!("Failed to create APFS clone: {e}");
                         source_path.clone()
                     }
                 };
@@ -445,7 +446,7 @@ impl AppState {
                         &clone_path,
                         &session_id_for_session,
                     ) {
-                        eprintln!(
+                        warn!(
                             "create_session_branch failed for {session_id_for_session}: {e}"
                         );
                     }
@@ -460,7 +461,7 @@ impl AppState {
                                 &clone_path,
                                 &sanitised,
                             ) {
-                                eprintln!("branch rename failed for custom name: {e}");
+                                warn!("branch rename failed for custom name: {e}");
                             }
                         }
                     }
@@ -701,7 +702,7 @@ impl AppState {
         let Some(project) = self.projects.get(cursor.project_idx) else { return; };
         let Some(session) = project.sessions.get(cursor.session_idx) else { return; };
         let Some(clone_path) = session.clone_path.clone() else {
-            eprintln!(
+            warn!(
                 "Cannot resume session {} — no clone_path on record",
                 session.id
             );
@@ -709,7 +710,7 @@ impl AppState {
         };
 
         if !clone_path.exists() {
-            eprintln!(
+            warn!(
                 "Cannot resume session {} — clone_path is missing on disk: {}",
                 session.id,
                 clone_path.display()
@@ -941,10 +942,10 @@ impl AppState {
                         .status()
                     {
                         Ok(s) if !s.success() => {
-                            eprintln!("allele: shutdown command exited with {s} — continuing");
+                            warn!("allele: shutdown command exited with {s} — continuing");
                         }
                         Err(e) => {
-                            eprintln!("allele: failed to run shutdown command: {e} — continuing");
+                            warn!("allele: failed to run shutdown command: {e} — continuing");
                         }
                         _ => {}
                     }
@@ -1027,7 +1028,7 @@ impl AppState {
                             &clone_path,
                             &session_id_for_task,
                         ) {
-                            eprintln!(
+                            warn!(
                                 "archive_session failed for {session_id_for_task}: {e}"
                             );
                         }
@@ -1036,7 +1037,7 @@ impl AppState {
                     .await;
 
                 if let Err(e) = delete_result {
-                    eprintln!("Failed to delete clone: {e}");
+                    warn!("Failed to delete clone: {e}");
                 }
 
                 // Remove the placeholder on the main thread

@@ -20,7 +20,7 @@
 //! ## Error handling
 //!
 //! - Missing `~/.allele/keymap.json` → silent no-op; defaults apply.
-//! - Malformed user file → `eprintln!` warning; defaults apply.
+//! - Malformed user file → `tracing::warn!`; defaults apply.
 //! - Unknown action name in either file → startup panic with the
 //!   offending name and source file. Loud failure is preferred to
 //!   silent binding loss; the user fixes the JSON and relaunches.
@@ -34,6 +34,7 @@ use std::path::PathBuf;
 
 use gpui::{App, KeyBinding};
 use serde::Deserialize;
+use tracing::warn;
 
 use crate::rich::compose_bar as cb;
 use crate::text_input as ti;
@@ -218,7 +219,7 @@ fn load_user_overrides() -> Vec<KeymapEntry> {
         Ok(s) => s,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
         Err(err) => {
-            eprintln!(
+            warn!(
                 "keymap: failed to read user overrides at {}: {err}",
                 path.display()
             );
@@ -229,7 +230,7 @@ fn load_user_overrides() -> Vec<KeymapEntry> {
     match serde_json::from_str::<Vec<KeymapEntry>>(&stripped) {
         Ok(entries) => entries,
         Err(err) => {
-            eprintln!(
+            warn!(
                 "keymap: failed to parse user overrides at {}: {err}. Using defaults.",
                 path.display()
             );

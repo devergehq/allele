@@ -5,6 +5,7 @@
 //! when using stream-json without `--include-partial-messages`.
 
 use super::types::*;
+use tracing::warn;
 
 /// Transforms wire-format `StreamLine`s into Allele's `RichEvent`s.
 pub struct StreamParser {
@@ -22,7 +23,7 @@ impl StreamParser {
         let parsed: StreamLine = match serde_json::from_str(line) {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("[stream] parse error: {e} — line: {}", &line[..line.len().min(120)]);
+                warn!("[stream] parse error: {e} — line: {}", &line[..line.len().min(120)]);
                 return Vec::new();
             }
         };

@@ -10,6 +10,7 @@
 // System Settings → Privacy & Security → Automation.
 
 use std::process::{Command, Stdio};
+use tracing::warn;
 
 /// True if Google Chrome's main process is running. Used so the Browser
 /// tab UI can distinguish "Chrome not running" from "script failed".
@@ -34,7 +35,7 @@ fn run_osascript(script: &str) -> Option<String> {
         .ok()?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        eprintln!("browser: osascript failed ({}): {}", out.status, err.trim());
+        warn!("browser: osascript failed ({}): {}", out.status, err.trim());
         return None;
     }
     Some(String::from_utf8_lossy(&out.stdout).trim().to_string())

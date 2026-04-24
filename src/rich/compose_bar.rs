@@ -30,6 +30,7 @@ use gpui::{
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, PathPromptOptions,
     Pixels, Rgba, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
+use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
@@ -508,7 +509,7 @@ impl ComposeBar {
                         cx.notify();
                     }
                     Err(e) => {
-                        eprintln!("allele: failed to save pasted image: {e}");
+                        warn!("allele: failed to save pasted image: {e}");
                     }
                 }
                 return;
@@ -605,7 +606,7 @@ impl ComposeBar {
                     self.attachments.push(a);
                     any_added = true;
                 }
-                Err(e) => eprintln!(
+                Err(e) => warn!(
                     "allele: failed to attach {}: {e}",
                     src.display()
                 ),
@@ -621,7 +622,7 @@ impl ComposeBar {
         if let Some(pos) = self.attachments.iter().position(|a| a.id == id) {
             let removed = self.attachments.remove(pos);
             if let Err(e) = std::fs::remove_file(&removed.path) {
-                eprintln!(
+                warn!(
                     "allele: failed to delete attachment file {}: {e}",
                     removed.path.display()
                 );

@@ -6,6 +6,7 @@
 //! per-family handlers (see ARCHITECTURE.md §3.1).
 
 use gpui::*;
+use tracing::{info, warn};
 
 use crate::actions::{PendingAction, SessionCursor};
 use crate::app_state::AppState;
@@ -125,7 +126,7 @@ impl AppState {
                                     &git::archive_ref_name(&session_id),
                                 );
                                 project.archives.remove(archive_idx);
-                                eprintln!("Merged archive {session_id} into canonical");
+                                info!("Merged archive {session_id} into canonical");
                             }
                             Ok(git::MergeResult::AlreadyUpToDate) => {
                                 let _ = git::delete_ref(
@@ -133,12 +134,12 @@ impl AppState {
                                     &git::archive_ref_name(&session_id),
                                 );
                                 project.archives.remove(archive_idx);
-                                eprintln!(
+                                info!(
                                     "Archive {session_id} had no new commits — nothing to merge (already up to date)"
                                 );
                             }
                             Err(e) => {
-                                eprintln!(
+                                warn!(
                                     "merge_archive failed for {session_id}: {e}"
                                 );
                             }
@@ -157,7 +158,7 @@ impl AppState {
                             &git::archive_ref_name(&session_id),
                         );
                         project.archives.remove(archive_idx);
-                        eprintln!("Deleted archive ref for {session_id}");
+                        info!("Deleted archive ref for {session_id}");
                     }
                 }
                 self.save_state();
@@ -248,7 +249,7 @@ impl AppState {
                                         if proj_settings.rebase_before_merge && git::has_remote(&canonical, remote) {
                                             let branch_override = proj_settings.default_branch.as_deref();
                                             if let Err(e) = git::fetch_and_rebase_onto_remote_branch(&canonical, remote, branch_override) {
-                                                eprintln!("Rebase onto {remote} failed for {session_id}: {e}");
+                                                warn!("Rebase onto {remote} failed for {session_id}: {e}");
                                                 // Clean up the archive ref only — preserve the clone
                                                 let _ = git::delete_ref(
                                                     &canonical,
@@ -256,7 +257,7 @@ impl AppState {
                                                 );
                                                 anyhow::bail!("Rebase failed — resolve conflicts in the session and merge again. {e}");
                                             }
-                                            eprintln!("Rebased canonical onto {remote} for {session_id}");
+                                            info!("Rebased canonical onto {remote} for {session_id}");
                                         }
 
                                         // 3. Merge the archive ref using the configured strategy
@@ -280,13 +281,13 @@ impl AppState {
 
                                         match merge_result {
                                             Ok(git::MergeResult::Merged) => {
-                                                eprintln!("Merged session {session_id} into canonical");
+                                                info!("Merged session {session_id} into canonical");
                                             }
                                             Ok(git::MergeResult::AlreadyUpToDate) => {
-                                                eprintln!("Session {session_id} already up to date — nothing to merge");
+                                                info!("Session {session_id} already up to date — nothing to merge");
                                             }
                                             Err(e) => {
-                                                eprintln!("merge_archive failed for {session_id}: {e}");
+                                                warn!("merge_archive failed for {session_id}: {e}");
                                                 // Preserve clone — don't delete it on merge failure
                                                 anyhow::bail!("Merge failed — resolve conflicts in the session and merge again. {e}");
                                             }
@@ -295,7 +296,7 @@ impl AppState {
                                         // 5. Trash the APFS clone (near-instant rename) on
                                         //    success. Actual deletion deferred to startup purge.
                                         if let Err(e) = clone::trash_clone(&clone_path) {
-                                            eprintln!("Failed to trash clone after merge for {session_id}: {e}");
+                                            warn!("Failed to trash clone after merge for {session_id}: {e}");
                                         }
                                         Ok(())
                                     })
@@ -308,7 +309,7 @@ impl AppState {
                                     }
 
                                     if let Err(e) = &result {
-                                        eprintln!("Merge-and-close pipeline error: {e}");
+                                        warn!("Merge-and-close pipeline error: {e}");
 
                                         // Restore the session so the user can fix conflicts and retry
                                         let restored = Session::suspended_from_persisted(
@@ -538,7 +539,7 @@ impl AppState {
                         if let Some(new_path) = paths.into_iter().next() {
                             let _ = this.update(cx, |this: &mut Self, cx| {
                                 if let Some(project) = this.projects.get_mut(project_idx) {
-                                    eprintln!(
+                                    info!(
                                         "Relocated project '{}': {} -> {}",
                                         project.name,
                                         project.source_path.display(),
@@ -779,7 +780,7 @@ impl AppState {
                                     clone_path,
                                     &sanitised,
                                 ) {
-                                    eprintln!("branch rename failed: {e}");
+                                    warn!("branch rename failed: {e}");
                                 }
                             }
                         }
