@@ -28,7 +28,10 @@ mod text_input;
 mod transcript;
 mod trust;
 
-use actions::{PendingAction, SessionCursor};
+use actions::{
+    BrowserAction, DrawerAction, OverlayAction, ProjectAction, SessionAction, SessionCursor,
+    SettingsAction, SidebarAction,
+};
 use app_state::{AppState, MainTab, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MIN_WIDTH};
 use gpui::*;
 use project::Project;
@@ -129,12 +132,12 @@ impl AppState {
                         scratch_pad::ScratchPadEvent::Send { text, attachments } => {
                             this.scratch_pad_send(text.clone(), attachments.clone(), cx);
                             this.scratch_pad = None;
-                            this.pending_action = Some(PendingAction::FocusActive);
+                            this.pending_action = Some(SessionAction::FocusActive.into());
                             cx.notify();
                         }
                         scratch_pad::ScratchPadEvent::Close => {
                             this.scratch_pad = None;
-                            this.pending_action = Some(PendingAction::FocusActive);
+                            this.pending_action = Some(SessionAction::FocusActive.into());
                             cx.notify();
                         }
                         scratch_pad::ScratchPadEvent::DeleteHistoryEntry { id } => {
@@ -312,7 +315,7 @@ impl AppState {
                         // active session (activates its tab or creates one).
                         if tab == MainTab::Browser && previous != MainTab::Browser {
                             this.pending_action =
-                                Some(PendingAction::SyncBrowserToActiveSession);
+                                Some(BrowserAction::SyncBrowserToActiveSession.into());
                         }
                         cx.notify();
                     }),
@@ -560,7 +563,7 @@ impl AppState {
                         MouseButton::Left,
                         cx.listener(|this: &mut Self, _event, _window, cx| {
                             this.pending_action =
-                                Some(PendingAction::SyncBrowserToActiveSession);
+                                Some(BrowserAction::SyncBrowserToActiveSession.into());
                             cx.notify();
                         }),
                     ),
@@ -583,10 +586,11 @@ impl AppState {
                             MouseButton::Left,
                             cx.listener(move |this: &mut Self, _event, _window, cx| {
                                 this.pending_action = Some(
-                                    PendingAction::CloseBrowserTabForSession {
+                                    BrowserAction::CloseBrowserTabForSession {
                                         project_idx: cur.project_idx,
                                         session_idx: cur.session_idx,
-                                    },
+                                    }
+                                    .into(),
                                 );
                                 cx.notify();
                             }),
@@ -720,7 +724,7 @@ impl AppState {
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
-                        this.pending_action = Some(PendingAction::EditSession { project_idx: p_idx, session_idx: s_idx });
+                        this.pending_action = Some(SessionAction::EditSession { project_idx: p_idx, session_idx: s_idx }.into());
                         cx.notify();
                     })),
             )
@@ -730,7 +734,7 @@ impl AppState {
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
-                        this.pending_action = Some(PendingAction::RevealSessionInFinder { project_idx: p_idx, session_idx: s_idx });
+                        this.pending_action = Some(SessionAction::RevealSessionInFinder { project_idx: p_idx, session_idx: s_idx }.into());
                         cx.notify();
                     })),
             )
@@ -739,7 +743,7 @@ impl AppState {
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
-                        this.pending_action = Some(PendingAction::CopySessionPath { project_idx: p_idx, session_idx: s_idx });
+                        this.pending_action = Some(SessionAction::CopySessionPath { project_idx: p_idx, session_idx: s_idx }.into());
                         cx.notify();
                     })),
             )
@@ -749,7 +753,7 @@ impl AppState {
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
-                        this.pending_action = Some(PendingAction::TogglePinSession { project_idx: p_idx, session_idx: s_idx });
+                        this.pending_action = Some(SessionAction::TogglePinSession { project_idx: p_idx, session_idx: s_idx }.into());
                         cx.notify();
                     })),
             )
@@ -758,7 +762,7 @@ impl AppState {
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
-                        this.pending_action = Some(PendingAction::EditSession { project_idx: p_idx, session_idx: s_idx });
+                        this.pending_action = Some(SessionAction::EditSession { project_idx: p_idx, session_idx: s_idx }.into());
                         cx.notify();
                     })),
             )
@@ -768,7 +772,7 @@ impl AppState {
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
-                        this.pending_action = Some(PendingAction::RequestDiscardSession { project_idx: p_idx, session_idx: s_idx });
+                        this.pending_action = Some(SessionAction::RequestDiscardSession { project_idx: p_idx, session_idx: s_idx }.into());
                         cx.notify();
                     })),
             );
@@ -827,19 +831,19 @@ impl AppState {
                         pinned,
                     } => {
                         this.edit_session_modal = None;
-                        this.pending_action = Some(PendingAction::ApplySessionEdit {
+                        this.pending_action = Some(SessionAction::ApplySessionEdit {
                             project_idx: *project_idx,
                             session_idx: *session_idx,
                             label: label.clone(),
                             branch_slug: branch_slug.clone(),
                             comment: comment.clone(),
                             pinned: *pinned,
-                        });
+                        }.into());
                         cx.notify();
                     }
                     new_session_modal::EditSessionModalEvent::Close => {
                         this.edit_session_modal = None;
-                        this.pending_action = Some(PendingAction::FocusActive);
+                        this.pending_action = Some(SessionAction::FocusActive.into());
                         cx.notify();
                     }
                 }
@@ -941,7 +945,7 @@ impl AppState {
             if let Ok(Ok(Some(paths))) = paths.await {
                 if let Some(path) = paths.into_iter().next() {
                     let _ = this.update(cx, |this: &mut Self, cx| {
-                        this.pending_action = Some(PendingAction::OpenProjectAtPath(path));
+                        this.pending_action = Some(ProjectAction::OpenProjectAtPath(path).into());
                         cx.notify();
                     });
                 }
@@ -1041,18 +1045,18 @@ impl AppState {
                         initial_prompt,
                     } => {
                         this.new_session_modal = None;
-                        this.pending_action = Some(PendingAction::AddSessionWithDetails {
+                        this.pending_action = Some(SessionAction::AddSessionWithDetails {
                             project_idx: *project_idx,
                             label: label.clone(),
                             branch_slug: branch_slug.clone(),
                             agent_id: agent_id.clone(),
                             initial_prompt: initial_prompt.clone(),
-                        });
+                        }.into());
                         cx.notify();
                     }
                     new_session_modal::NewSessionModalEvent::Close => {
                         this.new_session_modal = None;
-                        this.pending_action = Some(PendingAction::FocusActive);
+                        this.pending_action = Some(SessionAction::FocusActive.into());
                         cx.notify();
                     }
                 }
@@ -1787,7 +1791,7 @@ fn main() {
                         move |_, cx| {
                             handle
                                 .update(cx, |this: &mut AppState, cx| {
-                                    this.pending_action = Some(PendingAction::ToggleSidebar);
+                                    this.pending_action = Some(SidebarAction::ToggleSidebar.into());
                                     cx.notify();
                                 })
                                 .ok();
@@ -1798,7 +1802,7 @@ fn main() {
                         move |_, cx| {
                             handle
                                 .update(cx, |this: &mut AppState, cx| {
-                                    this.pending_action = Some(PendingAction::ToggleDrawer);
+                                    this.pending_action = Some(DrawerAction::ToggleDrawer.into());
                                     cx.notify();
                                 })
                                 .ok();
@@ -1809,7 +1813,7 @@ fn main() {
                         move |_, cx| {
                             handle
                                 .update(cx, |this: &mut AppState, cx| {
-                                    this.pending_action = Some(PendingAction::OpenScratchPad);
+                                    this.pending_action = Some(OverlayAction::OpenScratchPad.into());
                                     cx.notify();
                                 })
                                 .ok();
@@ -1914,10 +1918,10 @@ fn main() {
                                             session_idx: s_idx,
                                         };
                                         let pending = if resumable {
-                                            Some(PendingAction::ResumeSession {
+                                            Some(SessionAction::ResumeSession {
                                                 project_idx: p_idx,
                                                 session_idx: s_idx,
-                                            })
+                                            }.into())
                                         } else {
                                             None
                                         };
@@ -2335,10 +2339,10 @@ impl Render for AppState {
                                     .child("Resume")
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                         if let Some(active) = this.active {
-                                            this.pending_action = Some(PendingAction::ResumeSession {
+                                            this.pending_action = Some(SessionAction::ResumeSession {
                                                 project_idx: active.project_idx,
                                                 session_idx: active.session_idx,
-                                            });
+                                            }.into());
                                             cx.notify();
                                         }
                                     })),
@@ -2359,7 +2363,7 @@ impl Render for AppState {
                                 .child("New Session")
                                 .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                     if let Some(active) = this.active {
-                                        this.pending_action = Some(PendingAction::AddSessionToProject(active.project_idx));
+                                        this.pending_action = Some(SessionAction::AddSessionToProject(active.project_idx).into());
                                         cx.notify();
                                     }
                                 })),
@@ -2586,7 +2590,7 @@ impl Render for AppState {
                                         cx.new(|_| SimpleTooltip { text: "Close inspector".into() }).into()
                                     })
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                        this.pending_action = Some(PendingAction::ToggleRightSidebar);
+                                        this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
                                         cx.notify();
                                     })),
                             ),

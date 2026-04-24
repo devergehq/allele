@@ -12,7 +12,7 @@
 
 use gpui::*;
 
-use crate::actions::{PendingAction, SessionCursor};
+use crate::actions::{DrawerAction, SessionCursor, SettingsAction};
 use crate::app_state::{AppState, DRAWER_MIN_HEIGHT};
 use crate::session::DrawerTab;
 use crate::terminal::{clamp_font_size, ShellCommand, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
@@ -46,17 +46,17 @@ impl AppState {
              cx: &mut Context<Self>| {
                 match event {
                     TerminalEvent::ToggleDrawer => {
-                        this.pending_action = Some(PendingAction::ToggleDrawer);
+                        this.pending_action = Some(DrawerAction::ToggleDrawer.into());
                         cx.notify();
                     }
                     TerminalEvent::AdjustFontSize(delta) => {
                         let new_size = clamp_font_size(this.user_settings.font_size + delta);
-                        this.pending_action = Some(PendingAction::UpdateFontSize(new_size));
+                        this.pending_action = Some(SettingsAction::UpdateFontSize(new_size).into());
                         cx.notify();
                     }
                     TerminalEvent::ResetFontSize => {
                         this.pending_action =
-                            Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
+                            Some(SettingsAction::UpdateFontSize(DEFAULT_FONT_SIZE).into());
                         cx.notify();
                     }
                     _ => {}
@@ -261,12 +261,12 @@ pub(crate) fn build_drawer_items(
                             match key {
                                 "enter" => {
                                     this.pending_action =
-                                        Some(PendingAction::CommitRenameDrawerTab);
+                                        Some(DrawerAction::CommitRenameDrawerTab.into());
                                     cx.notify();
                                 }
                                 "escape" => {
                                     this.pending_action =
-                                        Some(PendingAction::CancelRenameDrawerTab);
+                                        Some(DrawerAction::CancelRenameDrawerTab.into());
                                     cx.notify();
                                 }
                                 "backspace" => {
@@ -304,10 +304,10 @@ pub(crate) fn build_drawer_items(
                             cx.listener(move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
                                 if event.click_count >= 2 {
                                     this.pending_action =
-                                        Some(PendingAction::StartRenameDrawerTab(idx));
+                                        Some(DrawerAction::StartRenameDrawerTab(idx).into());
                                 } else {
                                     this.pending_action =
-                                        Some(PendingAction::SwitchDrawerTab(idx));
+                                        Some(DrawerAction::SwitchDrawerTab(idx).into());
                                 }
                                 cx.notify();
                             }),
@@ -332,7 +332,7 @@ pub(crate) fn build_drawer_items(
                             MouseButton::Left,
                             cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                 this.pending_action =
-                                    Some(PendingAction::CloseDrawerTab(idx));
+                                    Some(DrawerAction::CloseDrawerTab(idx).into());
                                 cx.notify();
                             }),
                         ),
@@ -360,7 +360,7 @@ pub(crate) fn build_drawer_items(
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this: &mut AppState, _event, _window, cx| {
-                    this.pending_action = Some(PendingAction::NewDrawerTab);
+                    this.pending_action = Some(DrawerAction::NewDrawerTab.into());
                     cx.notify();
                 }),
             ),
@@ -395,7 +395,7 @@ pub(crate) fn build_drawer_items(
                         cx.new(|_| SimpleTooltip { text: "Close drawer".into() }).into()
                     })
                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
-                        this.pending_action = Some(PendingAction::ToggleDrawer);
+                        this.pending_action = Some(DrawerAction::ToggleDrawer.into());
                         cx.notify();
                     })),
             )

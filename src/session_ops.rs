@@ -8,7 +8,10 @@
 use gpui::*;
 use tracing::{info, warn};
 
-use crate::actions::{PendingAction, SessionCursor};
+use crate::actions::{
+    DrawerAction, OverlayAction, ProjectAction, SessionAction, SessionCursor, SettingsAction,
+    SidebarAction,
+};
 use crate::app_state::AppState;
 use crate::session::{Session, SessionStatus};
 use crate::state::ArchivedSession;
@@ -34,7 +37,7 @@ impl AppState {
                 "Project source path missing: {} — prompting for relocation",
                 project.source_path.display()
             );
-            self.pending_action = Some(PendingAction::RelocateProject(project_idx));
+            self.pending_action = Some(ProjectAction::RelocateProject(project_idx).into());
             cx.notify();
             return;
         }
@@ -202,11 +205,11 @@ impl AppState {
                 cx.subscribe(&terminal_view, |this: &mut Self, _tv: Entity<TerminalView>, event: &TerminalEvent, cx: &mut Context<Self>| {
                     match event {
                         TerminalEvent::NewSession => {
-                            this.pending_action = Some(PendingAction::NewSessionInActiveProject);
+                            this.pending_action = Some(SessionAction::NewSessionInActiveProject.into());
                             cx.notify();
                         }
                         TerminalEvent::CloseSession => {
-                            this.pending_action = Some(PendingAction::CloseActiveSession);
+                            this.pending_action = Some(SessionAction::CloseActiveSession.into());
                             cx.notify();
                         }
                         TerminalEvent::SwitchSession(target) => {
@@ -216,7 +219,7 @@ impl AppState {
                                 for (s_idx, _) in project.sessions.iter().enumerate() {
                                     if flat_idx == target {
                                         this.active = Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
-                                        this.pending_action = Some(PendingAction::FocusActive);
+                                        this.pending_action = Some(SessionAction::FocusActive.into());
                                         cx.notify();
                                         break 'outer;
                                     }
@@ -231,29 +234,29 @@ impl AppState {
                             this.navigate_session(1, cx);
                         }
                         TerminalEvent::ToggleDrawer => {
-                            this.pending_action = Some(PendingAction::ToggleDrawer);
+                            this.pending_action = Some(DrawerAction::ToggleDrawer.into());
                             cx.notify();
                         }
                         TerminalEvent::ToggleSidebar => {
-                            this.pending_action = Some(PendingAction::ToggleSidebar);
+                            this.pending_action = Some(SidebarAction::ToggleSidebar.into());
                             cx.notify();
                         }
                         TerminalEvent::ToggleRightSidebar => {
-                            this.pending_action = Some(PendingAction::ToggleRightSidebar);
+                            this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
                             cx.notify();
                         }
                         TerminalEvent::OpenScratchPad => {
-                            this.pending_action = Some(PendingAction::OpenScratchPad);
+                            this.pending_action = Some(OverlayAction::OpenScratchPad.into());
                             cx.notify();
                         }
                         TerminalEvent::AdjustFontSize(delta) => {
                             let new_size = clamp_font_size(this.user_settings.font_size + delta);
-                            this.pending_action = Some(PendingAction::UpdateFontSize(new_size));
+                            this.pending_action = Some(SettingsAction::UpdateFontSize(new_size).into());
                             cx.notify();
                         }
                         TerminalEvent::ResetFontSize => {
                             this.pending_action =
-                                Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
+                                Some(SettingsAction::UpdateFontSize(DEFAULT_FONT_SIZE).into());
                             cx.notify();
                         }
                         TerminalEvent::OpenExternalEditor { path, line_col } => {
@@ -316,7 +319,7 @@ impl AppState {
         let Some(project) = self.projects.get_mut(project_idx) else { return; };
 
         if !project.source_path.exists() {
-            self.pending_action = Some(PendingAction::RelocateProject(project_idx));
+            self.pending_action = Some(ProjectAction::RelocateProject(project_idx).into());
             cx.notify();
             return;
         }
@@ -475,11 +478,11 @@ impl AppState {
                 cx.subscribe(&terminal_view, |this: &mut Self, _tv: Entity<TerminalView>, event: &TerminalEvent, cx: &mut Context<Self>| {
                     match event {
                         TerminalEvent::NewSession => {
-                            this.pending_action = Some(PendingAction::NewSessionInActiveProject);
+                            this.pending_action = Some(SessionAction::NewSessionInActiveProject.into());
                             cx.notify();
                         }
                         TerminalEvent::CloseSession => {
-                            this.pending_action = Some(PendingAction::CloseActiveSession);
+                            this.pending_action = Some(SessionAction::CloseActiveSession.into());
                             cx.notify();
                         }
                         TerminalEvent::SwitchSession(target) => {
@@ -489,7 +492,7 @@ impl AppState {
                                 for (s_idx, _) in project.sessions.iter().enumerate() {
                                     if flat_idx == target {
                                         this.active = Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
-                                        this.pending_action = Some(PendingAction::FocusActive);
+                                        this.pending_action = Some(SessionAction::FocusActive.into());
                                         cx.notify();
                                         break 'outer;
                                     }
@@ -504,29 +507,29 @@ impl AppState {
                             this.navigate_session(1, cx);
                         }
                         TerminalEvent::ToggleDrawer => {
-                            this.pending_action = Some(PendingAction::ToggleDrawer);
+                            this.pending_action = Some(DrawerAction::ToggleDrawer.into());
                             cx.notify();
                         }
                         TerminalEvent::ToggleSidebar => {
-                            this.pending_action = Some(PendingAction::ToggleSidebar);
+                            this.pending_action = Some(SidebarAction::ToggleSidebar.into());
                             cx.notify();
                         }
                         TerminalEvent::ToggleRightSidebar => {
-                            this.pending_action = Some(PendingAction::ToggleRightSidebar);
+                            this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
                             cx.notify();
                         }
                         TerminalEvent::OpenScratchPad => {
-                            this.pending_action = Some(PendingAction::OpenScratchPad);
+                            this.pending_action = Some(OverlayAction::OpenScratchPad.into());
                             cx.notify();
                         }
                         TerminalEvent::AdjustFontSize(delta) => {
                             let new_size = clamp_font_size(this.user_settings.font_size + delta);
-                            this.pending_action = Some(PendingAction::UpdateFontSize(new_size));
+                            this.pending_action = Some(SettingsAction::UpdateFontSize(new_size).into());
                             cx.notify();
                         }
                         TerminalEvent::ResetFontSize => {
                             this.pending_action =
-                                Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
+                                Some(SettingsAction::UpdateFontSize(DEFAULT_FONT_SIZE).into());
                             cx.notify();
                         }
                         TerminalEvent::OpenExternalEditor { path, line_col } => {
@@ -684,7 +687,7 @@ impl AppState {
         };
 
         self.active = Some(flat[new_pos]);
-        self.pending_action = Some(PendingAction::FocusActive);
+        self.pending_action = Some(SessionAction::FocusActive.into());
         cx.notify();
     }
 
@@ -765,11 +768,11 @@ impl AppState {
         cx.subscribe(&terminal_view, |this: &mut Self, _tv: Entity<TerminalView>, event: &TerminalEvent, cx: &mut Context<Self>| {
             match event {
                 TerminalEvent::NewSession => {
-                    this.pending_action = Some(PendingAction::NewSessionInActiveProject);
+                    this.pending_action = Some(SessionAction::NewSessionInActiveProject.into());
                     cx.notify();
                 }
                 TerminalEvent::CloseSession => {
-                    this.pending_action = Some(PendingAction::CloseActiveSession);
+                    this.pending_action = Some(SessionAction::CloseActiveSession.into());
                     cx.notify();
                 }
                 TerminalEvent::SwitchSession(target) => {
@@ -781,7 +784,7 @@ impl AppState {
                         for (s_idx, _) in project.sessions.iter().enumerate() {
                             if flat_idx == target {
                                 this.active = Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
-                                this.pending_action = Some(PendingAction::FocusActive);
+                                this.pending_action = Some(SessionAction::FocusActive.into());
                                 cx.notify();
                                 break 'outer;
                             }
@@ -796,28 +799,28 @@ impl AppState {
                     this.navigate_session(1, cx);
                 }
                 TerminalEvent::ToggleDrawer => {
-                    this.pending_action = Some(PendingAction::ToggleDrawer);
+                    this.pending_action = Some(DrawerAction::ToggleDrawer.into());
                     cx.notify();
                 }
                 TerminalEvent::ToggleSidebar => {
-                    this.pending_action = Some(PendingAction::ToggleSidebar);
+                    this.pending_action = Some(SidebarAction::ToggleSidebar.into());
                     cx.notify();
                 }
                 TerminalEvent::ToggleRightSidebar => {
-                    this.pending_action = Some(PendingAction::ToggleRightSidebar);
+                    this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
                     cx.notify();
                 }
                 TerminalEvent::OpenScratchPad => {
-                    this.pending_action = Some(PendingAction::OpenScratchPad);
+                    this.pending_action = Some(OverlayAction::OpenScratchPad.into());
                     cx.notify();
                 }
                 TerminalEvent::AdjustFontSize(delta) => {
                     let new_size = clamp_font_size(this.user_settings.font_size + delta);
-                    this.pending_action = Some(PendingAction::UpdateFontSize(new_size));
+                    this.pending_action = Some(SettingsAction::UpdateFontSize(new_size).into());
                     cx.notify();
                 }
                 TerminalEvent::ResetFontSize => {
-                    this.pending_action = Some(PendingAction::UpdateFontSize(DEFAULT_FONT_SIZE));
+                    this.pending_action = Some(SettingsAction::UpdateFontSize(DEFAULT_FONT_SIZE).into());
                     cx.notify();
                 }
                 TerminalEvent::OpenExternalEditor { path, line_col } => {
@@ -854,7 +857,7 @@ impl AppState {
             session.resuming_until =
                 Some(std::time::Instant::now() + std::time::Duration::from_secs(3));
             self.active = Some(cursor);
-            self.pending_action = Some(PendingAction::FocusActive);
+            self.pending_action = Some(SessionAction::FocusActive.into());
         }
 
         self.apply_project_config(cursor, window, cx);
