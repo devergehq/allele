@@ -85,6 +85,14 @@ Modules **new since divergence** (not in blueprint, need coverage in plan):
 
 ## 5. Phase sequence (execution order)
 
+**Status as of most recent commit on this branch:** Phases 1–15 and 17–19 ✅
+applied. Phase 16 (Linux build via Docker) ⏳ deferred — verification requires
+a Docker host and is decoupled from the code changes. Phase 18's audit ⏳
+documents findings only; per-site application (SAFETY comments + .expect
+upgrades + two None-handling refactors) is a follow-up.
+
+
+
 Each phase should be one commit, on a fresh session branch off current master. Acceptance
 criteria for every phase:
 
