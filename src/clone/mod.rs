@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
+use crate::errors::AlleleError;
 use crate::git;
 
 /// Base directory for all workspace clones
@@ -20,9 +21,9 @@ pub const TRASH_TTL_DAYS: u64 = 14;
 
 /// Create a clone for a session: uses a short unique session ID as the workspace name.
 /// Returns the clone path.
-pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str) -> anyhow::Result<PathBuf> {
+pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str) -> crate::errors::Result<PathBuf> {
     let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+        .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
     let clone_dir = home.join(CLONE_BASE).join(project_name);
     fs::create_dir_all(&clone_dir)?;
 
@@ -34,8 +35,10 @@ pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str)
         // Unlikely with UUIDs but handle by appending a random suffix
         create_clone(source, &format!("{short_id}-alt"))?
     } else {
-        let src_cstr = CString::new(source.to_string_lossy().as_bytes())?;
-        let dst_cstr = CString::new(clone_path.to_string_lossy().as_bytes())?;
+        let src_cstr = CString::new(source.to_string_lossy().as_bytes())
+            .map_err(|e| AlleleError::Clone(format!("source path contains NUL: {e}")))?;
+        let dst_cstr = CString::new(clone_path.to_string_lossy().as_bytes())
+            .map_err(|e| AlleleError::Clone(format!("destination path contains NUL: {e}")))?;
 
         let result = unsafe {
             libc::clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), 0)
@@ -44,15 +47,15 @@ pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str)
         if result != 0 {
             let err = std::io::Error::last_os_error();
             if err.raw_os_error() == Some(libc::EXDEV) {
-                anyhow::bail!(
+                return Err(AlleleError::Clone(format!(
                     "Cannot clone: source ({}) and destination ({}) are on different \
                      volumes. Both must be on the same APFS volume for clonefile(2) to work. \
                      Move your project or ~/.allele/ so they share a volume.",
                     source.display(),
                     clone_path.display(),
-                );
+                )));
             }
-            anyhow::bail!("clonefile() failed: {err}");
+            return Err(AlleleError::Clone(format!("clonefile() failed: {err}")));
         }
 
         clone_path
@@ -76,9 +79,9 @@ pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str)
 /// untracked files, node_modules, .env, everything.
 ///
 /// Returns the path to the clone.
-pub fn create_clone(source: &Path, workspace_name: &str) -> anyhow::Result<PathBuf> {
+pub fn create_clone(source: &Path, workspace_name: &str) -> crate::errors::Result<PathBuf> {
     let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+        .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
 
     // Derive a project name from the source path
     let project_name = source
@@ -97,15 +100,17 @@ pub fn create_clone(source: &Path, workspace_name: &str) -> anyhow::Result<PathB
 
     // clonefile requires destination does NOT exist
     if clone_path.exists() {
-        anyhow::bail!(
+        return Err(AlleleError::Clone(format!(
             "Clone destination already exists: {}",
             clone_path.display()
-        );
+        )));
     }
 
     // Call clonefile(2) — macOS APFS copy-on-write clone
-    let src_cstr = CString::new(source.to_string_lossy().as_bytes())?;
-    let dst_cstr = CString::new(clone_path.to_string_lossy().as_bytes())?;
+    let src_cstr = CString::new(source.to_string_lossy().as_bytes())
+        .map_err(|e| AlleleError::Clone(format!("source path contains NUL: {e}")))?;
+    let dst_cstr = CString::new(clone_path.to_string_lossy().as_bytes())
+        .map_err(|e| AlleleError::Clone(format!("destination path contains NUL: {e}")))?;
 
     let result = unsafe {
         libc::clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), 0)
@@ -114,15 +119,15 @@ pub fn create_clone(source: &Path, workspace_name: &str) -> anyhow::Result<PathB
     if result != 0 {
         let err = std::io::Error::last_os_error();
         if err.raw_os_error() == Some(libc::EXDEV) {
-            anyhow::bail!(
+            return Err(AlleleError::Clone(format!(
                 "Cannot clone: source ({}) and destination ({}) are on different \
                  volumes. Both must be on the same APFS volume for clonefile(2) to work. \
                  Move your project or ~/.allele/ so they share a volume.",
                 source.display(),
                 clone_path.display(),
-            );
+            )));
         }
-        anyhow::bail!("clonefile() failed: {err}");
+        return Err(AlleleError::Clone(format!("clonefile() failed: {err}")));
     }
 
     Ok(clone_path)
@@ -189,21 +194,21 @@ pub fn cleanup_stale_runtime(clone_path: &Path, paths: &[String]) {
 /// This is the destructive path — only used via the explicit "Discard"
 /// action. Normal session closure trashes the clone instead (see
 /// [`trash_clone`]).
-pub fn delete_clone(clone_path: &Path) -> anyhow::Result<()> {
+pub fn delete_clone(clone_path: &Path) -> crate::errors::Result<()> {
     if !clone_path.exists() {
         return Ok(());
     }
 
     // Safety check — only delete paths under our workspace directory
     let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+        .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
     let workspace_base = home.join(CLONE_BASE);
 
     if !clone_path.starts_with(&workspace_base) {
-        anyhow::bail!(
+        return Err(AlleleError::Clone(format!(
             "Refusing to delete path outside workspace directory: {}",
             clone_path.display()
-        );
+        )));
     }
 
     fs::remove_dir_all(clone_path)?;
@@ -211,9 +216,9 @@ pub fn delete_clone(clone_path: &Path) -> anyhow::Result<()> {
 }
 
 /// Return the trash base directory, creating it if necessary.
-pub fn trash_base() -> anyhow::Result<PathBuf> {
+pub fn trash_base() -> crate::errors::Result<PathBuf> {
     let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+        .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
     let path = home.join(TRASH_BASE);
     fs::create_dir_all(&path)?;
     Ok(path)
@@ -227,20 +232,23 @@ pub fn trash_base() -> anyhow::Result<PathBuf> {
 ///
 /// Safety: refuses to operate on any path outside
 /// `~/.allele/workspaces/`.
-pub fn trash_clone(clone_path: &Path) -> anyhow::Result<PathBuf> {
+pub fn trash_clone(clone_path: &Path) -> crate::errors::Result<PathBuf> {
     if !clone_path.exists() {
-        anyhow::bail!("trash_clone: path does not exist: {}", clone_path.display());
+        return Err(AlleleError::Clone(format!(
+            "trash_clone: path does not exist: {}",
+            clone_path.display()
+        )));
     }
 
     let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+        .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
     let workspace_base = home.join(CLONE_BASE);
 
     if !clone_path.starts_with(&workspace_base) {
-        anyhow::bail!(
+        return Err(AlleleError::Clone(format!(
             "Refusing to trash path outside workspace directory: {}",
             clone_path.display()
-        );
+        )));
     }
 
     let trash_dir = trash_base()?;
@@ -270,15 +278,15 @@ pub fn trash_clone(clone_path: &Path) -> anyhow::Result<PathBuf> {
 
     fs::rename(clone_path, &dest).map_err(|e| {
         if e.raw_os_error() == Some(libc::EXDEV) {
-            anyhow::anyhow!(
+            AlleleError::Clone(format!(
                 "Cannot trash clone: source ({}) and trash directory ({}) are on different \
                  volumes. Both must be on the same APFS volume. \
                  Move ~/.allele/ so workspaces and trash share a volume.",
                 clone_path.display(),
                 dest.display(),
-            )
+            ))
         } else {
-            e.into()
+            AlleleError::Io(e)
         }
     })?;
     Ok(dest)
@@ -287,7 +295,7 @@ pub fn trash_clone(clone_path: &Path) -> anyhow::Result<PathBuf> {
 /// Delete trash entries older than `ttl_days`. Returns the number of entries
 /// actually purged. Errors on individual entries are logged and swallowed —
 /// one corrupt directory shouldn't stop the sweep.
-pub fn purge_trash_older_than_days(ttl_days: u64) -> anyhow::Result<usize> {
+pub fn purge_trash_older_than_days(ttl_days: u64) -> crate::errors::Result<usize> {
     let trash_dir = trash_base()?;
     if !trash_dir.exists() {
         return Ok(0);
@@ -338,9 +346,9 @@ pub fn purge_trash_older_than_days(ttl_days: u64) -> anyhow::Result<usize> {
 pub fn sweep_orphans(
     referenced: &HashSet<PathBuf>,
     project_sources: &HashMap<String, PathBuf>,
-) -> anyhow::Result<usize> {
+) -> crate::errors::Result<usize> {
     let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+        .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
     let workspace_base = home.join(CLONE_BASE);
 
     if !workspace_base.exists() {
