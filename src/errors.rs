@@ -30,6 +30,9 @@ pub enum AlleleError {
     #[error("config error: {0}")]
     Config(String),
 
+    #[error("hooks error: {0}")]
+    Hooks(String),
+
     #[error("state error: {0}")]
     State(String),
 
