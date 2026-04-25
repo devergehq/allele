@@ -680,9 +680,13 @@ impl AppState {
         }
     }
 
-    /// Floating right-click menu for a session row.
+    /// Floating right-click menu for a session row. Returns an empty `Div`
+    /// when no context menu is open, so callers can attach unconditionally.
     fn render_session_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (cursor, position) = self.session_context_menu.unwrap();
+        let mut root = div();
+        let Some((cursor, position)) = self.session_context_menu else {
+            return root;
+        };
         let p_idx = cursor.project_idx;
         let s_idx = cursor.session_idx;
 
@@ -782,7 +786,8 @@ impl AppState {
                     })),
             );
 
-        deferred(anchored().position(position).snap_to_window().child(menu))
+        root = root.child(deferred(anchored().position(position).snap_to_window().child(menu)));
+        root
     }
 
     /// Open the edit-session modal for an existing session.
@@ -2731,9 +2736,7 @@ impl Render for AppState {
             outer = outer.child(modal);
         }
 
-        if self.session_context_menu.is_some() {
-            outer = outer.child(self.render_session_context_menu(cx));
-        }
+        outer = outer.child(self.render_session_context_menu(cx));
 
         // Coalesce per-frame mutations into at most one write per file.
         // See ARCHITECTURE.md §3.4.
