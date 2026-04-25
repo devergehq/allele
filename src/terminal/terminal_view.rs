@@ -538,6 +538,8 @@ impl TerminalView {
     fn scroll_lines_from_event(&self, event: &ScrollWheelEvent) -> i32 {
         match event.delta {
             ScrollDelta::Pixels(delta_px) => {
+                // SAFETY: Mutex is private to this terminal view; only this
+                // method ever locks it, so it can never be poisoned.
                 let mut acc = self.scroll_pixel_accumulator.lock().unwrap();
                 *acc += f32::from(delta_px.y);
                 let whole = (*acc / self.cell_height).trunc() as i32;
@@ -547,6 +549,7 @@ impl TerminalView {
                 whole
             }
             ScrollDelta::Lines(delta_ln) => {
+                // SAFETY: same Mutex as above — private, single-locker, never poisoned.
                 *self.scroll_pixel_accumulator.lock().unwrap() = 0.0;
                 delta_ln.y.round() as i32
             }
@@ -2188,6 +2191,7 @@ pub(crate) fn parse_line_col_suffix(token: &str) -> (&str, Option<(u32, Option<u
         return (token, None);
     }
     // nums[0] is the rightmost (col if two), nums[last] is leftmost (line).
+    // SAFETY: `nums.is_empty()` was checked immediately above.
     let path_end = nums.last().unwrap().0;
     let path_part = &token[..path_end];
     if path_part.is_empty() {

@@ -152,13 +152,15 @@ impl AppState {
                         let needs_git = clone_path.as_ref().map_or(false, |cp| *cp != canonical);
 
                         if needs_git {
-                            let clone_path = clone_path.unwrap(); // safe: needs_git is true
+                            // SAFETY: needs_git is true, so clone_path is Some.
+                            let clone_path = clone_path.unwrap();
                             let restore_clone = clone_path.clone();
 
                             // Show a placeholder while the background pipeline runs.
                             let placeholder_id = uuid::Uuid::new_v4().to_string();
                             {
-                                let project = self.projects.get_mut(cursor.project_idx).unwrap();
+                                let project = self.projects.get_mut(cursor.project_idx)
+                                    .expect("cursor produced by a sidebar click; project_idx always in bounds");
                                 project.loading_sessions.push(project::LoadingSession {
                                     id: placeholder_id.clone(),
                                     label: format!("{session_label} (rebasing & merging)"),
