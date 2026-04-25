@@ -18,6 +18,8 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
 use tracing::warn;
 
+use crate::errors::AlleleError;
+
 /// Canonical on-disk locations for the hook infrastructure.
 pub fn base_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".allele"))
@@ -126,8 +128,8 @@ fn build_hooks_json(receiver: &str) -> serde_json::Value {
 ///
 /// Returns the absolute path to hooks.json so the caller can pass it to
 /// `claude --settings`.
-pub fn install_if_missing() -> anyhow::Result<PathBuf> {
-    let base = base_dir().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+pub fn install_if_missing() -> crate::errors::Result<PathBuf> {
+    let base = base_dir().ok_or_else(|| AlleleError::Hooks("no home directory".to_string()))?;
     fs::create_dir_all(&base)?;
     fs::create_dir_all(base.join("bin"))?;
     fs::create_dir_all(base.join("events"))?;
@@ -135,7 +137,7 @@ pub fn install_if_missing() -> anyhow::Result<PathBuf> {
     // Write the receiver script every time — it's tiny and this guarantees
     // the on-disk copy matches the source in case we ship a fix.
     let receiver_path = receiver_script_path()
-        .ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+        .ok_or_else(|| AlleleError::Hooks("no home directory".to_string()))?;
     fs::write(&receiver_path, RECEIVER_SCRIPT)?;
 
     #[cfg(unix)]
@@ -149,7 +151,7 @@ pub fn install_if_missing() -> anyhow::Result<PathBuf> {
     // Write (or rewrite) hooks.json. We always rewrite so the receiver path
     // is current and the version marker is up-to-date.
     let hooks_path = hooks_settings_path()
-        .ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+        .ok_or_else(|| AlleleError::Hooks("no home directory".to_string()))?;
     let receiver_abs = receiver_path.to_string_lossy().to_string();
     let hooks_json = build_hooks_json(&receiver_abs);
     fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_json)?)?;
