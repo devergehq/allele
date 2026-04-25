@@ -116,18 +116,20 @@ impl AppState {
             .child(tree_col)
             .child(preview_col);
 
-        if self.editor.context_menu.is_some() {
-            root = root.child(self.render_editor_context_menu(cx));
-        }
+        root = root.child(self.render_editor_context_menu(cx));
 
         root
     }
 
-    /// Floating right-click menu for the file tree. Rendered via
-    /// `deferred` so it paints on top of sibling content, and positioned
-    /// in window coordinates at the click site.
+    /// Floating right-click menu for the file tree. Returns an empty `Div`
+    /// when no menu is open, so callers can attach unconditionally.
+    /// Rendered via `deferred` so it paints on top of sibling content, and
+    /// positioned in window coordinates at the click site.
     pub(crate) fn render_editor_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let (path, position) = self.editor.context_menu.clone().unwrap();
+        let mut root = div();
+        let Some((path, position)) = self.editor.context_menu.clone() else {
+            return root;
+        };
 
         let item = |id: &'static str, label: &'static str, path: PathBuf, reveal: bool| {
             div()
@@ -177,7 +179,8 @@ impl AppState {
                 false,
             ));
 
-        deferred(anchored().position(position).snap_to_window().child(menu))
+        root = root.child(deferred(anchored().position(position).snap_to_window().child(menu)));
+        root
     }
 
     /// Recursively build file-tree rows starting at `dir`.
