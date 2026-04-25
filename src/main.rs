@@ -2026,7 +2026,7 @@ fn main() {
                 })
             },
         )
-        .unwrap();
+        .expect("open main window");
     });
 }
 

@@ -620,6 +620,9 @@ impl Element for TextElement {
         if let Some(selection) = prepaint.selection.take() {
             window.paint_quad(selection);
         }
+        // SAFETY: GPUI's element lifecycle guarantees `prepaint.line` is
+        // Some by the time `paint` runs — it's set in the matching prepaint
+        // pass earlier in the same frame.
         let line = prepaint.line.take().unwrap();
         let line_origin = point(bounds.origin.x - prepaint.scroll_x, bounds.origin.y);
         line.paint(
