@@ -146,6 +146,11 @@ impl PtyTerminal {
         // Ensure locale is set for proper unicode rendering
         env.insert("LANG".to_string(), "en_AU.UTF-8".to_string());
         env.insert("LC_ALL".to_string(), "en_AU.UTF-8".to_string());
+        // Force Claude Code into alt-screen render mode (its own internal
+        // scrollback) so primary-screen CSI 2J + cursor-positioning repaints
+        // don't duplicate viewport content into our terminal scrollback.
+        // Harmless for non-CC processes that ignore the variable.
+        env.insert("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string());
 
         // Build the shell configuration
         let shell = command.map(|cmd| {
