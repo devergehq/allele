@@ -2082,6 +2082,10 @@ impl Render for AppState {
                         session.terminal_view = None;
                         session.status = SessionStatus::Suspended;
                     } else {
+                        warn!(
+                            "PTY exited for session {} ({}) — marking Done",
+                            session.id, session.label
+                        );
                         session.status = SessionStatus::Done;
                     }
                     session.last_active = std::time::SystemTime::now();

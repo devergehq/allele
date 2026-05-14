@@ -1517,7 +1517,12 @@ impl Render for TerminalView {
                 }
 
                 // ── App-level shortcuts (Cmd key) ─────────────────────
-                if let Some(action) = keymap::app_action(key, mods) {
+                if mods.platform {
+                    let Some(action) = keymap::app_action(key, mods) else {
+                        // Cmd+key combo not recognised by Allele — consume
+                        // silently so raw characters don't leak to the PTY.
+                        return;
+                    };
                     match action {
                         AppAction::Paste => {
                             if let Some(ref terminal) = this.terminal {
