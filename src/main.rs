@@ -13,6 +13,7 @@ mod git;
 mod hook_events;
 mod hooks;
 mod keymap;
+mod naming;
 mod new_session_modal;
 mod pending_actions;
 mod platform;
@@ -802,15 +803,19 @@ impl AppState {
         let Some(session) = project.sessions.get(session_idx) else { return; };
 
         // Extract the current branch name from the clone.
-        // If it's the default allele/session/{id} format, show empty
-        // so the placeholder text appears. Otherwise show the full name.
+        // If it's a placeholder (session-<8hex> or legacy allele/session/<id>),
+        // show empty so the placeholder text appears.
         let current_branch = session
             .clone_path
             .as_ref()
             .and_then(|cp| git::current_branch(cp))
             .unwrap_or_default();
         let default_branch = git::session_branch_name(&session.id);
-        let branch_slug = if current_branch == default_branch {
+        let legacy_branch = git::legacy_session_branch_name(&session.id);
+        let branch_slug = if current_branch == default_branch
+            || current_branch == legacy_branch
+            || current_branch.starts_with("allele/session/")
+        {
             String::new()
         } else {
             current_branch
@@ -1712,6 +1717,7 @@ fn main() {
                         .with_agent_id(persisted.agent_id.clone());
                         session.pinned = persisted.pinned;
                         session.comment = persisted.comment.clone();
+                        session.branch_name = persisted.branch_name.clone();
                         project.sessions.push(session);
                     }
 

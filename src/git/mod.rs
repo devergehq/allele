@@ -727,20 +727,58 @@ pub fn current_branch(repo: &Path) -> Option<String> {
     })
 }
 
-/// Extract the session ID from a branch name like `allele/session/<id>`
-/// or `allele/session/<id>/<slug>` (after auto-naming).
-/// Returns `None` if the branch doesn't follow the Allele session naming
-/// convention.
+/// Extract the session ID from a branch name.
+///
+/// Handles both formats:
+/// - Legacy: `allele/session/<uuid>` or `allele/session/<uuid>/<slug>`
+/// - New: `session-<8hex>` or `<slug>-<8hex>`
+///
+/// For legacy format, returns the full UUID. For new format, returns the
+/// 8-char short ID (callers may need to map this back to the full UUID
+/// via state.json).
 pub fn session_id_from_branch(branch: &str) -> Option<&str> {
-    let rest = branch.strip_prefix("allele/session/")?;
-    // After rename, rest might be "<uuid>/<slug>" — take only the UUID part
-    Some(rest.split('/').next().unwrap_or(rest))
+    // Legacy format: allele/session/<uuid>[/<slug>]
+    if let Some(rest) = branch.strip_prefix("allele/session/") {
+        return Some(rest.split('/').next().unwrap_or(rest));
+    }
+    // New initial format: session-<8hex>
+    if let Some(short_id) = branch.strip_prefix("session-") {
+        if short_id.len() == 8 && short_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(short_id);
+        }
+    }
+    None
+}
+
+/// Extract the 8-char short ID suffix from a branch name like `<slug>-<8hex>`.
+/// Returns `None` if the branch doesn't end with a valid 8-char hex suffix.
+#[allow(dead_code)]
+pub fn short_id_from_branch(branch: &str) -> Option<&str> {
+    if branch.len() < 9 {
+        return None;
+    }
+    // Last segment after the final hyphen must be exactly 8 hex chars
+    let last_hyphen = branch.rfind('-')?;
+    let suffix = &branch[last_hyphen + 1..];
+    if suffix.len() == 8 && suffix.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(suffix)
+    } else {
+        None
+    }
 }
 
 // --- Ref name helpers ---------------------------------------------------
 
-/// `refs/heads/allele/session/<session-id>` — session branch in the clone.
+/// Initial session branch name using the short ID (first 8 chars of UUID).
+/// Format: `session-<8hex>` — a clean placeholder before LLM naming runs.
 pub fn session_branch_name(session_id: &str) -> String {
+    let short_id: String = session_id.chars().take(8).collect();
+    format!("session-{short_id}")
+}
+
+/// Legacy branch name format (pre-naming-overhaul). Still recognised by
+/// `session_id_from_branch` for backward compat during orphan cleanup.
+pub fn legacy_session_branch_name(session_id: &str) -> String {
     format!("allele/session/{session_id}")
 }
 
@@ -852,13 +890,15 @@ pub fn slugify(input: &str, max_len: usize) -> String {
     truncated.trim_end_matches('-').to_string()
 }
 
-/// Rename a session branch from `allele/session/<id>` to
-/// `allele/session/<id>/<slug>`. Idempotent — returns `Ok(())` if the
-/// old branch doesn't exist (already renamed or detached HEAD).
+/// Rename a session branch from its initial `session-<8hex>` to the final
+/// LLM-generated name (e.g. `fix-auth-5dc47535`). Idempotent — returns
+/// `Ok(())` if the current branch is already the target name.
+///
+/// Also handles the legacy `allele/session/<id>` format for backward compat.
 pub fn rename_session_branch(
     clone: &Path,
-    session_id: &str,
-    slug: &str,
+    _session_id: &str,
+    new_branch_name: &str,
 ) -> crate::errors::Result<()> {
     if !is_git_repo(clone) {
         return Err(AlleleError::Git(format!(
@@ -867,10 +907,33 @@ pub fn rename_session_branch(
         )));
     }
 
-    let old_branch = session_branch_name(session_id);
+    if let Some(current) = current_branch(clone) {
+        if current == new_branch_name {
+            return Ok(());
+        }
+    }
+
+    rename_current_branch(clone, new_branch_name)
+}
+
+/// Legacy rename: from `allele/session/<id>` to `allele/session/<id>/<slug>`.
+/// Kept for backward compat with sessions created before the naming overhaul.
+#[allow(dead_code)]
+pub fn legacy_rename_session_branch(
+    clone: &Path,
+    session_id: &str,
+    slug: &str,
+) -> crate::errors::Result<()> {
+    if !is_git_repo(clone) {
+        return Err(AlleleError::Git(format!(
+            "legacy_rename_session_branch: not a git repo: {}",
+            clone.display()
+        )));
+    }
+
+    let old_branch = legacy_session_branch_name(session_id);
     let new_branch = format!("allele/session/{session_id}/{slug}");
 
-    // Check current branch — if already renamed, skip.
     if let Some(current) = current_branch(clone) {
         if current == new_branch || current != old_branch {
             return Ok(());
@@ -879,7 +942,7 @@ pub fn rename_session_branch(
 
     let mut cmd = git_cmd(Some(clone));
     cmd.arg("branch").arg("-m").arg(&old_branch).arg(&new_branch);
-    run_git(cmd, "branch -m (session rename)").map_err(|e| AlleleError::Git(e.to_string()))?;
+    run_git(cmd, "branch -m (legacy session rename)").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     Ok(())
 }
@@ -1075,7 +1138,8 @@ mod tests {
         let mut cmd = git_cmd(Some(&path));
         cmd.arg("symbolic-ref").arg("HEAD");
         let head_ref = run_git_stdout(cmd, "symbolic-ref HEAD (test)").unwrap();
-        assert_eq!(head_ref, format!("refs/heads/allele/session/testsession07"));
+        // New format: session-<first 8 chars of id>
+        assert_eq!(head_ref, "refs/heads/session-testsess");
     }
 
     #[test]
@@ -1333,15 +1397,16 @@ mod tests {
         let parent = run_git_stdout(cmd, "rev-parse parent (test)").unwrap();
         assert_eq!(parent, canonical_head);
 
-        // 10. Verify: current_branch + session_id_from_branch work on the clone
+        // 10. Verify: current_branch shows the new session-<shortid> format
         let branch = current_branch(&clone_path).unwrap();
-        assert_eq!(session_id_from_branch(&branch), Some("e2e01"));
+        assert_eq!(branch, "session-e2e01");
     }
 
     // --- Auto-naming tests -------------------------------------------------
 
     #[test]
     fn session_id_from_branch_with_slug() {
+        // Legacy format with slug
         assert_eq!(
             session_id_from_branch("allele/session/855fa03e/fix-login-bug"),
             Some("855fa03e")
@@ -1350,7 +1415,7 @@ mod tests {
 
     #[test]
     fn session_id_from_branch_uuid_only() {
-        // Original format still works
+        // Legacy format without slug
         assert_eq!(
             session_id_from_branch("allele/session/855fa03e"),
             Some("855fa03e")
@@ -1359,10 +1424,33 @@ mod tests {
 
     #[test]
     fn session_id_from_branch_full_uuid_with_slug() {
+        // Legacy format with full UUID
         assert_eq!(
             session_id_from_branch("allele/session/855fa03e-5cc7-477a-b1e6-4e9d127923b6/refactor-auth"),
             Some("855fa03e-5cc7-477a-b1e6-4e9d127923b6")
         );
+    }
+
+    #[test]
+    fn session_id_from_branch_new_format() {
+        // New format: session-<8hex>
+        assert_eq!(
+            session_id_from_branch("session-5dc47535"),
+            Some("5dc47535")
+        );
+    }
+
+    #[test]
+    fn session_id_from_branch_new_format_rejects_non_hex() {
+        // session- prefix but not hex digits
+        assert_eq!(session_id_from_branch("session-notahexv"), None);
+    }
+
+    #[test]
+    fn session_id_from_branch_rejects_named_branch() {
+        // Final named branch (slug-8hex) — not identified via this function
+        // (use short_id_from_branch instead)
+        assert_eq!(session_id_from_branch("fix-auth-5dc47535"), None);
     }
 
     #[test]
@@ -1395,12 +1483,11 @@ mod tests {
         let (_dir, path) = make_canonical("hello");
         create_session_branch(&path, "rename01").unwrap();
 
-        rename_session_branch(&path, "rename01", "fix-login-bug").unwrap();
+        // New behaviour: renames to the exact branch name passed
+        rename_session_branch(&path, "rename01", "fix-login-bug-rename01").unwrap();
 
         let branch = current_branch(&path).unwrap();
-        assert_eq!(branch, "allele/session/rename01/fix-login-bug");
-        // session_id extraction still works
-        assert_eq!(session_id_from_branch(&branch), Some("rename01"));
+        assert_eq!(branch, "fix-login-bug-rename01");
     }
 
     #[test]
@@ -1408,12 +1495,12 @@ mod tests {
         let (_dir, path) = make_canonical("hello");
         create_session_branch(&path, "rename02").unwrap();
 
-        rename_session_branch(&path, "rename02", "fix-bug").unwrap();
+        rename_session_branch(&path, "rename02", "fix-bug-rename02").unwrap();
         // Second rename should be a no-op
-        rename_session_branch(&path, "rename02", "fix-bug").unwrap();
+        rename_session_branch(&path, "rename02", "fix-bug-rename02").unwrap();
 
         let branch = current_branch(&path).unwrap();
-        assert_eq!(branch, "allele/session/rename02/fix-bug");
+        assert_eq!(branch, "fix-bug-rename02");
     }
 
     #[test]
@@ -1438,8 +1525,8 @@ mod tests {
         run_git(cmd, "commit (test)").unwrap();
         let work_commit = head_commit(&clone_path);
 
-        // Rename the branch (simulating auto-naming)
-        rename_session_branch(&clone_path, "archrename01", "fix-auth").unwrap();
+        // Rename the branch (simulating new auto-naming format)
+        rename_session_branch(&clone_path, "archrename01", "fix-auth-archrena").unwrap();
 
         // Archive should still work — uses current_branch to find the ref
         archive_session(&canonical, &clone_path, "archrename01").unwrap();

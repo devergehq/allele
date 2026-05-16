@@ -337,6 +337,36 @@ pub fn purge_trash_older_than_days(ttl_days: u64) -> crate::errors::Result<usize
 /// present in `referenced` into the trash. Conservative — never deletes.
 ///
 /// `project_sources` maps project names to their canonical source paths.
+/// Resolve the session ID from an orphaned clone using multiple strategies:
+/// 1. `.allele-session` marker file (new sessions)
+/// 2. Legacy branch prefix `allele/session/<id>`
+/// 3. Clone directory name (8-hex short ID — partial, best-effort)
+fn resolve_session_id_for_orphan(clone_path: &Path) -> Option<String> {
+    // Strategy 1: marker file contains the full UUID
+    let marker = clone_path.join(".allele-session");
+    if let Ok(content) = fs::read_to_string(&marker) {
+        let id = content.trim().to_string();
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+
+    // Strategy 2: legacy branch prefix
+    if let Some(branch) = git::current_branch(clone_path) {
+        if let Some(id) = git::session_id_from_branch(&branch) {
+            return Some(id.to_string());
+        }
+    }
+
+    // Strategy 3: directory name is the 8-char short ID — usable for archive
+    // ref naming but not a full UUID. Still better than nothing.
+    clone_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .filter(|n| n.len() == 8 && n.chars().all(|c| c.is_ascii_hexdigit()))
+        .map(|s| s.to_string())
+}
+
 /// If the clone has an `allele/session/<id>` branch and the owning
 /// project is in the map, `git::archive_session` runs before trashing
 /// to preserve the orphan's session work in canonical. Archive failure
@@ -387,14 +417,11 @@ pub fn sweep_orphans(
             }
 
             // Archive the orphan's session work into canonical before
-            // trashing. Resolve canonical from the project name, and
-            // session ID from the clone's current branch. Both must
-            // succeed for the archive to run; otherwise skip silently.
+            // trashing. Resolve session ID from: (1) .allele-session marker
+            // file, (2) legacy branch prefix, (3) clone directory name.
             if let Some(source_path) = project_sources.get(&proj_name) {
-                if let Some(session_id) = git::current_branch(&clone_path)
-                    .as_deref()
-                    .and_then(git::session_id_from_branch)
-                {
+                let session_id = resolve_session_id_for_orphan(&clone_path);
+                if let Some(session_id) = session_id.as_deref() {
                     if let Err(e) = git::archive_session(source_path, &clone_path, session_id) {
                         warn!(
                             "Orphan sweep: archive_session failed for {session_id}: {e}"

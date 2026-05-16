@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::warn;
 
+use crate::naming::NamingConfig;
+
 /// Which built-in adapter drives an agent's command building. `Generic`
 /// is used for custom user-added entries that just run a binary with the
 /// configured extra args.
@@ -213,6 +215,11 @@ pub struct Settings {
     /// promoted to the top of their project's session list in the sidebar.
     #[serde(default = "default_true")]
     pub promote_attention_sessions: bool,
+
+    /// Branch naming configuration — controls how session branches are named
+    /// (LLM model, mode, per-platform settings).
+    #[serde(default)]
+    pub naming: NamingConfig,
 }
 
 fn default_sidebar_width() -> f32 { 240.0 }
@@ -308,6 +315,7 @@ impl Default for Settings {
             default_agent: None,
             git_pull_before_new_session: false,
             promote_attention_sessions: true,
+            naming: NamingConfig::default(),
         }
     }
 }

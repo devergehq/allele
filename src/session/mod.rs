@@ -117,6 +117,12 @@ pub struct Session {
     pub pinned: bool,
     /// Optional user comment displayed as a subtitle on the session row.
     pub comment: Option<String>,
+    /// The current git branch name for this session (e.g. "fix-auth-5dc47535").
+    /// Persisted to state.json for orphan cleanup identification.
+    pub branch_name: Option<String>,
+    /// Transient: LLM-generated naming suggestions awaiting user selection
+    /// (only populated in Interactive naming mode).
+    pub naming_suggestions: Option<Vec<String>>,
 }
 
 impl Session {
@@ -147,6 +153,8 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
+            branch_name: None,
+            naming_suggestions: None,
         }
     }
 
@@ -184,6 +192,8 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
+            branch_name: None,
+            naming_suggestions: None,
         }
     }
 
