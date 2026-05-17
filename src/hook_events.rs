@@ -199,7 +199,7 @@ impl AppState {
     ) {
         let Some(events_dir) = hooks::events_dir() else { return; };
 
-        // Snapshot the naming config and resolve the agent kind for this session.
+        // Snapshot the naming config and resolve the agent kind + binary for this session.
         let naming_config = self.user_settings.naming.clone();
         let agent_kind = self
             .projects
@@ -210,6 +210,9 @@ impl AppState {
             .and_then(|aid| self.user_settings.agents.iter().find(|a| &a.id == aid))
             .map(|a| a.kind)
             .unwrap_or(AgentKind::Claude);
+        let agent_binary = crate::agents::detect_path(agent_kind)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
 
         cx.spawn(async move |this, cx| {
             // Poll for the .prompt file (written by the hook receiver on first
@@ -249,10 +252,11 @@ impl AppState {
             };
 
             // Attempt LLM naming (Auto or Interactive modes).
-            let naming_result = if mode != NamingMode::Legacy {
+            let naming_result = if mode != NamingMode::Legacy && !agent_binary.is_empty() {
                 let request = NamingRequest {
                     prompt_text: &prompt,
                     agent_kind,
+                    agent_binary: &agent_binary,
                     short_id: &short_id,
                     suggestions_count,
                 };

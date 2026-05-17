@@ -483,19 +483,8 @@ fn render_naming_pane(
     let mode = naming.mode;
     let mode_label = mode.label();
     let mode_desc = mode.description();
-    let claude_model = naming.claude.model.clone();
-    let claude_key_env = naming.claude.api_key_env.clone();
-    let claude_key_set = std::env::var(&claude_key_env).is_ok();
-    let opencode_model = naming.opencode.model.clone();
-    let opencode_key_env = naming.opencode.api_key_env.clone();
-    let opencode_key_set = std::env::var(&opencode_key_env).is_ok();
-
-    let key_indicator = |set: bool| -> &'static str {
-        if set { "●" } else { "○" }
-    };
-    let key_color = |set: bool| -> u32 {
-        if set { 0xa6e3a1 } else { 0xf38ba8 }
-    };
+    let claude_model = naming.claude.model.clone().unwrap_or_default();
+    let opencode_model = naming.opencode.model.clone().unwrap_or_default();
 
     div()
         .flex()
@@ -517,9 +506,9 @@ fn render_naming_pane(
                 .text_size(px(12.0))
                 .text_color(rgb(0xa6adc8))
                 .child(
-                    "Uses a fast LLM to generate meaningful branch names \
+                    "Uses the coding agent to generate meaningful branch names \
                      from your first prompt. Falls back to keyword extraction \
-                     when no API key is available.",
+                     when the agent binary is unavailable.",
                 ),
         )
         // Mode toggle (clickable to cycle)
@@ -592,12 +581,6 @@ fn render_naming_pane(
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(key_color(claude_key_set)))
-                        .child(SharedString::from(key_indicator(claude_key_set).to_string())),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
                         .text_color(rgb(0xcdd6f4))
                         .child(SharedString::from(claude_model)),
                 ),
@@ -615,12 +598,6 @@ fn render_naming_pane(
                         .text_color(rgb(0x6c7086))
                         .min_w(px(50.0))
                         .child("OpenCode"),
-                )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(key_color(opencode_key_set)))
-                        .child(SharedString::from(key_indicator(opencode_key_set).to_string())),
                 )
                 .child(
                     div()
