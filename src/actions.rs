@@ -13,6 +13,7 @@
 
 use std::path::PathBuf;
 
+use crate::naming;
 use crate::settings;
 
 #[derive(Debug)]
@@ -159,6 +160,9 @@ pub enum SettingsAction {
     /// writes `user_settings.font_size`, saves to disk, and broadcasts
     /// the new value to every open `TerminalView`.
     UpdateFontSize(f32),
+    /// Update the naming configuration (mode, models). Emitted by the
+    /// Settings window naming section.
+    UpdateNamingConfig(naming::NamingConfig),
 }
 
 /// Chrome browser integration — sync / close linked tabs.

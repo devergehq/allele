@@ -143,6 +143,8 @@ pub(crate) struct AppState {
     pub(crate) session_context_menu: Option<(SessionCursor, Point<Pixels>)>,
     /// "Edit session" modal for renaming/commenting an existing session.
     pub(crate) edit_session_modal: Option<Entity<new_session_modal::EditSessionModal>>,
+    /// Interactive naming modal — shown when NamingMode::Interactive generates suggestions.
+    pub(crate) naming_modal: Option<Entity<new_session_modal::NamingModal>>,
     /// Persistent Scratch Pad submission history across all projects.
     /// Loaded from state.json on startup, appended on submit, written back
     /// on every save_state. Filtered by project when the overlay opens.

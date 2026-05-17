@@ -61,6 +61,10 @@ pub struct PersistedSession {
     /// Optional user comment displayed as a subtitle on the session row.
     #[serde(default)]
     pub comment: Option<String>,
+    /// Current git branch name (e.g. "fix-auth-5dc47535"). Used for orphan
+    /// cleanup identification now that branches don't carry the allele/session/ prefix.
+    #[serde(default)]
+    pub branch_name: Option<String>,
 }
 
 impl PersistedSession {
@@ -86,6 +90,7 @@ impl PersistedSession {
             agent_id: session.agent_id.clone(),
             pinned: session.pinned,
             comment: session.comment.clone(),
+            branch_name: session.branch_name.clone(),
         }
     }
 }

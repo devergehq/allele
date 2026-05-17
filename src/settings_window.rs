@@ -27,6 +27,7 @@ use crate::text_input::{TextInput, TextInputEvent};
 enum Section {
     Sessions,
     Agents,
+    Naming,
     Editor,
     Browser,
     Appearance,
@@ -37,6 +38,7 @@ impl Section {
         match self {
             Section::Sessions => "Sessions",
             Section::Agents => "Agents",
+            Section::Naming => "Naming",
             Section::Editor => "Editor",
             Section::Browser => "Browser",
             Section::Appearance => "Appearance",
@@ -396,6 +398,7 @@ fn render_sidebar(selected: Section, cx: &mut Context<SettingsWindowState>) -> i
     let sections = [
         Section::Sessions,
         Section::Agents,
+        Section::Naming,
         Section::Editor,
         Section::Browser,
         Section::Appearance,
@@ -444,6 +447,7 @@ fn render_pane(
     match this.selected {
         Section::Sessions => render_sessions_pane(this, cx).into_any_element(),
         Section::Agents => render_agents_pane(this, cx).into_any_element(),
+        Section::Naming => render_naming_pane(this, cx).into_any_element(),
         Section::Editor => render_editor_pane(this, cx).into_any_element(),
         Section::Browser => render_browser_pane(this, cx).into_any_element(),
         Section::Appearance => render_appearance_pane(this, cx).into_any_element(),
@@ -464,6 +468,175 @@ fn input_frame(child: Entity<TextInput>) -> Div {
         .text_color(rgb(0xcdd6f4))
         .overflow_hidden()
         .child(child)
+}
+
+fn render_naming_pane(
+    this: &mut SettingsWindowState,
+    cx: &mut Context<SettingsWindowState>,
+) -> impl IntoElement {
+    use crate::naming::NamingMode;
+
+    let naming = this.app.upgrade()
+        .map(|app| app.read(cx).user_settings.naming.clone())
+        .unwrap_or_default();
+
+    let mode = naming.mode;
+    let mode_label = mode.label();
+    let mode_desc = mode.description();
+    let claude_model = naming.claude.model.clone();
+    let claude_key_env = naming.claude.api_key_env.clone();
+    let claude_key_set = std::env::var(&claude_key_env).is_ok();
+    let opencode_model = naming.opencode.model.clone();
+    let opencode_key_env = naming.opencode.api_key_env.clone();
+    let opencode_key_set = std::env::var(&opencode_key_env).is_ok();
+
+    let key_indicator = |set: bool| -> &'static str {
+        if set { "●" } else { "○" }
+    };
+    let key_color = |set: bool| -> u32 {
+        if set { 0xa6e3a1 } else { 0xf38ba8 }
+    };
+
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w(px(0.0))
+        .overflow_hidden()
+        .p(px(20.0))
+        .gap(px(12.0))
+        .child(
+            div()
+                .text_size(px(16.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0xcdd6f4))
+                .child("Branch Naming"),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(0xa6adc8))
+                .child(
+                    "Uses a fast LLM to generate meaningful branch names \
+                     from your first prompt. Falls back to keyword extraction \
+                     when no API key is available.",
+                ),
+        )
+        // Mode toggle (clickable to cycle)
+        .child(
+            div()
+                .id("naming-mode-toggle")
+                .cursor_pointer()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        let next_mode = match mode {
+                            NamingMode::Auto => NamingMode::Interactive,
+                            NamingMode::Interactive => NamingMode::Legacy,
+                            NamingMode::Legacy => NamingMode::Auto,
+                        };
+                        if let Some(app) = this.app.upgrade() {
+                            let mut new_config = app.read(cx).user_settings.naming.clone();
+                            new_config.mode = next_mode;
+                            app.update(cx, |state: &mut crate::AppState, cx| {
+                                state.pending_action =
+                                    Some(crate::SettingsAction::UpdateNamingConfig(new_config).into());
+                                cx.notify();
+                            });
+                        }
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x6c7086))
+                        .min_w(px(50.0))
+                        .child("Mode"),
+                )
+                .child(
+                    div()
+                        .px(px(8.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(0x313244))
+                        .text_size(px(12.0))
+                        .text_color(rgb(0x89b4fa))
+                        .child(SharedString::from(mode_label.to_string())),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x6c7086))
+                        .child(SharedString::from(mode_desc.to_string())),
+                ),
+        )
+        // Claude model
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x6c7086))
+                        .min_w(px(50.0))
+                        .child("Claude"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(key_color(claude_key_set)))
+                        .child(SharedString::from(key_indicator(claude_key_set).to_string())),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xcdd6f4))
+                        .child(SharedString::from(claude_model)),
+                ),
+        )
+        // OpenCode model
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x6c7086))
+                        .min_w(px(50.0))
+                        .child("OpenCode"),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(key_color(opencode_key_set)))
+                        .child(SharedString::from(key_indicator(opencode_key_set).to_string())),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.0))
+                        .text_color(rgb(0xcdd6f4))
+                        .child(SharedString::from(opencode_model)),
+                ),
+        )
+        // Hint
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(rgb(0x45475a))
+                .mt(px(8.0))
+                .child("Edit settings.json for advanced naming config"),
+        )
 }
 
 fn render_appearance_pane(

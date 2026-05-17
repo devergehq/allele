@@ -193,6 +193,12 @@ impl AppState {
                             "create_session_branch failed for {session_id_for_session}: {e}"
                         );
                     }
+
+                    // Write marker file for orphan cleanup identification.
+                    let marker_path = clone_path.join(".allele-session");
+                    if let Err(e) = std::fs::write(&marker_path, &session_id_for_session) {
+                        warn!("failed to write .allele-session marker: {e}");
+                    }
                 }
 
                 // Create the terminal view with the clone as PWD
@@ -454,9 +460,13 @@ impl AppState {
                         );
                     }
 
+                    // Write marker file for orphan cleanup identification.
+                    let marker_path = clone_path.join(".allele-session");
+                    if let Err(e) = std::fs::write(&marker_path, &session_id_for_session) {
+                        warn!("failed to write .allele-session marker: {e}");
+                    }
+
                     // Rename the branch if the user provided a custom name.
-                    // Use the name directly (no allele/session/ prefix) since
-                    // the user explicitly chose it.
                     if let Some(ref name) = branch_slug {
                         let sanitised = git::sanitise_branch_name(name, 100);
                         if !sanitised.is_empty() {

@@ -11,6 +11,8 @@ use gpui::*;
 use tracing::{info, warn};
 
 use crate::app_state::AppState;
+use crate::naming::{self, NamingMode, NamingRequest};
+use crate::settings::AgentKind;
 use crate::{git, hooks, session, settings};
 
 impl AppState {
@@ -186,10 +188,9 @@ impl AppState {
         }
     }
 
-    /// Spawn a background task that reads the first prompt from the hook
-    /// events directory, extracts keywords to produce a 3-5 word slug, then
-    /// updates the session label and renames the git branch.
-    /// No external dependencies — pure Rust keyword extraction.
+    /// Spawn a background task that reads the first prompt, generates a branch
+    /// name (via LLM or keyword extraction), renames the branch, and updates
+    /// the session label.
     pub(crate) fn trigger_auto_naming(
         &self,
         session_id: String,
@@ -198,12 +199,21 @@ impl AppState {
     ) {
         let Some(events_dir) = hooks::events_dir() else { return; };
 
+        // Snapshot the naming config and resolve the agent kind for this session.
+        let naming_config = self.user_settings.naming.clone();
+        let agent_kind = self
+            .projects
+            .iter()
+            .flat_map(|p| &p.sessions)
+            .find(|s| s.id == session_id)
+            .and_then(|s| s.agent_id.as_ref())
+            .and_then(|aid| self.user_settings.agents.iter().find(|a| &a.id == aid))
+            .map(|a| a.kind)
+            .unwrap_or(AgentKind::Claude);
+
         cx.spawn(async move |this, cx| {
-            // Read the .prompt file (written by the hook receiver on the first
-            // UserPromptSubmit). Since auto-naming fires on the first hook event
-            // (often session_start, before the user types), we poll generously:
-            // 120 attempts × 2s = 4 minutes. The extraction itself is instant
-            // so there's no cost to waiting longer.
+            // Poll for the .prompt file (written by the hook receiver on first
+            // UserPromptSubmit). 120 attempts × 2s = 4 minutes.
             let prompt_path = events_dir.join(format!("{session_id}.prompt"));
             let mut prompt_text = None;
             for attempt in 0..120 {
@@ -230,60 +240,80 @@ impl AppState {
                 prompt.len()
             );
 
-            // Extract keywords — pure Rust, no LLM needed.
-            let slug_raw = git::extract_slug_from_prompt(&prompt, 4);
+            let short_id: String = session_id.chars().take(8).collect();
+            let mode = naming_config.mode;
 
-            info!("auto-naming: extracted slug_raw={slug_raw:?} for {session_id}");
-            if slug_raw.is_empty() {
-                warn!("auto-naming: empty slug from keyword extraction");
-                return;
-            }
-
-            let slug = git::slugify(&slug_raw, 50);
-            if slug.is_empty() {
-                return;
-            }
-
-            // Human-readable label: replace hyphens with spaces, title case,
-            // capped at 40 chars for sidebar display.
-            let full_label: String = slug
-                .split('-')
-                .map(|word| {
-                    let mut chars = word.chars();
-                    match chars.next() {
-                        Some(c) => {
-                            let upper: String = c.to_uppercase().collect();
-                            format!("{upper}{}", chars.as_str())
-                        }
-                        None => String::new(),
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            let display_label = if full_label.len() > 40 {
-                let mut truncated = full_label[..40].to_string();
-                // Avoid cutting mid-word — trim back to last space.
-                if let Some(last_space) = truncated.rfind(' ') {
-                    truncated.truncate(last_space);
-                }
-                truncated
-            } else {
-                full_label
+            let suggestions_count = match mode {
+                NamingMode::Interactive => 3,
+                _ => 1,
             };
 
-            // Rename the git branch in the background (non-blocking).
-            if let Some(ref cp) = clone_path {
-                info!("auto-naming: renaming branch for {session_id} with slug={slug:?}");
-                if let Err(e) = git::rename_session_branch(cp, &session_id, &slug) {
-                    warn!("auto-naming: branch rename failed: {e}");
-                    // Continue — label update is still valuable
-                } else {
-                    info!("auto-naming: branch rename succeeded for {session_id}");
+            // Attempt LLM naming (Auto or Interactive modes).
+            let naming_result = if mode != NamingMode::Legacy {
+                let request = NamingRequest {
+                    prompt_text: &prompt,
+                    agent_kind,
+                    short_id: &short_id,
+                    suggestions_count,
+                };
+                match naming::generate(&naming_config, &request) {
+                    Ok(result) => Some(result),
+                    Err(reason) => {
+                        warn!("auto-naming: LLM naming failed ({reason}), falling back to keyword extraction");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
+            // Determine final branch name and label.
+            let (branch_name, display_label, suggestions) = if let Some(result) = naming_result {
+                (result.branch_name, result.display_label, Some(result.suggestions))
+            } else {
+                // Fallback: keyword extraction (legacy mode or LLM failure).
+                let slug_raw = git::extract_slug_from_prompt(&prompt, 4);
+                if slug_raw.is_empty() {
+                    warn!("auto-naming: empty slug from keyword extraction");
+                    return;
+                }
+                let slug = git::slugify(&slug_raw, 50);
+                if slug.is_empty() {
+                    return;
+                }
+                let branch = naming::branch_name_from_slug(&slug, &short_id);
+                let label = naming::slug_to_label(&slug);
+                (branch, label, None)
+            };
+
+            info!("auto-naming: generated branch_name={branch_name:?} for {session_id}");
+
+            // In Interactive mode, hand off to the main thread to show the
+            // selection modal. The branch rename happens after user picks.
+            if mode == NamingMode::Interactive {
+                if let Some(suggestions) = suggestions {
+                    let _ = this.update(cx, |this: &mut AppState, cx| {
+                        for project in &mut this.projects {
+                            for session in &mut project.sessions {
+                                if session.id == session_id {
+                                    session.naming_suggestions = Some(suggestions.clone());
+                                    break;
+                                }
+                            }
+                        }
+                        cx.notify();
+                    });
+                    return;
                 }
             }
 
-            // Update session label on the main thread.
-            info!("auto-naming: updating label to {display_label:?} for {session_id}");
+            // Auto mode (or fallback): rename branch and update label immediately.
+            if let Some(ref cp) = clone_path {
+                if let Err(e) = git::rename_session_branch(cp, &session_id, &branch_name) {
+                    warn!("auto-naming: branch rename failed: {e}");
+                }
+            }
+
             let _ = this.update(cx, |this: &mut AppState, cx| {
                 for project in &mut this.projects {
                     for session in &mut project.sessions {
@@ -293,6 +323,7 @@ impl AppState {
                                 session.label, display_label
                             );
                             session.label = display_label.clone();
+                            session.branch_name = Some(branch_name.clone());
                             break;
                         }
                     }
