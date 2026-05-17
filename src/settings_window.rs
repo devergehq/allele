@@ -472,19 +472,23 @@ fn input_frame(child: Entity<TextInput>) -> Div {
 
 fn render_naming_pane(
     this: &mut SettingsWindowState,
-    _cx: &mut Context<SettingsWindowState>,
+    cx: &mut Context<SettingsWindowState>,
 ) -> impl IntoElement {
+    use crate::naming::NamingMode;
+
     let naming = this.app.upgrade()
-        .map(|app| app.read(_cx).user_settings.naming.clone())
+        .map(|app| app.read(cx).user_settings.naming.clone())
         .unwrap_or_default();
 
-    let mode_label = naming.mode.label();
-    let claude_model = &naming.claude.model;
-    let claude_key_env = &naming.claude.api_key_env;
-    let claude_key_set = std::env::var(claude_key_env).is_ok();
-    let opencode_model = &naming.opencode.model;
-    let opencode_key_env = &naming.opencode.api_key_env;
-    let opencode_key_set = std::env::var(opencode_key_env).is_ok();
+    let mode = naming.mode;
+    let mode_label = mode.label();
+    let mode_desc = mode.description();
+    let claude_model = naming.claude.model.clone();
+    let claude_key_env = naming.claude.api_key_env.clone();
+    let claude_key_set = std::env::var(&claude_key_env).is_ok();
+    let opencode_model = naming.opencode.model.clone();
+    let opencode_key_env = naming.opencode.api_key_env.clone();
+    let opencode_key_set = std::env::var(&opencode_key_env).is_ok();
 
     let key_indicator = |set: bool| -> &'static str {
         if set { "●" } else { "○" }
@@ -518,13 +522,35 @@ fn render_naming_pane(
                      when no API key is available.",
                 ),
         )
-        // Mode display
+        // Mode toggle (clickable to cycle)
         .child(
             div()
+                .id("naming-mode-toggle")
+                .cursor_pointer()
                 .flex()
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        let next_mode = match mode {
+                            NamingMode::Auto => NamingMode::Interactive,
+                            NamingMode::Interactive => NamingMode::Legacy,
+                            NamingMode::Legacy => NamingMode::Auto,
+                        };
+                        if let Some(app) = this.app.upgrade() {
+                            let mut new_config = app.read(cx).user_settings.naming.clone();
+                            new_config.mode = next_mode;
+                            app.update(cx, |state: &mut crate::AppState, cx| {
+                                state.pending_action =
+                                    Some(crate::SettingsAction::UpdateNamingConfig(new_config).into());
+                                cx.notify();
+                            });
+                        }
+                        cx.notify();
+                    }),
+                )
                 .child(
                     div()
                         .text_size(px(11.0))
@@ -534,9 +560,19 @@ fn render_naming_pane(
                 )
                 .child(
                     div()
+                        .px(px(8.0))
+                        .py(px(2.0))
+                        .rounded(px(4.0))
+                        .bg(rgb(0x313244))
                         .text_size(px(12.0))
-                        .text_color(rgb(0xcdd6f4))
+                        .text_color(rgb(0x89b4fa))
                         .child(SharedString::from(mode_label.to_string())),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(rgb(0x6c7086))
+                        .child(SharedString::from(mode_desc.to_string())),
                 ),
         )
         // Claude model
@@ -563,7 +599,7 @@ fn render_naming_pane(
                     div()
                         .text_size(px(12.0))
                         .text_color(rgb(0xcdd6f4))
-                        .child(SharedString::from(claude_model.clone())),
+                        .child(SharedString::from(claude_model)),
                 ),
         )
         // OpenCode model
@@ -590,7 +626,7 @@ fn render_naming_pane(
                     div()
                         .text_size(px(12.0))
                         .text_color(rgb(0xcdd6f4))
-                        .child(SharedString::from(opencode_model.clone())),
+                        .child(SharedString::from(opencode_model)),
                 ),
         )
         // Hint

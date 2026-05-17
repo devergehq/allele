@@ -2027,6 +2027,7 @@ fn main() {
                         new_session_modal: None,
                         session_context_menu: None,
                         edit_session_modal: None,
+                        naming_modal: None,
                         sidebar_filter_input,
                         sidebar_filter: String::new(),
                         state_dirty: false,
@@ -2746,7 +2747,76 @@ impl Render for AppState {
             outer = outer.child(modal);
         }
 
+        if let Some(modal) = self.naming_modal.clone() {
+            outer = outer.child(modal);
+        }
+
         outer = outer.child(self.render_session_context_menu(cx));
+
+        // If a session has naming suggestions pending and no modal is open, spawn one.
+        if self.naming_modal.is_none() {
+            let pending = self.projects.iter().flat_map(|p| &p.sessions)
+                .find(|s| s.naming_suggestions.is_some())
+                .map(|s| (s.id.clone(), s.naming_suggestions.clone().unwrap()));
+            if let Some((session_id, suggestions)) = pending {
+                let entity = cx.new(|cx| {
+                    new_session_modal::NamingModal::new(cx, session_id.clone(), suggestions)
+                });
+                let sid = session_id.clone();
+                cx.subscribe(&entity, move |this: &mut Self, _modal, event: &new_session_modal::NamingModalEvent, cx| {
+                    match event {
+                        new_session_modal::NamingModalEvent::Pick { session_id, slug } => {
+                            let short_id: String = session_id.chars().take(8).collect();
+                            let branch_name = naming::branch_name_from_slug(slug, &short_id);
+                            let display_label = naming::slug_to_label(slug);
+
+                            // Rename the branch
+                            for project in &this.projects {
+                                for session in &project.sessions {
+                                    if session.id == *session_id {
+                                        if let Some(ref cp) = session.clone_path {
+                                            if let Err(e) = git::rename_session_branch(cp, session_id, &branch_name) {
+                                                tracing::warn!("naming modal: branch rename failed: {e}");
+                                            }
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+
+                            // Update session state
+                            for project in &mut this.projects {
+                                for session in &mut project.sessions {
+                                    if session.id == *session_id {
+                                        session.label = display_label.clone();
+                                        session.branch_name = Some(branch_name.clone());
+                                        session.naming_suggestions = None;
+                                        break;
+                                    }
+                                }
+                            }
+                            this.naming_modal = None;
+                            this.mark_state_dirty();
+                            cx.notify();
+                        }
+                        new_session_modal::NamingModalEvent::Close => {
+                            // Clear suggestions without renaming
+                            for project in &mut this.projects {
+                                for session in &mut project.sessions {
+                                    if session.id == sid {
+                                        session.naming_suggestions = None;
+                                        break;
+                                    }
+                                }
+                            }
+                            this.naming_modal = None;
+                            cx.notify();
+                        }
+                    }
+                }).detach();
+                self.naming_modal = Some(entity);
+            }
+        }
 
         // Coalesce per-frame mutations into at most one write per file.
         // See ARCHITECTURE.md §3.4.

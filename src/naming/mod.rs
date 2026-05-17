@@ -48,7 +48,6 @@ impl Default for NamingMode {
 }
 
 impl NamingMode {
-    #[allow(dead_code)]
     pub fn label(self) -> &'static str {
         match self {
             NamingMode::Auto => "Auto",
@@ -57,7 +56,6 @@ impl NamingMode {
         }
     }
 
-    #[allow(dead_code)]
     pub fn description(self) -> &'static str {
         match self {
             NamingMode::Auto => "LLM picks the name automatically",

@@ -666,3 +666,159 @@ impl Render for EditSessionModal {
         backdrop.child(card)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Naming Suggestion Modal
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum NamingModalEvent {
+    Pick { session_id: String, slug: String },
+    Close,
+}
+
+impl EventEmitter<NamingModalEvent> for NamingModal {}
+
+pub struct NamingModal {
+    session_id: String,
+    suggestions: Vec<String>,
+    custom_input: Entity<TextInput>,
+    focus_handle: FocusHandle,
+}
+
+impl NamingModal {
+    pub fn new(cx: &mut Context<Self>, session_id: String, suggestions: Vec<String>) -> Self {
+        let custom_input = cx.new(|cx| TextInput::new(cx, "", "or type your own..."));
+        cx.subscribe(&custom_input, |this: &mut Self, _input, event: &TextInputEvent, cx| {
+            if matches!(event, TextInputEvent::Submitted) {
+                this.submit_custom(cx);
+            }
+        }).detach();
+        Self { session_id, suggestions, custom_input, focus_handle: cx.focus_handle() }
+    }
+
+    fn pick(&mut self, slug: String, cx: &mut Context<Self>) {
+        cx.emit(NamingModalEvent::Pick { session_id: self.session_id.clone(), slug });
+    }
+
+    fn submit_custom(&mut self, cx: &mut Context<Self>) {
+        let value = self.custom_input.read(cx).text().to_string();
+        let trimmed = value.trim();
+        if !trimmed.is_empty() {
+            let slug = crate::git::slugify(trimmed, 50);
+            if !slug.is_empty() {
+                self.pick(slug, cx);
+                return;
+            }
+        }
+        if let Some(first) = self.suggestions.first().cloned() {
+            self.pick(first, cx);
+        }
+    }
+
+    fn dismiss(&mut self, cx: &mut Context<Self>) {
+        if let Some(first) = self.suggestions.first().cloned() {
+            self.pick(first, cx);
+        } else {
+            cx.emit(NamingModalEvent::Close);
+        }
+    }
+}
+
+impl Focusable for NamingModal {
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl Render for NamingModal {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let backdrop = div()
+            .id("naming-modal-backdrop")
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(gpui::black().opacity(0.5))
+            .on_mouse_down(MouseButton::Left, cx.listener(|this, _e, _w, cx| {
+                this.dismiss(cx);
+            }));
+
+        let mut card = div()
+            .id("naming-modal-card")
+            .w(px(340.0))
+            .bg(rgb(0x1e1e2e))
+            .rounded(px(12.0))
+            .border_1()
+            .border_color(rgb(0x45475a))
+            .p(px(20.0))
+            .flex()
+            .flex_col()
+            .gap(px(12.0))
+            .on_mouse_down(MouseButton::Left, |_e, _w, cx| { cx.stop_propagation(); })
+            .track_focus(&self.focus_handle)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _w, cx| {
+                if event.keystroke.key == "escape" { this.dismiss(cx); }
+            }))
+            .child(
+                div()
+                    .text_size(px(14.0))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(rgb(0xcdd6f4))
+                    .child("Name this session"),
+            );
+
+        for (i, suggestion) in self.suggestions.iter().enumerate() {
+            let slug = suggestion.clone();
+            let display = crate::naming::slug_to_label(&slug);
+            card = card.child(
+                div()
+                    .id(SharedString::from(format!("naming-opt-{i}")))
+                    .cursor_pointer()
+                    .px(px(12.0))
+                    .py(px(8.0))
+                    .rounded(px(6.0))
+                    .bg(rgb(0x313244))
+                    .hover(|s| s.bg(rgb(0x45475a)))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _e, _w, cx| {
+                        cx.stop_propagation();
+                        this.pick(slug.clone(), cx);
+                    }))
+                    .child(
+                        div().text_size(px(13.0)).text_color(rgb(0xcdd6f4))
+                            .child(SharedString::from(display)),
+                    )
+                    .child(
+                        div().text_size(px(10.0)).text_color(rgb(0x6c7086))
+                            .child(SharedString::from(suggestion.clone())),
+                    ),
+            );
+        }
+
+        card = card.child(
+            div()
+                .flex().flex_row().items_center().gap(px(8.0))
+                .child(div().flex_1().min_w(px(0.0)).child(self.custom_input.clone()))
+                .child(
+                    div()
+                        .id("naming-skip-btn")
+                        .cursor_pointer()
+                        .px(px(8.0)).py(px(4.0)).rounded(px(4.0))
+                        .bg(rgb(0x45475a))
+                        .hover(|s| s.bg(rgb(0x585b70)))
+                        .text_size(px(11.0)).text_color(rgb(0xa6adc8))
+                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _e, _w, cx| {
+                            cx.stop_propagation();
+                            this.dismiss(cx);
+                        }))
+                        .child("Skip"),
+                ),
+        );
+
+        backdrop.child(card)
+    }
+}

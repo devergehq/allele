@@ -851,6 +851,20 @@ impl AppState {
                 };
                 snapshot.save();
             }
+            SettingsAction::UpdateNamingConfig(config) => {
+                *skip_refocus = true;
+                self.user_settings.naming = config;
+                let snapshot = Settings {
+                    projects: self.projects.iter().map(|p| ProjectSave {
+                        id: p.id.clone(),
+                        name: p.name.clone(),
+                        source_path: p.source_path.clone(),
+                        settings: p.settings.clone(),
+                    }).collect(),
+                    ..self.user_settings.clone()
+                };
+                snapshot.save();
+            }
         }
     }
 
