@@ -86,6 +86,10 @@ pub struct SettingsWindowState {
     /// Whether attention-needed sessions are promoted to the top of the
     /// sidebar list. Mirrored from `Settings::promote_attention_sessions`.
     promote_attention_sessions: bool,
+    /// Naming model inputs — editable so the user doesn't need to hand-edit
+    /// settings.json (which the app overwrites on every auto-save).
+    naming_claude_model_input: Entity<TextInput>,
+    naming_opencode_model_input: Entity<TextInput>,
 }
 
 impl SettingsWindowState {
@@ -100,6 +104,8 @@ impl SettingsWindowState {
         initial_font_size: f32,
         initial_git_pull_before_new_session: bool,
         initial_promote_attention_sessions: bool,
+        initial_naming_claude_model: String,
+        initial_naming_opencode_model: String,
     ) -> Self {
         let draft_input = cx.new(|cx| {
             TextInput::new(cx, "", "Add a path (e.g. tmp/pids/server.pid)")
@@ -131,6 +137,34 @@ impl SettingsWindowState {
         )
         .detach();
 
+        let naming_claude_model_input = cx.new(|cx| {
+            TextInput::new(cx, initial_naming_claude_model, "claude-haiku-4-5-20251001")
+        });
+        cx.subscribe(
+            &naming_claude_model_input,
+            |this, input, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Changed | TextInputEvent::Submitted) {
+                    let value = input.read(cx).text().to_string();
+                    this.push_naming_model("claude", value, cx);
+                }
+            },
+        )
+        .detach();
+
+        let naming_opencode_model_input = cx.new(|cx| {
+            TextInput::new(cx, initial_naming_opencode_model, "openai/gpt-4o-mini")
+        });
+        cx.subscribe(
+            &naming_opencode_model_input,
+            |this, input, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Changed | TextInputEvent::Submitted) {
+                    let value = input.read(cx).text().to_string();
+                    this.push_naming_model("opencode", value, cx);
+                }
+            },
+        )
+        .detach();
+
         let mut s = Self {
             app,
             selected: Section::Sessions,
@@ -144,6 +178,8 @@ impl SettingsWindowState {
             font_size: crate::terminal::clamp_font_size(initial_font_size),
             git_pull_before_new_session: initial_git_pull_before_new_session,
             promote_attention_sessions: initial_promote_attention_sessions,
+            naming_claude_model_input,
+            naming_opencode_model_input,
         };
         s.sync_agent_inputs(cx);
         s
@@ -246,6 +282,25 @@ impl SettingsWindowState {
                 cx.notify();
             })
             .ok();
+    }
+
+    // --- naming --------------------------------------------------------
+
+    fn push_naming_model(&self, which: &str, value: String, cx: &mut Context<Self>) {
+        if let Some(app) = self.app.upgrade() {
+            let mut new_config = app.read(cx).user_settings.naming.clone();
+            let model = if value.is_empty() { None } else { Some(value) };
+            match which {
+                "claude" => new_config.claude.model = model,
+                "opencode" => new_config.opencode.model = model,
+                _ => return,
+            }
+            app.update(cx, |state: &mut crate::AppState, cx| {
+                state.pending_action =
+                    Some(crate::SettingsAction::UpdateNamingConfig(new_config).into());
+                cx.notify();
+            });
+        }
     }
 
     // --- browser -------------------------------------------------------
@@ -483,8 +538,6 @@ fn render_naming_pane(
     let mode = naming.mode;
     let mode_label = mode.label();
     let mode_desc = mode.description();
-    let claude_model = naming.claude.model.clone().unwrap_or_default();
-    let opencode_model = naming.opencode.model.clone().unwrap_or_default();
 
     div()
         .flex()
@@ -578,12 +631,7 @@ fn render_naming_pane(
                         .min_w(px(50.0))
                         .child("Claude"),
                 )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(0xcdd6f4))
-                        .child(SharedString::from(claude_model)),
-                ),
+                .child(input_frame(this.naming_claude_model_input.clone())),
         )
         // OpenCode model
         .child(
@@ -599,20 +647,7 @@ fn render_naming_pane(
                         .min_w(px(50.0))
                         .child("OpenCode"),
                 )
-                .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(rgb(0xcdd6f4))
-                        .child(SharedString::from(opencode_model)),
-                ),
-        )
-        // Hint
-        .child(
-            div()
-                .text_size(px(10.0))
-                .text_color(rgb(0x45475a))
-                .mt(px(8.0))
-                .child("Edit settings.json for advanced naming config"),
+                .child(input_frame(this.naming_opencode_model_input.clone())),
         )
 }
 
@@ -1366,6 +1401,8 @@ pub fn open_settings_window(
     initial_font_size: f32,
     initial_git_pull_before_new_session: bool,
     initial_promote_attention_sessions: bool,
+    initial_naming_claude_model: String,
+    initial_naming_opencode_model: String,
 ) -> anyhow::Result<WindowHandle<SettingsWindowState>> {
     let window_size = size(px(640.0), px(440.0));
     let options = WindowOptions {
@@ -1391,6 +1428,8 @@ pub fn open_settings_window(
                 initial_font_size,
                 initial_git_pull_before_new_session,
                 initial_promote_attention_sessions,
+                initial_naming_claude_model,
+                initial_naming_opencode_model,
             )
         })
     })

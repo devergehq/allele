@@ -1876,7 +1876,7 @@ fn main() {
                             // "attempted to dereference an ArenaRef after
                             // its Arena was cleared".
                             let Some(strong) = handle.upgrade() else { return };
-                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions) = strong.update(cx, |state: &mut AppState, _cx| {
+                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions, naming_claude_model, naming_opencode_model) = strong.update(cx, |state: &mut AppState, _cx| {
                                 (
                                     state.settings_window,
                                     state.user_settings.session_cleanup_paths.clone(),
@@ -1891,6 +1891,8 @@ fn main() {
                                     state.user_settings.font_size,
                                     state.user_settings.git_pull_before_new_session,
                                     state.user_settings.promote_attention_sessions,
+                                    state.user_settings.naming.claude.model.clone().unwrap_or_default(),
+                                    state.user_settings.naming.opencode.model.clone().unwrap_or_default(),
                                 )
                             });
 
@@ -1906,7 +1908,7 @@ fn main() {
                             }
 
                             let weak = handle.clone();
-                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions) {
+                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions, naming_claude_model, naming_opencode_model) {
                                 Ok(new_handle) => {
                                     strong
                                         .update(cx, |state: &mut AppState, _cx| {
