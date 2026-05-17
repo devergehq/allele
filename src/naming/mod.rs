@@ -1,10 +1,12 @@
 //! LLM-powered session branch naming.
 //!
-//! Calls a fast/cheap model (Haiku for Claude agents, GPT-4o-mini for OpenCode)
-//! to generate a meaningful 2-4 word branch name from the session's first prompt.
-//! Falls back to keyword extraction when no API key is available or the call fails.
+//! Shells out to the coding agent binary (`claude -p` or `opencode run`) to
+//! generate a meaningful 2-4 word branch name from the session's first prompt.
+//! The agents use their own subscription auth — no separate API keys needed.
+//! Falls back to keyword extraction when the binary isn't available or fails.
 
 use serde::{Deserialize, Serialize};
+use std::process::Command;
 use tracing::info;
 
 use crate::settings::AgentKind;
@@ -67,26 +69,29 @@ impl NamingMode {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NamingModelConfig {
-    pub model: String,
     #[serde(default)]
-    pub api_base: Option<String>,
-    #[serde(default)]
-    pub api_key_env: String,
+    pub model: Option<String>,
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
+    api_base: Option<String>,
+    #[serde(default, skip_serializing)]
+    #[allow(dead_code)]
+    api_key_env: Option<String>,
 }
 
 fn default_claude_config() -> NamingModelConfig {
     NamingModelConfig {
-        model: "claude-haiku-4-5-20251001".to_string(),
+        model: Some("claude-haiku-4-5-20251001".to_string()),
         api_base: None,
-        api_key_env: "ANTHROPIC_API_KEY".to_string(),
+        api_key_env: None,
     }
 }
 
 fn default_opencode_config() -> NamingModelConfig {
     NamingModelConfig {
-        model: "gpt-4o-mini".to_string(),
+        model: Some("openai/gpt-4o-mini".to_string()),
         api_base: None,
-        api_key_env: "OPENAI_API_KEY".to_string(),
+        api_key_env: None,
     }
 }
 
@@ -97,6 +102,7 @@ fn default_opencode_config() -> NamingModelConfig {
 pub struct NamingRequest<'a> {
     pub prompt_text: &'a str,
     pub agent_kind: AgentKind,
+    pub agent_binary: &'a str,
     pub short_id: &'a str,
     pub suggestions_count: usize,
 }
@@ -111,8 +117,9 @@ pub struct NamingResult {
 // Public API
 // ---------------------------------------------------------------------------
 
-/// Generate a branch name from the session's first prompt using the configured LLM.
-/// Returns `Ok(NamingResult)` on success, or `Err(reason)` on failure (caller falls back).
+/// Generate a branch name from the session's first prompt by shelling out to
+/// the coding agent. Returns `Ok(NamingResult)` on success, or `Err(reason)`
+/// on failure (caller falls back to keyword extraction).
 pub fn generate(config: &NamingConfig, request: &NamingRequest) -> Result<NamingResult, String> {
     let model_config = match request.agent_kind {
         AgentKind::Claude => &config.claude,
@@ -120,28 +127,29 @@ pub fn generate(config: &NamingConfig, request: &NamingRequest) -> Result<Naming
         AgentKind::Generic => &config.claude,
     };
 
-    let api_key = resolve_api_key(model_config)?;
     let prompt_snippet = truncate_prompt(request.prompt_text, 500);
+    let system = system_prompt(request.suggestions_count);
+    let full_prompt = format!("{system}\n\nTask description:\n{prompt_snippet}");
 
     let raw_response = match request.agent_kind {
         AgentKind::Claude | AgentKind::Generic => {
-            call_anthropic(&prompt_snippet, model_config, &api_key, request.suggestions_count)?
+            call_claude(request.agent_binary, model_config, &full_prompt)?
         }
         AgentKind::Opencode => {
-            call_openai_compatible(&prompt_snippet, model_config, &api_key, request.suggestions_count)?
+            call_opencode(request.agent_binary, model_config, &full_prompt)?
         }
     };
 
     let suggestions = parse_suggestions(&raw_response, request.suggestions_count);
     if suggestions.is_empty() {
-        return Err("LLM returned no valid branch names".to_string());
+        return Err("Agent returned no valid branch names".to_string());
     }
 
     let slug = &suggestions[0];
     let branch_name = format!("{}-{}", slug, request.short_id);
     let display_label = slug_to_label(slug);
 
-    info!("naming: LLM generated branch_name={branch_name:?}, label={display_label:?}");
+    info!("naming: agent generated branch_name={branch_name:?}, label={display_label:?}");
 
     Ok(NamingResult {
         suggestions,
@@ -186,15 +194,6 @@ pub fn slug_to_label(slug: &str) -> String {
 // Internals
 // ---------------------------------------------------------------------------
 
-fn resolve_api_key(config: &NamingModelConfig) -> Result<String, String> {
-    std::env::var(&config.api_key_env).map_err(|_| {
-        format!(
-            "naming: {} not set in environment",
-            config.api_key_env
-        )
-    })
-}
-
 fn truncate_prompt(prompt: &str, max_chars: usize) -> String {
     if prompt.len() <= max_chars {
         prompt.to_string()
@@ -219,94 +218,59 @@ fn system_prompt(count: usize) -> String {
     }
 }
 
-fn build_agent() -> ureq::Agent {
-    let config = ureq::config::Config::builder()
-        .timeout_global(Some(std::time::Duration::from_secs(5)))
-        .build();
-    config.new_agent()
+fn call_claude(binary: &str, config: &NamingModelConfig, prompt: &str) -> Result<String, String> {
+    let mut cmd = Command::new(binary);
+    cmd.arg("-p");
+    if let Some(model) = &config.model {
+        cmd.arg("--model").arg(model);
+    }
+    cmd.arg("--max-tokens").arg("60");
+    cmd.arg(prompt);
+
+    info!("naming: spawning claude -p (model={:?})", config.model);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("naming: failed to spawn claude: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("naming: claude exited with {}: {stderr}", output.status));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return Err("naming: claude produced no output".to_string());
+    }
+
+    Ok(stdout)
 }
 
-fn call_anthropic(
-    prompt: &str,
-    config: &NamingModelConfig,
-    api_key: &str,
-    count: usize,
-) -> Result<String, String> {
-    let base = config
-        .api_base
-        .as_deref()
-        .unwrap_or("https://api.anthropic.com");
-    let url = format!("{base}/v1/messages");
+fn call_opencode(binary: &str, config: &NamingModelConfig, prompt: &str) -> Result<String, String> {
+    let mut cmd = Command::new(binary);
+    cmd.arg("run");
+    if let Some(model) = &config.model {
+        cmd.arg("--model").arg(model);
+    }
+    cmd.arg(prompt);
 
-    let body = serde_json::json!({
-        "model": config.model,
-        "max_tokens": 60,
-        "system": system_prompt(count),
-        "messages": [{"role": "user", "content": prompt}]
-    });
+    info!("naming: spawning opencode run (model={:?})", config.model);
 
-    info!("naming: calling Anthropic API model={}", config.model);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("naming: failed to spawn opencode: {e}"))?;
 
-    let agent = build_agent();
-    let mut response = agent
-        .post(&url)
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .send(body.to_string().as_bytes())
-        .map_err(|e| format!("naming: Anthropic API error: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("naming: opencode exited with {}: {stderr}", output.status));
+    }
 
-    let resp_body: serde_json::Value = response
-        .body_mut()
-        .read_json()
-        .map_err(|e| format!("naming: failed to parse Anthropic response: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if stdout.is_empty() {
+        return Err("naming: opencode produced no output".to_string());
+    }
 
-    resp_body["content"][0]["text"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "naming: no text in Anthropic response".to_string())
-}
-
-fn call_openai_compatible(
-    prompt: &str,
-    config: &NamingModelConfig,
-    api_key: &str,
-    count: usize,
-) -> Result<String, String> {
-    let base = config
-        .api_base
-        .as_deref()
-        .unwrap_or("https://api.openai.com");
-    let url = format!("{base}/v1/chat/completions");
-
-    let body = serde_json::json!({
-        "model": config.model,
-        "max_tokens": 60,
-        "messages": [
-            {"role": "system", "content": system_prompt(count)},
-            {"role": "user", "content": prompt}
-        ]
-    });
-
-    info!("naming: calling OpenAI-compatible API model={}", config.model);
-
-    let agent = build_agent();
-    let mut response = agent
-        .post(&url)
-        .header("Authorization", &format!("Bearer {api_key}"))
-        .header("content-type", "application/json")
-        .send(body.to_string().as_bytes())
-        .map_err(|e| format!("naming: OpenAI API error: {e}"))?;
-
-    let resp_body: serde_json::Value = response
-        .body_mut()
-        .read_json()
-        .map_err(|e| format!("naming: failed to parse OpenAI response: {e}"))?;
-
-    resp_body["choices"][0]["message"]["content"]
-        .as_str()
-        .map(|s| s.to_string())
-        .ok_or_else(|| "naming: no content in OpenAI response".to_string())
+    Ok(stdout)
 }
 
 /// Parse and validate LLM output into clean branch name slugs.
@@ -320,12 +284,10 @@ fn parse_suggestions(raw: &str, max_count: usize) -> Vec<String> {
 /// Validate and clean a single slug candidate.
 /// Returns `None` if the input is invalid.
 fn validate_slug(raw: &str) -> Option<String> {
-    // Strip common LLM noise: quotes, backticks, numbering, bullet points
     let cleaned = raw
         .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '-' || c == '*')
         .trim_start_matches(|c: char| c.is_ascii_digit() || c == '.' || c == ')' || c == ' ');
 
-    // Normalize to lowercase kebab-case
     let slug: String = cleaned
         .to_lowercase()
         .chars()
@@ -336,12 +298,10 @@ fn validate_slug(raw: &str) -> Option<String> {
         .collect::<Vec<_>>()
         .join("-");
 
-    // Validate length
     if slug.len() < 3 || slug.len() > 50 {
         return None;
     }
 
-    // Must contain at least one hyphen (2+ words)
     if !slug.contains('-') {
         return None;
     }
@@ -420,5 +380,37 @@ mod tests {
     #[test]
     fn branch_name_from_slug_format() {
         assert_eq!(branch_name_from_slug("fix-auth", "5dc47535"), "fix-auth-5dc47535");
+    }
+
+    #[test]
+    fn legacy_config_with_api_key_env_deserializes() {
+        let json = r#"{
+            "mode": "auto",
+            "claude": {
+                "model": "claude-haiku-4-5-20251001",
+                "api_base": null,
+                "api_key_env": "ANTHROPIC_API_KEY"
+            },
+            "opencode": {
+                "model": "gpt-4o-mini",
+                "api_base": null,
+                "api_key_env": "OPENAI_API_KEY"
+            }
+        }"#;
+        let config: NamingConfig = serde_json::from_str(json).expect("should deserialize legacy config");
+        assert_eq!(config.mode, NamingMode::Auto);
+        assert_eq!(config.claude.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+    }
+
+    #[test]
+    fn new_config_without_legacy_fields_deserializes() {
+        let json = r#"{
+            "mode": "interactive",
+            "claude": { "model": "claude-haiku-4-5-20251001" },
+            "opencode": { "model": "openai/gpt-4o-mini" }
+        }"#;
+        let config: NamingConfig = serde_json::from_str(json).expect("should deserialize new config");
+        assert_eq!(config.mode, NamingMode::Interactive);
+        assert_eq!(config.opencode.model.as_deref(), Some("openai/gpt-4o-mini"));
     }
 }

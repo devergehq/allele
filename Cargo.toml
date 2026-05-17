@@ -49,9 +49,6 @@ tokio = { version = "1", features = ["full"] }
 # File watching (for hook events)
 notify = "7"
 
-# Lightweight blocking HTTP client for LLM naming API calls
-ureq = { version = "3", features = ["json"] }
-
 # Markdown parsing for Rich Sidecar TextBlock rendering
 pulldown-cmark = { version = "0.13.0", default-features = false }
 
