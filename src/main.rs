@@ -1400,6 +1400,10 @@ fn install_app_menu(cx: &mut App) {
 
 /// Open the standard macOS About panel, populated with app details and a
 /// clickable link to the GitHub repo.
+///
+/// The options dictionary is created once and retained for the process
+/// lifetime.  Re-creating Obj-C objects on every invocation caused a
+/// crash when the panel was already visible and focused.
 fn show_about_panel() {
     #[cfg(target_os = "macos")]
     unsafe {
@@ -1407,60 +1411,67 @@ fn show_about_panel() {
         use cocoa::base::{id, nil};
         use cocoa::foundation::NSString;
         use objc::{class, msg_send, sel, sel_impl};
+        use std::sync::OnceLock;
 
-        #[repr(C)]
-        struct NSRange {
-            location: usize,
-            length: usize,
-        }
+        // Store the retained NSDictionary pointer as a usize so it is
+        // Send+Sync.  Created exactly once; leaked intentionally.
+        static OPTIONS: OnceLock<usize> = OnceLock::new();
 
-        let name: id = NSString::alloc(nil).init_str("Allele");
-        let version: id = NSString::alloc(nil)
-            .init_str(concat!("Version ", env!("CARGO_PKG_VERSION")));
-        let copyright: id = NSString::alloc(nil).init_str(
-            "Claude Code session manager — APFS clone management for parallel variant workflows.",
-        );
+        let options_ptr = *OPTIONS.get_or_init(|| {
+            #[repr(C)]
+            struct NSRange {
+                location: usize,
+                length: usize,
+            }
 
-        // Credits: plain ASCII so UTF-16 offsets line up with byte offsets for
-        // the NSLink range below.
-        const URL: &str = "https://github.com/devergehq/allele";
-        const BODY: &str = "Claude Code session manager\nAPFS clone management for parallel variant workflows.\n\n";
-        let credits_text = format!("{BODY}{URL}");
+            let name: id = NSString::alloc(nil).init_str("Allele");
+            let version: id = NSString::alloc(nil)
+                .init_str(concat!("Version ", env!("CARGO_PKG_VERSION")));
+            let copyright: id = NSString::alloc(nil).init_str(
+                "Claude Code session manager — APFS clone management for parallel variant workflows.",
+            );
 
-        let ns_credits_str: id = NSString::alloc(nil).init_str(&credits_text);
-        let credits: id = msg_send![class!(NSMutableAttributedString), alloc];
-        let credits: id = msg_send![credits, initWithString: ns_credits_str];
+            const URL: &str = "https://github.com/devergehq/allele";
+            const BODY: &str = "Claude Code session manager\nAPFS clone management for parallel variant workflows.\n\n";
+            let credits_text = format!("{BODY}{URL}");
 
-        let url_str: id = NSString::alloc(nil).init_str(URL);
-        let url: id = msg_send![class!(NSURL), URLWithString: url_str];
-        let link_key: id = NSString::alloc(nil).init_str("NSLink");
-        let range = NSRange {
-            location: BODY.len(),
-            length: URL.len(),
-        };
-        let _: () = msg_send![credits, addAttribute: link_key value: url range: range];
+            let ns_credits_str: id = NSString::alloc(nil).init_str(&credits_text);
+            let credits: id = msg_send![class!(NSMutableAttributedString), alloc];
+            let credits: id = msg_send![credits, initWithString: ns_credits_str];
 
-        // Load the embedded icon for the About panel
-        let icon_data: &[u8] = include_bytes!("../assets/icons/allele-icon-256.png");
-        let ns_icon_data: id = msg_send![class!(NSData), dataWithBytes: icon_data.as_ptr() length: icon_data.len()];
-        let icon_image: id = msg_send![class!(NSImage), alloc];
-        let icon_image: id = msg_send![icon_image, initWithData: ns_icon_data];
+            let url_str: id = NSString::alloc(nil).init_str(URL);
+            let url: id = msg_send![class!(NSURL), URLWithString: url_str];
+            let link_key: id = NSString::alloc(nil).init_str("NSLink");
+            let range = NSRange {
+                location: BODY.len(),
+                length: URL.len(),
+            };
+            let _: () = msg_send![credits, addAttribute: link_key value: url range: range];
 
-        let keys: [id; 5] = [
-            NSString::alloc(nil).init_str("ApplicationName"),
-            NSString::alloc(nil).init_str("ApplicationVersion"),
-            NSString::alloc(nil).init_str("Copyright"),
-            NSString::alloc(nil).init_str("Credits"),
-            NSString::alloc(nil).init_str("ApplicationIcon"),
-        ];
-        let vals: [id; 5] = [name, version, copyright, credits, icon_image];
-        let options: id = msg_send![
-            class!(NSDictionary),
-            dictionaryWithObjects: vals.as_ptr()
-            forKeys: keys.as_ptr()
-            count: 5usize
-        ];
+            let icon_data: &[u8] = include_bytes!("../assets/icons/allele-icon-256.png");
+            let ns_icon_data: id = msg_send![class!(NSData), dataWithBytes: icon_data.as_ptr() length: icon_data.len()];
+            let icon_image: id = msg_send![class!(NSImage), alloc];
+            let icon_image: id = msg_send![icon_image, initWithData: ns_icon_data];
 
+            let keys: [id; 5] = [
+                NSString::alloc(nil).init_str("ApplicationName"),
+                NSString::alloc(nil).init_str("ApplicationVersion"),
+                NSString::alloc(nil).init_str("Copyright"),
+                NSString::alloc(nil).init_str("Credits"),
+                NSString::alloc(nil).init_str("ApplicationIcon"),
+            ];
+            let vals: [id; 5] = [name, version, copyright, credits, icon_image];
+            let options: id = msg_send![
+                class!(NSDictionary),
+                dictionaryWithObjects: vals.as_ptr()
+                forKeys: keys.as_ptr()
+                count: 5usize
+            ];
+            let _: () = msg_send![options, retain];
+            options as usize
+        });
+
+        let options = options_ptr as id;
         let app = NSApp();
         let _: () = msg_send![app, activateIgnoringOtherApps: true];
         let _: () = msg_send![app, orderFrontStandardAboutPanelWithOptions: options];
@@ -2016,6 +2027,8 @@ fn main() {
                             discard: None,
                             dirty_session: None,
                             quit: false,
+                            remove_project: None,
+                            dirty_merge: None,
                         },
                         rich: RichState {
                             view: None,

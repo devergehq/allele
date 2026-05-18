@@ -56,6 +56,10 @@ pub enum SessionAction {
     SelectSession { project_idx: usize, session_idx: usize },
     /// Merge session work into canonical and close (archive + merge + delete clone).
     MergeAndClose { project_idx: usize, session_idx: usize },
+    /// Cancel an in-flight dirty-merge confirmation.
+    CancelDirtyMerge,
+    /// Proceed with merge despite uncommitted changes — discards them first.
+    ProceedDirtyMerge { project_idx: usize, session_idx: usize },
     /// Proceed with session creation despite dirty canonical.
     ProceedDirtySession(usize),
     /// Cancel dirty-state session creation.
@@ -123,6 +127,11 @@ pub enum SidebarAction {
 #[derive(Debug)]
 pub enum ProjectAction {
     OpenProjectAtPath(PathBuf),
+    /// Arm the inline confirmation gate for removing a project.
+    RequestRemoveProject(usize),
+    /// Cancel an in-flight project removal confirmation.
+    CancelRemoveProject,
+    /// Actually remove the project (after confirmation).
     RemoveProject(usize),
     /// Source path missing — open folder picker so the user can relocate.
     RelocateProject(usize),

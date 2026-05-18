@@ -199,6 +199,10 @@ impl AppState {
                     if let Err(e) = std::fs::write(&marker_path, &session_id_for_session) {
                         warn!("failed to write .allele-session marker: {e}");
                     }
+
+                    // Exclude the marker from git so auto-commit never
+                    // captures it into the session branch.
+                    crate::git::exclude_pattern_in_clone(&clone_path, ".allele-session");
                 }
 
                 // Create the terminal view with the clone as PWD
@@ -465,6 +469,8 @@ impl AppState {
                     if let Err(e) = std::fs::write(&marker_path, &session_id_for_session) {
                         warn!("failed to write .allele-session marker: {e}");
                     }
+
+                    crate::git::exclude_pattern_in_clone(&clone_path, ".allele-session");
 
                     // Rename the branch if the user provided a custom name.
                     if let Some(ref name) = branch_slug {

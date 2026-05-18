@@ -131,191 +131,32 @@ impl AppState {
                     cx,
                 );
             }
+            SessionAction::CancelDirtyMerge => {
+                self.confirming.dirty_merge = None;
+                cx.notify();
+            }
+            SessionAction::ProceedDirtyMerge { project_idx, session_idx } => {
+                self.confirming.dirty_merge = None;
+                self.execute_merge_and_close(
+                    SessionCursor { project_idx, session_idx },
+                    true, // discard_uncommitted
+                    window,
+                    cx,
+                );
+            }
             SessionAction::MergeAndClose { project_idx, session_idx } => {
                 let cursor = SessionCursor { project_idx, session_idx };
-                if let Some(project) = self.projects.get_mut(cursor.project_idx) {
-                    if cursor.session_idx < project.sessions.len() {
-                        let session = &mut project.sessions[cursor.session_idx];
-                        let clone_path = session.clone_path.clone();
-                        let session_id = session.id.clone();
-                        let session_label = session.label.clone();
-                        let canonical = project.source_path.clone();
-                        let proj_settings = project.settings.clone();
+                let is_dirty = self.projects.get(cursor.project_idx)
+                    .and_then(|p| p.sessions.get(cursor.session_idx))
+                    .and_then(|s| s.clone_path.as_ref())
+                    .map(|cp| git::is_working_tree_dirty(cp))
+                    .unwrap_or(false);
 
-                        // Capture session metadata for potential restoration on failure
-                        // (must happen before the mutable borrow for loading_sessions).
-                        let restore_started = session.started_at;
-                        let restore_last_active = session.last_active;
-                        let restore_agent_id = session.agent_id.clone();
-
-                        // If no clone or clone == canonical, just remove (no git ops).
-                        let needs_git = clone_path.as_ref().map_or(false, |cp| *cp != canonical);
-
-                        if needs_git {
-                            // SAFETY: needs_git is true, so clone_path is Some.
-                            let clone_path = clone_path.unwrap();
-                            let restore_clone = clone_path.clone();
-
-                            // Show a placeholder while the background pipeline runs.
-                            let placeholder_id = uuid::Uuid::new_v4().to_string();
-                            {
-                                let project = self.projects.get_mut(cursor.project_idx)
-                                    .expect("cursor produced by a sidebar click; project_idx always in bounds");
-                                project.loading_sessions.push(project::LoadingSession {
-                                    id: placeholder_id.clone(),
-                                    label: format!("{session_label} (rebasing & merging)"),
-                                });
-
-                                // Remove session from the list (frees PTY via Drop).
-                                // We DON'T call remove_session() because its background
-                                // task would delete the clone — we need the clone alive
-                                // until we know the merge succeeded.
-                                project.sessions.remove(cursor.session_idx);
-                            }
-
-                            // Update active cursor if it pointed at the removed session.
-                            if let Some(active) = self.active {
-                                if active == cursor {
-                                    let project = &self.projects[cursor.project_idx];
-                                    self.active = if !project.sessions.is_empty() {
-                                        let new_idx = cursor.session_idx.min(project.sessions.len() - 1);
-                                        Some(SessionCursor { project_idx: cursor.project_idx, session_idx: new_idx })
-                                    } else {
-                                        self.projects.iter().enumerate().find_map(|(p_idx, p)| {
-                                            if !p.sessions.is_empty() {
-                                                Some(SessionCursor { project_idx: p_idx, session_idx: 0 })
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                    };
-                                } else if active.project_idx == cursor.project_idx && active.session_idx > cursor.session_idx {
-                                    self.active = Some(SessionCursor {
-                                        project_idx: active.project_idx,
-                                        session_idx: active.session_idx - 1,
-                                    });
-                                }
-                            }
-                            self.mark_state_dirty();
-                            cx.notify();
-
-                            // Clones for restoration on failure (originals move into the background task).
-                            let restore_id = session_id.clone();
-                            let restore_label = session_label.clone();
-
-                            // Spawn the archive → rebase → merge → delete pipeline on the background executor.
-                            let placeholder_id_for_task = placeholder_id.clone();
-                            let project_idx_for_task = cursor.project_idx;
-                            cx.spawn(async move |this, cx| {
-                                let result = cx
-                                    .background_executor()
-                                    .spawn(async move {
-                                        // 1. Auto-commit + fetch session branch as archive ref
-                                        git::archive_session(&canonical, &clone_path, &session_id)?;
-
-                                        // 2. Optionally fetch remote & rebase canonical onto remote tip
-                                        let remote = proj_settings.resolved_remote();
-                                        if proj_settings.rebase_before_merge && git::has_remote(&canonical, remote) {
-                                            let branch_override = proj_settings.default_branch.as_deref();
-                                            if let Err(e) = git::fetch_and_rebase_onto_remote_branch(&canonical, remote, branch_override) {
-                                                warn!("Rebase onto {remote} failed for {session_id}: {e}");
-                                                // Clean up the archive ref only — preserve the clone
-                                                let _ = git::delete_ref(
-                                                    &canonical,
-                                                    &git::archive_ref_name(&session_id),
-                                                );
-                                                anyhow::bail!("Rebase failed — resolve conflicts in the session and merge again. {e}");
-                                            }
-                                            info!("Rebased canonical onto {remote} for {session_id}");
-                                        }
-
-                                        // 3. Merge the archive ref using the configured strategy
-                                        let merge_result = match proj_settings.merge_strategy {
-                                            crate::settings::MergeStrategy::Merge => {
-                                                git::merge_archive(&canonical, &session_id)
-                                            }
-                                            crate::settings::MergeStrategy::Squash => {
-                                                git::squash_merge_archive(&canonical, &session_id)
-                                            }
-                                            crate::settings::MergeStrategy::RebaseThenMerge => {
-                                                git::rebase_merge_archive(&canonical, &session_id)
-                                            }
-                                        };
-
-                                        // 4. Always delete the archive ref (cleanup even on merge failure)
-                                        let _ = git::delete_ref(
-                                            &canonical,
-                                            &git::archive_ref_name(&session_id),
-                                        );
-
-                                        match merge_result {
-                                            Ok(git::MergeResult::Merged) => {
-                                                info!("Merged session {session_id} into canonical");
-                                            }
-                                            Ok(git::MergeResult::AlreadyUpToDate) => {
-                                                info!("Session {session_id} already up to date — nothing to merge");
-                                            }
-                                            Err(e) => {
-                                                warn!("merge_archive failed for {session_id}: {e}");
-                                                // Preserve clone — don't delete it on merge failure
-                                                anyhow::bail!("Merge failed — resolve conflicts in the session and merge again. {e}");
-                                            }
-                                        }
-
-                                        // 5. Trash the APFS clone (near-instant rename) on
-                                        //    success. Actual deletion deferred to startup purge.
-                                        if let Err(e) = clone::trash_clone(&clone_path) {
-                                            warn!("Failed to trash clone after merge for {session_id}: {e}");
-                                        }
-                                        Ok(())
-                                    })
-                                    .await;
-
-                                // Update UI on the main thread
-                                let _ = this.update(cx, |this: &mut Self, cx| {
-                                    if let Some(project) = this.projects.get_mut(project_idx_for_task) {
-                                        project.loading_sessions.retain(|l| l.id != placeholder_id_for_task);
-                                    }
-
-                                    if let Err(e) = &result {
-                                        warn!("Merge-and-close pipeline error: {e}");
-
-                                        // Restore the session so the user can fix conflicts and retry
-                                        let restored = Session::suspended_from_persisted(
-                                            restore_id.clone(),
-                                            restore_label.clone(),
-                                            restore_started,
-                                            restore_last_active,
-                                            Some(restore_clone.clone()),
-                                            false, // not merged — that's the point
-                                        )
-                                        .with_agent_id(restore_agent_id.clone());
-                                        if let Some(project) = this.projects.get_mut(project_idx_for_task) {
-                                            project.sessions.push(restored);
-                                        }
-
-                                        hooks::show_notification(
-                                            "Merge failed",
-                                            &format!("{restore_label}: resolve conflicts and merge again"),
-                                        );
-                                    }
-
-                                    this.mark_state_dirty();
-                                    cx.notify();
-                                });
-                            })
-                            .detach();
-                        } else {
-                            // No clone to manage — mark merged so remove_session
-                            // skips creating an archive entry.
-                            if let Some(project) = self.projects.get_mut(cursor.project_idx) {
-                                if cursor.session_idx < project.sessions.len() {
-                                    project.sessions[cursor.session_idx].merged = true;
-                                }
-                            }
-                            self.remove_session(cursor, window, cx);
-                        }
-                    }
+                if is_dirty {
+                    self.confirming.dirty_merge = Some(cursor);
+                    cx.notify();
+                } else {
+                    self.execute_merge_and_close(cursor, false, window, cx);
                 }
             }
             SessionAction::SelectSession { project_idx, session_idx } => {
@@ -422,6 +263,178 @@ impl AppState {
                     }
                 }
                 self.mark_state_dirty();
+            }
+        }
+    }
+
+    fn execute_merge_and_close(
+        &mut self,
+        cursor: SessionCursor,
+        discard_uncommitted: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(project) = self.projects.get_mut(cursor.project_idx) {
+            if cursor.session_idx < project.sessions.len() {
+                let session = &mut project.sessions[cursor.session_idx];
+                let clone_path = session.clone_path.clone();
+                let session_id = session.id.clone();
+                let session_label = session.label.clone();
+                let canonical = project.source_path.clone();
+                let proj_settings = project.settings.clone();
+
+                let restore_started = session.started_at;
+                let restore_last_active = session.last_active;
+                let restore_agent_id = session.agent_id.clone();
+
+                let needs_git = clone_path.as_ref().map_or(false, |cp| *cp != canonical);
+
+                if needs_git {
+                    let clone_path = clone_path.unwrap();
+                    let restore_clone = clone_path.clone();
+
+                    let placeholder_id = uuid::Uuid::new_v4().to_string();
+                    {
+                        let project = self.projects.get_mut(cursor.project_idx)
+                            .expect("cursor produced by a sidebar click; project_idx always in bounds");
+                        project.loading_sessions.push(project::LoadingSession {
+                            id: placeholder_id.clone(),
+                            label: format!("{session_label} (rebasing & merging)"),
+                        });
+                        project.sessions.remove(cursor.session_idx);
+                    }
+
+                    if let Some(active) = self.active {
+                        if active == cursor {
+                            let project = &self.projects[cursor.project_idx];
+                            self.active = if !project.sessions.is_empty() {
+                                let new_idx = cursor.session_idx.min(project.sessions.len() - 1);
+                                Some(SessionCursor { project_idx: cursor.project_idx, session_idx: new_idx })
+                            } else {
+                                self.projects.iter().enumerate().find_map(|(p_idx, p)| {
+                                    if !p.sessions.is_empty() {
+                                        Some(SessionCursor { project_idx: p_idx, session_idx: 0 })
+                                    } else {
+                                        None
+                                    }
+                                })
+                            };
+                        } else if active.project_idx == cursor.project_idx && active.session_idx > cursor.session_idx {
+                            self.active = Some(SessionCursor {
+                                project_idx: active.project_idx,
+                                session_idx: active.session_idx - 1,
+                            });
+                        }
+                    }
+                    self.mark_state_dirty();
+                    cx.notify();
+
+                    let restore_id = session_id.clone();
+                    let restore_label = session_label.clone();
+
+                    let placeholder_id_for_task = placeholder_id.clone();
+                    let project_idx_for_task = cursor.project_idx;
+                    cx.spawn(async move |this, cx| {
+                        let result = cx
+                            .background_executor()
+                            .spawn(async move {
+                                if discard_uncommitted {
+                                    git::archive_session_committed_only(&canonical, &clone_path, &session_id)?;
+                                } else {
+                                    git::archive_session(&canonical, &clone_path, &session_id)?;
+                                }
+
+                                let remote = proj_settings.resolved_remote();
+                                if proj_settings.rebase_before_merge && git::has_remote(&canonical, remote) {
+                                    let branch_override = proj_settings.default_branch.as_deref();
+                                    if let Err(e) = git::fetch_and_rebase_onto_remote_branch(&canonical, remote, branch_override) {
+                                        warn!("Rebase onto {remote} failed for {session_id}: {e}");
+                                        let _ = git::delete_ref(
+                                            &canonical,
+                                            &git::archive_ref_name(&session_id),
+                                        );
+                                        anyhow::bail!("Rebase failed — resolve conflicts in the session and merge again. {e}");
+                                    }
+                                    info!("Rebased canonical onto {remote} for {session_id}");
+                                }
+
+                                let merge_result = match proj_settings.merge_strategy {
+                                    crate::settings::MergeStrategy::Merge => {
+                                        git::merge_archive(&canonical, &session_id)
+                                    }
+                                    crate::settings::MergeStrategy::Squash => {
+                                        git::squash_merge_archive(&canonical, &session_id)
+                                    }
+                                    crate::settings::MergeStrategy::RebaseThenMerge => {
+                                        git::rebase_merge_archive(&canonical, &session_id)
+                                    }
+                                };
+
+                                let _ = git::delete_ref(
+                                    &canonical,
+                                    &git::archive_ref_name(&session_id),
+                                );
+
+                                match merge_result {
+                                    Ok(git::MergeResult::Merged) => {
+                                        info!("Merged session {session_id} into canonical");
+                                    }
+                                    Ok(git::MergeResult::AlreadyUpToDate) => {
+                                        info!("Session {session_id} already up to date — nothing to merge");
+                                    }
+                                    Err(e) => {
+                                        warn!("merge_archive failed for {session_id}: {e}");
+                                        anyhow::bail!("Merge failed — resolve conflicts in the session and merge again. {e}");
+                                    }
+                                }
+
+                                if let Err(e) = clone::trash_clone(&clone_path) {
+                                    warn!("Failed to trash clone after merge for {session_id}: {e}");
+                                }
+                                Ok(())
+                            })
+                            .await;
+
+                        let _ = this.update(cx, |this: &mut Self, cx| {
+                            if let Some(project) = this.projects.get_mut(project_idx_for_task) {
+                                project.loading_sessions.retain(|l| l.id != placeholder_id_for_task);
+                            }
+
+                            if let Err(e) = &result {
+                                warn!("Merge-and-close pipeline error: {e}");
+
+                                let restored = Session::suspended_from_persisted(
+                                    restore_id.clone(),
+                                    restore_label.clone(),
+                                    restore_started,
+                                    restore_last_active,
+                                    Some(restore_clone.clone()),
+                                    false,
+                                )
+                                .with_agent_id(restore_agent_id.clone());
+                                if let Some(project) = this.projects.get_mut(project_idx_for_task) {
+                                    project.sessions.push(restored);
+                                }
+
+                                hooks::show_notification(
+                                    "Merge failed",
+                                    &format!("{restore_label}: resolve conflicts and merge again"),
+                                );
+                            }
+
+                            this.mark_state_dirty();
+                            cx.notify();
+                        });
+                    })
+                    .detach();
+                } else {
+                    if let Some(project) = self.projects.get_mut(cursor.project_idx) {
+                        if cursor.session_idx < project.sessions.len() {
+                            project.sessions[cursor.session_idx].merged = true;
+                        }
+                    }
+                    self.remove_session(cursor, window, cx);
+                }
             }
         }
     }
@@ -684,7 +697,16 @@ impl AppState {
                 // Auto-create first session for the new project
                 self.add_session_to_project(idx, window, cx);
             }
+            ProjectAction::RequestRemoveProject(project_idx) => {
+                self.confirming.remove_project = Some(project_idx);
+                cx.notify();
+            }
+            ProjectAction::CancelRemoveProject => {
+                self.confirming.remove_project = None;
+                cx.notify();
+            }
             ProjectAction::RemoveProject(project_idx) => {
+                self.confirming.remove_project = None;
                 self.remove_project(project_idx, window, cx);
             }
             ProjectAction::RelocateProject(project_idx) => {

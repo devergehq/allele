@@ -1415,7 +1415,16 @@ pub fn open_settings_window(
         ..Default::default()
     };
 
-    cx.open_window(options, move |_window, cx| {
+    cx.open_window(options, move |window, cx| {
+        let app_for_close = app.clone();
+        window.on_window_should_close(cx, move |_window, cx| {
+            if let Some(strong) = app_for_close.upgrade() {
+                strong.update(cx, |state: &mut AppState, _cx| {
+                    state.settings_window = None;
+                });
+            }
+            true
+        });
         cx.new(move |cx| {
             SettingsWindowState::new(
                 cx,

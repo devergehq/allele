@@ -394,6 +394,20 @@ pub fn auto_commit_if_dirty(clone: &Path) -> crate::errors::Result<bool> {
     Ok(true)
 }
 
+/// Discard all uncommitted changes in a working tree: reset staged
+/// changes and remove untracked files. Equivalent to
+/// `git checkout -- . && git clean -fd`.
+pub fn discard_uncommitted(repo: &Path) -> crate::errors::Result<()> {
+    let mut checkout = git_cmd(Some(repo));
+    checkout.arg("checkout").arg("--").arg(".");
+    run_git(checkout, "checkout -- . (discard)").map_err(|e| AlleleError::Git(e.to_string()))?;
+
+    let mut clean = git_cmd(Some(repo));
+    clean.arg("clean").arg("-fd");
+    run_git(clean, "clean -fd (discard)").map_err(|e| AlleleError::Git(e.to_string()))?;
+    Ok(())
+}
+
 /// Archive a clone's session work back into canonical by fetching the
 /// session branch as `refs/allele/archive/<session-id>`.
 ///
@@ -412,6 +426,45 @@ pub fn archive_session(
         warn!("auto_commit_if_dirty failed for {session_id}: {e}");
     }
     fetch_session_branch(canonical, clone, session_id)
+}
+
+/// Like [`archive_session`] but discards uncommitted changes instead of
+/// auto-committing them. Used when the user explicitly chose to merge
+/// only committed work.
+pub fn archive_session_committed_only(
+    canonical: &Path,
+    clone: &Path,
+    session_id: &str,
+) -> crate::errors::Result<()> {
+    if is_working_tree_dirty(clone) {
+        if let Err(e) = discard_uncommitted(clone) {
+            warn!("discard_uncommitted failed for {session_id}: {e}");
+        }
+    }
+    fetch_session_branch(canonical, clone, session_id)
+}
+
+/// Append a pattern to `.git/info/exclude` so git ignores it locally
+/// without touching `.gitignore` (which would be committed).
+pub fn exclude_pattern_in_clone(repo: &Path, pattern: &str) {
+    let exclude = repo.join(".git").join("info").join("exclude");
+    if let Ok(existing) = std::fs::read_to_string(&exclude) {
+        if existing.lines().any(|l| l.trim() == pattern) {
+            return;
+        }
+    }
+    if let Some(parent) = exclude.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let mut file = match std::fs::OpenOptions::new().append(true).create(true).open(&exclude) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("failed to open .git/info/exclude: {e}");
+            return;
+        }
+    };
+    use std::io::Write;
+    let _ = writeln!(file, "{pattern}");
 }
 
 /// Delete a ref. Equivalent to `git update-ref -d <ref>`.

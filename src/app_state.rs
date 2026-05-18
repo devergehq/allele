@@ -83,6 +83,11 @@ pub(crate) struct ConfirmationState {
     pub(crate) dirty_session: Option<usize>,
     /// When true, a quit confirmation banner is shown because running sessions exist.
     pub(crate) quit: bool,
+    /// Project index awaiting remove-project confirmation. When `Some(idx)`
+    /// the project header row shows Confirm/Cancel instead of the ✕ button.
+    pub(crate) remove_project: Option<usize>,
+    /// Session cursor awaiting merge-with-uncommitted-changes confirmation.
+    pub(crate) dirty_merge: Option<SessionCursor>,
 }
 
 /// Rich Sidecar (transcript view) state. Lazily created the first time the

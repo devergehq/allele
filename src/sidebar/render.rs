@@ -37,41 +37,89 @@ pub(crate) fn build_sidebar_items(
             }
         }
 
+        let is_confirming_remove = state.confirming.remove_project == Some(p_idx);
+
         // Project header
-        sidebar_items.push(
-            div()
-                .id(SharedString::from(format!("project-{p_idx}")))
-                .px(px(12.0))
-                .py(px(6.0))
-                .bg(rgb(0x11111b))
-                .border_b_1()
-                .border_color(rgb(0x313244))
-                .flex()
-                .flex_row()
-                .gap(px(6.0))
-                .items_center()
-                .justify_between()
-                .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .flex_row()
-                        .gap(px(6.0))
-                        .items_center()
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(rgb(0x6c7086))
-                                .child("▾"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .font_weight(FontWeight::BOLD)
-                                .text_color(rgb(0xcdd6f4))
-                                .child(project_name),
-                        ),
-                )
+        let mut header = div()
+            .id(SharedString::from(format!("project-{p_idx}")))
+            .px(px(12.0))
+            .py(px(6.0))
+            .bg(if is_confirming_remove { rgb(0x3b1f28) } else { rgb(0x11111b) })
+            .border_b_1()
+            .border_color(rgb(0x313244))
+            .flex()
+            .flex_row()
+            .gap(px(6.0))
+            .items_center()
+            .justify_between()
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_row()
+                    .gap(px(6.0))
+                    .items_center()
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(rgb(0x6c7086))
+                            .child("▾"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.0))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(rgb(0xcdd6f4))
+                            .child(project_name),
+                    ),
+            );
+
+        if is_confirming_remove {
+            header = header.child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_row()
+                    .gap(px(4.0))
+                    .items_center()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("confirm-remove-{p_idx}")))
+                            .cursor_pointer()
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(3.0))
+                            .bg(rgb(0x45475a))
+                            .text_size(px(10.0))
+                            .text_color(rgb(0xf38ba8))
+                            .hover(|s| s.bg(rgb(0x58303a)))
+                            .child("Remove")
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.pending_action = Some(ProjectAction::RemoveProject(p_idx).into());
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("cancel-remove-{p_idx}")))
+                            .cursor_pointer()
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(3.0))
+                            .text_size(px(10.0))
+                            .text_color(rgb(0x9399b2))
+                            .hover(|s| s.text_color(rgb(0xcdd6f4)))
+                            .child("Cancel")
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.pending_action = Some(ProjectAction::CancelRemoveProject.into());
+                                cx.notify();
+                            })),
+                    ),
+            );
+        } else {
+            header = header
                 .child(
                     // New session button
                     div()
@@ -152,12 +200,13 @@ pub(crate) fn build_sidebar_items(
                         })
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                             cx.stop_propagation();
-                            this.pending_action = Some(ProjectAction::RemoveProject(p_idx).into());
+                            this.pending_action = Some(ProjectAction::RequestRemoveProject(p_idx).into());
                             cx.notify();
                         })),
-                )
-                .into_any_element(),
-        );
+                );
+        }
+
+        sidebar_items.push(header.into_any_element());
 
         // Dirty-state confirmation prompt
         if state.confirming.dirty_session == Some(p_idx) {
@@ -496,8 +545,9 @@ pub(crate) fn build_sidebar_items(
                     .unwrap_or_else(|| session.label.clone())
             };
             let elapsed = session.elapsed_display();
-            let is_confirming = state.confirming.discard
-                == Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
+            let session_cursor = SessionCursor { project_idx: p_idx, session_idx: s_idx };
+            let is_confirming_discard = state.confirming.discard == Some(session_cursor);
+            let is_confirming_merge = state.confirming.dirty_merge == Some(session_cursor);
 
             let label_color = if is_suspended {
                 rgb(0x6c7086) // greyed out for Suspended
@@ -507,8 +557,10 @@ pub(crate) fn build_sidebar_items(
                 rgb(0x9399b2)
             };
 
-            let row_bg = if is_confirming {
+            let row_bg = if is_confirming_discard {
                 rgb(0x3b1f28) // subtle red tint while confirming discard
+            } else if is_confirming_merge {
+                rgb(0x3b2f1e) // subtle amber tint while confirming merge with uncommitted
             } else if is_active {
                 rgb(0x313244)
             } else {
@@ -611,9 +663,7 @@ pub(crate) fn build_sidebar_items(
                     info_col
                 });
 
-            if is_confirming {
-                // Replace the normal buttons with a two-button confirm
-                // prompt: Discard (destructive) + Cancel.
+            if is_confirming_discard {
                 row = row.child(
                     div()
                         .flex_shrink_0()
@@ -658,6 +708,65 @@ pub(crate) fn build_sidebar_items(
                                     this.pending_action = Some(SessionAction::CancelDiscard.into());
                                     cx.notify();
                                 })),
+                        ),
+                );
+            } else if is_confirming_merge {
+                row = row.child(
+                    div()
+                        .flex_shrink_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .child(
+                            div()
+                                .text_size(px(9.0))
+                                .text_color(rgb(0xf9e2af))
+                                .child("Uncommitted changes"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .flex_row()
+                                .gap(px(4.0))
+                                .items_center()
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("confirm-merge-{p_idx}-{s_idx}")))
+                                        .cursor_pointer()
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .rounded(px(3.0))
+                                        .bg(rgb(0x45475a))
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(0xf9e2af))
+                                        .hover(|s| s.bg(rgb(0x4a3f2a)))
+                                        .child("Merge committed")
+                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                            cx.stop_propagation();
+                                            this.pending_action = Some(SessionAction::ProceedDirtyMerge {
+                                                project_idx: p_idx,
+                                                session_idx: s_idx,
+                                            }.into());
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("cancel-merge-{p_idx}-{s_idx}")))
+                                        .cursor_pointer()
+                                        .px(px(6.0))
+                                        .py(px(2.0))
+                                        .rounded(px(3.0))
+                                        .text_size(px(10.0))
+                                        .text_color(rgb(0x9399b2))
+                                        .hover(|s| s.text_color(rgb(0xcdd6f4)))
+                                        .child("Cancel")
+                                        .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
+                                            cx.stop_propagation();
+                                            this.pending_action = Some(SessionAction::CancelDirtyMerge.into());
+                                            cx.notify();
+                                        })),
+                                ),
                         ),
                 );
             } else {
