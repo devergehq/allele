@@ -222,14 +222,23 @@ impl TerminalView {
         // Auto-focus this terminal on creation
         focus_handle.focus(window, cx);
 
-        // Poll for PTY events on a timer and re-render
+        // Poll for PTY events on a timer and re-render.
+        //
+        // Adaptive tick rate: 16ms (60 FPS) when active PTY events are
+        // flowing, 500ms when idle (no events for 2+ seconds). This
+        // dramatically reduces GPUI rendering pressure when sessions are
+        // idle, which mitigates memory growth from the rendering pipeline.
         cx.spawn_in(window, async |this: WeakEntity<Self>, cx: &mut AsyncWindowContext| {
+            let mut idle_ticks: u32 = 0;
+            const IDLE_THRESHOLD: u32 = 125; // ~2 seconds at 16ms
+
             loop {
+                let tick_ms = if idle_ticks >= IDLE_THRESHOLD { 500 } else { 16 };
                 cx.background_executor()
-                    .timer(Duration::from_millis(16))
+                    .timer(Duration::from_millis(tick_ms))
                     .await;
 
-                let should_redraw = this
+                let result = this
                     .update(cx, |this: &mut Self, _cx: &mut Context<Self>| {
                         let (pty_events, bell) = if let Some(ref mut terminal) = this.terminal {
                             let had = terminal.drain_events();
@@ -239,6 +248,13 @@ impl TerminalView {
                         } else {
                             (false, false)
                         };
+
+                        // Track idle state for adaptive tick rate
+                        if pty_events {
+                            idle_ticks = 0;
+                        } else {
+                            idle_ticks = idle_ticks.saturating_add(1);
+                        }
 
                         if bell {
                             this.bell_flash_start = Some(Instant::now());
@@ -262,6 +278,7 @@ impl TerminalView {
                         // Update scroll timestamp when scroll detected
                         if scrolled {
                             this.last_scroll_time = Instant::now();
+                            idle_ticks = 0;
                         }
 
                         // Cursor blink: toggle every 500ms, but only if idle (no keypress in 500ms)
@@ -291,15 +308,6 @@ impl TerminalView {
                                         .map(|d| d.as_millis())
                                         .unwrap_or(0),
                                 );
-                                // In alt-screen, reset the visible grid before SIGWINCH so
-                                // CC's repaint lands on a blank canvas. Alt-screen has no
-                                // scrollback (max_scroll_limit=0), so this loses nothing.
-                                //
-                                // In primary screen, scrollback preservation across CC's
-                                // SIGWINCH-triggered repaint is handled in the alacritty
-                                // fork: the CSI 2J handler now uses reset_region(..) only,
-                                // which clears the viewport in place without pushing into
-                                // or clearing history.
                                 if let Some(ref terminal) = this.terminal {
                                     let mut term = terminal.term.lock();
                                     let in_alt_screen = term.mode()
@@ -326,7 +334,6 @@ impl TerminalView {
                         let target_opacity = if this.scrollbar_dragging || scroll_age < 1.5 {
                             1.0
                         } else if scroll_age < 2.5 {
-                            // Fade out over 1 second
                             1.0 - (scroll_age - 1.5)
                         } else {
                             0.0
@@ -337,15 +344,32 @@ impl TerminalView {
                             opacity_changed = true;
                         }
 
-                        pty_events || scrolled || blink_changed || opacity_changed || bell || bell_expired || resize_committed
-                    })
-                    .unwrap_or(false);
+                        // Signal whether the PTY has exited and all animations settled
+                        let pty_done = this.terminal.as_ref().map_or(true, |t| t.exited);
+                        let animations_done = !bell_expired
+                            && this.bell_flash_start.is_none()
+                            && this.pending_resize.is_none()
+                            && (this.scrollbar_opacity - target_opacity).abs() < 0.01;
 
-                if should_redraw {
-                    this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
-                        cx.notify();
-                    })
-                    .ok();
+                        let should_redraw = pty_events || scrolled || blink_changed || opacity_changed || bell || bell_expired || resize_committed;
+                        (should_redraw, pty_done && animations_done)
+                    });
+
+                match result {
+                    Ok((should_redraw, settled)) => {
+                        if should_redraw {
+                            if this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
+                                cx.notify();
+                            }).is_err() {
+                                break; // entity dropped
+                            }
+                        }
+                        // Stop the loop when PTY exited and all visual state settled
+                        if settled && idle_ticks > IDLE_THRESHOLD {
+                            break;
+                        }
+                    }
+                    Err(_) => break, // entity dropped
                 }
             }
         })

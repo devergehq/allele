@@ -13,6 +13,7 @@ mod git;
 mod hook_events;
 mod hooks;
 mod keymap;
+mod memory_watchdog;
 mod naming;
 mod new_session_modal;
 mod pending_actions;
@@ -1543,6 +1544,10 @@ fn main() {
                 None
             }
         };
+
+        // Memory watchdog — monitors RSS and force-quits at 8 GB to
+        // prevent runaway leaks from bricking the system.
+        memory_watchdog::spawn(cx);
 
         // Conservative orphan sweep + trash purge + archive ref pruning.
         // Runs on a background thread so the UI opens immediately —

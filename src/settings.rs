@@ -229,17 +229,37 @@ fn default_right_sidebar_width() -> f32 { 300.0 }
 fn default_true() -> bool { true }
 
 /// Default list of stale runtime files to purge from a fresh session clone.
-/// `.overmind.sock` is the canonical case — Overmind refuses to start when a
-/// socket from the parent clone sticks around. `.foreman.sock` is the Foreman
-/// equivalent; `tmp/pids/server.pid` is the Rails/Puma pid file that makes
-/// `rails s` bail with "a server is already running".
+/// Paths deleted from each new session clone before the session starts.
+///
+/// Two categories:
+/// - **Stale runtime files** — sockets, pid files that make daemons refuse
+///   to start because they see a "running" instance from the parent tree.
+/// - **Build caches** — framework output dirs whose contents are tied to
+///   the original project's absolute path. Keeping them causes dev servers
+///   to reconcile stale state, which can trigger massive memory consumption
+///   (e.g. Turbopack recompiling against a stale `.next` cache).
+///
+/// `node_modules` is deliberately NOT included — it's read-heavy, rarely
+/// modified, and expensive to reinstall. COW sharing gives it to us free.
 fn default_session_cleanup_paths() -> Vec<String> {
     vec![
+        // Runtime files
         ".overmind.sock".to_string(),
         ".foreman.sock".to_string(),
         "tmp/pids/server.pid".to_string(),
+        // Build caches (path-dependent, cheap to rebuild)
+        ".next".to_string(),
+        ".nuxt".to_string(),
+        ".turbo".to_string(),
+        "target".to_string(),
     ]
 }
+
+/// Paths that should always be in cleanup_paths. Used by
+/// `ensure_cleanup_paths_updated` to backfill existing settings.
+const RECOMMENDED_CLEANUP_PATHS: &[&str] = &[
+    ".next", ".nuxt", ".turbo", "target",
+];
 
 /// Built-in macOS sound for AwaitingInput. Used when the user hasn't set
 /// a custom path in settings.json.
@@ -339,7 +359,19 @@ impl Settings {
             Err(_) => Self::default(),
         };
         s.ensure_agents_seeded();
+        s.ensure_cleanup_paths_updated();
         s
+    }
+
+    /// Append any recommended cleanup paths that are missing from the
+    /// user's list. This backfills older settings files that predate the
+    /// addition of build-cache cleanup (`.next`, `target/`, etc.).
+    fn ensure_cleanup_paths_updated(&mut self) {
+        for &path in RECOMMENDED_CLEANUP_PATHS {
+            if !self.session_cleanup_paths.iter().any(|p| p == path) {
+                self.session_cleanup_paths.push(path.to_string());
+            }
+        }
     }
 
     /// Populate the agents list (and a default id) on a fresh install or a
