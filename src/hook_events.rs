@@ -25,7 +25,7 @@ impl AppState {
     ///   a tool, which means any prior permission prompt has been resolved)
     /// - `UserPromptSubmit` → `Running` (user submitted new input)
     /// - `SessionStart` → `Running`
-    /// - `SessionEnd` → `Done`
+    /// - `SessionEnd` → `Idle` (PTY watcher handles actual process exit → Done)
     ///
     /// Note: `Stop` no longer has special handling for `AwaitingInput`.
     /// In practice Claude doesn't emit `Stop` while still blocked on a
@@ -107,7 +107,14 @@ impl AppState {
             }
             HookKind::UserPromptSubmit => Some(SessionStatus::Running),
             HookKind::SessionStart => Some(SessionStatus::Idle),
-            HookKind::SessionEnd => Some(SessionStatus::Done),
+            HookKind::SessionEnd => {
+                // /clear and real exits both fire SessionEnd, but only real
+                // exits kill the PTY process. The PTY watcher in the render
+                // loop catches actual process death via has_exited() — so we
+                // never mark Done here. Transition to Idle (context was reset,
+                // session is alive and waiting for new input).
+                Some(SessionStatus::Idle)
+            }
             HookKind::Other => None,
         };
 
