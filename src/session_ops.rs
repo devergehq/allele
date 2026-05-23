@@ -103,6 +103,7 @@ impl AppState {
         let source_for_task = source_path.clone();
         let project_name_for_task = project_name.clone();
         let pull_before_clone = self.user_settings.git_pull_before_new_session;
+        let cleanup_paths_for_task = self.user_settings.session_cleanup_paths.clone();
         // Two copies: one moves into the background clonefile closure (where
         // it's used as the short-ID source), the other is captured by the
         // main-thread update_in closure to set Session.id.
@@ -135,6 +136,7 @@ impl AppState {
                         &source_for_task,
                         &project_name_for_task,
                         &session_id_for_clone,
+                        &cleanup_paths_for_task,
                     );
                     (clone, pull_error)
                 })
@@ -389,6 +391,7 @@ impl AppState {
         let display_label_for_task = display_label.clone();
         let agent_id_for_task = agent_id.clone();
         let pull_before_clone = self.user_settings.git_pull_before_new_session;
+        let cleanup_paths_for_task = self.user_settings.session_cleanup_paths.clone();
         let branch_slug = custom_branch_slug;
         let prompt = initial_prompt;
 
@@ -416,6 +419,7 @@ impl AppState {
                         &source_for_task,
                         &project_name_for_task,
                         &session_id_for_clone,
+                        &cleanup_paths_for_task,
                     );
                     (clone, pull_error)
                 })

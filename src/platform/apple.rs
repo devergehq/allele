@@ -16,17 +16,11 @@ use std::process::{Command, Stdio};
 
 use crate::errors::{AlleleError, Result};
 
-/// APFS `clonefile(2)` backend. Delegates to
-/// [`crate::clone::create_clone`], which performs the actual
-/// syscall and owns the EXDEV diagnostic.
+/// APFS `clonefile(2)` backend.
 pub(crate) struct AppleCloneBackend;
 
 impl super::CloneBackend for AppleCloneBackend {
     fn clone_dir(&self, src: &Path, dst: &Path) -> Result<()> {
-        // crate::clone::create_clone takes (source, workspace_name)
-        // where workspace_name is a leaf under ~/.allele/workspaces/.
-        // The trait's contract is raw src -> dst directory clone, so
-        // we use clonefile(2) directly for the generic case.
         use std::ffi::CString;
         if dst.exists() {
             return Err(AlleleError::Clone(format!(

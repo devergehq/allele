@@ -1,6 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
@@ -20,101 +21,109 @@ const TRASH_BASE: &str = ".allele/trash";
 pub const TRASH_TTL_DAYS: u64 = 14;
 
 /// Create a clone for a session: uses a short unique session ID as the workspace name.
+/// Entries whose top-level name matches an `exclude` path are skipped entirely,
+/// avoiding the cost of cloning directories that would be deleted immediately after.
 /// Returns the clone path.
-pub fn create_session_clone(source: &Path, project_name: &str, session_id: &str) -> crate::errors::Result<PathBuf> {
+pub fn create_session_clone(
+    source: &Path,
+    project_name: &str,
+    session_id: &str,
+    exclude: &[String],
+) -> crate::errors::Result<PathBuf> {
     let home = dirs::home_dir()
         .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
     let clone_dir = home.join(CLONE_BASE).join(project_name);
     fs::create_dir_all(&clone_dir)?;
 
-    // Short session ID — first 8 chars of UUID
     let short_id: String = session_id.chars().take(8).collect();
     let clone_path = clone_dir.join(&short_id);
 
-    let final_path = if clone_path.exists() {
-        // Unlikely with UUIDs but handle by appending a random suffix
-        create_clone(source, &format!("{short_id}-alt"))?
-    } else {
-        let src_cstr = CString::new(source.to_string_lossy().as_bytes())
-            .map_err(|e| AlleleError::Clone(format!("source path contains NUL: {e}")))?;
-        let dst_cstr = CString::new(clone_path.to_string_lossy().as_bytes())
-            .map_err(|e| AlleleError::Clone(format!("destination path contains NUL: {e}")))?;
-
-        let result = unsafe {
-            libc::clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), 0)
-        };
-
-        if result != 0 {
-            let err = std::io::Error::last_os_error();
-            if err.raw_os_error() == Some(libc::EXDEV) {
-                return Err(AlleleError::Clone(format!(
-                    "Cannot clone: source ({}) and destination ({}) are on different \
-                     volumes. Both must be on the same APFS volume for clonefile(2) to work. \
-                     Move your project or ~/.allele/ so they share a volume.",
-                    source.display(),
-                    clone_path.display(),
-                )));
-            }
-            return Err(AlleleError::Clone(format!("clonefile() failed: {err}")));
+    let dest = if clone_path.exists() {
+        let alt = clone_dir.join(format!("{short_id}-alt"));
+        if alt.exists() {
+            return Err(AlleleError::Clone(format!(
+                "Clone destination already exists: {}",
+                alt.display()
+            )));
         }
-
+        alt
+    } else {
         clone_path
     };
 
-    // Pre-register the clone as a trusted workspace in ~/.claude.json so
-    // Claude Code does not prompt on first entry. Non-fatal: a failure
-    // here just means the user sees the trust dialog once, which is the
-    // current baseline behaviour.
-    if let Err(e) = crate::trust::trust_workspace(&final_path) {
-        warn!("trust_workspace({}) failed: {e}", final_path.display());
+    selective_clone(source, &dest, exclude)?;
+
+    if let Err(e) = crate::trust::trust_workspace(&dest) {
+        warn!("trust_workspace({}) failed: {e}", dest.display());
     }
 
-    Ok(final_path)
+    Ok(dest)
 }
 
-/// Create an APFS copy-on-write clone of a directory.
-///
-/// Uses the macOS `clonefile(2)` syscall — near-instant, zero disk cost
-/// until files are modified. The clone is a perfect snapshot including
-/// untracked files, node_modules, .env, everything.
-///
-/// Returns the path to the clone.
-pub fn create_clone(source: &Path, workspace_name: &str) -> crate::errors::Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
+/// Clone `source` into `dest`, skipping top-level entries whose name
+/// appears in `exclude`. When `exclude` is empty, falls back to a single
+/// atomic `clonefile(2)` call.
+fn selective_clone(source: &Path, dest: &Path, exclude: &[String]) -> crate::errors::Result<()> {
+    let skip: HashSet<&str> = exclude
+        .iter()
+        .filter_map(|p| {
+            let rel = Path::new(p.trim());
+            // Only top-level entries can be skipped at clone time.
+            if rel.components().count() == 1 {
+                rel.file_name().and_then(|n| n.to_str())
+            } else {
+                None
+            }
+        })
+        .collect();
 
-    // Derive a project name from the source path
-    let project_name = source
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("unknown");
-
-    let clone_dir = home
-        .join(CLONE_BASE)
-        .join(project_name);
-
-    // Ensure parent directory exists
-    fs::create_dir_all(&clone_dir)?;
-
-    let clone_path = clone_dir.join(workspace_name);
-
-    // clonefile requires destination does NOT exist
-    if clone_path.exists() {
-        return Err(AlleleError::Clone(format!(
-            "Clone destination already exists: {}",
-            clone_path.display()
-        )));
+    if skip.is_empty() {
+        return clonefile_path(source, dest);
     }
 
-    // Call clonefile(2) — macOS APFS copy-on-write clone
-    let src_cstr = CString::new(source.to_string_lossy().as_bytes())
+    // Create dest with same permissions as source.
+    let src_meta = fs::metadata(source).map_err(|e| {
+        AlleleError::Clone(format!("cannot stat source {}: {e}", source.display()))
+    })?;
+    fs::create_dir(dest)?;
+    fs::set_permissions(dest, fs::Permissions::from_mode(src_meta.permissions().mode()))?;
+
+    let entries = fs::read_dir(source).map_err(|e| {
+        AlleleError::Clone(format!("cannot read source {}: {e}", source.display()))
+    })?;
+
+    let mut skipped = 0usize;
+    for entry in entries {
+        let entry = entry.map_err(|e| AlleleError::Clone(format!("read_dir error: {e}")))?;
+        let name = entry.file_name();
+
+        if skip.contains(name.to_string_lossy().as_ref()) {
+            skipped += 1;
+            continue;
+        }
+
+        if let Err(e) = clonefile_path(&entry.path(), &dest.join(&name)) {
+            warn!("selective_clone: cleaning up partial clone at {}", dest.display());
+            let _ = fs::remove_dir_all(dest);
+            return Err(e);
+        }
+    }
+
+    if skipped > 0 {
+        info!("selective_clone: skipped {skipped} excluded entries");
+    }
+
+    Ok(())
+}
+
+/// `clonefile(2)` wrapper for a single path (file or directory).
+fn clonefile_path(src: &Path, dst: &Path) -> crate::errors::Result<()> {
+    let src_cstr = CString::new(src.to_string_lossy().as_bytes())
         .map_err(|e| AlleleError::Clone(format!("source path contains NUL: {e}")))?;
-    let dst_cstr = CString::new(clone_path.to_string_lossy().as_bytes())
+    let dst_cstr = CString::new(dst.to_string_lossy().as_bytes())
         .map_err(|e| AlleleError::Clone(format!("destination path contains NUL: {e}")))?;
 
-    let result = unsafe {
-        libc::clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), 0)
-    };
+    let result = unsafe { libc::clonefile(src_cstr.as_ptr(), dst_cstr.as_ptr(), 0) };
 
     if result != 0 {
         let err = std::io::Error::last_os_error();
@@ -123,14 +132,18 @@ pub fn create_clone(source: &Path, workspace_name: &str) -> crate::errors::Resul
                 "Cannot clone: source ({}) and destination ({}) are on different \
                  volumes. Both must be on the same APFS volume for clonefile(2) to work. \
                  Move your project or ~/.allele/ so they share a volume.",
-                source.display(),
-                clone_path.display(),
+                src.display(),
+                dst.display(),
             )));
         }
-        return Err(AlleleError::Clone(format!("clonefile() failed: {err}")));
+        return Err(AlleleError::Clone(format!(
+            "clonefile({} → {}) failed: {err}",
+            src.display(),
+            dst.display(),
+        )));
     }
 
-    Ok(clone_path)
+    Ok(())
 }
 
 /// Delete stale runtime artifacts left behind in a fresh session clone.
