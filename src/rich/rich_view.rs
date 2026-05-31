@@ -63,6 +63,9 @@ pub enum RichViewEvent {
         text: String,
         attachments: Vec<super::attachments::Attachment>,
     },
+    /// User clicked "Allow" on a permission request block. The parent
+    /// should send Enter to the session's PTY to approve the tool call.
+    AllowPermission,
 }
 
 // ── View ──────────────────────────────────────────────────────────
@@ -144,6 +147,35 @@ impl RichView {
         let old_count = self.document.block_count();
         self.document.push_user_prompt(text);
         self.document.push_awaiting_indicator();
+        let new_count = self.document.block_count();
+        self.sync_list_state(old_count, new_count);
+        cx.notify();
+    }
+
+    /// Show a permission request in the transcript. Called by the parent
+    /// when the hook system detects the session entered AwaitingInput with
+    /// a permission prompt. Replaces any prior permission block.
+    pub fn push_permission_request(
+        &mut self,
+        tool_name: Option<String>,
+        summary: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        let old_count = self.document.block_count();
+        self.document.push_permission_request(tool_name, summary);
+        let new_count = self.document.block_count();
+        self.sync_list_state(old_count, new_count);
+        cx.notify();
+    }
+
+    /// Remove the permission request block. Called by the parent when
+    /// the session leaves AwaitingInput.
+    pub fn clear_permission_request(&mut self, cx: &mut Context<Self>) {
+        if !self.document.has_permission_block() {
+            return;
+        }
+        let old_count = self.document.block_count();
+        self.document.clear_permission_request();
         let new_count = self.document.block_count();
         self.sync_list_state(old_count, new_count);
         cx.notify();
@@ -366,6 +398,14 @@ fn render_block(block: &Block, font_size: f32, cx: &mut Context<RichView>) -> Di
         }
         BlockKind::AwaitingResponse => {
             wrapper = wrapper.child(render_awaiting(font_size));
+        }
+        BlockKind::PermissionRequest { tool_name, summary } => {
+            wrapper = wrapper.child(render_permission_request(
+                tool_name.as_deref(),
+                summary.as_deref(),
+                font_size,
+                cx,
+            ));
         }
     }
 
@@ -1254,6 +1294,102 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
                         .child(content.to_string()),
                 ),
         )
+}
+
+// ── Permission request ────────────────────────────────────────────
+
+fn render_permission_request(
+    tool_name: Option<&str>,
+    summary: Option<&str>,
+    font_size: f32,
+    cx: &mut Context<RichView>,
+) -> Div {
+    let label = match tool_name {
+        Some(name) => format!("{name} wants permission"),
+        None => "Permission requested".to_string(),
+    };
+
+    let mut card = div()
+        .w_full()
+        .min_w_0()
+        .my(px(8.0))
+        .px(px(12.0))
+        .py(px(10.0))
+        .rounded(px(6.0))
+        .bg(hex_alpha(PEACH, 0.1))
+        .border_l_2()
+        .border_color(hex(PEACH));
+
+    // Header row: icon + tool label
+    card = card.child(
+        div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .gap(px(8.0))
+            .items_center()
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(hex(PEACH))
+                    .text_size(px(font_size))
+                    .child("⏸"),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .text_color(hex(PEACH))
+                    .text_size(px(font_size))
+                    .font_weight(FontWeight::BOLD)
+                    .child(label),
+            ),
+    );
+
+    // Summary line (command, file path, etc.)
+    if let Some(text) = summary {
+        card = card.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .mt(px(4.0))
+                .pl(px(24.0))
+                .text_color(hex(SUBTEXT1))
+                .text_size(px(font_size - 1.0))
+                .font_family("JetBrains Mono")
+                .child(text.to_string()),
+        );
+    }
+
+    // Allow button
+    card = card.child(
+        div()
+            .w_full()
+            .min_w_0()
+            .mt(px(8.0))
+            .pl(px(24.0))
+            .child(
+                div()
+                    .id("permission-allow-btn")
+                    .px(px(12.0))
+                    .py(px(4.0))
+                    .rounded(px(4.0))
+                    .bg(hex_alpha(GREEN, 0.15))
+                    .text_color(hex(GREEN))
+                    .text_size(px(font_size - 1.0))
+                    .font_weight(FontWeight::BOLD)
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .child("Allow")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|_this, _event, _window, cx| {
+                            cx.emit(RichViewEvent::AllowPermission);
+                        }),
+                    ),
+            ),
+    );
+
+    card
 }
 
 // ── Awaiting response (thinking indicator) ────────────────────────

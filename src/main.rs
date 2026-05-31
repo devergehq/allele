@@ -568,6 +568,21 @@ impl AppState {
                         attachments.iter().map(|a| a.path.clone()).collect();
                     this.scratch_pad_send(text.clone(), paths, cx);
                 }
+                rich::RichViewEvent::AllowPermission => {
+                    if let Some(cursor) = this.active {
+                        if let Some(session) = this.projects
+                            .get_mut(cursor.project_idx)
+                            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                        {
+                            if let Some(ref tv) = session.terminal_view {
+                                tv.read(cx).send_input(b"\r");
+                            }
+                            session.status = session::SessionStatus::Running;
+                            session.attention_context = None;
+                        }
+                    }
+                    cx.notify();
+                }
             }
         })
         .detach();

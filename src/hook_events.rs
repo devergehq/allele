@@ -185,6 +185,17 @@ impl AppState {
             .map(|p| p.name.clone())
             .unwrap_or_default();
 
+        // Capture attention context for the RichView permission block.
+        let attention_for_rich = if new_status == SessionStatus::AwaitingInput {
+            self.projects
+                .get(p_idx)
+                .and_then(|p| p.sessions.get(s_idx))
+                .and_then(|s| s.attention_context.as_ref())
+                .map(|ctx| (ctx.tool_name.clone(), ctx.tool_input_summary.clone()))
+        } else {
+            None
+        };
+
         // Persist the updated status.
         self.mark_state_dirty();
 
@@ -227,6 +238,23 @@ impl AppState {
         }
 
         cx.notify();
+
+        // Update the RichView permission block if this session is the one
+        // currently being displayed in the transcript tab.
+        let cursor = crate::actions::SessionCursor { project_idx: p_idx, session_idx: s_idx };
+        if self.rich.cursor == Some(cursor) {
+            if let Some(view) = self.rich.view.as_ref().cloned() {
+                if let Some((tool_name, summary)) = attention_for_rich {
+                    view.update(cx, |rv, cx| {
+                        rv.push_permission_request(tool_name, summary, cx);
+                    });
+                } else if prior == SessionStatus::AwaitingInput {
+                    view.update(cx, |rv, cx| {
+                        rv.clear_permission_request(cx);
+                    });
+                }
+            }
+        }
 
         // Trigger auto-naming after all borrows are released.
         if let Some((session_id, clone_path)) = auto_name_data {

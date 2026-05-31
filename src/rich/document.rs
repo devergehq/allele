@@ -74,6 +74,14 @@ pub enum BlockKind {
     /// but hasn't produced any output blocks yet. Removed when the first
     /// real block arrives or when the session ends.
     AwaitingResponse,
+
+    /// Permission prompt — Claude is blocked waiting for user approval.
+    /// Injected by the parent when the hook system detects AwaitingInput,
+    /// removed when the session transitions out of that state.
+    PermissionRequest {
+        tool_name: Option<String>,
+        summary: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -91,6 +99,8 @@ pub struct RichDocument {
     current_text_block: Option<BlockId>,
     /// Index of the active AwaitingResponse placeholder block (if any).
     awaiting_block: Option<BlockId>,
+    /// Index of the active PermissionRequest block (if any).
+    permission_block: Option<BlockId>,
     next_id: BlockId,
 }
 
@@ -101,6 +111,7 @@ impl RichDocument {
             tool_use_index: HashMap::new(),
             current_text_block: None,
             awaiting_block: None,
+            permission_block: None,
             next_id: 0,
         }
     }
@@ -166,6 +177,39 @@ impl RichDocument {
                 self.blocks.remove(pos);
             }
         }
+    }
+
+    /// Show a permission request block (Claude is blocked on a prompt).
+    /// Replaces any existing permission block. Always positioned at the
+    /// tail of the block list so it's immediately visible.
+    pub fn push_permission_request(
+        &mut self,
+        tool_name: Option<String>,
+        summary: Option<String>,
+    ) -> BlockId {
+        self.clear_permission_request();
+        let id = self.push_block(Block {
+            id: self.next_id,
+            kind: BlockKind::PermissionRequest { tool_name, summary },
+            parent_agent_id: None,
+            collapsed: false,
+            cached_height: None,
+        });
+        self.permission_block = Some(id);
+        id
+    }
+
+    /// Remove the permission request block (session left AwaitingInput).
+    pub fn clear_permission_request(&mut self) {
+        if let Some(id) = self.permission_block.take() {
+            if let Some(pos) = self.blocks.iter().position(|b| b.id == id) {
+                self.blocks.remove(pos);
+            }
+        }
+    }
+
+    pub fn has_permission_block(&self) -> bool {
+        self.permission_block.is_some()
     }
 
     pub fn blocks(&self) -> &[Block] {
