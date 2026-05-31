@@ -221,10 +221,10 @@ fn system_prompt(count: usize) -> String {
 fn call_claude(binary: &str, config: &NamingModelConfig, prompt: &str) -> Result<String, String> {
     let mut cmd = Command::new(binary);
     cmd.arg("-p");
+    cmd.arg("--tools").arg("none");
     if let Some(model) = &config.model {
         cmd.arg("--model").arg(model);
     }
-    cmd.arg("--max-tokens").arg("60");
     cmd.arg(prompt);
 
     info!("naming: spawning claude -p (model={:?})", config.model);
