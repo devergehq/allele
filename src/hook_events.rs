@@ -12,6 +12,7 @@ use tracing::{info, warn};
 
 use crate::app_state::AppState;
 use crate::naming::{self, NamingMode, NamingRequest};
+use crate::session::AttentionContext;
 use crate::settings::AgentKind;
 use crate::{git, hooks, session, settings};
 
@@ -93,6 +94,38 @@ impl AppState {
         } else {
             None
         };
+
+        // Populate attention context from the hook payload on Notification.
+        if matches!(event.kind, HookKind::Notification) {
+            let ctx = if let Some(ref payload) = event.payload {
+                Some(AttentionContext {
+                    tool_name: payload.tool_name.clone(),
+                    tool_input_summary: summarise_attention_input(
+                        payload.tool_name.as_deref(),
+                        payload.tool_input.as_ref(),
+                    ),
+                    message: payload.message.clone(),
+                    title: payload.title.clone(),
+                    ts: event.ts,
+                })
+            } else {
+                Some(AttentionContext {
+                    tool_name: None,
+                    tool_input_summary: None,
+                    message: None,
+                    title: None,
+                    ts: event.ts,
+                })
+            };
+            session.attention_context = ctx;
+        }
+
+        // Clear attention context on any transition OUT of AwaitingInput.
+        if prior == SessionStatus::AwaitingInput
+            && !matches!(event.kind, HookKind::Notification)
+        {
+            session.attention_context = None;
+        }
 
         let new_status = match event.kind {
             HookKind::Notification => Some(SessionStatus::AwaitingInput),
@@ -344,5 +377,49 @@ impl AppState {
             });
         })
         .detach();
+    }
+}
+
+/// Create a brief summary of a tool's input for the attention bar.
+fn summarise_attention_input(
+    tool_name: Option<&str>,
+    tool_input: Option<&serde_json::Value>,
+) -> Option<String> {
+    let name = tool_name?;
+    let input = tool_input?;
+
+    let summary = match name {
+        "Bash" => input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .map(|c| if c.len() > 80 { format!("{}…", &c[..77]) } else { c.to_string() }),
+        "Read" | "read_file" | "Edit" | "edit_file" | "Write" | "write_file" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|p| short_path(p)),
+        "Grep" => {
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            Some(format!("/{pattern}/"))
+        }
+        "Agent" => input
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(|s| if s.len() > 60 { format!("{}…", &s[..57]) } else { s.to_string() }),
+        _ => input
+            .as_object()
+            .and_then(|obj| obj.values().next())
+            .and_then(|v| v.as_str())
+            .map(|s| if s.len() > 60 { format!("{}…", &s[..57]) } else { s.to_string() }),
+    };
+
+    summary
+}
+
+fn short_path(path: &str) -> String {
+    let parts: Vec<&str> = path.rsplit('/').take(2).collect();
+    if parts.len() == 2 {
+        format!("{}/{}", parts[1], parts[0])
+    } else {
+        parts.first().unwrap_or(&"?").to_string()
     }
 }

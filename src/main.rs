@@ -42,7 +42,7 @@ use app_state::{
 };
 use gpui::*;
 use project::Project;
-actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction]);
+actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction, CycleAttentionSession]);
 use session::{Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
@@ -348,6 +348,142 @@ impl AppState {
             strip = strip.child(tab("main-tab-browser", "Browser", MainTab::Browser));
         }
         strip
+    }
+
+    /// Render the attention bar — a row per session in AwaitingInput state,
+    /// showing what each session wants so the user can act without switching.
+    /// Returns `None` when no sessions need attention (renders nothing).
+    fn render_attention_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let mut items: Vec<(usize, usize, String, String, String)> = Vec::new();
+
+        for (p_idx, project) in self.projects.iter().enumerate() {
+            for (s_idx, session) in project.sessions.iter().enumerate() {
+                if session.status != session::SessionStatus::AwaitingInput {
+                    continue;
+                }
+                let label = session.label.clone();
+                let (tool, summary) = if let Some(ref ctx) = session.attention_context {
+                    let tool = ctx.tool_name.clone().unwrap_or_default();
+                    let summary = ctx.tool_input_summary.clone()
+                        .or_else(|| ctx.message.clone())
+                        .unwrap_or_else(|| "Waiting for input".into());
+                    (tool, summary)
+                } else {
+                    (String::new(), "Waiting for input".into())
+                };
+                items.push((p_idx, s_idx, label, tool, summary));
+            }
+        }
+
+        if items.is_empty() {
+            return None;
+        }
+
+        let mut bar = div()
+            .w_full()
+            .flex_shrink_0()
+            .flex()
+            .flex_col()
+            .bg(rgb(0x1e1e2e))
+            .border_b_1()
+            .border_color(rgb(0x45475a));
+
+        for (idx, (p_idx, s_idx, label, tool, summary)) in items.into_iter().enumerate() {
+            let row_id = SharedString::from(format!("attention-row-{p_idx}-{s_idx}"));
+            let allow_id = SharedString::from(format!("attention-allow-{p_idx}-{s_idx}"));
+
+            let tool_display = if tool.is_empty() {
+                String::new()
+            } else {
+                format!("{tool}: ")
+            };
+
+            let is_active = self.active
+                .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
+                .unwrap_or(false);
+
+            let bg = if is_active { 0x2a2334 } else { if idx % 2 == 0 { 0x1e1e2e } else { 0x1a1a28 } };
+
+            bar = bar.child(
+                div()
+                    .id(row_id)
+                    .w_full()
+                    .px(px(12.0))
+                    .py(px(5.0))
+                    .bg(rgb(bg))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(rgb(0xfab387)) // peach — attention
+                            .child("❗"),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_x_hidden()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .gap(px(6.0))
+                            .cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                this.main_tab = MainTab::Claude;
+                                this.pending_action = Some(SessionAction::SelectSession {
+                                    project_idx: p_idx,
+                                    session_idx: s_idx,
+                                }.into());
+                                cx.notify();
+                            }))
+                            .child(
+                                div()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(0xcdd6f4))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.0))
+                                    .overflow_x_hidden()
+                                    .text_size(px(11.0))
+                                    .text_color(rgb(0xa6adc8))
+                                    .child(format!("{tool_display}{summary}")),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(allow_id)
+                            .cursor_pointer()
+                            .px(px(8.0))
+                            .py(px(2.0))
+                            .rounded(px(3.0))
+                            .bg(rgb(0x313244))
+                            .text_size(px(10.0))
+                            .text_color(rgb(0xa6e3a1)) // green
+                            .hover(|s| s.bg(rgb(0x45475a)))
+                            .child("Allow")
+                            .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                if let Some(session) = this.projects
+                                    .get(p_idx)
+                                    .and_then(|p| p.sessions.get(s_idx))
+                                {
+                                    if let Some(ref tv) = session.terminal_view {
+                                        tv.read(cx).send_input(b"\n");
+                                    }
+                                }
+                                cx.notify();
+                            })),
+                    ),
+            );
+        }
+
+        Some(bar)
     }
 
     // ── Rich Sidecar (Transcript tab) ────────────────────────────────
@@ -1882,6 +2018,42 @@ fn main() {
                                 .ok();
                         }
                     });
+                    App::on_action::<CycleAttentionSession>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            handle
+                                .update(cx, |this: &mut AppState, cx| {
+                                    // Collect all AwaitingInput sessions.
+                                    let mut attention: Vec<SessionCursor> = Vec::new();
+                                    for (p_idx, project) in this.projects.iter().enumerate() {
+                                        for (s_idx, session) in project.sessions.iter().enumerate() {
+                                            if session.status == session::SessionStatus::AwaitingInput {
+                                                attention.push(SessionCursor {
+                                                    project_idx: p_idx,
+                                                    session_idx: s_idx,
+                                                });
+                                            }
+                                        }
+                                    }
+                                    if attention.is_empty() {
+                                        return;
+                                    }
+                                    // Find the next one after the current active session.
+                                    let current_pos = this.active
+                                        .and_then(|c| attention.iter().position(|a| *a == c))
+                                        .map(|i| i + 1)
+                                        .unwrap_or(0);
+                                    let next = attention[current_pos % attention.len()];
+                                    this.main_tab = MainTab::Claude;
+                                    this.pending_action = Some(SessionAction::SelectSession {
+                                        project_idx: next.project_idx,
+                                        session_idx: next.session_idx,
+                                    }.into());
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    });
                     App::on_action::<OpenSettings>(cx, {
                         let handle = toggle_handle.clone();
                         move |_, cx| {
@@ -2331,6 +2503,11 @@ impl Render for AppState {
 
                 // --- Main-area tab strip: Claude / Editor ---
                 content_col = content_col.child(self.render_main_tab_strip(cx));
+
+                // --- Attention bar (sessions needing input) ---
+                if let Some(attention_bar) = self.render_attention_bar(cx) {
+                    content_col = content_col.child(attention_bar);
+                }
 
                 // --- Main terminal area (flex_1, takes remaining space) ---
                 {

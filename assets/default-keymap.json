@@ -82,7 +82,8 @@
       "cmd-j":               "allele.toggle_drawer",
       "cmd-shift-r":         "allele.toggle_transcript_tab",
       "cmd-,":               "allele.open_settings",
-      "cmd-k":               "allele.open_scratch_pad"
+      "cmd-k":               "allele.open_scratch_pad",
+      "cmd-shift-a":         "allele.cycle_attention"
     }
   }
 ]

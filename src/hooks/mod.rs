@@ -69,7 +69,28 @@ fi
 
 ts=$(date +%s)
 out="$events_dir/$session_id.jsonl"
-printf '{"ts":%s,"kind":"%s"}\n' "$ts" "$kind" >> "$out"
+
+# Build the event line with optional rich fields extracted from the payload.
+# jq is required for rich fields — without it we fall back to ts+kind only.
+if command -v jq >/dev/null 2>&1; then
+    tool_name=$(printf '%s' "$payload" | jq -r '.tool_name // empty' 2>/dev/null)
+    tool_input=$(printf '%s' "$payload" | jq -c '.tool_input // empty' 2>/dev/null)
+    message=$(printf '%s' "$payload" | jq -r '.message // empty' 2>/dev/null)
+    title=$(printf '%s' "$payload" | jq -r '.title // empty' 2>/dev/null)
+
+    # Construct JSON with only non-empty fields to keep lines compact.
+    # All string values go through jq -Rs for proper JSON escaping.
+    line=$(printf '{"ts":%s,"kind":"%s"' "$ts" "$kind")
+    [ -n "$tool_name" ] && line="$line,\"tool_name\":$(printf '%s' "$tool_name" | jq -Rs .)"
+    [ -n "$tool_input" ] && [ "$tool_input" != '""' ] && line="$line,\"tool_input\":$tool_input"
+    [ -n "$message" ] && line="$line,\"message\":$(printf '%s' "$message" | jq -Rs .)"
+    [ -n "$title" ] && line="$line,\"title\":$(printf '%s' "$title" | jq -Rs .)"
+    line="$line}"
+
+    printf '%s\n' "$line" >> "$out"
+else
+    printf '{"ts":%s,"kind":"%s"}\n' "$ts" "$kind" >> "$out"
+fi
 
 # Capture the first user prompt for session auto-naming.
 # Writes to a .prompt sidecar file (first prompt only — skip if exists).
@@ -104,7 +125,7 @@ fn build_hooks_json(receiver: &str) -> serde_json::Value {
     };
 
     serde_json::json!({
-        "_allele_version": 3,
+        "_allele_version": 4,
         "hooks": {
             "Notification":        [make_hook("notification")],
             "Stop":                [make_hook("stop")],
@@ -166,6 +187,19 @@ pub fn install_if_missing() -> crate::errors::Result<PathBuf> {
 pub struct HookEventLine {
     pub ts: u64,
     pub kind: String,
+    /// Tool name from the hook payload (PreToolUse, Notification).
+    #[serde(default)]
+    pub tool_name: Option<String>,
+    /// Tool input from the hook payload (PreToolUse, Notification).
+    /// Kept as raw JSON so we don't have to model every tool's schema.
+    #[serde(default)]
+    pub tool_input: Option<serde_json::Value>,
+    /// Notification message text (Notification hook).
+    #[serde(default)]
+    pub message: Option<String>,
+    /// Notification title text (Notification hook).
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 /// The kinds of events we route into status transitions. Unknown kinds are
@@ -206,10 +240,22 @@ impl HookKind {
 pub struct HookEvent {
     pub session_id: String,
     pub kind: HookKind,
-    /// Unix epoch seconds — reserved for the Phase C activity feed, which
-    /// will display a chronological list of attention events.
-    #[allow(dead_code)]
+    /// Unix epoch seconds.
     pub ts: u64,
+    /// Rich payload data from the hook receiver — populated when jq is
+    /// available and the hook carries tool/notification context.
+    pub payload: Option<HookPayload>,
+}
+
+/// Rich data extracted from the hook receiver's full payload capture.
+/// Attached to Notification and PreToolUse events so the attention bar
+/// can show what each session wants without the user switching to it.
+#[derive(Debug, Clone)]
+pub struct HookPayload {
+    pub tool_name: Option<String>,
+    pub tool_input: Option<serde_json::Value>,
+    pub message: Option<String>,
+    pub title: Option<String>,
 }
 
 /// Tracks per-file read offsets so previously-processed lines are never
@@ -303,10 +349,25 @@ impl EventWatcher {
 
                 match serde_json::from_str::<HookEventLine>(&line) {
                     Ok(parsed) => {
+                        let has_payload = parsed.tool_name.is_some()
+                            || parsed.tool_input.is_some()
+                            || parsed.message.is_some()
+                            || parsed.title.is_some();
+                        let payload = if has_payload {
+                            Some(HookPayload {
+                                tool_name: parsed.tool_name,
+                                tool_input: parsed.tool_input,
+                                message: parsed.message,
+                                title: parsed.title,
+                            })
+                        } else {
+                            None
+                        };
                         out.push(HookEvent {
                             session_id: session_id.clone(),
                             kind: HookKind::parse(&parsed.kind),
                             ts: parsed.ts,
+                            payload,
                         });
                     }
                     Err(e) => {

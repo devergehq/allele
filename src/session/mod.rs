@@ -5,6 +5,23 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::terminal::TerminalView;
 
+/// Rich context about what a session is waiting for when in `AwaitingInput`
+/// state. Populated from the hook payload on Notification events, cleared
+/// when the session transitions out of AwaitingInput.
+#[derive(Debug, Clone)]
+pub struct AttentionContext {
+    /// The tool Claude wants to run (e.g. "Bash", "Edit", "Read").
+    pub tool_name: Option<String>,
+    /// Brief summary of the tool input (e.g. "npm install", "src/main.rs").
+    pub tool_input_summary: Option<String>,
+    /// Notification message text from Claude Code.
+    pub message: Option<String>,
+    /// Notification title text from Claude Code.
+    pub title: Option<String>,
+    /// When this attention context was created.
+    pub ts: u64,
+}
+
 /// Status of a session
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionStatus {
@@ -123,6 +140,10 @@ pub struct Session {
     /// Transient: LLM-generated naming suggestions awaiting user selection
     /// (only populated in Interactive naming mode).
     pub naming_suggestions: Option<Vec<String>>,
+    /// Rich context about what this session is waiting for. Populated from
+    /// the hook payload when a Notification fires (AwaitingInput), cleared
+    /// when the session transitions to Running or any non-attention state.
+    pub attention_context: Option<AttentionContext>,
 }
 
 impl Session {
@@ -155,6 +176,7 @@ impl Session {
             comment: None,
             branch_name: None,
             naming_suggestions: None,
+            attention_context: None,
         }
     }
 
@@ -194,6 +216,7 @@ impl Session {
             comment: None,
             branch_name: None,
             naming_suggestions: None,
+            attention_context: None,
         }
     }
 
