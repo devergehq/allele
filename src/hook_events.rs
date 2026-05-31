@@ -96,28 +96,37 @@ impl AppState {
         };
 
         // Populate attention context from the hook payload on Notification.
+        // Claude Code's Notification hook only sends {session_id, message} —
+        // tool details aren't in the payload. For permission prompts, scrape
+        // the terminal buffer to extract the tool name and command summary.
         if matches!(event.kind, HookKind::Notification) {
-            let ctx = if let Some(ref payload) = event.payload {
-                Some(AttentionContext {
-                    tool_name: payload.tool_name.clone(),
-                    tool_input_summary: summarise_attention_input(
-                        payload.tool_name.as_deref(),
-                        payload.tool_input.as_ref(),
-                    ),
-                    message: payload.message.clone(),
-                    title: payload.title.clone(),
-                    ts: event.ts,
-                })
+            let message = event
+                .payload
+                .as_ref()
+                .and_then(|p| p.message.clone());
+            let is_permission = message
+                .as_deref()
+                .map(|m| m.contains("permission"))
+                .unwrap_or(false);
+
+            let (tool_name, tool_summary) = if is_permission {
+                if let Some(ref tv) = session.terminal_view {
+                    let lines = tv.read(cx).read_last_lines(30);
+                    scrape_permission_from_buffer(&lines)
+                } else {
+                    (None, None)
+                }
             } else {
-                Some(AttentionContext {
-                    tool_name: None,
-                    tool_input_summary: None,
-                    message: None,
-                    title: None,
-                    ts: event.ts,
-                })
+                (None, None)
             };
-            session.attention_context = ctx;
+
+            session.attention_context = Some(AttentionContext {
+                tool_name,
+                tool_input_summary: tool_summary,
+                message,
+                title: event.payload.as_ref().and_then(|p| p.title.clone()),
+                ts: event.ts,
+            });
         }
 
         // Clear attention context on any transition OUT of AwaitingInput.
@@ -448,4 +457,83 @@ fn short_path(path: &str) -> String {
     } else {
         parts.first().unwrap_or(&"?").to_string()
     }
+}
+
+/// Scrape the terminal buffer for Claude Code's permission prompt to extract
+/// the tool name and a summary of what it wants to do.
+///
+/// Claude Code renders permission prompts like:
+/// ```text
+///   Bash command
+///     git add src/main.rs && git commit ...
+///   Read file
+///     /path/to/file.rs
+///   Edit file
+///     /path/to/file.rs
+///   Write(/path/to/file.rs)
+///     content...
+/// ```
+///
+/// Returns `(tool_name, summary)` — both `None` if the pattern isn't found.
+fn scrape_permission_from_buffer(lines: &[String]) -> (Option<String>, Option<String>) {
+    // Known Claude Code permission prompt headers.
+    const TOOL_HEADERS: &[(&str, &str)] = &[
+        ("Bash command", "Bash"),
+        ("Run shell command", "Bash"),
+        ("Read file", "Read"),
+        ("Edit file", "Edit"),
+        ("Write file", "Write"),
+        ("Execute command", "Bash"),
+    ];
+
+    // Scan backwards from the bottom for "Do you want to proceed?" to confirm
+    // we're looking at a permission prompt, then scan upward for the tool header.
+    let mut has_prompt = false;
+    let mut prompt_line_idx = 0;
+    for (i, line) in lines.iter().enumerate().rev() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("Do you want to proceed") {
+            has_prompt = true;
+            prompt_line_idx = i;
+            break;
+        }
+    }
+
+    if !has_prompt {
+        return (None, None);
+    }
+
+    // Scan upward from the "Do you want to proceed?" line for a tool header.
+    for i in (0..prompt_line_idx).rev() {
+        let trimmed = lines[i].trim();
+
+        // Check known headers
+        for &(header, tool_name) in TOOL_HEADERS {
+            if trimmed == header {
+                // The content (command, file path, etc.) is on the lines
+                // between the header and the prompt. Take the first non-empty
+                // indented line as the summary.
+                let summary = lines[i + 1..prompt_line_idx]
+                    .iter()
+                    .map(|l| l.trim())
+                    .find(|l| !l.is_empty())
+                    .map(|s| {
+                        if s.len() > 80 {
+                            format!("{}…", &s[..77])
+                        } else {
+                            s.to_string()
+                        }
+                    });
+                return (Some(tool_name.to_string()), summary);
+            }
+        }
+
+        // Handle "Write(/path/to/file)" pattern
+        if trimmed.starts_with("Write(") && trimmed.ends_with(')') {
+            let path = &trimmed[6..trimmed.len() - 1];
+            return (Some("Write".to_string()), Some(short_path(path)));
+        }
+    }
+
+    (None, None)
 }

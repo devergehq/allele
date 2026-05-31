@@ -468,6 +468,28 @@ impl TerminalView {
         }
     }
 
+    /// Read the last `n` visible lines from the terminal grid as plain text.
+    /// Used to scrape permission prompt details from the screen buffer.
+    pub fn read_last_lines(&self, n: usize) -> Vec<String> {
+        let Some(ref t) = self.terminal else { return Vec::new() };
+        let term = t.term.lock();
+        let grid = term.grid();
+        let rows = grid.screen_lines();
+        let cols = grid.columns();
+        let start = rows.saturating_sub(n);
+        let mut lines = Vec::with_capacity(n);
+        for row_idx in start..rows {
+            let line = Line(row_idx as i32);
+            let text: String = (0..cols)
+                .map(|col| grid[line][Column(col)].c)
+                .collect::<String>()
+                .trim_end()
+                .to_string();
+            lines.push(text);
+        }
+        lines
+    }
+
     /// Get the current terminal title set by the shell via OSC sequences.
     pub fn title(&self) -> Option<String> {
         self.terminal.as_ref().and_then(|t| t.title.clone())

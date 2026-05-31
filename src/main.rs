@@ -364,12 +364,19 @@ impl AppState {
                 }
                 let label = session.label.clone();
                 let (tool, summary, is_permission) = if let Some(ref ctx) = session.attention_context {
-                    let has_tool = ctx.tool_name.is_some();
                     let tool = ctx.tool_name.clone().unwrap_or_default();
                     let summary = ctx.tool_input_summary.clone()
                         .or_else(|| ctx.message.clone())
                         .unwrap_or_else(|| "Waiting for input".into());
-                    (tool, summary, has_tool)
+                    // Permission prompts: either tool_name is set (rich payload)
+                    // or the message contains "permission" (Claude Code's
+                    // Notification hook doesn't include tool details, only the
+                    // message text like "Claude needs your permission").
+                    let is_perm = ctx.tool_name.is_some()
+                        || ctx.message.as_deref()
+                            .map(|m| m.contains("permission"))
+                            .unwrap_or(false);
+                    (tool, summary, is_perm)
                 } else {
                     (String::new(), "Waiting for input".into(), false)
                 };
