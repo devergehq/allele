@@ -15,6 +15,7 @@
 //!   - Render walks the document blocks and produces styled GPUI elements
 
 use gpui::*;
+use similar::{ChangeTag, TextDiff};
 
 use super::compose_bar::{ComposeBar, ComposeBarEvent};
 use super::document::{short_path, Block, BlockKind, RichDocument};
@@ -291,7 +292,7 @@ fn render_block(block: &Block, font_size: f32, cx: &mut Context<RichView>) -> Di
     // widest text run (long diff lines, stringified JSON, etc.) and the
     // viewport has no horizontal scroll — so text runs off the page.
     // Constrained here, long text wraps at the list's own width.
-    let mut wrapper = div().w_full().min_w_0().pl(indent).mb(px(4.0));
+    let mut wrapper = div().w_full().min_w_0().pl(indent).pb(px(16.0));
 
     let block_id = block.id;
 
@@ -381,7 +382,7 @@ fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
     div()
         .w_full()
         .min_w_0()
-        .my(px(8.0))
+        .my(px(12.0))
         .px(px(10.0))
         .py(px(6.0))
         .flex()
@@ -489,7 +490,7 @@ fn render_tool_call(
         .w_full()
         .min_w_0()
         .px(px(10.0))
-        .py(px(6.0))
+        .py(px(8.0))
         .rounded(px(4.0))
         .bg(hex_alpha(SURFACE0, 0.6))
         .border_l_2()
@@ -537,38 +538,10 @@ fn render_tool_call(
             ),
     );
 
-    // Expanded: pretty-printed input JSON. Each line becomes its own
-    // child so long values wrap at the card's width instead of the
-    // whole blob being rendered as one un-wrappable run. Falls back to
-    // Debug repr on serialisation failure so we never panic on
-    // malformed input.
     if !collapsed {
-        let pretty = serde_json::to_string_pretty(input_full)
-            .unwrap_or_else(|_| format!("{input_full:?}"));
-        let mut json_block = div()
-            .w_full()
-            .min_w_0()
-            .mt(px(6.0))
-            .px(px(8.0))
-            .py(px(4.0))
-            .rounded(px(3.0))
-            .bg(hex_alpha(SURFACE1, 0.4))
-            .text_color(hex(SUBTEXT1))
-            .text_size(px(font_size - 2.0))
-            .font_family("JetBrains Mono");
-        for line in pretty.lines() {
-            json_block = json_block.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .child(line.to_string()),
-            );
-        }
-        card = card.child(json_block);
+        card = card.child(render_tool_expanded_input(tool_name, input_full, font_size));
     }
 
-    // Result (if available and is error) — always shown regardless of
-    // collapsed state so errors are never hidden.
     if let Some(r) = result {
         if r.is_error {
             let preview = if r.content.len() > 200 {
@@ -585,10 +558,229 @@ fn render_tool_call(
                     .text_size(px(font_size - 1.0))
                     .child(preview),
             );
+        } else if !collapsed && !r.content.trim().is_empty() {
+            card = card.child(render_tool_result_output(&r.content, font_size));
         }
     }
 
     card
+}
+
+// ── Tool expanded input (smart per-tool formatting) ──────────────
+
+fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_size: f32) -> Div {
+    let code_size = font_size - 2.0;
+    match tool_name {
+        "Bash" => {
+            let command = input.get("command").and_then(|v| v.as_str()).unwrap_or("?");
+            let description = input.get("description").and_then(|v| v.as_str());
+            let mut block = div().w_full().min_w_0().mt(px(6.0));
+            if let Some(desc) = description {
+                block = block.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .mb(px(4.0))
+                        .text_color(hex(SUBTEXT0))
+                        .text_size(px(code_size))
+                        .child(desc.to_string()),
+                );
+            }
+            let mut code = div()
+                .w_full()
+                .min_w_0()
+                .px(px(8.0))
+                .py(px(6.0))
+                .rounded(px(3.0))
+                .bg(hex_alpha(SURFACE1, 0.4))
+                .text_color(hex(GREEN))
+                .text_size(px(code_size))
+                .font_family("JetBrains Mono");
+            for line in command.lines() {
+                code = code.child(div().w_full().min_w_0().child(line.to_string()));
+            }
+            block.child(code)
+        }
+        "Read" | "read_file" => {
+            let path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("?");
+            let offset = input.get("offset").and_then(|v| v.as_u64());
+            let limit = input.get("limit").and_then(|v| v.as_u64());
+            let mut detail = path.to_string();
+            if let Some(o) = offset {
+                detail.push_str(&format!(" (from line {o}"));
+                if let Some(l) = limit {
+                    detail.push_str(&format!(", {l} lines"));
+                }
+                detail.push(')');
+            } else if let Some(l) = limit {
+                detail.push_str(&format!(" ({l} lines)"));
+            }
+            div()
+                .w_full()
+                .min_w_0()
+                .mt(px(6.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(3.0))
+                .bg(hex_alpha(SURFACE1, 0.4))
+                .text_color(hex(SUBTEXT1))
+                .text_size(px(code_size))
+                .font_family("JetBrains Mono")
+                .child(detail)
+        }
+        "Write" | "write_file" => {
+            let path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("?");
+            let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let line_count = content.lines().count();
+            div()
+                .w_full()
+                .min_w_0()
+                .mt(px(6.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(3.0))
+                .bg(hex_alpha(SURFACE1, 0.4))
+                .text_color(hex(SUBTEXT1))
+                .text_size(px(code_size))
+                .font_family("JetBrains Mono")
+                .child(format!("{path} ({line_count} lines)"))
+        }
+        "Grep" => {
+            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
+            let path = input.get("path").and_then(|v| v.as_str()).map(|p| super::document::short_path(p)).unwrap_or_default();
+            let include = input.get("include").and_then(|v| v.as_str());
+            let mut detail = format!("/{pattern}/");
+            if !path.is_empty() {
+                detail.push_str(&format!(" in {path}"));
+            }
+            if let Some(inc) = include {
+                detail.push_str(&format!(" ({inc})"));
+            }
+            div()
+                .w_full()
+                .min_w_0()
+                .mt(px(6.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(3.0))
+                .bg(hex_alpha(SURFACE1, 0.4))
+                .text_color(hex(SUBTEXT1))
+                .text_size(px(code_size))
+                .font_family("JetBrains Mono")
+                .child(detail)
+        }
+        "Agent" => {
+            let desc = input.get("description").and_then(|v| v.as_str()).unwrap_or("subagent");
+            let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
+            let mut block = div()
+                .w_full()
+                .min_w_0()
+                .mt(px(6.0));
+            block = block.child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .mb(px(4.0))
+                    .text_color(hex(LAVENDER))
+                    .text_size(px(code_size))
+                    .font_weight(FontWeight::BOLD)
+                    .child(desc.to_string()),
+            );
+            if !prompt.is_empty() {
+                let preview = if prompt.len() > 500 {
+                    format!("{}…", &prompt[..497])
+                } else {
+                    prompt.to_string()
+                };
+                block = block.child(
+                    div()
+                        .w_full()
+                        .min_w_0()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(3.0))
+                        .bg(hex_alpha(SURFACE1, 0.4))
+                        .text_color(hex(SUBTEXT0))
+                        .text_size(px(code_size))
+                        .child(preview),
+                );
+            }
+            block
+        }
+        _ => {
+            let pretty = serde_json::to_string_pretty(input)
+                .unwrap_or_else(|_| format!("{input:?}"));
+            let mut json_block = div()
+                .w_full()
+                .min_w_0()
+                .mt(px(6.0))
+                .px(px(8.0))
+                .py(px(4.0))
+                .rounded(px(3.0))
+                .bg(hex_alpha(SURFACE1, 0.4))
+                .text_color(hex(SUBTEXT1))
+                .text_size(px(code_size))
+                .font_family("JetBrains Mono");
+            for line in pretty.lines().take(40) {
+                json_block = json_block.child(div().w_full().min_w_0().child(line.to_string()));
+            }
+            let total_lines = pretty.lines().count();
+            if total_lines > 40 {
+                json_block = json_block.child(
+                    div()
+                        .mt(px(4.0))
+                        .text_color(hex_alpha(OVERLAY0, 0.7))
+                        .child(format!("…{} more lines", total_lines - 40)),
+                );
+            }
+            json_block
+        }
+    }
+}
+
+// ── Tool result output (shown when expanded) ─────────────────────
+
+const MAX_RESULT_LINES: usize = 80;
+
+fn render_tool_result_output(content: &str, font_size: f32) -> Div {
+    let code_size = font_size - 2.0;
+    let lines: Vec<&str> = content.lines().collect();
+    let truncated = lines.len() > MAX_RESULT_LINES;
+    let visible = if truncated { &lines[..MAX_RESULT_LINES] } else { &lines };
+
+    let mut block = div()
+        .w_full()
+        .min_w_0()
+        .mt(px(8.0))
+        .px(px(8.0))
+        .py(px(6.0))
+        .rounded(px(3.0))
+        .bg(hex_alpha(SURFACE1, 0.3))
+        .text_color(hex(SUBTEXT0))
+        .text_size(px(code_size))
+        .font_family("JetBrains Mono");
+
+    for line in visible {
+        block = block.child(
+            div()
+                .w_full()
+                .min_w_0()
+                .child(line.to_string()),
+        );
+    }
+
+    if truncated {
+        let remaining = lines.len() - MAX_RESULT_LINES;
+        block = block.child(
+            div()
+                .mt(px(4.0))
+                .text_color(hex_alpha(OVERLAY0, 0.7))
+                .text_size(px(code_size))
+                .child(format!("…{remaining} more lines")),
+        );
+    }
+
+    block
 }
 
 // ── Diff view ─────────────────────────────────────────────────────
@@ -605,11 +797,16 @@ fn render_diff(
 ) -> Div {
     let code_size = font_size - 1.0;
 
-    // Line-delta summary for the collapsed header. Newline count is a
-    // good-enough proxy for git-style +/- since Edit replaces a chunk;
-    // it lets a long edit turn read as a tidy list instead of a wall.
-    let removed = old_string.lines().count();
-    let added = new_string.lines().count();
+    let text_diff = TextDiff::from_lines(old_string, new_string);
+    let mut added = 0usize;
+    let mut removed = 0usize;
+    for change in text_diff.iter_all_changes() {
+        match change.tag() {
+            ChangeTag::Insert => added += 1,
+            ChangeTag::Delete => removed += 1,
+            ChangeTag::Equal => {}
+        }
+    }
 
     let mut diff = div()
         .w_full()
@@ -684,77 +881,258 @@ fn render_diff(
             ),
     );
 
-    // +/- body hidden when collapsed — header + chevron stay visible so
-    // the user still sees the file path and an affordance to expand.
     if collapsed {
         return diff;
     }
 
-    // Old lines (red). `flex_1().min_w_0()` on the line text lets it
-    // wrap at the card width instead of pushing the row past the
-    // viewport. Monospace + ligatures-off matches the terminal feel.
-    for line in old_string.lines() {
-        diff = diff.child(
-            div()
-                .w_full()
-                .min_w_0()
-                .px(px(10.0))
-                .py(px(1.0))
-                .bg(hex_alpha(RED, 0.1))
-                .flex()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_color(hex(RED))
-                        .text_size(px(code_size))
-                        .font_family("JetBrains Mono")
-                        .child("-"),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_color(hex_alpha(RED, 0.8))
-                        .text_size(px(code_size))
-                        .font_family("JetBrains Mono")
-                        .child(line.to_string()),
-                ),
-        );
-    }
+    let text_diff = TextDiff::from_lines(old_string, new_string);
+    let changes: Vec<_> = text_diff
+        .iter_all_changes()
+        .map(|c| (c.tag(), c.value().trim_end_matches('\n').to_string()))
+        .collect();
 
-    // New lines (green)
-    for line in new_string.lines() {
-        diff = diff.child(
-            div()
-                .w_full()
-                .min_w_0()
-                .px(px(10.0))
-                .py(px(1.0))
-                .bg(hex_alpha(GREEN, 0.1))
-                .flex()
-                .gap(px(6.0))
-                .child(
-                    div()
-                        .flex_shrink_0()
-                        .text_color(hex(GREEN))
-                        .text_size(px(code_size))
-                        .font_family("JetBrains Mono")
-                        .child("+"),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .text_color(hex_alpha(GREEN, 0.8))
-                        .text_size(px(code_size))
-                        .font_family("JetBrains Mono")
-                        .child(line.to_string()),
-                ),
-        );
+    let mut i = 0;
+    while i < changes.len() {
+        // Try to pair consecutive Delete+Insert runs for intraline highlighting.
+        let del_start = i;
+        while i < changes.len() && changes[i].0 == ChangeTag::Delete {
+            i += 1;
+        }
+        let del_end = i;
+        let ins_start = i;
+        while i < changes.len() && changes[i].0 == ChangeTag::Insert {
+            i += 1;
+        }
+        let ins_end = i;
+
+        let del_count = del_end - del_start;
+        let ins_count = ins_end - ins_start;
+
+        if del_count > 0 || ins_count > 0 {
+            // Hunk-level similarity: compare the entire deleted block
+            // against the entire inserted block. If they're structurally
+            // different, render all reds then all greens (no interleaving).
+            let del_block: String = (del_start..del_end)
+                .map(|k| changes[k].1.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let ins_block: String = (ins_start..ins_end)
+                .map(|k| changes[k].1.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let hunk_ratio = strsim_ratio(&del_block, &ins_block);
+
+            if hunk_ratio < 0.4 {
+                // Structural replacement — group reds then greens.
+                for j in del_start..del_end {
+                    diff = diff.child(render_diff_line_plain(
+                        "-", &changes[j].1, code_size,
+                        hex_alpha(RED, 0.8), hex_alpha(RED, 0.1),
+                    ));
+                }
+                for j in ins_start..ins_end {
+                    diff = diff.child(render_diff_line_plain(
+                        "+", &changes[j].1, code_size,
+                        hex_alpha(GREEN, 0.8), hex_alpha(GREEN, 0.1),
+                    ));
+                }
+            } else {
+                // Similar hunk — interleave with per-line intraline.
+                let paired = del_count.min(ins_count);
+                for j in 0..paired {
+                    let del_line = &changes[del_start + j].1;
+                    let ins_line = &changes[ins_start + j].1;
+                    let ratio = strsim_ratio(del_line, ins_line);
+                    if ratio > 0.4 {
+                        diff = diff.child(render_diff_line_intraline(
+                            "-", del_line, ins_line, true, code_size,
+                        ));
+                        diff = diff.child(render_diff_line_intraline(
+                            "+", ins_line, del_line, false, code_size,
+                        ));
+                    } else {
+                        diff = diff.child(render_diff_line_plain(
+                            "-", del_line, code_size,
+                            hex_alpha(RED, 0.8), hex_alpha(RED, 0.1),
+                        ));
+                        diff = diff.child(render_diff_line_plain(
+                            "+", ins_line, code_size,
+                            hex_alpha(GREEN, 0.8), hex_alpha(GREEN, 0.1),
+                        ));
+                    }
+                }
+                for j in paired..del_count {
+                    diff = diff.child(render_diff_line_plain(
+                        "-", &changes[del_start + j].1, code_size,
+                        hex_alpha(RED, 0.8), hex_alpha(RED, 0.1),
+                    ));
+                }
+                for j in paired..ins_count {
+                    diff = diff.child(render_diff_line_plain(
+                        "+", &changes[ins_start + j].1, code_size,
+                        hex_alpha(GREEN, 0.8), hex_alpha(GREEN, 0.1),
+                    ));
+                }
+            }
+            continue;
+        }
+
+        // Equal line.
+        if i < changes.len() && changes[i].0 == ChangeTag::Equal {
+            diff = diff.child(render_diff_line_plain(
+                " ", &changes[i].1, code_size,
+                hex_alpha(SUBTEXT0, 0.5), hex_alpha(SURFACE0, 0.0),
+            ));
+            i += 1;
+        }
     }
 
     diff
+}
+
+fn strsim_ratio(a: &str, b: &str) -> f64 {
+    let diff = TextDiff::from_words(a, b);
+    let matching: usize = diff
+        .iter_all_changes()
+        .filter(|c| c.tag() == ChangeTag::Equal)
+        .map(|c| c.value().len())
+        .sum();
+    let total = a.len() + b.len();
+    if total == 0 {
+        return 1.0;
+    }
+    (2 * matching) as f64 / total as f64
+}
+
+fn render_diff_line_plain(
+    prefix: &'static str,
+    text: &str,
+    code_size: f32,
+    text_color: Hsla,
+    bg_color: Hsla,
+) -> Div {
+    div()
+        .w_full()
+        .min_w_0()
+        .px(px(10.0))
+        .py(px(1.0))
+        .bg(bg_color)
+        .flex()
+        .gap(px(6.0))
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(10.0))
+                .text_color(text_color)
+                .text_size(px(code_size))
+                .font_family("JetBrains Mono")
+                .child(prefix),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_color(text_color)
+                .text_size(px(code_size))
+                .font_family("JetBrains Mono")
+                .child(text.to_string()),
+        )
+}
+
+fn render_diff_line_intraline(
+    prefix: &'static str,
+    this_line: &str,
+    other_line: &str,
+    is_delete: bool,
+    code_size: f32,
+) -> Div {
+    let (base_color, bg_color, highlight_bg) = if is_delete {
+        (hex_alpha(RED, 0.8), hex_alpha(RED, 0.1), hex_alpha(RED, 0.3))
+    } else {
+        (hex_alpha(GREEN, 0.8), hex_alpha(GREEN, 0.1), hex_alpha(GREEN, 0.3))
+    };
+
+    let word_diff = TextDiff::from_words(other_line, this_line);
+    let mono = Font {
+        family: "JetBrains Mono".into(),
+        weight: FontWeight::NORMAL,
+        style: FontStyle::Normal,
+        features: FontFeatures::disable_ligatures(),
+        fallbacks: None,
+    };
+
+    let mut full_text = String::new();
+    let mut runs: Vec<TextRun> = Vec::new();
+
+    for change in word_diff.iter_all_changes() {
+        let val = change.value();
+        match change.tag() {
+            ChangeTag::Equal => {
+                full_text.push_str(val);
+                runs.push(TextRun {
+                    len: val.len(),
+                    font: mono.clone(),
+                    color: base_color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+            }
+            ChangeTag::Insert => {
+                full_text.push_str(val);
+                runs.push(TextRun {
+                    len: val.len(),
+                    font: mono.clone(),
+                    color: base_color,
+                    background_color: Some(highlight_bg),
+                    underline: None,
+                    strikethrough: None,
+                });
+            }
+            ChangeTag::Delete => {
+                // Words only in the other line — skip for this line's render.
+            }
+        }
+    }
+
+    // Merge adjacent runs with same styling to reduce render overhead.
+    let mut merged: Vec<TextRun> = Vec::new();
+    for run in runs {
+        if let Some(last) = merged.last_mut() {
+            if last.background_color == run.background_color {
+                last.len += run.len;
+                continue;
+            }
+        }
+        merged.push(run);
+    }
+
+    let styled = StyledText::new(SharedString::from(full_text)).with_runs(merged);
+
+    div()
+        .w_full()
+        .min_w_0()
+        .px(px(10.0))
+        .py(px(1.0))
+        .bg(bg_color)
+        .flex()
+        .gap(px(6.0))
+        .child(
+            div()
+                .flex_shrink_0()
+                .w(px(10.0))
+                .text_color(base_color)
+                .text_size(px(code_size))
+                .font_family("JetBrains Mono")
+                .child(prefix),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(code_size))
+                .child(styled),
+        )
 }
 
 // ── Session end ───────────────────────────────────────────────────

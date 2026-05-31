@@ -52,6 +52,9 @@ notify = "7"
 # Markdown parsing for Rich Sidecar TextBlock rendering
 pulldown-cmark = { version = "0.13.0", default-features = false }
 
+# Line-level diffs for unified Edit rendering in Rich Sidecar
+similar = "2"
+
 # APFS COW cloning
 # clonetree or direct libc FFI — evaluate during Phase 1
 

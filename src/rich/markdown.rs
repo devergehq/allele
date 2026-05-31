@@ -395,7 +395,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
 
 fn paragraph_element(text: SharedString, runs: Vec<TextRun>, font_size: f32) -> Div {
     div()
-        .py(px(2.0))
+        .py(px(4.0))
         .text_size(px(font_size))
         .child(StyledText::new(text).with_runs(runs))
 }
@@ -435,7 +435,7 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
     let trimmed = if code.ends_with('\n') { &code[..code.len() - 1] } else { &code };
 
     let mut block = div()
-        .my(px(6.0))
+        .my(px(10.0))
         .rounded(px(4.0))
         .bg(hex_alpha(SURFACE0, 0.6))
         .border_l_2()
