@@ -124,8 +124,6 @@ impl AppState {
                 tool_name,
                 tool_input_summary: tool_summary,
                 message,
-                title: event.payload.as_ref().and_then(|p| p.title.clone()),
-                ts: event.ts,
             });
         }
 
@@ -413,41 +411,6 @@ impl AppState {
         })
         .detach();
     }
-}
-
-/// Create a brief summary of a tool's input for the attention bar.
-fn summarise_attention_input(
-    tool_name: Option<&str>,
-    tool_input: Option<&serde_json::Value>,
-) -> Option<String> {
-    let name = tool_name?;
-    let input = tool_input?;
-
-    let summary = match name {
-        "Bash" => input
-            .get("command")
-            .and_then(|v| v.as_str())
-            .map(|c| if c.len() > 80 { format!("{}…", &c[..77]) } else { c.to_string() }),
-        "Read" | "read_file" | "Edit" | "edit_file" | "Write" | "write_file" => input
-            .get("file_path")
-            .and_then(|v| v.as_str())
-            .map(|p| short_path(p)),
-        "Grep" => {
-            let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
-            Some(format!("/{pattern}/"))
-        }
-        "Agent" => input
-            .get("description")
-            .and_then(|v| v.as_str())
-            .map(|s| if s.len() > 60 { format!("{}…", &s[..57]) } else { s.to_string() }),
-        _ => input
-            .as_object()
-            .and_then(|obj| obj.values().next())
-            .and_then(|v| v.as_str())
-            .map(|s| if s.len() > 60 { format!("{}…", &s[..57]) } else { s.to_string() }),
-    };
-
-    summary
 }
 
 fn short_path(path: &str) -> String {

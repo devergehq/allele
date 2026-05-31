@@ -240,8 +240,6 @@ impl HookKind {
 pub struct HookEvent {
     pub session_id: String,
     pub kind: HookKind,
-    /// Unix epoch seconds.
-    pub ts: u64,
     /// Rich payload data from the hook receiver — populated when jq is
     /// available and the hook carries tool/notification context.
     pub payload: Option<HookPayload>,
@@ -252,10 +250,7 @@ pub struct HookEvent {
 /// can show what each session wants without the user switching to it.
 #[derive(Debug, Clone)]
 pub struct HookPayload {
-    pub tool_name: Option<String>,
-    pub tool_input: Option<serde_json::Value>,
     pub message: Option<String>,
-    pub title: Option<String>,
 }
 
 /// Tracks per-file read offsets so previously-processed lines are never
@@ -349,24 +344,10 @@ impl EventWatcher {
 
                 match serde_json::from_str::<HookEventLine>(&line) {
                     Ok(parsed) => {
-                        let has_payload = parsed.tool_name.is_some()
-                            || parsed.tool_input.is_some()
-                            || parsed.message.is_some()
-                            || parsed.title.is_some();
-                        let payload = if has_payload {
-                            Some(HookPayload {
-                                tool_name: parsed.tool_name,
-                                tool_input: parsed.tool_input,
-                                message: parsed.message,
-                                title: parsed.title,
-                            })
-                        } else {
-                            None
-                        };
+                        let payload = parsed.message.map(|m| HookPayload { message: Some(m) });
                         out.push(HookEvent {
                             session_id: session_id.clone(),
                             kind: HookKind::parse(&parsed.kind),
-                            ts: parsed.ts,
                             payload,
                         });
                     }

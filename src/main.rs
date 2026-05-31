@@ -483,12 +483,14 @@ impl AppState {
                         .child("Allow")
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                             if let Some(session) = this.projects
-                                .get(p_idx)
-                                .and_then(|p| p.sessions.get(s_idx))
+                                .get_mut(p_idx)
+                                .and_then(|p| p.sessions.get_mut(s_idx))
                             {
                                 if let Some(ref tv) = session.terminal_view {
                                     tv.read(cx).send_input(b"\r");
                                 }
+                                session.status = session::SessionStatus::Running;
+                                session.attention_context = None;
                             }
                             cx.notify();
                         })),
@@ -2516,13 +2518,13 @@ impl Render for AppState {
                     .flex()
                     .flex_col();
 
-                // --- Main-area tab strip: Claude / Editor ---
-                content_col = content_col.child(self.render_main_tab_strip(cx));
-
-                // --- Attention bar (sessions needing input) ---
+                // --- Attention bar (sessions needing input) — above tabs for visibility ---
                 if let Some(attention_bar) = self.render_attention_bar(cx) {
                     content_col = content_col.child(attention_bar);
                 }
+
+                // --- Main-area tab strip: Claude / Editor ---
+                content_col = content_col.child(self.render_main_tab_strip(cx));
 
                 // --- Main terminal area (flex_1, takes remaining space) ---
                 {

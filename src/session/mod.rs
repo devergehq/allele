@@ -16,10 +16,6 @@ pub struct AttentionContext {
     pub tool_input_summary: Option<String>,
     /// Notification message text from Claude Code.
     pub message: Option<String>,
-    /// Notification title text from Claude Code.
-    pub title: Option<String>,
-    /// When this attention context was created.
-    pub ts: u64,
 }
 
 /// Status of a session
