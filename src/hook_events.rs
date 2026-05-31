@@ -255,82 +255,114 @@ impl AppState {
             .unwrap_or_default();
 
         cx.spawn(async move |this, cx| {
-            // Poll for the .prompt file (written by the hook receiver on first
-            // UserPromptSubmit). 120 attempts × 2s = 4 minutes.
-            let prompt_path = events_dir.join(format!("{session_id}.prompt"));
-            let mut prompt_text = None;
-            for attempt in 0..120 {
-                if let Ok(text) = std::fs::read_to_string(&prompt_path) {
-                    if !text.trim().is_empty() {
-                        prompt_text = Some(text);
-                        break;
+            // All blocking work (file polling, LLM subprocess, git rename)
+            // runs on the background executor so the UI thread stays free.
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    // Poll for the .prompt file (written by the hook receiver on first
+                    // UserPromptSubmit). 120 attempts × 2s = 4 minutes.
+                    let prompt_path = events_dir.join(format!("{session_id}.prompt"));
+                    let mut prompt_text = None;
+                    for attempt in 0..120 {
+                        if let Ok(text) = std::fs::read_to_string(&prompt_path) {
+                            if !text.trim().is_empty() {
+                                prompt_text = Some(text);
+                                break;
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(2000));
+                        if attempt == 0 {
+                            info!("auto-naming: waiting for prompt file for {session_id}");
+                        }
                     }
-                }
-                cx.background_executor()
-                    .timer(std::time::Duration::from_millis(2000))
-                    .await;
-                if attempt == 0 {
-                    info!("auto-naming: waiting for prompt file for {session_id}");
-                }
-            }
 
-            let Some(prompt) = prompt_text else {
-                warn!("auto-naming: no prompt file found after 4min for {session_id}");
+                    let Some(prompt) = prompt_text else {
+                        warn!("auto-naming: no prompt file found after 4min for {session_id}");
+                        return None;
+                    };
+                    info!(
+                        "auto-naming: prompt file read for {session_id} ({} chars)",
+                        prompt.len()
+                    );
+
+                    let short_id: String = session_id.chars().take(8).collect();
+                    let mode = naming_config.mode;
+
+                    let suggestions_count = match mode {
+                        NamingMode::Interactive => 3,
+                        _ => 1,
+                    };
+
+                    // Attempt LLM naming (Auto or Interactive modes).
+                    let naming_result =
+                        if mode != NamingMode::Legacy && !agent_binary.is_empty() {
+                            let request = NamingRequest {
+                                prompt_text: &prompt,
+                                agent_kind,
+                                agent_binary: &agent_binary,
+                                short_id: &short_id,
+                                suggestions_count,
+                            };
+                            match naming::generate(&naming_config, &request) {
+                                Ok(result) => Some(result),
+                                Err(reason) => {
+                                    warn!("auto-naming: LLM naming failed ({reason}), falling back to keyword extraction");
+                                    None
+                                }
+                            }
+                        } else {
+                            None
+                        };
+
+                    // Determine final branch name and label.
+                    let (branch_name, display_label, suggestions) =
+                        if let Some(result) = naming_result {
+                            (
+                                result.branch_name,
+                                result.display_label,
+                                Some(result.suggestions),
+                            )
+                        } else {
+                            // Fallback: keyword extraction (legacy mode or LLM failure).
+                            let slug_raw = git::extract_slug_from_prompt(&prompt, 4);
+                            if slug_raw.is_empty() {
+                                warn!("auto-naming: empty slug from keyword extraction");
+                                return None;
+                            }
+                            let slug = git::slugify(&slug_raw, 50);
+                            if slug.is_empty() {
+                                return None;
+                            }
+                            let branch = naming::branch_name_from_slug(&slug, &short_id);
+                            let label = naming::slug_to_label(&slug);
+                            (branch, label, None)
+                        };
+
+                    info!(
+                        "auto-naming: generated branch_name={branch_name:?} for {session_id}"
+                    );
+
+                    // Rename git branch (also blocking I/O).
+                    if mode != NamingMode::Interactive || suggestions.is_none() {
+                        if let Some(ref cp) = clone_path {
+                            if let Err(e) =
+                                git::rename_session_branch(cp, &session_id, &branch_name)
+                            {
+                                warn!("auto-naming: branch rename failed: {e}");
+                            }
+                        }
+                    }
+
+                    Some((session_id, mode, branch_name, display_label, suggestions))
+                })
+                .await;
+
+            // Back on the foreground — apply results to UI state.
+            let Some((session_id, mode, branch_name, display_label, suggestions)) = result
+            else {
                 return;
             };
-            info!(
-                "auto-naming: prompt file read for {session_id} ({} chars)",
-                prompt.len()
-            );
-
-            let short_id: String = session_id.chars().take(8).collect();
-            let mode = naming_config.mode;
-
-            let suggestions_count = match mode {
-                NamingMode::Interactive => 3,
-                _ => 1,
-            };
-
-            // Attempt LLM naming (Auto or Interactive modes).
-            let naming_result = if mode != NamingMode::Legacy && !agent_binary.is_empty() {
-                let request = NamingRequest {
-                    prompt_text: &prompt,
-                    agent_kind,
-                    agent_binary: &agent_binary,
-                    short_id: &short_id,
-                    suggestions_count,
-                };
-                match naming::generate(&naming_config, &request) {
-                    Ok(result) => Some(result),
-                    Err(reason) => {
-                        warn!("auto-naming: LLM naming failed ({reason}), falling back to keyword extraction");
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            // Determine final branch name and label.
-            let (branch_name, display_label, suggestions) = if let Some(result) = naming_result {
-                (result.branch_name, result.display_label, Some(result.suggestions))
-            } else {
-                // Fallback: keyword extraction (legacy mode or LLM failure).
-                let slug_raw = git::extract_slug_from_prompt(&prompt, 4);
-                if slug_raw.is_empty() {
-                    warn!("auto-naming: empty slug from keyword extraction");
-                    return;
-                }
-                let slug = git::slugify(&slug_raw, 50);
-                if slug.is_empty() {
-                    return;
-                }
-                let branch = naming::branch_name_from_slug(&slug, &short_id);
-                let label = naming::slug_to_label(&slug);
-                (branch, label, None)
-            };
-
-            info!("auto-naming: generated branch_name={branch_name:?} for {session_id}");
 
             // In Interactive mode, hand off to the main thread to show the
             // selection modal. The branch rename happens after user picks.
@@ -351,13 +383,7 @@ impl AppState {
                 }
             }
 
-            // Auto mode (or fallback): rename branch and update label immediately.
-            if let Some(ref cp) = clone_path {
-                if let Err(e) = git::rename_session_branch(cp, &session_id, &branch_name) {
-                    warn!("auto-naming: branch rename failed: {e}");
-                }
-            }
-
+            // Auto mode (or fallback): update label immediately.
             let _ = this.update(cx, |this: &mut AppState, cx| {
                 for project in &mut this.projects {
                     for session in &mut project.sessions {
