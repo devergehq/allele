@@ -116,9 +116,9 @@ impl AppState {
                 .as_ref()
                 .and_then(|p| p.message.clone());
 
-            let (tool_name, tool_summary) = if let Some(ref ctx) = session.last_pre_tool_use {
+            let (tool_name, tool_summary) = if let Some(ctx) = session.last_pre_tool_use.take() {
                 let summary = summarise_tool_input(&ctx.tool_name, ctx.tool_input.as_ref());
-                (Some(ctx.tool_name.clone()), summary)
+                (Some(ctx.tool_name), summary)
             } else {
                 (None, None)
             };
