@@ -251,6 +251,8 @@ pub struct HookEvent {
 #[derive(Debug, Clone)]
 pub struct HookPayload {
     pub message: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_input: Option<serde_json::Value>,
 }
 
 /// Tracks per-file read offsets so previously-processed lines are never
@@ -344,7 +346,18 @@ impl EventWatcher {
 
                 match serde_json::from_str::<HookEventLine>(&line) {
                     Ok(parsed) => {
-                        let payload = parsed.message.map(|m| HookPayload { message: Some(m) });
+                        let has_data = parsed.message.is_some()
+                            || parsed.tool_name.is_some()
+                            || parsed.tool_input.is_some();
+                        let payload = if has_data {
+                            Some(HookPayload {
+                                message: parsed.message,
+                                tool_name: parsed.tool_name,
+                                tool_input: parsed.tool_input,
+                            })
+                        } else {
+                            None
+                        };
                         out.push(HookEvent {
                             session_id: session_id.clone(),
                             kind: HookKind::parse(&parsed.kind),

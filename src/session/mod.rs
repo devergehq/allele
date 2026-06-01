@@ -5,6 +5,15 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::terminal::TerminalView;
 
+/// Cached context from the most recent PreToolUse hook event. PreToolUse
+/// fires before the permission Notification, so we stash it here and pull
+/// the tool details when the Notification arrives.
+#[derive(Debug, Clone)]
+pub struct PreToolUseContext {
+    pub tool_name: String,
+    pub tool_input: Option<serde_json::Value>,
+}
+
 /// Rich context about what a session is waiting for when in `AwaitingInput`
 /// state. Populated from the hook payload on Notification events, cleared
 /// when the session transitions out of AwaitingInput.
@@ -136,6 +145,10 @@ pub struct Session {
     /// Transient: LLM-generated naming suggestions awaiting user selection
     /// (only populated in Interactive naming mode).
     pub naming_suggestions: Option<Vec<String>>,
+    /// Cached tool context from the most recent PreToolUse hook event.
+    /// PreToolUse always fires before a permission Notification, so this
+    /// holds the tool details needed for the attention bar display.
+    pub last_pre_tool_use: Option<PreToolUseContext>,
     /// Rich context about what this session is waiting for. Populated from
     /// the hook payload when a Notification fires (AwaitingInput), cleared
     /// when the session transitions to Running or any non-attention state.
@@ -172,6 +185,7 @@ impl Session {
             comment: None,
             branch_name: None,
             naming_suggestions: None,
+            last_pre_tool_use: None,
             attention_context: None,
         }
     }
@@ -212,6 +226,7 @@ impl Session {
             comment: None,
             branch_name: None,
             naming_suggestions: None,
+            last_pre_tool_use: None,
             attention_context: None,
         }
     }
