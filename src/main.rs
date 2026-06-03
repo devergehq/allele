@@ -439,7 +439,6 @@ impl AppState {
                         .gap(px(6.0))
                         .cursor_pointer()
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
-                            this.main_tab = MainTab::Claude;
                             this.pending_action = Some(SessionAction::SelectSession {
                                 project_idx: p_idx,
                                 session_idx: s_idx,
@@ -2076,7 +2075,6 @@ fn main() {
                                         .map(|i| i + 1)
                                         .unwrap_or(0);
                                     let next = attention[current_pos % attention.len()];
-                                    this.main_tab = MainTab::Claude;
                                     this.pending_action = Some(SessionAction::SelectSession {
                                         project_idx: next.project_idx,
                                         session_idx: next.session_idx,
