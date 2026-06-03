@@ -56,6 +56,10 @@ pub enum TerminalEvent {
         path: PathBuf,
         line_col: Option<(u32, Option<u32>)>,
     },
+    /// User pressed Enter in this terminal. Used to clear stale
+    /// AwaitingInput status when the user approves a permission prompt
+    /// directly in the terminal instead of clicking the attention bar.
+    EnterPressed,
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -1649,6 +1653,9 @@ impl Render for TerminalView {
                 let key_char = event.keystroke.key_char.as_deref();
                 if let Some(bytes) = this.keymap.resolve(key, mods, key_char) {
                     terminal.write(&bytes);
+                    if key == "enter" {
+                        cx.emit(TerminalEvent::EnterPressed);
+                    }
                 }
             }))
             .on_mouse_down(

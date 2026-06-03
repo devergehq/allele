@@ -279,6 +279,9 @@ impl AppState {
                                 .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
                             settings::spawn_external_editor(cmd, path, *line_col);
                         }
+                        TerminalEvent::EnterPressed => {
+                            this.handle_terminal_enter(&_tv, cx);
+                        }
                     }
                 }).detach();
 
@@ -560,6 +563,9 @@ impl AppState {
                                 .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
                             settings::spawn_external_editor(cmd, path, *line_col);
                         }
+                        TerminalEvent::EnterPressed => {
+                            this.handle_terminal_enter(&_tv, cx);
+                        }
                     }
                 }).detach();
 
@@ -621,6 +627,42 @@ impl AppState {
             }
         })
         .detach();
+    }
+
+    /// Called when the user presses Enter in a terminal. If the owning
+    /// session is in `AwaitingInput`, optimistically transition it to
+    /// `Running` so the attention bar clears immediately rather than
+    /// lingering until the next hook event (PostToolUse).
+    pub(crate) fn handle_terminal_enter(
+        &mut self,
+        tv: &Entity<TerminalView>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut matched_cursor: Option<SessionCursor> = None;
+        for (p_idx, project) in self.projects.iter_mut().enumerate() {
+            for (s_idx, session) in project.sessions.iter_mut().enumerate() {
+                if session.terminal_view.as_ref() == Some(tv)
+                    && session.status == SessionStatus::AwaitingInput
+                {
+                    session.status = SessionStatus::Running;
+                    session.attention_context = None;
+                    matched_cursor = Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
+                    break;
+                }
+            }
+            if matched_cursor.is_some() { break; }
+        }
+
+        if let Some(cursor) = matched_cursor {
+            if self.rich.cursor == Some(cursor) {
+                if let Some(view) = self.rich.view.as_ref().cloned() {
+                    view.update(cx, |rv, cx| {
+                        rv.clear_permission_request(cx);
+                    });
+                }
+            }
+            cx.notify();
+        }
     }
 
     /// Close a session without deleting its clone.
@@ -850,6 +892,9 @@ impl AppState {
                         .as_deref()
                         .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
                     settings::spawn_external_editor(cmd, path, *line_col);
+                }
+                TerminalEvent::EnterPressed => {
+                    this.handle_terminal_enter(&_tv, cx);
                 }
             }
         }).detach();

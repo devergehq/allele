@@ -584,10 +584,11 @@ fn render_tool_call(
 
     if let Some(r) = result {
         if r.is_error {
-            let preview = if r.content.len() > 200 {
-                format!("{}...", &r.content[..197])
+            let cleaned = strip_ansi(&r.content);
+            let preview = if cleaned.len() > 200 {
+                format!("{}...", &cleaned[..197])
             } else {
-                r.content.clone()
+                cleaned
             };
             card = card.child(
                 div()
@@ -784,7 +785,8 @@ const MAX_RESULT_LINES: usize = 80;
 
 fn render_tool_result_output(content: &str, font_size: f32) -> Div {
     let code_size = font_size - 2.0;
-    let lines: Vec<&str> = content.lines().collect();
+    let cleaned = strip_ansi(content);
+    let lines: Vec<&str> = cleaned.lines().collect();
     let truncated = lines.len() > MAX_RESULT_LINES;
     let visible = if truncated { &lines[..MAX_RESULT_LINES] } else { &lines };
 
@@ -1414,5 +1416,80 @@ fn render_awaiting(font_size: f32) -> Div {
                 .text_size(px(font_size - 1.0))
                 .child("Thinking…"),
         )
+}
+
+// ── ANSI escape stripping ────────────────────────────────────────
+
+/// Strip ANSI escape sequences (CSI, OSC, simple ESC) from text.
+/// Tool output (especially Bash/test runners) contains colour codes
+/// that the transcript view should display as plain text.
+fn strip_ansi(input: &str) -> String {
+    if !input.contains('\x1b') {
+        return input.to_string();
+    }
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            match chars.clone().next() {
+                Some('[') => {
+                    chars.next(); // consume '['
+                    // CSI: parameter bytes (0x30–0x3F), intermediate (0x20–0x2F), final (0x40–0x7E)
+                    loop {
+                        match chars.next() {
+                            Some(ch) if ('@'..='~').contains(&ch) => break,
+                            None => break,
+                            _ => {}
+                        }
+                    }
+                }
+                Some(']') => {
+                    chars.next(); // consume ']'
+                    // OSC: consume until BEL or ST (ESC \)
+                    loop {
+                        match chars.next() {
+                            Some('\x07') => break,
+                            Some('\x1b') => { chars.next(); break; }
+                            None => break,
+                            _ => {}
+                        }
+                    }
+                }
+                Some(_) => { chars.next(); } // two-byte ESC sequence
+                None => {}
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_ansi;
+
+    #[test]
+    fn strip_sgr_codes() {
+        let input = "\x1b[90mTests:\x1b[39m \x1b[33;1m2 deprecated\x1b[39;22m";
+        assert_eq!(strip_ansi(input), "Tests: 2 deprecated");
+    }
+
+    #[test]
+    fn strip_cursor_movement() {
+        assert_eq!(strip_ansi("\x1b[1A\x1b[90mParallel:\x1b[39m 16"), "Parallel: 16");
+    }
+
+    #[test]
+    fn passthrough_clean_text() {
+        let clean = "no escapes here";
+        assert_eq!(strip_ansi(clean), clean);
+    }
+
+    #[test]
+    fn preserves_utf8() {
+        let input = "\x1b[32m✓ passed\x1b[0m — done";
+        assert_eq!(strip_ansi(input), "✓ passed — done");
+    }
 }
 
