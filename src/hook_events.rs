@@ -108,6 +108,14 @@ impl AppState {
             }
         }
 
+        // Clear stale PreToolUse cache on PostToolUse — the tool completed
+        // (auto-accepted or user-accepted), so any cached data is resolved.
+        // Without this, a later Notification wrongly inherits the tool context
+        // and renders as a permission prompt instead of a generic waiting state.
+        if matches!(event.kind, HookKind::PostToolUse) {
+            session.last_pre_tool_use = None;
+        }
+
         // Populate attention context on Notification by pulling tool details
         // from the cached PreToolUse rather than scraping the terminal buffer.
         if matches!(event.kind, HookKind::Notification) {
