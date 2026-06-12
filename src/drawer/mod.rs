@@ -412,6 +412,16 @@ pub(crate) fn build_drawer_items(
         .bg(rgb(0x1e1e2e));
 
     if let Some(dt) = active_tab_view {
+        // Drawer PTYs lose the same horizontal space to the right changes
+        // panel as the main terminal does — keep their column math honest.
+        let right_inset = if state.right_panel.visible {
+            6.0 + state.right_panel.width
+        } else {
+            0.0
+        };
+        dt.update(cx, |tv, _cx| {
+            tv.right_inset = right_inset;
+        });
         drawer_panel = drawer_panel.child(dt);
     } else {
         drawer_panel = drawer_panel.child(

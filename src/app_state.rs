@@ -48,6 +48,36 @@ pub(crate) struct RightPanelState {
     pub(crate) resizing: bool,
 }
 
+/// Git changes panel (right panel body): file list + selected diff.
+/// Data is loaded asynchronously off the UI thread; the generation
+/// counters let late results from superseded loads be dropped.
+#[derive(Default)]
+pub(crate) struct ChangesPanelState {
+    /// Changed files from `git status`, staged and unstaged entries mixed
+    /// (each entry knows its side). Rebuilt wholesale on every refresh.
+    pub(crate) files: Vec<crate::git::ChangedFile>,
+    /// Selected file row: (repo-relative path, staged side).
+    pub(crate) selected: Option<(String, bool)>,
+    /// Diff text for the selected file, once loaded.
+    pub(crate) diff: Option<crate::git::FileDiff>,
+    /// Clone directory the current `files` list was loaded from. Compared
+    /// against the active session's clone dir each render to detect that a
+    /// refresh is needed (session switch, first open).
+    pub(crate) repo_dir: Option<PathBuf>,
+    /// False when `repo_dir` turned out not to be a git work tree.
+    pub(crate) is_repo: bool,
+    pub(crate) loading: bool,
+    pub(crate) diff_loading: bool,
+    /// A refresh arrived while one was in flight — re-run on completion.
+    /// Bounds git-status concurrency to one subprocess per AppState.
+    pub(crate) refresh_queued: bool,
+    /// Bumped on every refresh kick-off; async results carrying an older
+    /// generation are discarded.
+    pub(crate) refresh_gen: u64,
+    /// Same contract as `refresh_gen`, for diff loads.
+    pub(crate) diff_gen: u64,
+}
+
 /// Drawer terminal geometry + inline-rename state.
 pub(crate) struct DrawerState {
     pub(crate) height: f32,
@@ -110,6 +140,7 @@ pub(crate) struct AppState {
     pub(crate) pending_action: Option<PendingAction>,
     pub(crate) sidebar: SidebarState,
     pub(crate) right_panel: RightPanelState,
+    pub(crate) changes: ChangesPanelState,
     pub(crate) drawer: DrawerState,
     pub(crate) editor: EditorState,
     pub(crate) confirming: ConfirmationState,

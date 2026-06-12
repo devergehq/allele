@@ -128,6 +128,10 @@ pub struct TerminalView {
     /// Set by the parent before render so the PTY resize computation
     /// accounts for space that isn't available to this view.
     pub bottom_inset: f32,
+    /// Pixels reserved to the right of this terminal (e.g. the changes
+    /// panel + its resize handle). Same contract as `bottom_inset`: set by
+    /// the parent before render so PTY resize accounts for hidden space.
+    pub right_inset: f32,
     // Resize debounce — record desired size + timestamp, only commit
     // the resize to the PTY once the size has been stable for RESIZE_DEBOUNCE_MS.
     pending_resize: Option<(TermSize, Instant)>,
@@ -191,8 +195,10 @@ impl TerminalView {
                     cell_height,
                     scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     scroll_pixel_accumulator: std::sync::Arc::new(std::sync::Mutex::new(0.0)),
-                    element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
-                    element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
+                    // -1 = "not yet painted" sentinel. A real origin can be
+                    // exactly 0 (left sidebar hidden), so 0 must stay valid.
+                    element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
+                    element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
                     scrollbar_dragging: false,
                     cursor_visible: true,
                     last_keypress: Instant::now(),
@@ -213,6 +219,7 @@ impl TerminalView {
                     visible_path_spans: Vec::new(),
                     terminal_context_menu: None,
                     bottom_inset: 0.0,
+                    right_inset: 0.0,
                     pending_resize: None,
                     bell_flash_start: None,
                     frame_count: 0,
@@ -397,8 +404,9 @@ impl TerminalView {
             cell_height,
             scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scroll_pixel_accumulator: std::sync::Arc::new(std::sync::Mutex::new(0.0)),
-            element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
-            element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            // -1 = "not yet painted" sentinel — see the primary constructor.
+            element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
+            element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             scrollbar_dragging: false,
             cursor_visible: true,
             last_keypress: Instant::now(),
@@ -419,6 +427,7 @@ impl TerminalView {
             visible_path_spans: Vec::new(),
             terminal_context_menu: None,
             bottom_inset: 0.0,
+            right_inset: 0.0,
             pending_resize: None,
             bell_flash_start: None,
             frame_count: 0,
@@ -1363,8 +1372,11 @@ impl Render for TerminalView {
             let viewport = window.viewport_size();
             let origin_x = self.element_origin_x.load(std::sync::atomic::Ordering::Relaxed) as f32;
             let origin_y = self.element_origin_y.load(std::sync::atomic::Ordering::Relaxed) as f32;
-            if origin_x > 0.0 {
-                let available_width = f32::from(viewport.width) - origin_x;
+            // origin == -1 means the grid hasn't painted yet; origin 0 is a
+            // legitimate position (left sidebar hidden) and must resize.
+            if origin_x >= 0.0 && origin_y >= 0.0 {
+                let available_width =
+                    f32::from(viewport.width) - origin_x - self.right_inset;
                 let available_height = f32::from(viewport.height) - origin_y - self.bottom_inset;
                 if available_width > 100.0 && available_height > 100.0 {
                     let new_size = Self::compute_size(

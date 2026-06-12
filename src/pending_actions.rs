@@ -670,7 +670,7 @@ impl AppState {
         action: SidebarAction,
         _skip_refocus: &mut bool,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         match action {
             SidebarAction::ToggleSidebar => {
@@ -680,6 +680,21 @@ impl AppState {
             SidebarAction::ToggleRightSidebar => {
                 self.right_panel.visible = !self.right_panel.visible;
                 self.mark_settings_dirty();
+                if self.right_panel.visible {
+                    self.refresh_changes(cx);
+                }
+            }
+            SidebarAction::RefreshChanges => {
+                self.refresh_changes(cx);
+            }
+            SidebarAction::SelectChangedFile { path, staged } => {
+                self.changes.selected = Some((path.clone(), staged));
+                self.load_changes_diff(path, staged, cx);
+            }
+            SidebarAction::ClearChangesSelection => {
+                self.changes.selected = None;
+                self.changes.diff = None;
+                self.changes.diff_gen += 1; // drop any in-flight diff
             }
         }
     }

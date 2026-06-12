@@ -272,6 +272,17 @@ impl AppState {
             info!("auto-naming: trigger fired for session {session_id}");
             self.trigger_auto_naming(session_id, clone_path, cx);
         }
+
+        // Keep the changes panel live: tool activity in the displayed
+        // session likely touched the working tree. The refresh runs on the
+        // background executor and newer generations supersede older ones,
+        // so firing per-event is safe.
+        if self.right_panel.visible
+            && self.active == Some(cursor)
+            && matches!(event.kind, HookKind::PostToolUse | HookKind::Stop)
+        {
+            self.refresh_changes(cx);
+        }
     }
 
     /// Spawn a background task that reads the first prompt, generates a branch

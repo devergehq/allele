@@ -121,6 +121,13 @@ pub enum SidebarAction {
     ToggleSidebar,
     /// Toggle the right sidebar visibility.
     ToggleRightSidebar,
+    /// Re-run `git status` for the changes panel (manual refresh button,
+    /// hook-event triggers).
+    RefreshChanges,
+    /// Select a row in the changes panel and load its diff.
+    SelectChangedFile { path: String, staged: bool },
+    /// Close the changes panel's diff pane (deselect the file row).
+    ClearChangesSelection,
 }
 
 /// Project lifecycle — add, remove, relocate.

@@ -1055,6 +1055,156 @@ pub fn rename_current_branch(
     Ok(())
 }
 
+// --- Working-tree changes (changes panel) -------------------------------
+
+/// What kind of change a file has, derived from a porcelain status code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeKind {
+    Modified,
+    Added,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChange,
+    Unmerged,
+    Untracked,
+}
+
+impl ChangeKind {
+    fn from_code(code: char) -> Option<Self> {
+        match code {
+            'M' => Some(Self::Modified),
+            'A' => Some(Self::Added),
+            'D' => Some(Self::Deleted),
+            'R' => Some(Self::Renamed),
+            'C' => Some(Self::Copied),
+            'T' => Some(Self::TypeChange),
+            'U' => Some(Self::Unmerged),
+            _ => None,
+        }
+    }
+
+    /// Single-letter badge shown in the changes panel.
+    pub fn badge(&self) -> &'static str {
+        match self {
+            Self::Modified => "M",
+            Self::Added => "A",
+            Self::Deleted => "D",
+            Self::Renamed => "R",
+            Self::Copied => "C",
+            Self::TypeChange => "T",
+            Self::Unmerged => "U",
+            Self::Untracked => "?",
+        }
+    }
+}
+
+/// One changed path in the working tree. A path that is both staged and
+/// unstaged (e.g. porcelain `MM`) yields two entries, one per side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChangedFile {
+    /// Path relative to the repo root (the new path for renames).
+    pub path: String,
+    pub kind: ChangeKind,
+    /// True if this entry describes the index (staged) side.
+    pub staged: bool,
+}
+
+/// Parse `git status --porcelain -z` output into per-side entries.
+///
+/// The `-z` format is NUL-separated; rename/copy entries are followed by a
+/// second NUL-terminated field holding the original path (which we skip —
+/// the panel shows the new path).
+fn parse_porcelain_z(raw: &str) -> Vec<ChangedFile> {
+    let mut out = Vec::new();
+    let mut fields = raw.split('\0');
+    while let Some(entry) = fields.next() {
+        if entry.len() < 4 {
+            continue;
+        }
+        let mut chars = entry.chars();
+        let x = chars.next().unwrap_or(' ');
+        let y = chars.next().unwrap_or(' ');
+        // entry[2] is the separator space; path starts at byte 3.
+        let path = entry[3..].to_string();
+        if x == '?' && y == '?' {
+            out.push(ChangedFile { path, kind: ChangeKind::Untracked, staged: false });
+            continue;
+        }
+        // Rename/copy in either column carries an extra "orig path" field.
+        if x == 'R' || x == 'C' || y == 'R' || y == 'C' {
+            let _orig = fields.next();
+        }
+        // Merge conflicts use paired codes (`UU`, `AA`, `DD`, `AU`, …) that
+        // would otherwise mislead as independent staged+unstaged changes —
+        // surface them as a single unmerged entry instead.
+        if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
+            out.push(ChangedFile { path, kind: ChangeKind::Unmerged, staged: false });
+            continue;
+        }
+        if let Some(kind) = ChangeKind::from_code(x) {
+            out.push(ChangedFile { path: path.clone(), kind, staged: true });
+        }
+        if let Some(kind) = ChangeKind::from_code(y) {
+            out.push(ChangedFile { path, kind, staged: false });
+        }
+    }
+    out
+}
+
+/// Enumerate staged + unstaged + untracked changes in `repo`.
+pub fn status_changes(repo: &Path) -> Result<Vec<ChangedFile>, AlleleError> {
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("status").arg("--porcelain").arg("-z");
+    let output = run_git(cmd, "status --porcelain -z")
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
+    Ok(parse_porcelain_z(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// Hard cap on diff bytes handed to the UI — beyond this the diff is
+/// truncated and flagged, so a giant generated file can't freeze rendering.
+const DIFF_BYTE_CAP: usize = 512 * 1024;
+
+/// A file diff prepared for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDiff {
+    pub text: String,
+    pub truncated: bool,
+    pub binary: bool,
+}
+
+/// Produce a unified diff for one file. `staged` diffs the index against
+/// HEAD (`--cached`); otherwise the working tree against the index.
+/// Untracked files are diffed against /dev/null so they render as all-added.
+pub fn diff_file(repo: &Path, path: &str, kind: ChangeKind, staged: bool) -> Result<FileDiff, AlleleError> {
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("diff").arg("--no-color");
+    if kind == ChangeKind::Untracked {
+        cmd.arg("--no-index").arg("--").arg("/dev/null").arg(path);
+    } else {
+        if staged {
+            cmd.arg("--cached");
+        }
+        cmd.arg("--").arg(path);
+    }
+    // `git diff --no-index` exits 1 when the files differ, which is the
+    // expected case — accept exit codes 0 and 1, fail on anything else.
+    let output = cmd
+        .output()
+        .map_err(|e| AlleleError::Git(format!("failed to spawn git diff: {e}")))?;
+    let code = output.status.code().unwrap_or(-1);
+    if code != 0 && code != 1 {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(AlleleError::Git(format!("git diff failed: {}", stderr.trim())));
+    }
+    let bytes = &output.stdout;
+    let truncated = bytes.len() > DIFF_BYTE_CAP;
+    let slice = if truncated { &bytes[..DIFF_BYTE_CAP] } else { &bytes[..] };
+    let text = String::from_utf8_lossy(slice).to_string();
+    let binary = text.lines().any(|l| l.starts_with("Binary files") || l.starts_with("GIT binary patch"));
+    Ok(FileDiff { text, truncated, binary })
+}
+
 // --- Tests --------------------------------------------------------------
 
 #[cfg(test)]
@@ -1662,5 +1812,89 @@ mod tests {
 
         let files = ls_tree(&canonical, "HEAD");
         assert!(files.contains(&"work.txt".to_string()));
+    }
+
+    #[test]
+    fn porcelain_parse_modified_both_sides() {
+        // `MM` = staged modification + further unstaged modification
+        let entries = parse_porcelain_z("MM src/main.rs\0");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], ChangedFile {
+            path: "src/main.rs".into(), kind: ChangeKind::Modified, staged: true,
+        });
+        assert_eq!(entries[1], ChangedFile {
+            path: "src/main.rs".into(), kind: ChangeKind::Modified, staged: false,
+        });
+    }
+
+    #[test]
+    fn porcelain_parse_untracked() {
+        let entries = parse_porcelain_z("?? notes.md\0");
+        assert_eq!(entries, vec![ChangedFile {
+            path: "notes.md".into(), kind: ChangeKind::Untracked, staged: false,
+        }]);
+    }
+
+    #[test]
+    fn porcelain_parse_rename_skips_orig_path() {
+        // Rename: new path in entry, original path as the following field.
+        let entries = parse_porcelain_z("R  new_name.rs\0old_name.rs\0?? other.txt\0");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], ChangedFile {
+            path: "new_name.rs".into(), kind: ChangeKind::Renamed, staged: true,
+        });
+        assert_eq!(entries[1], ChangedFile {
+            path: "other.txt".into(), kind: ChangeKind::Untracked, staged: false,
+        });
+    }
+
+    #[test]
+    fn porcelain_parse_path_with_spaces() {
+        let entries = parse_porcelain_z(" M dir name/file with spaces.txt\0");
+        assert_eq!(entries, vec![ChangedFile {
+            path: "dir name/file with spaces.txt".into(),
+            kind: ChangeKind::Modified, staged: false,
+        }]);
+    }
+
+    #[test]
+    fn porcelain_parse_conflicts_as_unmerged() {
+        for raw in ["UU both.rs\0", "AA both.rs\0", "DD both.rs\0", "AU both.rs\0", "UD both.rs\0"] {
+            let entries = parse_porcelain_z(raw);
+            assert_eq!(entries, vec![ChangedFile {
+                path: "both.rs".into(), kind: ChangeKind::Unmerged, staged: false,
+            }], "raw was {raw:?}");
+        }
+    }
+
+    #[test]
+    fn porcelain_parse_empty_and_ignored() {
+        assert!(parse_porcelain_z("").is_empty());
+        // `!!` (ignored) entries map to no change kind on either side.
+        assert!(parse_porcelain_z("!! target/\0").is_empty());
+    }
+
+    #[test]
+    fn status_changes_real_repo() {
+        let (_dir, canonical) = make_canonical("original\n");
+        fs::write(canonical.join("file.txt"), "modified\n").unwrap();
+        fs::write(canonical.join("new.txt"), "untracked\n").unwrap();
+        let changes = status_changes(&canonical).unwrap();
+        assert!(changes.contains(&ChangedFile {
+            path: "file.txt".into(), kind: ChangeKind::Modified, staged: false,
+        }));
+        assert!(changes.contains(&ChangedFile {
+            path: "new.txt".into(), kind: ChangeKind::Untracked, staged: false,
+        }));
+    }
+
+    #[test]
+    fn diff_file_untracked_renders_as_added() {
+        let (_dir, canonical) = make_canonical("x\n");
+        fs::write(canonical.join("brand_new.txt"), "hello\nworld\n").unwrap();
+        let diff = diff_file(&canonical, "brand_new.txt", ChangeKind::Untracked, false).unwrap();
+        assert!(!diff.binary);
+        assert!(diff.text.contains("+hello"));
+        assert!(diff.text.contains("+world"));
     }
 }

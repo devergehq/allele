@@ -2,6 +2,7 @@ mod actions;
 mod agents;
 mod app_state;
 mod browser;
+mod changes;
 mod terminal;
 mod sidebar;
 mod clone;
@@ -37,7 +38,8 @@ use actions::{
     SettingsAction, SidebarAction,
 };
 use app_state::{
-    AppState, ConfirmationState, DrawerState, EditorState, MainTab, RichState, RightPanelState,
+    AppState, ChangesPanelState, ConfirmationState, DrawerState, EditorState, MainTab, RichState,
+    RightPanelState,
     SidebarState, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
 };
 use gpui::*;
@@ -2212,6 +2214,7 @@ fn main() {
                                 .max(RIGHT_SIDEBAR_MIN_WIDTH),
                             resizing: false,
                         },
+                        changes: ChangesPanelState::default(),
                         drawer: DrawerState {
                             height: settings_for_window.drawer_height
                                 .max(DRAWER_MIN_HEIGHT),
@@ -2373,6 +2376,11 @@ impl Render for AppState {
                     && claude_session_history_exists(&s.id)
             })
             .unwrap_or(false);
+
+        // Changes panel staleness check — kicks a background `git status`
+        // when the panel is visible but showing data for a different
+        // session's clone (first open, session switch). Guarded inside.
+        self.ensure_changes_fresh(cx);
 
         let sidebar_w = self.sidebar.width;
         let sidebar_visible = self.sidebar.visible;
@@ -2559,8 +2567,16 @@ impl Render for AppState {
                                 } else {
                                     0.0
                                 };
+                                // Same for the right changes panel: its width +
+                                // 6px resize handle are unavailable to the PTY.
+                                let right_inset = if right_sidebar_visible {
+                                    6.0 + right_sidebar_w
+                                } else {
+                                    0.0
+                                };
                                 tv.update(cx, |tv, _cx| {
                                     tv.bottom_inset = inset;
+                                    tv.right_inset = right_inset;
                                 });
                                 main_area = main_area.child(tv);
                             } else {
@@ -2852,41 +2868,77 @@ impl Render for AppState {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_size(px(13.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child("Inspector"),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(FontWeight::BOLD)
+                                            .child("Changes"),
+                                    )
+                                    .child({
+                                        let staged = self.changes.files.iter().filter(|f| f.staged).count();
+                                        let unstaged = self.changes.files.len() - staged;
+                                        div()
+                                            .text_size(px(10.0))
+                                            .text_color(rgb(0x6c7086))
+                                            .child(if self.changes.loading {
+                                                "…".to_string()
+                                            } else {
+                                                format!("{staged} staged · {unstaged} unstaged")
+                                            })
+                                    }),
                             )
                             .child(
                                 div()
-                                    .id("right-sidebar-close-btn")
-                                    .cursor_pointer()
-                                    .px(px(6.0))
-                                    .py(px(2.0))
-                                    .rounded(px(4.0))
-                                    .text_size(px(14.0))
-                                    .text_color(rgb(0x6c7086))
-                                    .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
-                                    .child("×")
-                                    .tooltip(|_window, cx| {
-                                        cx.new(|_| SimpleTooltip { text: "Close inspector".into() }).into()
-                                    })
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                        this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
-                                        cx.notify();
-                                    })),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(2.0))
+                                    .child(
+                                        div()
+                                            .id("changes-refresh-btn")
+                                            .cursor_pointer()
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .rounded(px(4.0))
+                                            .text_size(px(12.0))
+                                            .text_color(rgb(0x6c7086))
+                                            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                                            .child("↻")
+                                            .tooltip(|_window, cx| {
+                                                cx.new(|_| SimpleTooltip { text: "Refresh changes".into() }).into()
+                                            })
+                                            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                                                this.pending_action = Some(SidebarAction::RefreshChanges.into());
+                                                cx.notify();
+                                            })),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("right-sidebar-close-btn")
+                                            .cursor_pointer()
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .rounded(px(4.0))
+                                            .text_size(px(14.0))
+                                            .text_color(rgb(0x6c7086))
+                                            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                                            .child("×")
+                                            .tooltip(|_window, cx| {
+                                                cx.new(|_| SimpleTooltip { text: "Close changes panel".into() }).into()
+                                            })
+                                            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                                                this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
+                                                cx.notify();
+                                            })),
+                                    ),
                             ),
                     )
-                    // Body placeholder
-                    .child(
-                        div()
-                            .flex_1()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .text_size(px(11.0))
-                            .text_color(rgb(0x45475a))
-                            .child("No inspector content"),
-                    ),
+                    // Body: git changes file list + diff pane
+                    .child(self.render_changes_panel_body(cx)),
             );
         }
 
