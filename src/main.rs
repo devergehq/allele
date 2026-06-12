@@ -2476,8 +2476,9 @@ impl Render for AppState {
                     // Session list
                     .child(
                         div()
+                            .id("sidebar-session-list")
                             .flex_1()
-                            .overflow_hidden()
+                            .overflow_y_scroll()
                             .children(sidebar_items),
                     )
                     // Status bar — attention summary lives here.
