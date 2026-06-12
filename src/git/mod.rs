@@ -935,11 +935,7 @@ pub fn slugify(input: &str, max_len: usize) -> String {
         .filter(|s| !s.is_empty())
         .collect::<Vec<_>>()
         .join("-");
-    let truncated = if slug.len() > max_len {
-        &slug[..max_len]
-    } else {
-        &slug
-    };
+    let truncated: String = slug.chars().take(max_len).collect();
     truncated.trim_end_matches('-').to_string()
 }
 

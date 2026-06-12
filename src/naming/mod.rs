@@ -179,8 +179,8 @@ pub fn slug_to_label(slug: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join(" ");
-    if full.len() > 40 {
-        let mut truncated = full[..40].to_string();
+    if full.chars().count() > 40 {
+        let mut truncated: String = full.chars().take(40).collect();
         if let Some(last_space) = truncated.rfind(' ') {
             truncated.truncate(last_space);
         }
@@ -195,11 +195,7 @@ pub fn slug_to_label(slug: &str) -> String {
 // ---------------------------------------------------------------------------
 
 fn truncate_prompt(prompt: &str, max_chars: usize) -> String {
-    if prompt.len() <= max_chars {
-        prompt.to_string()
-    } else {
-        prompt[..max_chars].to_string()
-    }
+    prompt.chars().take(max_chars).collect()
 }
 
 fn system_prompt(count: usize) -> String {
