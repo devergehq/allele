@@ -49,6 +49,25 @@ impl AppState {
                         this.pending_action = Some(DrawerAction::ToggleDrawer.into());
                         cx.notify();
                     }
+                    TerminalEvent::PrevSession | TerminalEvent::NextSession => {
+                        if let Some(cursor) = this.active {
+                            if let Some(session) = this.projects
+                                .get(cursor.project_idx)
+                                .and_then(|p| p.sessions.get(cursor.session_idx))
+                            {
+                                let len = session.drawer_tabs.len();
+                                if len > 1 {
+                                    let cur = session.drawer_active_tab;
+                                    let target = match event {
+                                        TerminalEvent::NextSession => (cur + 1) % len,
+                                        _ => (cur + len - 1) % len,
+                                    };
+                                    this.pending_action = Some(DrawerAction::SwitchDrawerTab(target).into());
+                                    cx.notify();
+                                }
+                            }
+                        }
+                    }
                     TerminalEvent::AdjustFontSize(delta) => {
                         let new_size = clamp_font_size(this.user_settings.font_size + delta);
                         this.pending_action = Some(SettingsAction::UpdateFontSize(new_size).into());
