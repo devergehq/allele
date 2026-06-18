@@ -198,6 +198,11 @@ impl AppState {
                 self.resume_session(cursor, window, cx);
                 self.sync_browser_to_active();
             }
+            SessionAction::SpawnStartupTerminals(cursor) => {
+                if let Some((_, cfg, port, clone_path)) = self.pending_startup.take() {
+                    self.spawn_terminals_and_preview(cursor, &cfg, port, &clone_path, window, cx);
+                }
+            }
             SessionAction::EditSession { project_idx, session_idx } => {
                 *skip_refocus = true;
                 self.open_edit_session_modal(project_idx, session_idx, window, cx);

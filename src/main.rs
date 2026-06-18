@@ -1305,29 +1305,111 @@ impl AppState {
             .filter(|s| !s.trim().is_empty());
 
         if let Some(startup_cmd) = startup {
+            // Show initial status in sidebar while startup runs.
+            if let Some(session) = self
+                .projects
+                .get_mut(cursor.project_idx)
+                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+            {
+                session.startup_status = Some("Starting…".into());
+            }
+            cx.notify();
+
             let clone_for_task = clone_path.clone();
-            cx.spawn_in(window, async move |this, cx| {
-                let status = cx
-                    .background_executor()
-                    .spawn(async move {
-                        std::process::Command::new("sh")
-                            .arg("-c")
-                            .arg(&startup_cmd)
-                            .current_dir(&clone_for_task)
-                            .status()
+            cx.spawn(async move |this, cx| {
+                let (tx, rx) = std::sync::mpsc::channel::<String>();
+
+                // Run the startup command on the background executor.
+                // Lines from stdout are sent via the channel so the UI
+                // thread can poll them without blocking.
+                cx.background_executor()
+                    .spawn({
+                        let cmd = startup_cmd.clone();
+                        let cwd = clone_for_task.clone();
+                        async move {
+                            let child = std::process::Command::new("sh")
+                                .arg("-c")
+                                .arg(&cmd)
+                                .current_dir(&cwd)
+                                .stdout(std::process::Stdio::piped())
+                                .stderr(std::process::Stdio::piped())
+                                .spawn();
+                            match child {
+                                Ok(mut child) => {
+                                    if let Some(stdout) = child.stdout.take() {
+                                        use std::io::BufRead;
+                                        for line in std::io::BufReader::new(stdout).lines().flatten() {
+                                            let _ = tx.send(line);
+                                        }
+                                    }
+                                    match child.wait() {
+                                        Ok(s) if !s.success() => {
+                                            warn!("allele: startup command exited with {s} — continuing");
+                                        }
+                                        Err(e) => {
+                                            warn!("allele: failed to wait on startup command: {e} — continuing");
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!("allele: failed to run startup command: {e} — continuing");
+                                }
+                            }
+                            drop(tx);
+                        }
                     })
-                    .await;
-                match status {
-                    Ok(s) if !s.success() => {
-                        warn!("allele: startup command exited with {s} — continuing");
+                    .detach();
+
+                // Poll the channel for status lines and update the sidebar.
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(100))
+                        .await;
+
+                    let mut last_line = None;
+                    let mut done = false;
+                    loop {
+                        match rx.try_recv() {
+                            Ok(line) => { last_line = Some(line); }
+                            Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                                done = true;
+                                break;
+                            }
+                        }
                     }
-                    Err(e) => {
-                        warn!("allele: failed to run startup command: {e} — continuing");
+                    if let Some(line) = last_line {
+                        let trimmed = line.trim().to_string();
+                        if !trimmed.is_empty() {
+                            let _ = this.update(cx, |this: &mut Self, cx| {
+                                if let Some(session) = this
+                                    .projects
+                                    .get_mut(cursor.project_idx)
+                                    .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                                {
+                                    session.startup_status = Some(trimmed);
+                                }
+                                cx.notify();
+                            });
+                        }
                     }
-                    _ => {}
+                    if done { break; }
                 }
-                let _ = this.update_in(cx, move |this: &mut Self, window, cx| {
-                    this.spawn_terminals_and_preview(cursor, &cfg, port, &clone_path, window, cx);
+
+                // Clear status and spawn terminals — needs window access,
+                // so we schedule a pending action that the render loop picks up.
+                let _ = this.update(cx, move |this: &mut Self, cx| {
+                    if let Some(session) = this
+                        .projects
+                        .get_mut(cursor.project_idx)
+                        .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                    {
+                        session.startup_status = None;
+                    }
+                    this.pending_startup = Some((cursor, cfg, port, clone_path));
+                    this.pending_action = Some(SessionAction::SpawnStartupTerminals(cursor).into());
+                    cx.notify();
                 });
             })
             .detach();
@@ -2255,6 +2337,7 @@ fn main() {
                         naming_modal: None,
                         sidebar_filter_input,
                         sidebar_filter: String::new(),
+                        pending_startup: None,
                         state_dirty: false,
                         settings_dirty: false,
                         repos: repositories::Repositories::production(),

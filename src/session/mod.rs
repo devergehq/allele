@@ -153,6 +153,9 @@ pub struct Session {
     /// the hook payload when a Notification fires (AwaitingInput), cleared
     /// when the session transitions to Running or any non-attention state.
     pub attention_context: Option<AttentionContext>,
+    /// Transient status line from the allele.json `startup` command.
+    /// Updated line-by-line as the script runs, cleared when it finishes.
+    pub startup_status: Option<String>,
 }
 
 impl Session {
@@ -187,6 +190,7 @@ impl Session {
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
+            startup_status: None,
         }
     }
 
@@ -228,6 +232,7 @@ impl Session {
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
+            startup_status: None,
         }
     }
 

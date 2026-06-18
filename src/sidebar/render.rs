@@ -599,6 +599,7 @@ pub(crate) fn build_sidebar_items(
                 .child({
                     let session_pinned = session.pinned;
                     let session_comment = session.comment.clone();
+                    let session_startup_status = session.startup_status.clone();
                     let mut label_row = div()
                         .flex()
                         .flex_row()
@@ -648,7 +649,18 @@ pub(crate) fn build_sidebar_items(
                         .flex_col()
                         .gap(px(1.0))
                         .child(label_row);
-                    if let Some(comment) = session_comment {
+                    if let Some(ref status) = session_startup_status {
+                        info_col = info_col.child(
+                            div()
+                                .pl(px(16.0))
+                                .text_size(px(10.0))
+                                .text_color(rgb(0xf9e2af))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(status.clone()),
+                        );
+                    } else if let Some(comment) = session_comment {
                         info_col = info_col.child(
                             div()
                                 .pl(px(16.0))

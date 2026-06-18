@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use gpui::{Entity, FocusHandle, Pixels, Point, WindowHandle};
 
 use crate::actions::{PendingAction, SessionCursor};
+use crate::config;
 use crate::project::Project;
 use crate::settings::Settings;
 use crate::{
@@ -185,6 +186,10 @@ pub(crate) struct AppState {
     /// Loaded from state.json on startup, appended on submit, written back
     /// on every save_state. Filtered by project when the overlay opens.
     pub(crate) scratch_pad_history: Vec<state::ScratchPadEntry>,
+    /// Transient storage for a startup command that finished on a non-window
+    /// context. The `SpawnStartupTerminals` action picks this up in the
+    /// next render tick where `window` is available.
+    pub(crate) pending_startup: Option<(SessionCursor, config::ProjectConfig, Option<u16>, PathBuf)>,
     /// Set by `mark_state_dirty()`; drained by `checkpoint_persistence()`
     /// at the end of each render tick. Coalesces N mutations-per-frame
     /// into at most one state.json write. See ARCHITECTURE.md §3.4.

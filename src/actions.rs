@@ -67,6 +67,9 @@ pub enum SessionAction {
     /// Auto-resume a session after launch. Fires once from the first render
     /// tick so `resume_session` has a valid `window` / `cx`.
     ResumeSession { project_idx: usize, session_idx: usize },
+    /// Spawn drawer terminals after an async startup command completes.
+    /// The config is stored transiently on `AppState.pending_startup`.
+    SpawnStartupTerminals(SessionCursor),
     /// Open the edit-session modal for a given session.
     EditSession { project_idx: usize, session_idx: usize },
     /// Reveal the session's clone path (or source path) in Finder.
