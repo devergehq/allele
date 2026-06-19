@@ -907,6 +907,13 @@ impl AppState {
                 };
                 snapshot.save();
             }
+            SettingsAction::UpdateProjectSettings { project_idx, settings } => {
+                *skip_refocus = true;
+                if let Some(project) = self.projects.get_mut(project_idx) {
+                    project.settings = settings;
+                }
+                self.mark_settings_dirty();
+            }
         }
     }
 

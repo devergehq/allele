@@ -10,17 +10,19 @@
 //! nothing extra". A malformed file is also returned as `None`, with a
 //! warning on stderr so the author can see why it was ignored.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::net::TcpListener;
 use std::path::Path;
 use tracing::warn;
+
+use crate::settings::ProjectSettings;
 
 const PORT_RANGE_START: u16 = 40000;
 const PORT_RANGE_END: u16 = 49999;
 const PLACEHOLDER_PORT: &str = "{{unique_port}}";
 const PLACEHOLDER_FOLDER: &str = "{{folder}}";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TerminalCfg {
     pub label: String,
     #[serde(default)]
@@ -58,6 +60,9 @@ impl ProjectConfig {
     /// Load `<project_root>/allele.json`. Returns `None` for missing,
     /// unreadable, or malformed files — in the malformed case a single
     /// warning line is written to stderr.
+    ///
+    /// This is the backwards-compatible path. The preferred source is
+    /// `from_settings()` which reads from `~/.allele/settings.json`.
     pub fn load(project_root: &Path) -> Option<Self> {
         let path = project_root.join("allele.json");
         let contents = std::fs::read_to_string(&path).ok()?;
@@ -71,6 +76,24 @@ impl ProjectConfig {
                 None
             }
         }
+    }
+
+    /// Build a `ProjectConfig` from the orchestration fields stored in
+    /// `ProjectSettings` (persisted in `~/.allele/settings.json`).
+    ///
+    /// Returns `None` when the user hasn't configured any orchestration
+    /// for this project (no terminals and no startup command).
+    pub fn from_settings(settings: &ProjectSettings) -> Option<Self> {
+        if settings.terminals.is_empty() && settings.startup.is_none() {
+            return None;
+        }
+        Some(Self {
+            terminals: settings.terminals.clone(),
+            preview: None,
+            agent: None,
+            startup: settings.startup.clone(),
+            shutdown: settings.shutdown.clone(),
+        })
     }
 }
 
@@ -88,6 +111,25 @@ pub fn allocate_port() -> Option<u16> {
          {{unique_port}} will be left unsubstituted"
     );
     None
+}
+
+/// Resolve a startup/shutdown command path. If the command starts with
+/// a relative path component (no leading `/` or `~`), prepend the
+/// project's script directory at `~/.allele/projects/{name}/scripts/`.
+pub fn resolve_script_command(cmd: &str, project_name: &str) -> String {
+    let trimmed = cmd.trim();
+    if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('~') {
+        return trimmed.to_string();
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    let scripts_dir = format!("{home}/.allele/projects/{project_name}/scripts");
+    // If the first token looks like a relative path to a script, resolve it
+    let first_token = trimmed.split_whitespace().next().unwrap_or("");
+    if first_token.contains('/') || first_token.ends_with(".sh") {
+        let resolved = format!("{scripts_dir}/{trimmed}");
+        return resolved;
+    }
+    trimmed.to_string()
 }
 
 /// Replace every occurrence of `{{unique_port}}` with `port` (when

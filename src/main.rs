@@ -1275,13 +1275,24 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let clone_path = self
-            .projects
-            .get(cursor.project_idx)
-            .and_then(|p| p.sessions.get(cursor.session_idx))
-            .and_then(|s| s.clone_path.clone());
+        let (clone_path, project_settings) = match self.projects.get(cursor.project_idx) {
+            Some(project) => {
+                let cp = project
+                    .sessions
+                    .get(cursor.session_idx)
+                    .and_then(|s| s.clone_path.clone());
+                (cp, project.settings.clone())
+            }
+            None => return,
+        };
         let Some(clone_path) = clone_path else { return };
-        let Some(cfg) = config::ProjectConfig::load(&clone_path) else { return };
+        // allele.json in the project root takes precedence (backwards compat),
+        // then fall back to orchestration fields in project settings.
+        let Some(cfg) = config::ProjectConfig::load(&clone_path)
+            .or_else(|| config::ProjectConfig::from_settings(&project_settings))
+        else {
+            return;
+        };
 
         let port = config::allocate_port();
 
@@ -1298,10 +1309,16 @@ impl AppState {
             session.allocated_port = port;
         }
 
+        let project_name = self
+            .projects
+            .get(cursor.project_idx)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
         let startup = cfg
             .startup
             .as_ref()
-            .map(|s| config::substitute(s, port, &clone_path))
+            .map(|s| config::resolve_script_command(s, &project_name))
+            .map(|s| config::substitute(&s, port, &clone_path))
             .filter(|s| !s.trim().is_empty());
 
         if let Some(startup_cmd) = startup {

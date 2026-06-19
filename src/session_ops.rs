@@ -996,11 +996,15 @@ impl AppState {
         // acceptable. Failure is logged and teardown continues so a
         // broken hook can't strand the clone on disk.
         if let Some(clone_path) = clone_path.as_ref() {
-            if let Some(cfg) = config::ProjectConfig::load(clone_path) {
+            let cfg = config::ProjectConfig::load(clone_path)
+                .or_else(|| config::ProjectConfig::from_settings(&project.settings));
+            if let Some(cfg) = cfg {
+                let project_name = project.name.clone();
                 let shutdown = cfg
                     .shutdown
                     .as_ref()
-                    .map(|s| config::substitute(s, removed.allocated_port, clone_path))
+                    .map(|s| config::resolve_script_command(s, &project_name))
+                    .map(|s| config::substitute(&s, removed.allocated_port, clone_path))
                     .filter(|s| !s.trim().is_empty());
                 if let Some(cmd) = shutdown {
                     match std::process::Command::new("sh")

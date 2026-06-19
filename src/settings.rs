@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tracing::warn;
 
+use crate::config::TerminalCfg;
 use crate::naming::NamingConfig;
 
 /// Which built-in adapter drives an agent's command building. `Generic`
@@ -84,6 +85,26 @@ pub struct ProjectSettings {
     /// Remote name for fetch/rebase operations. `None` = `"origin"`.
     #[serde(default)]
     pub remote: Option<String>,
+
+    // --- session orchestration -----------------------------------------------
+
+    /// Drawer terminals spawned when a session is created. Each entry
+    /// becomes a tab in the bottom drawer with the given label and
+    /// command. `{{unique_port}}` and `{{folder}}` are substituted.
+    #[serde(default)]
+    pub terminals: Vec<TerminalCfg>,
+
+    /// One-shot command run before terminals are spawned. Must complete
+    /// before the session materialises. Supports `{{unique_port}}` and
+    /// `{{folder}}` substitution. Relative paths resolve against
+    /// `~/.allele/projects/{project-name}/scripts/`.
+    #[serde(default)]
+    pub startup: Option<String>,
+
+    /// One-shot command run when the session is discarded. Relative
+    /// paths resolve the same way as `startup`.
+    #[serde(default)]
+    pub shutdown: Option<String>,
 }
 
 impl Default for ProjectSettings {
@@ -93,6 +114,9 @@ impl Default for ProjectSettings {
             merge_strategy: MergeStrategy::default(),
             rebase_before_merge: true,
             remote: None,
+            terminals: Vec::new(),
+            startup: None,
+            shutdown: None,
         }
     }
 }

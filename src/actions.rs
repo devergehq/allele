@@ -182,6 +182,12 @@ pub enum SettingsAction {
     /// Update the naming configuration (mode, models). Emitted by the
     /// Settings window naming section.
     UpdateNamingConfig(naming::NamingConfig),
+    /// Update a project's orchestration settings (terminals, startup, shutdown).
+    /// Emitted by the Settings window Projects section.
+    UpdateProjectSettings {
+        project_idx: usize,
+        settings: settings::ProjectSettings,
+    },
 }
 
 /// Chrome browser integration — sync / close linked tabs.
