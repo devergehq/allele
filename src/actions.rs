@@ -188,6 +188,10 @@ pub enum SettingsAction {
         project_idx: usize,
         settings: settings::ProjectSettings,
     },
+    /// Toggle the global base infrastructure (Traefik + shared network).
+    /// When enabled, brings it up; when disabled, tears it down. Both run
+    /// on a background task. Emitted by the Settings window.
+    UpdateBaseInfra(bool),
 }
 
 /// Chrome browser integration — sync / close linked tabs.

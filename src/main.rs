@@ -1,6 +1,7 @@
 mod actions;
 mod agents;
 mod app_state;
+mod base_infra;
 mod browser;
 mod changes;
 mod terminal;
@@ -2195,7 +2196,7 @@ fn main() {
                             // "attempted to dereference an ArenaRef after
                             // its Arena was cleared".
                             let Some(strong) = handle.upgrade() else { return };
-                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions, naming_claude_model, naming_opencode_model) = strong.update(cx, |state: &mut AppState, _cx| {
+                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions, naming_claude_model, naming_opencode_model, base_infra_enabled) = strong.update(cx, |state: &mut AppState, _cx| {
                                 (
                                     state.settings_window,
                                     state.user_settings.session_cleanup_paths.clone(),
@@ -2212,6 +2213,7 @@ fn main() {
                                     state.user_settings.promote_attention_sessions,
                                     state.user_settings.naming.claude.model.clone().unwrap_or_default(),
                                     state.user_settings.naming.opencode.model.clone().unwrap_or_default(),
+                                    state.user_settings.base_infra_enabled,
                                 )
                             });
 
@@ -2227,7 +2229,7 @@ fn main() {
                             }
 
                             let weak = handle.clone();
-                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions, naming_claude_model, naming_opencode_model) {
+                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions, naming_claude_model, naming_opencode_model, base_infra_enabled) {
                                 Ok(new_handle) => {
                                     strong
                                         .update(cx, |state: &mut AppState, _cx| {
@@ -2297,6 +2299,20 @@ fn main() {
                         }
                     }).detach();
 
+                    // Auto-start the base infrastructure (Traefik + network)
+                    // if enabled. Fire-and-forget on the background executor —
+                    // it must not block window creation, and failures are
+                    // logged (the user sees status when they open Settings).
+                    if settings_for_window.base_infra_enabled {
+                        cx.background_executor()
+                            .spawn(async move {
+                                if let Err(e) = crate::base_infra::up() {
+                                    warn!("base-infra auto-start failed: {e}");
+                                }
+                            })
+                            .detach();
+                    }
+
                     AppState {
                         projects,
                         active: initial_active,
@@ -2355,6 +2371,7 @@ fn main() {
                         sidebar_filter_input,
                         sidebar_filter: String::new(),
                         pending_startup: None,
+                        base_infra_status: None,
                         state_dirty: false,
                         settings_dirty: false,
                         repos: repositories::Repositories::production(),

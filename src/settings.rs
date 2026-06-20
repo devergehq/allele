@@ -219,6 +219,14 @@ pub struct Settings {
     #[serde(default)]
     pub browser_integration_enabled: bool,
 
+    // --- base infrastructure -------------------------------------------------
+    /// When true, Allele manages a global Traefik reverse proxy + shared
+    /// `allele` Docker network for multi-session HTTPS routing. Brought up
+    /// on launch and via the settings toggle. Off by default — opt-in, and
+    /// requires Docker. See `src/base_infra`.
+    #[serde(default)]
+    pub base_infra_enabled: bool,
+
     // --- coding agents -------------------------------------------------------
     /// Configured coding agents. Empty on legacy settings files — seeded
     /// via `ensure_agents_seeded` on first load.
@@ -355,6 +363,7 @@ impl Default for Settings {
             session_cleanup_paths: default_session_cleanup_paths(),
             external_editor_command: None,
             browser_integration_enabled: false,
+            base_infra_enabled: false,
             agents: Vec::new(),
             default_agent: None,
             git_pull_before_new_session: false,

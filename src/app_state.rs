@@ -190,6 +190,10 @@ pub(crate) struct AppState {
     /// context. The `SpawnStartupTerminals` action picks this up in the
     /// next render tick where `window` is available.
     pub(crate) pending_startup: Option<(SessionCursor, config::ProjectConfig, Option<u16>, PathBuf)>,
+    /// Transient status line for the base-infra (Traefik) lifecycle, shown
+    /// in the Settings → Infrastructure pane. e.g. "Starting…", "Running",
+    /// or an error message.
+    pub(crate) base_infra_status: Option<String>,
     /// Set by `mark_state_dirty()`; drained by `checkpoint_persistence()`
     /// at the end of each render tick. Coalesces N mutations-per-frame
     /// into at most one state.json write. See ARCHITECTURE.md §3.4.

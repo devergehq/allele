@@ -914,6 +914,36 @@ impl AppState {
                 }
                 self.mark_settings_dirty();
             }
+            SettingsAction::UpdateBaseInfra(enabled) => {
+                *skip_refocus = true;
+                self.user_settings.base_infra_enabled = enabled;
+                self.mark_settings_dirty();
+                self.base_infra_status =
+                    Some(if enabled { "Starting…".into() } else { "Stopping…".into() });
+                cx.spawn(async move |this, cx| {
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            if enabled {
+                                crate::base_infra::up()
+                            } else {
+                                crate::base_infra::down()
+                            }
+                        })
+                        .await;
+                    let status = match result {
+                        Ok(()) => {
+                            if enabled { "Running".to_string() } else { "Stopped".to_string() }
+                        }
+                        Err(e) => e,
+                    };
+                    let _ = this.update(cx, |this: &mut AppState, cx| {
+                        this.base_infra_status = Some(status);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
         }
     }
 

@@ -26,6 +26,7 @@ use crate::text_input::{TextInput, TextInputEvent};
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
     Projects,
+    Infrastructure,
     Sessions,
     Agents,
     Naming,
@@ -38,6 +39,7 @@ impl Section {
     fn label(self) -> &'static str {
         match self {
             Section::Projects => "Projects",
+            Section::Infrastructure => "Infrastructure",
             Section::Sessions => "Sessions",
             Section::Agents => "Agents",
             Section::Naming => "Naming",
@@ -92,6 +94,8 @@ pub struct SettingsWindowState {
     /// settings.json (which the app overwrites on every auto-save).
     naming_claude_model_input: Entity<TextInput>,
     naming_opencode_model_input: Entity<TextInput>,
+    /// Mirrored base-infra enabled toggle.
+    base_infra_enabled: bool,
     /// Selected project index for the Projects pane.
     projects_selected: Option<usize>,
     /// Text inputs for the selected project's startup/shutdown commands.
@@ -116,6 +120,7 @@ impl SettingsWindowState {
         initial_promote_attention_sessions: bool,
         initial_naming_claude_model: String,
         initial_naming_opencode_model: String,
+        initial_base_infra_enabled: bool,
     ) -> Self {
         let draft_input = cx.new(|cx| {
             TextInput::new(cx, "", "Add a path (e.g. tmp/pids/server.pid)")
@@ -217,6 +222,7 @@ impl SettingsWindowState {
             promote_attention_sessions: initial_promote_attention_sessions,
             naming_claude_model_input,
             naming_opencode_model_input,
+            base_infra_enabled: initial_base_infra_enabled,
             projects_selected: None,
             project_startup_input,
             project_shutdown_input,
@@ -225,6 +231,18 @@ impl SettingsWindowState {
         };
         s.sync_agent_inputs(cx);
         s
+    }
+
+    // --- base infrastructure --------------------------------------------
+
+    fn push_base_infra(&self, enabled: bool, cx: &mut Context<Self>) {
+        self.app
+            .update(cx, |state: &mut AppState, cx| {
+                state.pending_action =
+                    Some(crate::SettingsAction::UpdateBaseInfra(enabled).into());
+                cx.notify();
+            })
+            .ok();
     }
 
     // --- project orchestration ------------------------------------------
@@ -580,6 +598,7 @@ impl Render for SettingsWindowState {
 fn render_sidebar(selected: Section, cx: &mut Context<SettingsWindowState>) -> impl IntoElement {
     let sections = [
         Section::Projects,
+        Section::Infrastructure,
         Section::Sessions,
         Section::Agents,
         Section::Naming,
@@ -630,6 +649,7 @@ fn render_pane(
 ) -> AnyElement {
     match this.selected {
         Section::Projects => render_projects_pane(this, cx).into_any_element(),
+        Section::Infrastructure => render_infrastructure_pane(this, cx).into_any_element(),
         Section::Sessions => render_sessions_pane(this, cx).into_any_element(),
         Section::Agents => render_agents_pane(this, cx).into_any_element(),
         Section::Naming => render_naming_pane(this, cx).into_any_element(),
@@ -1020,6 +1040,145 @@ fn render_editor_pane(
                 ),
         )
         .child(input)
+}
+
+fn render_infrastructure_pane(
+    this: &mut SettingsWindowState,
+    cx: &mut Context<SettingsWindowState>,
+) -> impl IntoElement {
+    let enabled = this.base_infra_enabled;
+    let status = this
+        .app
+        .upgrade()
+        .and_then(|app| app.read(cx).base_infra_status.clone());
+    let dynamic_path = crate::base_infra::dynamic_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let certs_path = crate::base_infra::certs_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    let toggle = div()
+        .id("base-infra-toggle")
+        .cursor_pointer()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, _window, cx| {
+                this.base_infra_enabled = !this.base_infra_enabled;
+                this.push_base_infra(this.base_infra_enabled, cx);
+                cx.notify();
+            }),
+        )
+        .child(
+            div()
+                .w(px(32.0))
+                .h(px(18.0))
+                .rounded(px(9.0))
+                .bg(if enabled { rgb(0x89b4fa) } else { rgb(0x45475a) })
+                .flex()
+                .items_center()
+                .justify_start()
+                .px(px(2.0))
+                .child(
+                    div()
+                        .w(px(14.0))
+                        .h(px(14.0))
+                        .rounded(px(7.0))
+                        .bg(rgb(0x1e1e2e))
+                        .ml(if enabled { px(14.0) } else { px(0.0) }),
+                ),
+        )
+        .child(
+            div()
+                .text_size(px(12.0))
+                .text_color(rgb(0xcdd6f4))
+                .child("Enable global Traefik reverse proxy + shared network"),
+        );
+
+    let status_line = status.map(|s| {
+        let color = if s.contains("Running") {
+            rgb(0xa6e3a1)
+        } else if s.contains("Starting") || s.contains("Stopping") || s.contains("Stopped") {
+            rgb(0xf9e2af)
+        } else {
+            rgb(0xf38ba8) // error
+        };
+        div()
+            .text_size(px(11.0))
+            .text_color(color)
+            .child(SharedString::from(format!("Status: {s}")))
+    });
+
+    let path_row = |label: &str, value: &str| -> AnyElement {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(2.0))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(rgb(0x6c7086))
+                    .child(SharedString::from(label.to_string())),
+            )
+            .child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(rgb(0xa6adc8))
+                    .child(SharedString::from(value.to_string())),
+            )
+            .into_any_element()
+    };
+
+    let mut pane = div()
+        .id("infrastructure-pane")
+        .flex_1()
+        .p(px(20.0))
+        .flex()
+        .flex_col()
+        .gap(px(14.0))
+        .overflow_y_scroll()
+        .child(
+            div()
+                .text_size(px(16.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(rgb(0xcdd6f4))
+                .child("Infrastructure"),
+        )
+        .child(
+            div()
+                .text_size(px(11.0))
+                .text_color(rgb(0x6c7086))
+                .child(
+                    "A single Traefik reverse proxy + shared 'allele' Docker network that all \
+                     sessions register HTTPS routes against. Requires Docker. Allele manages \
+                     only the proxy and network — project services stay in your startup scripts.",
+                ),
+        )
+        .child(toggle);
+
+    if let Some(line) = status_line {
+        pane = pane.child(line);
+    }
+
+    pane = pane
+        .child(section_header("Paths"))
+        .child(path_row("Dynamic routes (session-start writes here)", &dynamic_path))
+        .child(path_row("TLS certificates (drop *.pem here)", &certs_path))
+        .child(
+            div()
+                .text_size(px(10.0))
+                .text_color(rgb(0x6c7086))
+                .child(
+                    "DNS: point your local domains at 127.0.0.1 via dnsmasq + /etc/resolver \
+                     (one-time, needs sudo).",
+                ),
+        );
+
+    pane
 }
 
 fn render_projects_pane(
@@ -1796,6 +1955,7 @@ pub fn open_settings_window(
     initial_promote_attention_sessions: bool,
     initial_naming_claude_model: String,
     initial_naming_opencode_model: String,
+    initial_base_infra_enabled: bool,
 ) -> anyhow::Result<WindowHandle<SettingsWindowState>> {
     let window_size = size(px(640.0), px(440.0));
     let options = WindowOptions {
@@ -1832,6 +1992,7 @@ pub fn open_settings_window(
                 initial_promote_attention_sessions,
                 initial_naming_claude_model,
                 initial_naming_opencode_model,
+                initial_base_infra_enabled,
             )
         })
     })
