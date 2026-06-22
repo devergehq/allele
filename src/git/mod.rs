@@ -331,6 +331,153 @@ pub fn create_session_branch(
     Ok(())
 }
 
+/// Return all local branch names (`refs/heads/*`), sorted by most-recent
+/// commit. Used to populate the "Branch name" field's existing-branch hint
+/// in the new-session modal.
+pub fn list_local_branches(repo: &Path) -> Vec<String> {
+    if !is_git_repo(repo) {
+        return Vec::new();
+    }
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("for-each-ref")
+        .arg("--sort=-committerdate")
+        .arg("--format=%(refname:short)")
+        .arg("refs/heads/");
+    run_git_stdout(cmd, "for-each-ref (local branches)")
+        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .unwrap_or_default()
+}
+
+/// True if a local branch named exactly `name` exists.
+pub fn local_branch_exists(repo: &Path, name: &str) -> bool {
+    if !is_git_repo(repo) {
+        return false;
+    }
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("show-ref")
+        .arg("--verify")
+        .arg("--quiet")
+        .arg(format!("refs/heads/{name}"));
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// Check out an existing local branch, switching the working tree to it.
+pub fn checkout_branch(clone: &Path, name: &str) -> crate::errors::Result<()> {
+    if !is_git_repo(clone) {
+        return Err(AlleleError::Git(format!(
+            "checkout_branch: not a git repo: {}",
+            clone.display()
+        )));
+    }
+    let mut cmd = git_cmd(Some(clone));
+    cmd.arg("checkout").arg(name);
+    run_git(cmd, "checkout (existing branch)").map_err(|e| AlleleError::Git(e.to_string()))?;
+    Ok(())
+}
+
+/// Try to fetch `name` from `remote` and check it out as a local branch that
+/// tracks it. Returns `Ok(true)` on success, `Ok(false)` if the branch does
+/// not exist on the remote, and `Err` only on an unexpected git failure
+/// after a successful fetch.
+///
+/// Uses [`user_git_cmd`] for the fetch so the user's credential helpers
+/// (osxkeychain, SSH agent) are available, matching [`pull`] and
+/// [`fetch_and_rebase_onto_remote_branch`].
+pub fn fetch_and_checkout_remote_branch(
+    clone: &Path,
+    remote: &str,
+    name: &str,
+) -> crate::errors::Result<bool> {
+    if !is_git_repo(clone) {
+        return Err(AlleleError::Git(format!(
+            "fetch_and_checkout_remote_branch: not a git repo: {}",
+            clone.display()
+        )));
+    }
+
+    // Fetch the single branch into its remote-tracking ref. A non-zero exit
+    // here almost always means "no such branch on the remote" — treat that
+    // as "not found" rather than a hard error so the caller can fall back to
+    // creating a fresh branch.
+    let mut cmd = user_git_cmd(clone);
+    cmd.arg("fetch")
+        .arg(remote)
+        .arg(format!("{name}:refs/remotes/{remote}/{name}"));
+    if run_git(cmd, &format!("fetch {remote} {name}")).is_err() {
+        return Ok(false);
+    }
+
+    // Create a local branch tracking the fetched ref and switch to it.
+    let mut cmd = git_cmd(Some(clone));
+    cmd.arg("checkout")
+        .arg("-b")
+        .arg(name)
+        .arg(format!("{remote}/{name}"));
+    run_git(cmd, "checkout -b (remote tracking branch)")
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
+    Ok(true)
+}
+
+/// How [`checkout_or_create_session_branch`] resolved the branch for a new
+/// session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionBranchOutcome {
+    /// A fresh session branch was created (and renamed to the custom name).
+    CreatedNew,
+    /// An existing branch (local, or fetched from `origin`) was checked out.
+    CheckedOutExisting,
+}
+
+/// Resolve the branch a new session should sit on.
+///
+/// If `custom_branch` names a branch that already exists — first locally,
+/// then on `origin` — that branch is checked out and the session works
+/// directly on it (the PR-review workflow). Otherwise a fresh session branch
+/// is created at HEAD and renamed to the sanitised custom name (the original
+/// behaviour).
+///
+/// Network access (the remote fetch) means callers should run this off the
+/// UI thread.
+pub fn checkout_or_create_session_branch(
+    clone: &Path,
+    session_id: &str,
+    custom_branch: Option<&str>,
+) -> crate::errors::Result<SessionBranchOutcome> {
+    if let Some(raw) = custom_branch {
+        let name = raw.trim();
+        if !name.is_empty() {
+            // 1. Existing local branch → check it out as-is.
+            if local_branch_exists(clone, name) {
+                checkout_branch(clone, name)?;
+                return Ok(SessionBranchOutcome::CheckedOutExisting);
+            }
+            // 2. Existing remote branch → fetch it and check it out.
+            if has_remote(clone, "origin") {
+                match fetch_and_checkout_remote_branch(clone, "origin", name) {
+                    Ok(true) => return Ok(SessionBranchOutcome::CheckedOutExisting),
+                    Ok(false) => { /* not on remote — fall through to create */ }
+                    Err(e) => {
+                        warn!(
+                            "fetch of existing branch '{name}' failed: {e} \
+                             (creating a new branch instead)"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // 3. No match (or no custom name) → fresh session branch, optional rename.
+    create_session_branch(clone, session_id)?;
+    if let Some(raw) = custom_branch {
+        let sanitised = sanitise_branch_name(raw, 100);
+        if !sanitised.is_empty() {
+            rename_current_branch(clone, &sanitised)?;
+        }
+    }
+    Ok(SessionBranchOutcome::CreatedNew)
+}
+
 /// Fetch the session branch from a clone back into canonical as an archive
 /// ref: `refs/allele/archive/<session-id>`.
 ///
@@ -1348,6 +1495,81 @@ mod tests {
         create_session_branch(&path, "testsession08").unwrap();
         let head_after = head_commit(&path);
         assert_eq!(head_before, head_after);
+    }
+
+    /// Create a named branch pointing at HEAD without switching to it.
+    fn make_branch(repo: &Path, name: &str) {
+        let mut cmd = git_cmd(Some(repo));
+        cmd.arg("branch").arg(name);
+        run_git(cmd, "branch (test fixture)").unwrap();
+    }
+
+    #[test]
+    fn local_branch_exists_detects_present_and_absent() {
+        let (_dir, path) = make_canonical("hello");
+        make_branch(&path, "feature/x");
+        assert!(local_branch_exists(&path, "feature/x"));
+        assert!(!local_branch_exists(&path, "does-not-exist"));
+    }
+
+    #[test]
+    fn list_local_branches_includes_created_branch() {
+        let (_dir, path) = make_canonical("hello");
+        make_branch(&path, "alpha");
+        let branches = list_local_branches(&path);
+        assert!(branches.iter().any(|b| b == "alpha"));
+    }
+
+    #[test]
+    fn checkout_branch_switches_head() {
+        let (_dir, path) = make_canonical("hello");
+        make_branch(&path, "topic");
+        checkout_branch(&path, "topic").unwrap();
+        assert_eq!(current_branch(&path).as_deref(), Some("topic"));
+    }
+
+    #[test]
+    fn session_branch_checks_out_existing_local_branch() {
+        let (_dir, path) = make_canonical("hello");
+        make_branch(&path, "existing-feature");
+
+        let outcome = checkout_or_create_session_branch(
+            &path,
+            "sessionid01",
+            Some("existing-feature"),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, SessionBranchOutcome::CheckedOutExisting);
+        assert_eq!(current_branch(&path).as_deref(), Some("existing-feature"));
+    }
+
+    #[test]
+    fn session_branch_creates_new_when_name_unknown() {
+        let (_dir, path) = make_canonical("hello");
+
+        let outcome = checkout_or_create_session_branch(
+            &path,
+            "sessionid02",
+            Some("brand-new-branch"),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, SessionBranchOutcome::CreatedNew);
+        // Falls back to creating the session branch then renaming it.
+        assert_eq!(current_branch(&path).as_deref(), Some("brand-new-branch"));
+        assert!(local_branch_exists(&path, "brand-new-branch"));
+    }
+
+    #[test]
+    fn session_branch_creates_session_name_when_no_custom() {
+        let (_dir, path) = make_canonical("hello");
+
+        let outcome =
+            checkout_or_create_session_branch(&path, "sessionid03", None).unwrap();
+
+        assert_eq!(outcome, SessionBranchOutcome::CreatedNew);
+        assert_eq!(current_branch(&path).as_deref(), Some("session-sessioni"));
     }
 
     #[test]

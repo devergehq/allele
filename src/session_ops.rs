@@ -397,6 +397,10 @@ impl AppState {
         let cleanup_paths_for_task = self.user_settings.session_cleanup_paths.clone();
         let branch_slug = custom_branch_slug;
         let prompt = initial_prompt;
+        // Branch resolution (which may fetch from a remote) runs inside the
+        // background task below so the network call never blocks the UI.
+        let branch_slug_for_clone = branch_slug.clone();
+        let session_id_for_branch = session_id.clone();
 
         cx.spawn_in(window, async move |this, cx| {
             let (clone_result, pull_error) = cx
@@ -424,6 +428,25 @@ impl AppState {
                         &session_id_for_clone,
                         &cleanup_paths_for_task,
                     );
+
+                    // Resolve the session branch here (off the UI thread):
+                    // check out an existing local/remote branch if the user
+                    // named one, otherwise create a fresh session branch.
+                    if let Ok(ref clone_path) = clone {
+                        if clone_path != &source_for_task {
+                            if let Err(e) = git::checkout_or_create_session_branch(
+                                clone_path,
+                                &session_id_for_branch,
+                                branch_slug_for_clone.as_deref(),
+                            ) {
+                                warn!(
+                                    "session branch setup failed for \
+                                     {session_id_for_branch}: {e}"
+                                );
+                            }
+                        }
+                    }
+
                     (clone, pull_error)
                 })
                 .await;
@@ -462,14 +485,8 @@ impl AppState {
                 project.loading_sessions.retain(|l| l.id != session_id);
 
                 if clone_succeeded {
-                    if let Err(e) = git::create_session_branch(
-                        &clone_path,
-                        &session_id_for_session,
-                    ) {
-                        warn!(
-                            "create_session_branch failed for {session_id_for_session}: {e}"
-                        );
-                    }
+                    // The session branch (existing branch checkout, or a fresh
+                    // branch) was already resolved in the background task above.
 
                     // Write marker file for orphan cleanup identification.
                     let marker_path = clone_path.join(".allele-session");
@@ -478,19 +495,6 @@ impl AppState {
                     }
 
                     crate::git::exclude_pattern_in_clone(&clone_path, ".allele-session");
-
-                    // Rename the branch if the user provided a custom name.
-                    if let Some(ref name) = branch_slug {
-                        let sanitised = git::sanitise_branch_name(name, 100);
-                        if !sanitised.is_empty() {
-                            if let Err(e) = git::rename_current_branch(
-                                &clone_path,
-                                &sanitised,
-                            ) {
-                                warn!("branch rename failed for custom name: {e}");
-                            }
-                        }
-                    }
                 }
 
                 let initial_font_size = this.user_settings.font_size;

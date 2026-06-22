@@ -19,6 +19,19 @@ pub enum NewSessionModalEvent {
 
 impl EventEmitter<NewSessionModalEvent> for NewSessionModal {}
 
+/// What the branch-name field currently resolves to, used to render a live
+/// hint under the input so the user knows whether they're checking out an
+/// existing branch or creating a new one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BranchHint {
+    /// Field is empty — a branch name will be auto-generated.
+    Empty,
+    /// The typed name matches an existing local branch — it'll be checked out.
+    ExistingLocal,
+    /// The typed name doesn't match a local branch.
+    NewOrRemote,
+}
+
 pub struct NewSessionModal {
     project_idx: usize,
     name_input: Entity<TextInput>,
@@ -28,6 +41,9 @@ pub struct NewSessionModal {
     agents: Vec<(String, String)>,
     selected_agent_idx: usize,
     default_label: String,
+    /// Local branch names in the project's source repo, for the live hint.
+    existing_branches: Vec<String>,
+    branch_hint: BranchHint,
     focus_handle: FocusHandle,
 }
 
@@ -38,12 +54,13 @@ impl NewSessionModal {
         agents: Vec<(String, String)>,
         default_agent_idx: usize,
         default_label: String,
+        existing_branches: Vec<String>,
     ) -> Self {
         let name_input = cx.new(|cx| {
             TextInput::new(cx, "", format!("{default_label}"))
         });
         let branch_input = cx.new(|cx| {
-            TextInput::new(cx, "", "auto-generated from session name")
+            TextInput::new(cx, "", "auto-generated, or type an existing branch")
         });
         let prompt_input = cx.new(|cx| {
             TextInput::new(cx, "", "optional")
@@ -56,8 +73,9 @@ impl NewSessionModal {
             }
         }).detach();
         cx.subscribe(&branch_input, |this: &mut Self, _input, event: &TextInputEvent, cx| {
-            if matches!(event, TextInputEvent::Submitted) {
-                this.submit(cx);
+            match event {
+                TextInputEvent::Submitted => this.submit(cx),
+                TextInputEvent::Changed => this.recompute_branch_hint(cx),
             }
         }).detach();
         cx.subscribe(&prompt_input, |this: &mut Self, _input, event: &TextInputEvent, cx| {
@@ -74,8 +92,25 @@ impl NewSessionModal {
             agents,
             selected_agent_idx: default_agent_idx,
             default_label,
+            existing_branches,
+            branch_hint: BranchHint::Empty,
             focus_handle: cx.focus_handle(),
         }
+    }
+
+    /// Recompute the branch hint from the current input text. Called on every
+    /// keystroke in the branch field.
+    fn recompute_branch_hint(&mut self, cx: &mut Context<Self>) {
+        let text = self.branch_input.read(cx).text().to_string();
+        let trimmed = text.trim();
+        self.branch_hint = if trimmed.is_empty() {
+            BranchHint::Empty
+        } else if self.existing_branches.iter().any(|b| b == trimmed) {
+            BranchHint::ExistingLocal
+        } else {
+            BranchHint::NewOrRemote
+        };
+        cx.notify();
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -271,10 +306,27 @@ impl Render for NewSessionModal {
                         "Session name",
                         Self::input_frame(self.name_input.clone()),
                     ))
-                    // Branch name
+                    // Branch name (with live existing/new hint underneath)
                     .child(Self::render_form_row(
                         "Branch name",
-                        Self::input_frame(self.branch_input.clone()),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.0))
+                            .child(Self::input_frame(self.branch_input.clone()))
+                            .child(match self.branch_hint {
+                                BranchHint::Empty => div().h(px(13.0)),
+                                BranchHint::ExistingLocal => div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0xa6e3a1))
+                                    .child("✓ existing branch — will be checked out"),
+                                BranchHint::NewOrRemote => div()
+                                    .text_size(px(10.0))
+                                    .text_color(rgb(0x6c7086))
+                                    .child(
+                                        "new branch — or an existing remote branch is checked out",
+                                    ),
+                            }),
                     ))
                     // Agent selector
                     .child(Self::render_form_row(

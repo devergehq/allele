@@ -1216,6 +1216,14 @@ impl AppState {
             .map(|a| format!("{} {session_count}", a.display_name))
             .unwrap_or_else(|| format!("Shell {session_count}"));
 
+        // Existing local branches in the project's source repo, so the modal
+        // can flag when a typed branch name will be checked out vs. created.
+        let existing_branches = self
+            .projects
+            .get(project_idx)
+            .map(|p| git::list_local_branches(&p.source_path))
+            .unwrap_or_default();
+
         let entity = cx.new(|cx| {
             new_session_modal::NewSessionModal::new(
                 cx,
@@ -1223,6 +1231,7 @@ impl AppState {
                 agents,
                 default_agent_idx,
                 default_label,
+                existing_branches,
             )
         });
 
