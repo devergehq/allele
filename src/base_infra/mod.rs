@@ -17,6 +17,7 @@
 //! Docker is unavailable — Allele is not, and must never become, a general
 //! Docker orchestrator.
 
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -104,6 +105,51 @@ pub fn dynamic_dir() -> Option<PathBuf> {
 /// TLS certificate dir. Projects drop their wildcard `*.pem` here.
 pub fn certs_dir() -> Option<PathBuf> {
     base_dir().map(|d| d.join("certs"))
+}
+
+/// Ports already claimed by existing session route files in the Traefik
+/// dynamic dir, parsed from `host.docker.internal:<port>` backend URLs.
+///
+/// These claims are the durable record of port ownership: a suspended
+/// session keeps its route file (suspend doesn't run session-stop), even
+/// though its dev server is no longer listening. A plain TCP-bind probe
+/// would see those ports as free and hand them out again, colliding two
+/// sessions on one port. Feeding this set into `config::allocate_port`
+/// makes a resumed session skip past ports another session still owns.
+///
+/// `exclude_stem` is the route-file stem of the session being allocated
+/// for (e.g. `"session-06d7068d"`), so a session resuming under an id it
+/// already has a route file for can reclaim its own port rather than
+/// reserving it against itself.
+pub fn registered_ports(exclude_stem: Option<&str>) -> HashSet<u16> {
+    let mut ports = HashSet::new();
+    let Some(dir) = dynamic_dir() else {
+        return ports;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return ports;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
+            continue;
+        }
+        if exclude_stem.is_some()
+            && path.file_stem().and_then(|s| s.to_str()) == exclude_stem
+        {
+            continue;
+        }
+        let Ok(contents) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for tail in contents.split("host.docker.internal:").skip(1) {
+            let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(port) = digits.parse::<u16>() {
+                ports.insert(port);
+            }
+        }
+    }
+    ports
 }
 
 /// Path to the managed compose file.

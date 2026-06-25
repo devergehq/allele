@@ -11,6 +11,7 @@
 //! warning on stderr so the author can see why it was ignored.
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::net::TcpListener;
 use std::path::Path;
 use tracing::warn;
@@ -100,8 +101,18 @@ impl ProjectConfig {
 /// Find a free TCP port in `40000..=49999` by trying to bind each in turn.
 /// The listener is dropped before returning, so the caller races with
 /// anything else on the machine to claim the port — fine for dev servers.
-pub fn allocate_port() -> Option<u16> {
+///
+/// `reserved` ports are skipped even if nothing is currently listening on
+/// them. A TCP bind probe only sees *currently-listening* servers, but a
+/// suspended session keeps its claim on a port (its Traefik route file
+/// survives, since suspend doesn't run session-stop) while its dev server
+/// is down. Passing those claimed ports here keeps a freshly-resumed
+/// session from being handed a port another session already owns.
+pub fn allocate_port(reserved: &HashSet<u16>) -> Option<u16> {
     for port in PORT_RANGE_START..=PORT_RANGE_END {
+        if reserved.contains(&port) {
+            continue;
+        }
         if TcpListener::bind(("127.0.0.1", port)).is_ok() {
             return Some(port);
         }
@@ -263,7 +274,16 @@ mod tests {
 
     #[test]
     fn allocate_port_returns_port_in_range() {
-        let port = allocate_port().expect("should find a free port");
+        let port = allocate_port(&HashSet::new()).expect("should find a free port");
+        assert!((PORT_RANGE_START..=PORT_RANGE_END).contains(&port));
+    }
+
+    #[test]
+    fn allocate_port_skips_reserved() {
+        // Reserve the bottom of the range; allocation must hop past it.
+        let reserved: HashSet<u16> = (PORT_RANGE_START..PORT_RANGE_START + 3).collect();
+        let port = allocate_port(&reserved).expect("should find a free port");
+        assert!(!reserved.contains(&port));
         assert!((PORT_RANGE_START..=PORT_RANGE_END).contains(&port));
     }
 }

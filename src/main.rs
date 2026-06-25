@@ -1304,7 +1304,29 @@ impl AppState {
             return;
         };
 
-        let port = config::allocate_port();
+        // Skip ports already claimed by other sessions. Two sources of
+        // truth, unioned: (1) the durable Traefik route files, which a
+        // suspended session keeps even with its dev server down, and (2)
+        // in-memory ports held by other live sessions this run. Without
+        // this, a resumed session can be handed a port a suspended session
+        // still owns, colliding on a single port. The current session's own
+        // route file is excluded so it can reclaim its previous port.
+        let self_stem = clone_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| format!("session-{s}"));
+        let mut reserved = crate::base_infra::registered_ports(self_stem.as_deref());
+        for (pi, project) in self.projects.iter().enumerate() {
+            for (si, session) in project.sessions.iter().enumerate() {
+                if (pi, si) == (cursor.project_idx, cursor.session_idx) {
+                    continue;
+                }
+                if let Some(p) = session.allocated_port {
+                    reserved.insert(p);
+                }
+            }
+        }
+        let port = config::allocate_port(&reserved);
 
         // Drop any pre-existing drawer tabs from a prior materialisation —
         // the config is the source of truth for this session's layout.
