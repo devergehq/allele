@@ -63,7 +63,7 @@ impl ProjectConfig {
     /// warning line is written to stderr.
     ///
     /// This is the backwards-compatible path. The preferred source is
-    /// `from_settings()` which reads from `~/.allele/settings.json`.
+    /// `from_settings()` which reads from `~/.config/allele/settings.json`.
     pub fn load(project_root: &Path) -> Option<Self> {
         let path = project_root.join("allele.json");
         let contents = std::fs::read_to_string(&path).ok()?;
@@ -80,7 +80,7 @@ impl ProjectConfig {
     }
 
     /// Build a `ProjectConfig` from the orchestration fields stored in
-    /// `ProjectSettings` (persisted in `~/.allele/settings.json`).
+    /// `ProjectSettings` (persisted in `~/.config/allele/settings.json`).
     ///
     /// Returns `None` when the user hasn't configured any orchestration
     /// for this project (no terminals and no startup command).

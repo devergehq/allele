@@ -56,6 +56,8 @@ If that's not you, you're probably better served by tmux, iTerm2 split panes, or
 - 6 status states: Running ●, Idle ○, Done ✓, Suspended ⏸, AwaitingInput ⚠, ResponseReady ★
 - Keyboard shortcuts: Cmd+1-9 (switch), Cmd+N (new), Cmd+W (close), Cmd+[/] (prev/next)
 - Cold resume across app restarts via `claude --resume`
+- New Session branch field: auto-name, **check out an existing branch**, or create a new one
+- Per-project session orchestration (drawer terminals + startup/shutdown hooks), configured in Settings
 - Auto-naming from first prompt via LLM summarisation
 - Sound alerts on attention events (configurable via settings.json)
 - macOS notifications on session completion (opt-in)
@@ -78,21 +80,31 @@ If that's not you, you're probably better served by tmux, iTerm2 split panes, or
 - Add/remove projects via sidebar or folder picker
 - Project relocation when source path moves
 - Per-project session list with expand/collapse
-- Optional `allele.json` at the project root for declarative session setup (see below)
+- Per-project session orchestration in Settings, with optional `allele.json` override (see below)
 
-## Per-project configuration (`allele.json`)
+### Base infrastructure (optional)
+- Opt-in Allele-managed global **Traefik** reverse proxy + shared `allele` Docker network
+- Session-start scripts register per-session HTTPS routes; Allele owns only Traefik (not your services)
 
-Drop an `allele.json` at the root of any project to declare the drawer
-terminals and preview URL that every session should start with. On session
-creation and on every cold-resume, Allele reads this file, allocates one free
-local TCP port in `40000..=49999`, substitutes placeholders, spawns a drawer
-tab per entry running your interactive login shell, pipes the substituted
-command into that shell as its first input (so it runs as if you typed it),
-opens the drawer, and opens the preview URL in your default browser. Because
-each tab is a real interactive shell, you can Ctrl+C the command, re-run it,
-or do anything else in that tab.
+## Per-project session orchestration
 
-Example:
+Each project can declare what every session starts with — a set of drawer
+terminals, a one-shot **startup** (session-start) hook, and a **shutdown**
+(session-end) hook. On session creation and on every cold-resume, Allele
+allocates one free local TCP port, runs the startup hook, then spawns a drawer
+tab per terminal (each a real interactive `$SHELL`, so you can Ctrl+C and re-run
+freely). When a session is **discarded**, the shutdown hook runs before the
+clone is archived.
+
+There are **two configuration sources**, in precedence order:
+
+1. **`allele.json`** at the session clone root — if present, it wins. It also
+   supports a `preview.url` and a per-project `agent` override.
+2. **Project settings** (Settings → project, persisted in
+   `~/.config/allele/settings.json`) — the recommended place to configure
+   `terminals`, `startup`, and `shutdown`. Used whenever there's no `allele.json`.
+
+Quick `allele.json` example:
 
 ```json
 {
@@ -101,53 +113,22 @@ Example:
     { "label": "Logs",     "command": "tail -f {{folder}}/log/development.log" },
     { "label": "Terminal", "command": "" }
   ],
-  "preview": {
-    "url": "http://127.0.0.1:{{unique_port}}"
-  },
-  "startup": "bin/setup",
+  "preview":  { "url": "http://127.0.0.1:{{unique_port}}" },
+  "startup":  "bin/setup",
   "shutdown": "docker compose down"
 }
 ```
 
-**Fields**
+`{{unique_port}}` is a free port in `40000..=49999` (skipping ports other
+sessions still own); `{{folder}}` is the session's clone path. Startup runs on
+every resume (keep it idempotent) and shutdown runs only on discard; both run
+off the UI thread and a non-zero exit logs a warning without blocking the
+session.
 
-- `terminals[]` — one drawer tab per entry.
-  - `label` — the tab's display name.
-  - `command` — a shell command piped into the tab's interactive shell at
-    startup. Runs under your real `$SHELL`, so aliases, rc files, and job
-    control (Ctrl+C / `bg` / `fg`) all work. Empty string leaves the shell
-    at an empty prompt.
-- `preview.url` — optional. Opened in the system browser once per
-  materialisation (creation and resume).
-- `startup` — optional. One-shot shell command run via `sh -c` in the
-  session's clone before any terminal or preview is spawned. Terminals
-  and preview wait for it to exit — use this for `bin/setup`, dependency
-  installs, or booting a background daemon the preview URL depends on.
-  Make it idempotent: it re-runs on every cold-resume. On non-zero exit
-  a warning is logged and the session continues.
-- `shutdown` — optional. One-shot shell command run via `sh -c` in the
-  clone when the session is **discarded** (not on plain close/suspend,
-  which keep the clone). Runs before the clone is archived and trashed,
-  so `{{folder}}` still exists. Same failure policy as `startup`.
-
-**Placeholders**
-
-- `{{unique_port}}` — a free TCP port allocated once per session, shared by
-  every `{{unique_port}}` in the file (so the server tab and the preview URL
-  always match). If no port in `40000..=49999` is free, the placeholder is
-  left unsubstituted and a warning is logged.
-- `{{folder}}` — the session's clone path (the APFS copy-on-write workspace
-  for that session, not the original project source). Useful for absolute
-  paths in log commands or subprocess invocations.
-
-**Behaviour notes**
-
-- Missing or malformed `allele.json` is silently ignored — the session
-  behaves as if there were no config (plain drawer, no preview).
-- A fresh port is allocated on every resume, so the preview URL will differ
-  between sessions and across restarts.
-- The file is read from the session's clone, so each session can override
-  the config by editing its own copy if needed.
+**See [`docs/projects-and-sessions.md`](docs/projects-and-sessions.md) for the
+full reference** — config precedence, hook timing and threading, script-path
+resolution (`~/.allele/projects/<name>/scripts/`), port allocation, and the
+optional Traefik base-infrastructure.
 
 ## Architecture (short version)
 
