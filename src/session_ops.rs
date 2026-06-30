@@ -993,41 +993,23 @@ impl AppState {
             }
         }
 
-        // Run the project-declared shutdown command (if any) before we
-        // drop the PTY and archive/trash the clone. Runs in-line — the
-        // Discard action is already destructive and user-confirmed, and
-        // the archive pipeline below is async, so a brief block here is
-        // acceptable. Failure is logged and teardown continues so a
-        // broken hook can't strand the clone on disk.
-        if let Some(clone_path) = clone_path.as_ref() {
+        // Resolve the project-declared shutdown command (if any) up front:
+        // a cheap config load plus string substitution, done here while
+        // `project` and `removed` are still in scope for the settings and
+        // port lookups. The command *itself* is run off-thread in the
+        // archive pipeline below — running it in-line would block GPUI's
+        // render loop, giving the user a spinning beach ball whenever a
+        // shutdown hook is slow (dev-server teardown, `docker compose
+        // down`, proxy-route cleanup, …).
+        let shutdown_cmd = clone_path.as_ref().and_then(|clone_path| {
             let cfg = config::ProjectConfig::load(clone_path)
-                .or_else(|| config::ProjectConfig::from_settings(&project.settings));
-            if let Some(cfg) = cfg {
-                let project_name = project.name.clone();
-                let shutdown = cfg
-                    .shutdown
-                    .as_ref()
-                    .map(|s| config::resolve_script_command(s, &project_name))
-                    .map(|s| config::substitute(&s, removed.allocated_port, clone_path))
-                    .filter(|s| !s.trim().is_empty());
-                if let Some(cmd) = shutdown {
-                    match std::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&cmd)
-                        .current_dir(clone_path)
-                        .status()
-                    {
-                        Ok(s) if !s.success() => {
-                            warn!("allele: shutdown command exited with {s} — continuing");
-                        }
-                        Err(e) => {
-                            warn!("allele: failed to run shutdown command: {e} — continuing");
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
+                .or_else(|| config::ProjectConfig::from_settings(&project.settings))?;
+            cfg.shutdown
+                .as_ref()
+                .map(|s| config::resolve_script_command(s, &project.name))
+                .map(|s| config::substitute(&s, removed.allocated_port, clone_path))
+                .filter(|s| !s.trim().is_empty())
+        });
 
         // Drop the Session — this frees the terminal_view entity (if any),
         // which fires cleanup hooks then kills the PTY process group via
@@ -1086,6 +1068,30 @@ impl AppState {
                 let delete_result = cx
                     .background_executor()
                     .spawn(async move {
+                        // Run the project-declared shutdown command first —
+                        // it needs the clone to still exist as its working
+                        // directory, and must run before the clone is
+                        // archived/trashed. Off the UI thread, so a slow
+                        // hook can't freeze the app. Failure is logged and
+                        // teardown continues so a broken hook can't strand
+                        // the clone on disk.
+                        if let Some(cmd) = shutdown_cmd {
+                            match std::process::Command::new("sh")
+                                .arg("-c")
+                                .arg(&cmd)
+                                .current_dir(&clone_path)
+                                .status()
+                            {
+                                Ok(s) if !s.success() => {
+                                    warn!("allele: shutdown command exited with {s} — continuing");
+                                }
+                                Err(e) => {
+                                    warn!("allele: failed to run shutdown command: {e} — continuing");
+                                }
+                                _ => {}
+                            }
+                        }
+
                         // Degenerate case: if the session's "clone path"
                         // is canonical itself (Phase C fallback when the
                         // clonefile syscall failed), skip the archive
