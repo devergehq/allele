@@ -127,8 +127,9 @@ session.
 
 **See [`docs/projects-and-sessions.md`](docs/projects-and-sessions.md) for the
 full reference** — config precedence, hook timing and threading, script-path
-resolution (`~/.allele/projects/<name>/scripts/`), port allocation, and the
-optional Traefik base-infrastructure.
+resolution (`~/.allele/projects/<name>/scripts/`), port allocation, the
+optional Traefik base-infrastructure, and versioning your config in a git repo
+symlinked into `~/.allele` for cross-machine parity.
 
 ## Architecture (short version)
 
