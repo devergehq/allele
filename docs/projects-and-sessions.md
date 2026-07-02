@@ -264,6 +264,60 @@ without Docker running surfaces a clear error rather than failing the app.
 
 ---
 
+## Versioning & sharing your config
+
+The directories Allele reads orchestration from are **plain directories you
+own**, not opaque managed state:
+
+- `~/.allele/projects/<name>/scripts/` — your `startup` / `shutdown` scripts.
+- `~/.allele/base-infra/` — the Traefik compose, dynamic config, and certs.
+
+**Both may be symlinks.** Allele only ever *creates them if missing* and writes
+individual scaffold files *if they don't already exist* (`base_infra::ensure_scaffold`,
+`config::resolve_script_command`); it never overwrites or replaces a directory
+you put there. So you can point either at a directory inside a git repo you
+control and Allele reads straight through the link — with no Allele changes and
+no risk of your edits being clobbered.
+
+The **recommended convention** for keeping this config under version control —
+and for parity across machines — is a personal **config repo** symlinked into
+`~/.allele`:
+
+```
+~/.allele/config/                    # a git repo you own
+├── base-infra/…                     #   ← ~/.allele/base-infra          symlinks here
+└── projects/<name>/scripts/…        #   ← ~/.allele/projects/<name>     symlinks here
+
+ln -s ~/.allele/config/base-infra       ~/.allele/base-infra
+ln -s ~/.allele/config/projects/<name>  ~/.allele/projects/<name>
+```
+
+Commit it, push it, and on another machine clone it and re-create the symlinks —
+your session orchestration comes with you.
+
+Two things stay **out of the repo**:
+
+- **Secrets** — TLS private keys, CA material, anything sensitive. Keep them
+  `.gitignore`d and regenerate them per-machine with a small setup script that
+  runs your cert tooling and creates the `allele` network. No private key should
+  travel through git.
+- **The project-settings fragment** — `terminals`, `startup`, and `shutdown`
+  live in `~/.config/allele/settings.json` alongside every other project, so
+  they can't be symlinked as a unit. Version a copy of just your project's entry
+  and *merge* it on the target machine — or use a project-root `allele.json`,
+  which is a single self-contained file the repo carries directly.
+
+> `allele.json` is the lightest thing to version: one file in your source tree,
+> no symlink, travels with the repo it configures. Use it for project-specific
+> orchestration; use the symlinked `~/.allele/config` repo when you want to share
+> machine-wide setup (base-infra plus several projects' scripts) as a unit.
+
+Allele ships no opinion beyond this — there is no built-in config-repo command.
+Structure the repo however suits you; the only guarantee Allele makes is that it
+reads these directories through symlinks and won't overwrite them.
+
+---
+
 ## End-to-end flow
 
 **Create / resume:**
