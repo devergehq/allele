@@ -83,9 +83,22 @@ pub struct DrawerTab {
 /// `state.json` on startup — those sessions are in `Suspended` status
 /// and have no PTY attached until the user explicitly resumes them.
 pub struct Session {
-    /// Stable UUID — same value used as Claude's `--session-id` and later
-    /// as `--resume <id>`. Persisted to `state.json`.
+    /// Stable UUID — the workspace identity. Names the clone dir
+    /// (`~/.allele/workspaces/<proj>/<id[..8]>`), the git branch, and the
+    /// `.allele-session` marker. Also the value passed to Claude as
+    /// `--session-id` when the session is first created. Persisted to
+    /// `state.json`. NEVER mutated after creation — `/clear` rotates the
+    /// *Claude* conversation, not the workspace (see `claude_session_id`).
     pub id: String,
+    /// The Claude conversation currently backing this workspace. Starts
+    /// equal to `id`; a `/clear` (or `/compact`) makes Claude Code rotate to
+    /// a fresh session id + transcript `.jsonl`, and we re-point this field
+    /// there (learned from the hook payload's cwd — see `apply_hook_event`).
+    /// `None` means "same as `id`" — the common case and the back-compat
+    /// default for sessions persisted before this field existed. Read via
+    /// [`Session::claude_session_id`]; it is what `--resume`, hook-event
+    /// matching, and the transcript tailer key off.
+    pub claude_session_id: Option<String>,
     pub label: String,
     pub terminal_view: Option<Entity<TerminalView>>,
     pub status: SessionStatus,
@@ -176,6 +189,7 @@ impl Session {
         let now = SystemTime::now();
         Self {
             id,
+            claude_session_id: None,
             label,
             terminal_view: Some(terminal_view),
             status: SessionStatus::Idle,
@@ -220,6 +234,7 @@ impl Session {
     ) -> Self {
         Self {
             id,
+            claude_session_id: None,
             label,
             terminal_view: None,
             status: SessionStatus::Suspended,
@@ -252,6 +267,22 @@ impl Session {
     pub fn with_clone(mut self, clone_path: PathBuf) -> Self {
         self.clone_path = Some(clone_path);
         self
+    }
+
+    /// Restore the persisted Claude conversation pointer during rehydration.
+    /// A `None` (or an entry equal to `id`) leaves the session pointing at
+    /// its stable `id`, which is correct for sessions that never `/clear`ed.
+    pub fn with_claude_session_id(mut self, claude_session_id: Option<String>) -> Self {
+        self.claude_session_id = claude_session_id.filter(|c| c != &self.id);
+        self
+    }
+
+    /// The Claude conversation id currently backing this workspace — the
+    /// value to pass to `claude --resume`, to match incoming hook events
+    /// against, and to tail the transcript for. Falls back to the stable
+    /// workspace `id` when no rotation has occurred.
+    pub fn claude_session_id(&self) -> &str {
+        self.claude_session_id.as_deref().unwrap_or(&self.id)
     }
 
     pub fn with_agent_id(mut self, agent_id: Option<String>) -> Self {
@@ -312,5 +343,50 @@ impl Session {
         } else {
             format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Import Session explicitly rather than `use super::*` — this module's
+    // parent does `use gpui::*`, whose glob would shadow the standard
+    // `#[test]` attribute with gpui's own `test` macro.
+    use super::Session;
+    use std::time::SystemTime;
+
+    fn sample(id: &str) -> Session {
+        let now = SystemTime::now();
+        Session::suspended_from_persisted(id.to_string(), "L".into(), now, now, None, false)
+    }
+
+    #[test]
+    fn claude_session_id_falls_back_to_workspace_id() {
+        let s = sample("workspace-abc");
+        // No rotation yet → the Claude conversation is the workspace id itself.
+        assert_eq!(s.claude_session_id(), "workspace-abc");
+    }
+
+    #[test]
+    fn claude_session_id_uses_rotated_pointer() {
+        let mut s = sample("workspace-abc");
+        s.claude_session_id = Some("rotated-xyz".into());
+        assert_eq!(s.claude_session_id(), "rotated-xyz");
+        // The stable workspace identity is untouched by the rotation.
+        assert_eq!(s.id, "workspace-abc");
+    }
+
+    #[test]
+    fn with_claude_session_id_drops_redundant_equal_pointer() {
+        // A persisted pointer equal to id is normalised away to None so we
+        // don't carry a redundant override for never-cleared sessions.
+        let s = sample("workspace-abc").with_claude_session_id(Some("workspace-abc".into()));
+        assert_eq!(s.claude_session_id, None);
+        assert_eq!(s.claude_session_id(), "workspace-abc");
+    }
+
+    #[test]
+    fn with_claude_session_id_keeps_divergent_pointer() {
+        let s = sample("workspace-abc").with_claude_session_id(Some("rotated-xyz".into()));
+        assert_eq!(s.claude_session_id.as_deref(), Some("rotated-xyz"));
     }
 }

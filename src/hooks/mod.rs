@@ -77,6 +77,10 @@ if command -v jq >/dev/null 2>&1; then
     tool_input=$(printf '%s' "$payload" | jq -c '.tool_input // empty' 2>/dev/null)
     message=$(printf '%s' "$payload" | jq -r '.message // empty' 2>/dev/null)
     title=$(printf '%s' "$payload" | jq -r '.title // empty' 2>/dev/null)
+    # cwd lets Allele re-associate a session whose id rotated (/clear or
+    # /compact spawns a fresh Claude session id). The workspace directory
+    # is stable across a rotation, so it's the anchor Allele matches on.
+    cwd=$(printf '%s' "$payload" | jq -r '.cwd // empty' 2>/dev/null)
 
     # Construct JSON with only non-empty fields to keep lines compact.
     # All string values go through jq -Rs for proper JSON escaping.
@@ -85,6 +89,7 @@ if command -v jq >/dev/null 2>&1; then
     [ -n "$tool_input" ] && [ "$tool_input" != '""' ] && line="$line,\"tool_input\":$tool_input"
     [ -n "$message" ] && line="$line,\"message\":$(printf '%s' "$message" | jq -Rs .)"
     [ -n "$title" ] && line="$line,\"title\":$(printf '%s' "$title" | jq -Rs .)"
+    [ -n "$cwd" ] && line="$line,\"cwd\":$(printf '%s' "$cwd" | jq -Rs .)"
     line="$line}"
 
     printf '%s\n' "$line" >> "$out"
@@ -125,7 +130,7 @@ fn build_hooks_json(receiver: &str) -> serde_json::Value {
     };
 
     serde_json::json!({
-        "_allele_version": 4,
+        "_allele_version": 5,
         "hooks": {
             "Notification":        [make_hook("notification")],
             "Stop":                [make_hook("stop")],
@@ -200,6 +205,12 @@ pub struct HookEventLine {
     /// Notification title text (Notification hook).
     #[serde(default)]
     pub title: Option<String>,
+    /// Working directory from the hook payload — present on every event when
+    /// jq is available. Used to re-associate a session whose Claude id rotated
+    /// after a `/clear`: the cwd (= the session's clone dir) is stable across
+    /// the rotation, so it anchors the new id back to the right workspace.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 /// A fully-resolved agent event ready for the main thread to consume.
@@ -213,6 +224,9 @@ pub struct HookEventLine {
 pub struct HookEvent {
     pub session_id: String,
     pub kind: String,
+    /// Working directory the event fired in, when the receiver captured it.
+    /// Anchors session-id re-association after a `/clear` rotation.
+    pub cwd: Option<String>,
     /// Rich payload data from the event producer — populated when the event
     /// carries tool/notification context.
     pub payload: Option<HookPayload>,
@@ -334,6 +348,7 @@ impl EventWatcher {
                         out.push(HookEvent {
                             session_id: session_id.clone(),
                             kind: parsed.kind,
+                            cwd: parsed.cwd,
                             payload,
                         });
                     }
@@ -428,5 +443,30 @@ pub fn show_fatal_dialog(title: &str, body: &str) {
     #[cfg(not(target_os = "macos"))]
     {
         let _ = (title, body);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_event_line_parses_cwd_when_present() {
+        // A SessionStart line as emitted by the receiver after a /clear.
+        let line = r#"{"ts":1751000000,"kind":"session_start","cwd":"/Users/x/.allele/workspaces/allele/e084e960"}"#;
+        let parsed: HookEventLine = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed.kind, "session_start");
+        assert_eq!(
+            parsed.cwd.as_deref(),
+            Some("/Users/x/.allele/workspaces/allele/e084e960")
+        );
+    }
+
+    #[test]
+    fn hook_event_line_cwd_defaults_to_none() {
+        // Older lines (pre-cwd receiver, or the jq-less fallback) omit cwd.
+        let line = r#"{"ts":1751000000,"kind":"stop"}"#;
+        let parsed: HookEventLine = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed.cwd, None);
     }
 }

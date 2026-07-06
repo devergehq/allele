@@ -787,7 +787,11 @@ impl AppState {
             return;
         }
 
-        let session_id = session.id.clone();
+        // Resume the *current* Claude conversation. For a session that was
+        // `/clear`ed, this is the rotated id (persisted on the session), not
+        // the original workspace `id` — resuming the latter would replay the
+        // pre-clear transcript.
+        let session_id = session.claude_session_id().to_string();
         let label = session.label.clone();
         let stored_agent_id = session.agent_id.clone();
 

@@ -570,14 +570,16 @@ impl AppState {
             return self.rich.view.clone();
         }
 
-        let (allele_session_id, cwd) = {
+        let (allele_session_id, claude_session_id, cwd) = {
             let project = self.projects.get(active.project_idx)?;
             let session = project.sessions.get(active.session_idx)?;
             let cwd = session
                 .clone_path
                 .clone()
                 .unwrap_or_else(|| project.source_path.clone());
-            (session.id.clone(), cwd)
+            // Attachments scope by the stable workspace id (must not move on
+            // /clear); the transcript tails the *current* Claude conversation.
+            (session.id.clone(), session.claude_session_id().to_string(), cwd)
         };
         // Transcript density differs from terminal density — the
         // terminal is tuned for cramming rows, whereas the Rich view is
@@ -626,7 +628,7 @@ impl AppState {
         // the Transcript tab on a brand-new session shows the internal
         // empty state ("Send a message to start.") and auto-populates
         // as soon as the first turn lands on disk, without any re-wire.
-        self.rich.transcript_tailer = transcript::expected_session_jsonl(&cwd, &allele_session_id)
+        self.rich.transcript_tailer = transcript::expected_session_jsonl(&cwd, &claude_session_id)
             .map(transcript::TranscriptTailer::new);
         self.rich.view = Some(view);
         self.rich.cursor = Some(active);
@@ -2262,7 +2264,8 @@ fn main() {
                             persisted.browser_tab_id,
                             persisted.browser_last_url.clone(),
                         )
-                        .with_agent_id(persisted.agent_id.clone());
+                        .with_agent_id(persisted.agent_id.clone())
+                        .with_claude_session_id(persisted.claude_session_id.clone());
                         session.pinned = persisted.pinned;
                         session.comment = persisted.comment.clone();
                         session.branch_name = persisted.branch_name.clone();

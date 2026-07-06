@@ -19,6 +19,12 @@ pub struct PersistedSession {
     /// Stable UUID — matches both `Session.id` in memory and Claude's
     /// own session ID (we force it via `claude --session-id <uuid>`).
     pub id: String,
+    /// The Claude conversation id currently backing this workspace. `None`
+    /// (the back-compat default) means "same as `id`". Diverges from `id`
+    /// once the session has been `/clear`ed — persisting it is what lets a
+    /// cold resume pick up the post-clear transcript instead of the original.
+    #[serde(default)]
+    pub claude_session_id: Option<String>,
     /// Links back to the owning `Project.id` in settings.json.
     pub project_id: String,
     /// Display label for the sidebar.
@@ -74,6 +80,7 @@ impl PersistedSession {
     pub fn from_session(session: &Session, project_id: &str) -> Self {
         Self {
             id: session.id.clone(),
+            claude_session_id: session.claude_session_id.clone(),
             project_id: project_id.to_string(),
             label: session.label.clone(),
             clone_path: session.clone_path.clone(),
