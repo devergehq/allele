@@ -91,13 +91,16 @@ pub enum SessionAction {
     },
 }
 
-/// Archive refs — merge / delete a session that has been archived.
+/// Archive refs — merge / delete / restore a session that has been archived.
 #[derive(Debug)]
 pub enum ArchiveAction {
     /// Merge an archived session ref into canonical's working tree.
     MergeArchive { project_idx: usize, archive_idx: usize },
     /// Delete an archive ref without merging.
     DeleteArchive { project_idx: usize, archive_idx: usize },
+    /// Reactivate an archived session: clone canonical, check the archived
+    /// work out onto a fresh branch, and re-add it as a suspended session.
+    RestoreArchive { project_idx: usize, archive_idx: usize },
 }
 
 /// Bottom drawer terminal tabs — toggle, spawn, rename, close.

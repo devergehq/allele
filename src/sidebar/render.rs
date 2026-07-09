@@ -1010,6 +1010,30 @@ pub(crate) fn build_sidebar_items(
                                 .flex_row()
                                 .gap(px(4.0))
                                 .child(
+                                    // Restore button — reactivate as a suspended session
+                                    div()
+                                        .id(SharedString::from(format!("restore-{p_idx}-{a_idx}")))
+                                        .cursor_pointer()
+                                        .px(px(4.0))
+                                        .py(px(1.0))
+                                        .rounded(px(6.0))
+                                        .text_size(px(12.0))
+                                        .text_color(theme().accent)
+                                        .hover(|s| s.bg(theme().bg_raised))
+                                        .child("restore")
+                                        .tooltip(|_window, cx| {
+                                            cx.new(|_| SimpleTooltip { text: "Restore as active session".into() }).into()
+                                        })
+                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                            cx.stop_propagation();
+                                            this.pending_action = Some(ArchiveAction::RestoreArchive {
+                                                project_idx: p_idx,
+                                                archive_idx: a_idx,
+                                            }.into());
+                                            cx.notify();
+                                        })),
+                                )
+                                .child(
                                     // Merge button
                                     div()
                                         .id(SharedString::from(format!("merge-{p_idx}-{a_idx}")))
