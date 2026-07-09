@@ -2267,6 +2267,7 @@ fn main() {
                         session.comment = persisted.comment.clone();
                         session.branch_name = persisted.branch_name.clone();
                         session.merge_strategy_override = persisted.merge_strategy_override;
+                        session.branch_locked = persisted.branch_locked;
                         project.sessions.push(session);
                     }
 
@@ -3649,13 +3650,16 @@ impl Render for AppState {
                             let branch_name = naming::branch_name_from_slug(slug, &short_id);
                             let display_label = naming::slug_to_label(slug);
 
-                            // Rename the branch
+                            // Rename the branch — unless the user pinned a
+                            // specific branch, in which case leave it untouched.
                             for project in &this.projects {
                                 for session in &project.sessions {
                                     if session.id == *session_id {
-                                        if let Some(ref cp) = session.clone_path {
-                                            if let Err(e) = git::rename_session_branch(cp, session_id, &branch_name) {
-                                                tracing::warn!("naming modal: branch rename failed: {e}");
+                                        if !session.branch_locked {
+                                            if let Some(ref cp) = session.clone_path {
+                                                if let Err(e) = git::rename_session_branch(cp, session_id, &branch_name) {
+                                                    tracing::warn!("naming modal: branch rename failed: {e}");
+                                                }
                                             }
                                         }
                                         break;
@@ -3668,7 +3672,9 @@ impl Render for AppState {
                                 for session in &mut project.sessions {
                                     if session.id == *session_id {
                                         session.label = display_label.clone();
-                                        session.branch_name = Some(branch_name.clone());
+                                        if !session.branch_locked {
+                                            session.branch_name = Some(branch_name.clone());
+                                        }
                                         session.naming_suggestions = None;
                                         break;
                                     }

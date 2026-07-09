@@ -396,6 +396,9 @@ impl AppState {
         let pull_before_clone = self.user_settings.git_pull_before_new_session;
         let cleanup_paths_for_task = self.user_settings.session_cleanup_paths.clone();
         let branch_slug = custom_branch_slug;
+        // The user picked this branch — auto-naming may relabel the session but
+        // must never rename the branch out from under them.
+        let branch_locked = branch_slug.is_some();
         let prompt = initial_prompt;
         // Branch resolution (which may fetch from a remote) runs inside the
         // background task below so the network call never blocks the UI.
@@ -584,6 +587,7 @@ impl AppState {
                 if skip_auto_naming {
                     session.auto_naming_fired = true;
                 }
+                session.branch_locked = branch_locked;
 
                 let Some(project) = this.projects.get_mut(project_idx) else { return; };
                 project.sessions.push(session);

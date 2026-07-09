@@ -68,6 +68,11 @@ pub struct PersistedSession {
     /// Per-session merge strategy override. `None` = project setting.
     #[serde(default)]
     pub merge_strategy_override: Option<crate::settings::MergeStrategy>,
+    /// True when the user chose the session's branch explicitly; auto-naming
+    /// must not rename it. Persisted so a placeholder-labelled session can't
+    /// re-fire the rename after a restart.
+    #[serde(default)]
+    pub branch_locked: bool,
 }
 
 impl PersistedSession {
@@ -95,6 +100,7 @@ impl PersistedSession {
             comment: session.comment.clone(),
             branch_name: session.branch_name.clone(),
             merge_strategy_override: session.merge_strategy_override,
+            branch_locked: session.branch_locked,
         }
     }
 }
