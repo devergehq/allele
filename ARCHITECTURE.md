@@ -71,7 +71,7 @@ src/
 ├── pending_actions.rs      # dispatch_pending_action + 8 family handlers
 ├── session_ops.rs          # add/resume/close/remove/navigate session + config
 ├── hook_events.rs          # apply_hook_event + trigger_auto_naming
-├── editor.rs               # Editor tab (file tree, preview, context menu)
+├── reader.rs               # Reader tab (read-only file tree, preview, context menu)
 ├── sidebar/render.rs       # build_sidebar_items (project tree + archives)
 ├── drawer/mod.rs           # render_drawer + drawer tab helpers
 │
@@ -268,7 +268,7 @@ code touching one subsystem had broad read/write access to all others.
 - `SidebarState` — `visible`, `width`, `resizing`
 - `RightPanelState` — same shape, separate type so they can diverge
 - `DrawerState` — `height`, `resizing`, `rename`, `rename_focus`
-- `EditorState` — `selected_path`, `expanded_dirs`, `preview`,
+- `ReaderState` — `selected_path`, `expanded_dirs`, `preview`,
   `context_menu`
 - `ConfirmationState` — `discard`, `dirty_session`, `quit`
 

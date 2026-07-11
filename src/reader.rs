@@ -1,4 +1,8 @@
-//! Editor tab rendering — file-tree rows, context menu, preview pane.
+//! Reader tab rendering — file-tree rows, context menu, preview pane.
+//!
+//! The Reader is a read-only project comprehension surface, not an in-app
+//! editor: it retrieves and displays source, Markdown, and referenced
+//! artifacts while editing stays in the user's external editor (DEV-43).
 //!
 //! Extracted from src/main.rs per docs/RE-DECOMPOSITION-PLAN.md §5 phase 7.
 //! See ARCHITECTURE.md §2 for module role.
@@ -10,9 +14,9 @@ use crate::theme::theme;
 use crate::app_state::AppState;
 
 impl AppState {
-    /// Root directory for the Editor tab's file tree: the active session's
+    /// Root directory for the Reader tab's file tree: the active session's
     /// clone path if present, otherwise the project's source path.
-    pub(crate) fn editor_workspace_root(&self) -> Option<PathBuf> {
+    pub(crate) fn reader_workspace_root(&self) -> Option<PathBuf> {
         let cursor = self.active?;
         let project = self.projects.get(cursor.project_idx)?;
         let session = project.sessions.get(cursor.session_idx)?;
@@ -24,13 +28,13 @@ impl AppState {
         )
     }
 
-    /// Two-column Editor view: file tree on the left, file preview on the right.
-    pub(crate) fn render_editor_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let root = self.editor_workspace_root();
+    /// Two-column Reader view: file tree on the left, file preview on the right.
+    pub(crate) fn render_reader_view(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let root = self.reader_workspace_root();
 
         let tree_col = {
             let mut col = div()
-                .id("editor-tree-scroll")
+                .id("reader-tree-scroll")
                 .w(px(240.0))
                 .flex_shrink_0()
                 .h_full()
@@ -74,7 +78,7 @@ impl AppState {
 
         let preview_col = {
             let mut col = div()
-                .id("editor-preview-scroll")
+                .id("reader-preview-scroll")
                 .flex_1()
                 .min_w(px(0.0))
                 .h_full()
@@ -85,7 +89,7 @@ impl AppState {
                 .text_color(theme().text_primary)
                 .font_family("monospace");
 
-            match (&self.editor.selected_path, &self.editor.preview) {
+            match (&self.reader.selected_path, &self.reader.preview) {
                 (Some(sel), Some((p, contents))) if p == sel => {
                     col = col.child(
                         div()
@@ -99,10 +103,23 @@ impl AppState {
                 _ => {
                     col = col
                         .flex()
+                        .flex_col()
                         .items_center()
                         .justify_center()
+                        .gap(px(6.0))
+                        .font_family(crate::theme::FONT_UI)
                         .text_color(theme().text_faint)
-                        .child("Select a file to preview");
+                        .child(
+                            div()
+                                .text_size(px(13.0))
+                                .child("Select a file to read"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme().text_ghost)
+                                .child("Reader is read-only — editing opens in your external editor"),
+                        );
                 }
             }
 
@@ -117,7 +134,7 @@ impl AppState {
             .child(tree_col)
             .child(preview_col);
 
-        root = root.child(self.render_editor_context_menu(cx));
+        root = root.child(self.render_reader_context_menu(cx));
 
         root
     }
@@ -126,9 +143,9 @@ impl AppState {
     /// when no menu is open, so callers can attach unconditionally.
     /// Rendered via `deferred` so it paints on top of sibling content, and
     /// positioned in window coordinates at the click site.
-    pub(crate) fn render_editor_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(crate) fn render_reader_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let mut root = div();
-        let Some((path, position)) = self.editor.context_menu.clone() else {
+        let Some((path, position)) = self.reader.context_menu.clone() else {
             return root;
         };
 
@@ -151,7 +168,7 @@ impl AppState {
                         } else {
                             this.open_in_external_editor(&path);
                         }
-                        this.editor.context_menu = None;
+                        this.reader.context_menu = None;
                         cx.notify();
                     }),
                 )
@@ -168,13 +185,13 @@ impl AppState {
             .rounded(px(6.0))
             .shadow_lg()
             .child(item(
-                "editor-ctx-reveal",
+                "reader-ctx-reveal",
                 "Reveal in Finder",
                 path.clone(),
                 true,
             ))
             .child(item(
-                "editor-ctx-open-external",
+                "reader-ctx-open-external",
                 "Open in External Editor",
                 path,
                 false,
@@ -214,8 +231,8 @@ impl AppState {
         let indent = px((depth * 12) as f32 + 8.0);
 
         for (path, is_dir, name) in entries {
-            let is_expanded = self.editor.expanded_dirs.contains(&path);
-            let is_selected = self.editor.selected_path.as_ref() == Some(&path);
+            let is_expanded = self.reader.expanded_dirs.contains(&path);
+            let is_selected = self.reader.selected_path.as_ref() == Some(&path);
 
             let tree_chevron = if is_dir {
                 Some(if is_expanded {
@@ -234,7 +251,7 @@ impl AppState {
             *counter += 1;
             let path_for_right_click = path.clone();
             let row = div()
-                .id(("editor-tree-row", row_id))
+                .id(("reader-tree-row", row_id))
                 .flex()
                 .flex_row()
                 .items_center()
@@ -256,23 +273,23 @@ impl AppState {
                     cx.listener(move |this: &mut Self, _event, _window, cx| {
                         let p = path_for_click.clone();
                         if p.is_dir() {
-                            if this.editor.expanded_dirs.contains(&p) {
-                                this.editor.expanded_dirs.remove(&p);
+                            if this.reader.expanded_dirs.contains(&p) {
+                                this.reader.expanded_dirs.remove(&p);
                             } else {
-                                this.editor.expanded_dirs.insert(p);
+                                this.reader.expanded_dirs.insert(p);
                             }
                         } else {
-                            this.editor.selected_path = Some(p.clone());
+                            this.reader.selected_path = Some(p.clone());
                             this.load_preview(p);
                         }
-                        this.editor.context_menu = None;
+                        this.reader.context_menu = None;
                         cx.notify();
                     }),
                 )
                 .on_mouse_down(
                     MouseButton::Right,
                     cx.listener(move |this: &mut Self, event: &MouseDownEvent, _window, cx| {
-                        this.editor.context_menu =
+                        this.reader.context_menu =
                             Some((path_for_right_click.clone(), event.position));
                         cx.notify();
                     }),
@@ -305,6 +322,6 @@ impl AppState {
             },
             Err(e) => format!("Could not stat file: {e}"),
         };
-        self.editor.preview = Some((path, contents));
+        self.reader.preview = Some((path, contents));
     }
 }

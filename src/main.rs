@@ -13,7 +13,7 @@ mod clone;
 mod config;
 mod drawer;
 mod debug_capture;
-mod editor;
+mod reader;
 mod errors;
 mod git;
 mod hook_events;
@@ -44,7 +44,7 @@ use actions::{
     SettingsAction, SidebarAction,
 };
 use app_state::{
-    AppState, ChangesPanelState, ConfirmationState, DrawerState, EditorState, MainTab, RichState,
+    AppState, ChangesPanelState, ConfirmationState, DrawerState, MainTab, ReaderState, RichState,
     RightPanelState,
     SidebarState, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
 };
@@ -377,7 +377,7 @@ impl AppState {
             .items_center()
             .gap(px(4.0))
             .child(tab("main-tab-claude", "Claude", MainTab::Claude))
-            .child(tab("main-tab-editor", "Editor", MainTab::Editor))
+            .child(tab("main-tab-reader", "Reader", MainTab::Reader))
             .child(tab("main-tab-transcript", "Transcript", MainTab::Transcript));
         if self.browser_tab_available() {
             strip = strip.child(tab("main-tab-browser", "Browser", MainTab::Browser));
@@ -2721,7 +2721,7 @@ fn main() {
                             rename: None,
                             rename_focus: None,
                         },
-                        editor: EditorState {
+                        reader: ReaderState {
                             selected_path: None,
                             expanded_dirs: HashSet::new(),
                             preview: None,
@@ -2797,7 +2797,7 @@ impl Render for AppState {
                 active_session: active_session.map(|s| s.label.as_str()),
                 main_tab: match self.main_tab {
                     MainTab::Claude => "claude",
-                    MainTab::Editor => "editor",
+                    MainTab::Reader => "reader",
                     MainTab::Browser => "browser",
                     MainTab::Transcript => "transcript",
                 },
@@ -3200,8 +3200,8 @@ impl Render for AppState {
                                 );
                             }
                         }
-                        MainTab::Editor => {
-                            main_area = main_area.child(self.render_editor_view(cx));
+                        MainTab::Reader => {
+                            main_area = main_area.child(self.render_reader_view(cx));
                         }
                         MainTab::Browser => {
                             main_area = main_area.child(self.render_browser_placeholder(cx));
