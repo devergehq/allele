@@ -145,6 +145,9 @@ pub struct Session {
     pub comment: Option<String>,
     /// Per-session merge strategy. `None` = use the project's setting.
     pub merge_strategy_override: Option<crate::settings::MergeStrategy>,
+    /// Whether the workspace has uncommitted changes. `None` until the
+    /// first background poll completes. Display-only; never persisted.
+    pub git_dirty: Option<bool>,
     /// The current git branch name for this session (e.g. "fix-auth-5dc47535").
     /// Persisted to state.json for orphan cleanup identification.
     pub branch_name: Option<String>,
@@ -193,6 +196,7 @@ impl Session {
             pinned: false,
             comment: None,
             merge_strategy_override: None,
+            git_dirty: None,
             branch_name: None,
             naming_suggestions: None,
             last_pre_tool_use: None,
@@ -236,6 +240,7 @@ impl Session {
             pinned: false,
             comment: None,
             merge_strategy_override: None,
+            git_dirty: None,
             branch_name: None,
             naming_suggestions: None,
             last_pre_tool_use: None,

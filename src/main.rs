@@ -2256,6 +2256,69 @@ fn main() {
                     })
                     .detach();
 
+                    // Git workspace-status poller (DEV-9). Every 15s, run a
+                    // porcelain status per session clone on the background
+                    // executor and update the sidebar dirty indicators.
+                    cx.spawn(async move |this, cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_secs(15))
+                                .await;
+
+                            let Ok(targets) = this.update(cx, |this: &mut AppState, _cx| {
+                                let mut t = Vec::new();
+                                for (p_idx, project) in this.projects.iter().enumerate() {
+                                    for (s_idx, session) in project.sessions.iter().enumerate() {
+                                        if let Some(cp) = &session.clone_path {
+                                            t.push((p_idx, s_idx, cp.clone()));
+                                        }
+                                    }
+                                }
+                                t
+                            }) else {
+                                break; // AppState dropped — app is exiting
+                            };
+                            if targets.is_empty() {
+                                continue;
+                            }
+
+                            let results = cx
+                                .background_executor()
+                                .spawn(async move {
+                                    targets
+                                        .into_iter()
+                                        .map(|(p, s, cp)| (p, s, git::is_working_tree_dirty(&cp)))
+                                        .collect::<Vec<_>>()
+                                })
+                                .await;
+
+                            if this
+                                .update(cx, |this: &mut AppState, cx| {
+                                    let mut changed = false;
+                                    for (p_idx, s_idx, dirty) in results {
+                                        if let Some(session) = this
+                                            .projects
+                                            .get_mut(p_idx)
+                                            .and_then(|p| p.sessions.get_mut(s_idx))
+                                        {
+                                            if session.git_dirty != Some(dirty) {
+                                                session.git_dirty = Some(dirty);
+                                                changed = true;
+                                            }
+                                        }
+                                    }
+                                    if changed {
+                                        cx.notify();
+                                    }
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+
                     // Rich Sidecar transcript tailer poll. Runs on a much
                     // gentler cadence than the old 120ms spinner timer so
                     // it doesn't drive full AppState re-renders that trigger
