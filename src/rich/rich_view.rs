@@ -20,6 +20,7 @@ use similar::{ChangeTag, TextDiff};
 
 use super::compose_bar::{ComposeBar, ComposeBarEvent};
 use super::document::{short_path, truncate_to_char_boundary, Block, BlockKind, RichDocument};
+use super::narrative::{Annotation, LocusPhase, NarrativeRole};
 use crate::stream::RichEvent;
 
 // ── Catppuccin Mocha palette (matching terminal) ──────────────────
@@ -170,7 +171,8 @@ impl RichView {
         let Some(block) = self.document.blocks().get(ix) else {
             return div().into_any_element();
         };
-        render_block(block, font_size, cx).into_any_element()
+        let annotation = self.document.annotation(block.id);
+        render_block(block, annotation, font_size, cx).into_any_element()
     }
 
     fn render_scrollbar(&self) -> Div {
@@ -275,7 +277,12 @@ impl Render for RichView {
 
 // ── Block renderers ───────────────────────────────────────────────
 
-fn render_block(block: &Block, font_size: f32, cx: &mut Context<RichView>) -> Div {
+fn render_block(
+    block: &Block,
+    annotation: Option<&Annotation>,
+    font_size: f32,
+    cx: &mut Context<RichView>,
+) -> Div {
     let indent = if block.parent_agent_id.is_some() {
         px(24.0)
     } else {
@@ -288,6 +295,20 @@ fn render_block(block: &Block, font_size: f32, cx: &mut Context<RichView>) -> Di
     // viewport has no horizontal scroll — so text runs off the page.
     // Constrained here, long text wraps at the list's own width.
     let mut wrapper = div().w_full().min_w_0().pl(indent).pb(px(16.0));
+
+    // DEV-29 narrative emphasis: a left accent bar on salient roles
+    // (decisions, outcomes) and a phase-divider pill above Locus phase
+    // headers, so a reader's eye lands on the meaningful moments.
+    let role = annotation.map(|a| &a.role);
+    if let Some(color) = role.and_then(role_accent) {
+        wrapper = wrapper
+            .border_l_2()
+            .border_color(color)
+            .pl(indent + px(8.0));
+    }
+    if let Some(NarrativeRole::PhaseHeader(phase)) = role {
+        wrapper = wrapper.child(phase_pill(*phase, font_size));
+    }
 
     let block_id = block.id;
 
@@ -373,6 +394,36 @@ fn render_block(block: &Block, font_size: f32, cx: &mut Context<RichView>) -> Di
     }
 
     wrapper
+}
+
+// ── Narrative emphasis (DEV-29) ───────────────────────────────────
+
+/// Accent colour for an emphasised narrative role, or `None` for roles that
+/// need no left bar (prose, activity, and phase headers — the latter get a
+/// pill instead).
+fn role_accent(role: &NarrativeRole) -> Option<Hsla> {
+    match role {
+        NarrativeRole::Decision => Some(with_alpha(theme().attention, 0.85)),
+        NarrativeRole::Outcome => Some(with_alpha(theme().success, 0.85)),
+        _ => None,
+    }
+}
+
+/// A small "LOCUS · PHASE" divider pill rendered above a phase-header block.
+fn phase_pill(phase: LocusPhase, font_size: f32) -> Div {
+    div()
+        .mb(px(6.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(theme().ready))
+        .child(
+            div()
+                .text_color(theme().ready)
+                .text_size(px(font_size - 2.0))
+                .font_weight(FontWeight::BOLD)
+                .child(format!("LOCUS · {}", phase.label())),
+        )
 }
 
 // ── Text block ────────────────────────────────────────────────────

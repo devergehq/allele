@@ -4,6 +4,7 @@
 //! parent (for subagent nesting). The tree is append-heavy with rare in-place updates
 //! (status changes on existing nodes).
 
+use crate::rich::narrative::{Annotation, NarrativeProjector};
 use crate::stream::RichEvent;
 use std::collections::HashMap;
 
@@ -102,6 +103,11 @@ pub struct RichDocument {
     /// Index of the active PermissionRequest block (if any).
     permission_block: Option<BlockId>,
     next_id: BlockId,
+    /// Streaming narrative projector (DEV-29) — recognises Locus phases,
+    /// conversational turns, and narrative roles as events arrive.
+    projector: NarrativeProjector,
+    /// Per-block narrative annotation, keyed by stable BlockId.
+    annotations: HashMap<BlockId, Annotation>,
 }
 
 impl RichDocument {
@@ -113,7 +119,14 @@ impl RichDocument {
             awaiting_block: None,
             permission_block: None,
             next_id: 0,
+            projector: NarrativeProjector::new(),
+            annotations: HashMap::new(),
         }
+    }
+
+    /// Narrative annotation for a block, if one was recorded.
+    pub fn annotation(&self, id: BlockId) -> Option<&Annotation> {
+        self.annotations.get(&id)
     }
 
     /// Append a UserPrompt block (echoed when the user submits via ComposeBar).
@@ -133,6 +146,7 @@ impl RichDocument {
             self.clear_awaiting_indicator();
         }
         self.close_text_stream();
+        let annotation = self.projector.on_user_prompt();
         let id = self.push_block(Block {
             id: self.next_id,
             kind: BlockKind::UserPrompt { content },
@@ -140,6 +154,7 @@ impl RichDocument {
             collapsed: false,
             cached_height: None,
         });
+        self.annotations.insert(id, annotation);
         if had_awaiting {
             // Re-add at the end so awaiting is always the tail block.
             let awaiting_id = self.push_block(Block {
@@ -239,6 +254,10 @@ impl RichDocument {
     /// Apply a RichEvent to the document, mutating in place.
     /// Returns the index of any newly created block (for scroll-to-bottom).
     pub fn apply_event(&mut self, event: RichEvent) -> Option<BlockId> {
+        // Advance the narrative projection (phase/turn/role) for this event
+        // before it is consumed by the match below (DEV-29).
+        let annotation = self.projector.on_event(&event);
+
         // Any incoming content event means the CLI is producing output —
         // clear the "thinking" indicator.
         match &event {
@@ -254,7 +273,7 @@ impl RichDocument {
             _ => {}
         }
 
-        match event {
+        let created = match event {
             RichEvent::TextDelta {
                 text,
                 parent_agent_id,
@@ -442,7 +461,13 @@ impl RichDocument {
             }
 
             RichEvent::Init { .. } | RichEvent::HookStatus { .. } => None,
+        };
+
+        // Attach the narrative annotation to whatever block this event created.
+        if let Some(id) = created {
+            self.annotations.insert(id, annotation);
         }
+        created
     }
 
     /// Toggle collapsed state of a block.
@@ -605,5 +630,46 @@ mod truncate_tests {
             assert!(t.len() <= max);
             assert!(s.starts_with(t));
         }
+    }
+}
+
+#[cfg(test)]
+mod narrative_wiring_tests {
+    use super::*;
+    use crate::rich::narrative::{LocusPhase, NarrativeRole};
+
+    #[test]
+    fn phase_header_block_is_annotated() {
+        let mut doc = RichDocument::new();
+        let id = doc
+            .apply_event(RichEvent::TextBlock {
+                text: "Phase 1: OBSERVE (1/7)".into(),
+                parent_agent_id: None,
+            })
+            .unwrap();
+        let ann = doc.annotation(id).expect("annotation attached");
+        assert_eq!(ann.role, NarrativeRole::PhaseHeader(LocusPhase::Observe));
+    }
+
+    #[test]
+    fn user_prompt_and_following_text_share_turn_and_phase() {
+        let mut doc = RichDocument::new();
+        let prompt = doc.push_user_prompt("do the thing".into());
+        assert_eq!(doc.annotation(prompt).unwrap().role, NarrativeRole::Prompt);
+        assert_eq!(doc.annotation(prompt).unwrap().turn, 1);
+
+        doc.apply_event(RichEvent::TextBlock {
+            text: "## PLAN".into(),
+            parent_agent_id: None,
+        });
+        let prose = doc
+            .apply_event(RichEvent::TextBlock {
+                text: "sequencing the work".into(),
+                parent_agent_id: None,
+            })
+            .unwrap();
+        let ann = doc.annotation(prose).unwrap();
+        assert_eq!(ann.phase, Some(LocusPhase::Plan));
+        assert_eq!(ann.turn, 1);
     }
 }

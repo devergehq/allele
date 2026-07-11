@@ -132,7 +132,12 @@ impl NarrativeProjector {
     /// Annotate a user prompt, opening a new turn.
     pub fn on_user_prompt(&mut self) -> Annotation {
         self.turn += 1;
-        Annotation { turn: self.turn, phase: self.phase, role: NarrativeRole::Prompt, agent: None }
+        Annotation {
+            turn: self.turn,
+            phase: self.phase,
+            role: NarrativeRole::Prompt,
+            agent: None,
+        }
     }
 
     /// Annotate a rich event. Updates the active phase when the event carries a
@@ -151,7 +156,12 @@ impl NarrativeProjector {
             RichEvent::Fallback { .. } => NarrativeRole::Unsupported,
             RichEvent::Init { .. } | RichEvent::HookStatus { .. } => NarrativeRole::Prose,
         };
-        Annotation { turn: self.turn, phase: self.phase, role, agent }
+        Annotation {
+            turn: self.turn,
+            phase: self.phase,
+            role,
+            agent,
+        }
     }
 
     /// Classify a text block, updating `self.phase` if it announces one.
@@ -177,14 +187,30 @@ impl NarrativeProjector {
 
 fn event_agent(event: &RichEvent) -> Option<String> {
     match event {
-        RichEvent::TextDelta { parent_agent_id, .. }
-        | RichEvent::TextBlock { parent_agent_id, .. }
-        | RichEvent::ThinkingBlock { parent_agent_id, .. }
-        | RichEvent::ToolUse { parent_agent_id, .. }
-        | RichEvent::ToolResult { parent_agent_id, .. }
-        | RichEvent::EditDiff { parent_agent_id, .. }
-        | RichEvent::Fallback { parent_agent_id, .. } => parent_agent_id.clone(),
-        RichEvent::Init { .. } | RichEvent::SessionResult { .. } | RichEvent::HookStatus { .. } => None,
+        RichEvent::TextDelta {
+            parent_agent_id, ..
+        }
+        | RichEvent::TextBlock {
+            parent_agent_id, ..
+        }
+        | RichEvent::ThinkingBlock {
+            parent_agent_id, ..
+        }
+        | RichEvent::ToolUse {
+            parent_agent_id, ..
+        }
+        | RichEvent::ToolResult {
+            parent_agent_id, ..
+        }
+        | RichEvent::EditDiff {
+            parent_agent_id, ..
+        }
+        | RichEvent::Fallback {
+            parent_agent_id, ..
+        } => parent_agent_id.clone(),
+        RichEvent::Init { .. } | RichEvent::SessionResult { .. } | RichEvent::HookStatus { .. } => {
+            None
+        }
     }
 }
 
@@ -236,7 +262,9 @@ fn is_classification_banner(text: &str) -> bool {
 }
 
 fn is_decision(text: &str) -> bool {
-    let lower = text.trim_start_matches(['*', '#', '-', ' ', '>']).to_ascii_lowercase();
+    let lower = text
+        .trim_start_matches(['*', '#', '-', ' ', '>'])
+        .to_ascii_lowercase();
     lower.starts_with("decision:")
         || lower.starts_with("decided:")
         || lower.starts_with("i'll ")
@@ -245,7 +273,9 @@ fn is_decision(text: &str) -> bool {
 }
 
 fn is_outcome(text: &str) -> bool {
-    let lower = text.trim_start_matches(['*', '#', '-', ' ', '>']).to_ascii_lowercase();
+    let lower = text
+        .trim_start_matches(['*', '#', '-', ' ', '>'])
+        .to_ascii_lowercase();
     lower.starts_with("summary:")
         || lower.starts_with("done.")
         || lower.starts_with("done —")
@@ -259,27 +289,48 @@ mod tests {
     use super::*;
 
     fn text(s: &str) -> RichEvent {
-        RichEvent::TextBlock { text: s.to_string(), parent_agent_id: None }
+        RichEvent::TextBlock {
+            text: s.to_string(),
+            parent_agent_id: None,
+        }
     }
 
     #[test]
     fn detects_formal_phase_header() {
-        assert_eq!(detect_phase_header("Phase 1: OBSERVE (1/7)"), Some(LocusPhase::Observe));
-        assert_eq!(detect_phase_header("## Phase 6: VERIFY"), Some(LocusPhase::Verify));
-        assert_eq!(detect_phase_header("**Phase 3: PLAN (3/7)**"), Some(LocusPhase::Plan));
+        assert_eq!(
+            detect_phase_header("Phase 1: OBSERVE (1/7)"),
+            Some(LocusPhase::Observe)
+        );
+        assert_eq!(
+            detect_phase_header("## Phase 6: VERIFY"),
+            Some(LocusPhase::Verify)
+        );
+        assert_eq!(
+            detect_phase_header("**Phase 3: PLAN (3/7)**"),
+            Some(LocusPhase::Plan)
+        );
     }
 
     #[test]
     fn detects_bare_phase_heading() {
         assert_eq!(detect_phase_header("## OBSERVE"), Some(LocusPhase::Observe));
-        assert_eq!(detect_phase_header("EXECUTE (5/7)"), Some(LocusPhase::Execute));
+        assert_eq!(
+            detect_phase_header("EXECUTE (5/7)"),
+            Some(LocusPhase::Execute)
+        );
     }
 
     #[test]
     fn does_not_misread_prose_as_phase() {
         // A paragraph that merely begins with a phase word is not a header.
-        assert_eq!(detect_phase_header("Plan the migration carefully before starting."), None);
-        assert_eq!(detect_phase_header("Observe that the tests already pass here."), None);
+        assert_eq!(
+            detect_phase_header("Plan the migration carefully before starting."),
+            None
+        );
+        assert_eq!(
+            detect_phase_header("Observe that the tests already pass here."),
+            None
+        );
     }
 
     #[test]
@@ -308,18 +359,40 @@ mod tests {
     #[test]
     fn classifies_salient_roles() {
         let mut p = NarrativeProjector::new();
-        assert_eq!(p.on_event(&text("**Classification: Non-trivial**")).role, NarrativeRole::Classification);
-        assert_eq!(p.on_event(&text("Decision: use a ledger.")).role, NarrativeRole::Decision);
-        assert_eq!(p.on_event(&text("I'll stack the PRs bottom-up.")).role, NarrativeRole::Decision);
-        assert_eq!(p.on_event(&text("Summary: shipped two tickets.")).role, NarrativeRole::Outcome);
+        assert_eq!(
+            p.on_event(&text("**Classification: Non-trivial**")).role,
+            NarrativeRole::Classification
+        );
+        assert_eq!(
+            p.on_event(&text("Decision: use a ledger.")).role,
+            NarrativeRole::Decision
+        );
+        assert_eq!(
+            p.on_event(&text("I'll stack the PRs bottom-up.")).role,
+            NarrativeRole::Decision
+        );
+        assert_eq!(
+            p.on_event(&text("Summary: shipped two tickets.")).role,
+            NarrativeRole::Outcome
+        );
     }
 
     #[test]
     fn session_result_is_outcome_and_fallback_is_unsupported() {
         let mut p = NarrativeProjector::new();
-        let end = RichEvent::SessionResult { duration_ms: 1, cost_usd: 0.0, num_turns: 1, is_error: false, result_text: None };
+        let end = RichEvent::SessionResult {
+            duration_ms: 1,
+            cost_usd: 0.0,
+            num_turns: 1,
+            is_error: false,
+            result_text: None,
+        };
         assert_eq!(p.on_event(&end).role, NarrativeRole::Outcome);
-        let fb = RichEvent::Fallback { raw: "{}".into(), reason: "x".into(), parent_agent_id: None };
+        let fb = RichEvent::Fallback {
+            raw: "{}".into(),
+            reason: "x".into(),
+            parent_agent_id: None,
+        };
         assert_eq!(p.on_event(&fb).role, NarrativeRole::Unsupported);
     }
 
