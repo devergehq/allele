@@ -22,13 +22,14 @@
 
 use std::ops::Range;
 use std::path::PathBuf;
+use crate::theme::{theme, with_alpha};
 
 use gpui::{
-    actions, fill, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds, ClipboardEntry,
+    actions, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry,
     ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, EntityInputHandler,
-    EventEmitter, ExternalPaths, FocusHandle, Focusable, GlobalElementId, Hsla, LayoutId,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, GlobalElementId, LayoutId,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, PathPromptOptions,
-    Pixels, Rgba, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    Pixels, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
@@ -81,26 +82,8 @@ const KEY_CONTEXT: &str = "ComposeBar";
 
 // ── Colours (Catppuccin Mocha) ────────────────────────────────────
 
-const SURFACE0: u32 = 0x313244;
-const SURFACE1: u32 = 0x45475a;
-const TEXT: u32 = 0xcdd6f4;
-const SUBTEXT0: u32 = 0xa6adc8;
-const BLUE: u32 = 0x89b4fa;
-const CRUST: u32 = 0x11111b;
 
-fn hex(c: u32) -> Hsla {
-    let r = ((c >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((c >> 8) & 0xFF) as f32 / 255.0;
-    let b = (c & 0xFF) as f32 / 255.0;
-    Rgba { r, g, b, a: 1.0 }.into()
-}
 
-fn hex_alpha(c: u32, alpha: f32) -> Hsla {
-    let r = ((c >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((c >> 8) & 0xFF) as f32 / 255.0;
-    let b = (c & 0xFF) as f32 / 255.0;
-    Rgba { r, g, b, a: alpha }.into()
-}
 
 // ── Events ────────────────────────────────────────────────────────
 
@@ -937,9 +920,9 @@ impl Element for TextElement {
 
         let is_placeholder = content.is_empty();
         let (display_text, text_color) = if is_placeholder {
-            (placeholder.to_string(), hex(SUBTEXT0))
+            (placeholder.to_string(), theme().text_secondary)
         } else {
-            (content.clone(), hex(TEXT))
+            (content.clone(), theme().text_primary)
         };
 
         // Split into lines (keep line boundaries)
@@ -1003,7 +986,7 @@ impl Element for TextElement {
                     point(bounds.left() + x, bounds.top() + y),
                     size(px(1.5), line_height),
                 ),
-                rgb(BLUE),
+                theme().accent,
             ))
         } else {
             // Placeholder — still show cursor at position 0
@@ -1012,7 +995,7 @@ impl Element for TextElement {
                     point(bounds.left(), bounds.top()),
                     size(px(1.5), line_height),
                 ),
-                rgb(BLUE),
+                theme().accent,
             ))
         };
 
@@ -1048,7 +1031,7 @@ impl Element for TextElement {
                             bounds.top() + y + line_height,
                         ),
                     ),
-                    rgba(0x89b4fa55),
+                    theme().selection,
                 ));
             }
         }
@@ -1161,9 +1144,9 @@ impl Render for ComposeBar {
         let font_size = self.font_size;
         let can_send = !self.content.trim().is_empty() && !self.busy;
         let send_color = if can_send {
-            hex(BLUE)
+            theme().accent
         } else {
-            hex_alpha(SUBTEXT0, 0.5)
+            with_alpha(theme().text_secondary, 0.5)
         };
         let send_label = if self.busy { "…" } else { "Send" };
 
@@ -1196,7 +1179,7 @@ impl Render for ComposeBar {
             .px(px(12.0))
             .py(px(6.0))
             .rounded(px(6.0))
-            .bg(hex_alpha(SURFACE1, 0.6))
+            .bg(with_alpha(theme().bg_hover, 0.6))
             .cursor(if can_send {
                 CursorStyle::PointingHand
             } else {
@@ -1224,12 +1207,12 @@ impl Render for ComposeBar {
             .px(px(12.0))
             .py(px(6.0))
             .rounded(px(6.0))
-            .bg(hex_alpha(SURFACE1, 0.4))
+            .bg(with_alpha(theme().bg_hover, 0.4))
             .cursor(CursorStyle::PointingHand)
             .child(
                 gpui::div()
                     .text_size(px(font_size + 1.0))
-                    .text_color(hex(SUBTEXT0))
+                    .text_color(theme().text_secondary)
                     .child("📎"),
             )
             .on_mouse_down(
@@ -1260,7 +1243,7 @@ impl Render for ComposeBar {
                 .px(px(8.0))
                 .py(px(4.0))
                 .border_b_1()
-                .border_color(hex_alpha(SURFACE1, 0.5));
+                .border_color(with_alpha(theme().bg_hover, 0.5));
             for attachment in &self.attachments {
                 let id = attachment.id;
                 let label = attachment.display_label();
@@ -1281,11 +1264,11 @@ impl Render for ComposeBar {
                     .px(px(8.0))
                     .py(px(4.0))
                     .rounded(px(6.0))
-                    .bg(hex_alpha(SURFACE1, 0.5))
+                    .bg(with_alpha(theme().bg_hover, 0.5))
                     .child(
                         gpui::div()
                             .text_size(px(font_size - 2.0))
-                            .text_color(if warn { hex_alpha(TEXT, 0.9) } else { hex(TEXT) })
+                            .text_color(if warn { with_alpha(theme().text_primary, 0.9) } else { theme().text_primary })
                             .child(format!("{prefix}{label}")),
                     )
                     .child(
@@ -1293,7 +1276,7 @@ impl Render for ComposeBar {
                             .id(ElementId::Name(format!("attachment-x-{id}").into()))
                             .cursor(CursorStyle::PointingHand)
                             .text_size(px(font_size - 2.0))
-                            .text_color(hex(SUBTEXT0))
+                            .text_color(theme().text_secondary)
                             .child("✕")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -1359,8 +1342,8 @@ impl Render for ComposeBar {
             .flex_shrink_0()
             .p(px(8.0))
             .border_t_1()
-            .border_color(hex_alpha(SURFACE1, 0.5))
-            .bg(hex(CRUST))
+            .border_color(with_alpha(theme().bg_hover, 0.5))
+            .bg(theme().bg_sunken)
             .flex()
             .gap(px(8.0))
             .items_end()
@@ -1372,9 +1355,9 @@ impl Render for ComposeBar {
                     .flex()
                     .flex_col()
                     .rounded(px(6.0))
-                    .bg(hex_alpha(SURFACE0, 0.6))
+                    .bg(with_alpha(theme().bg_raised, 0.6))
                     .border_1()
-                    .border_color(hex_alpha(SURFACE1, 0.5))
+                    .border_color(with_alpha(theme().bg_hover, 0.5))
                     .overflow_hidden();
                 if let Some(row) = attachments_row {
                     input_col = input_col.child(row);

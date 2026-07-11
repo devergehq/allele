@@ -16,6 +16,7 @@
 
 use gpui::*;
 use similar::{ChangeTag, TextDiff};
+use crate::theme::{theme, with_alpha};
 
 use super::compose_bar::{ComposeBar, ComposeBarEvent};
 use super::document::{short_path, Block, BlockKind, RichDocument};
@@ -23,33 +24,8 @@ use crate::stream::RichEvent;
 
 // ── Catppuccin Mocha palette (matching terminal) ──────────────────
 
-const BASE: u32 = 0x1e1e2e;
-const SURFACE0: u32 = 0x313244;
-const SURFACE1: u32 = 0x45475a;
-const TEXT: u32 = 0xcdd6f4;
-const SUBTEXT0: u32 = 0xa6adc8;
-const SUBTEXT1: u32 = 0xbac2de;
-const GREEN: u32 = 0xa6e3a1;
-const RED: u32 = 0xf38ba8;
-const PEACH: u32 = 0xfab387;
-const BLUE: u32 = 0x89b4fa;
-const LAVENDER: u32 = 0xcba6f7;
-const OVERLAY0: u32 = 0x6c7086;
-const TEAL: u32 = 0x94e2d5;
 
-fn hex(c: u32) -> Hsla {
-    let r = ((c >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((c >> 8) & 0xFF) as f32 / 255.0;
-    let b = (c & 0xFF) as f32 / 255.0;
-    Rgba { r, g, b, a: 1.0 }.into()
-}
 
-fn hex_alpha(c: u32, alpha: f32) -> Hsla {
-    let r = ((c >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((c >> 8) & 0xFF) as f32 / 255.0;
-    let b = (c & 0xFF) as f32 / 255.0;
-    Rgba { r, g, b, a: alpha }.into()
-}
 
 // ── Events emitted to parent ──────────────────────────────────────
 
@@ -234,7 +210,7 @@ impl RichView {
                     .h(thumb_height)
                     .top(thumb_top)
                     .rounded(px(6.0))
-                    .bg(hex_alpha(TEXT, 0.25)),
+                    .bg(with_alpha(theme().text_primary, 0.25)),
             )
     }
 
@@ -259,7 +235,7 @@ impl Render for RichView {
                 .overflow_hidden()
                 .flex()
                 .flex_col()
-                .bg(hex(BASE))
+                .bg(theme().bg_base)
                 .child(
                     div()
                         .flex_1()
@@ -268,7 +244,7 @@ impl Render for RichView {
                         .justify_center()
                         .child(
                             div()
-                                .text_color(hex(SUBTEXT0))
+                                .text_color(theme().text_secondary)
                                 .text_size(px(font_size))
                                 .child(message),
                         ),
@@ -296,7 +272,7 @@ impl Render for RichView {
             .overflow_hidden()
             .flex()
             .flex_col()
-            .bg(hex(BASE))
+            .bg(theme().bg_base)
             .child(
                 div()
                     .relative()
@@ -431,7 +407,7 @@ fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
         .child(
             div()
                 .flex_shrink_0()
-                .text_color(hex(LAVENDER))
+                .text_color(theme().ready)
                 .text_size(px(font_size - 1.0))
                 .font_weight(FontWeight::BOLD)
                 .child("Claude"),
@@ -466,13 +442,13 @@ fn render_thinking_block(
         .cursor(gpui::CursorStyle::PointingHand)
         .child(
             div()
-                .text_color(hex(OVERLAY0))
+                .text_color(theme().text_faint)
                 .text_size(px(font_size - 2.0))
                 .child(chevron(collapsed)),
         )
         .child(
             div()
-                .text_color(hex(OVERLAY0))
+                .text_color(theme().text_faint)
                 .text_size(px(font_size - 1.0))
                 .child("thinking"),
         )
@@ -490,7 +466,7 @@ fn render_thinking_block(
         .py(px(2.0))
         .pl(px(8.0))
         .border_l_2()
-        .border_color(hex_alpha(OVERLAY0, 0.3))
+        .border_color(with_alpha(theme().text_faint, 0.3))
         .child(header);
 
     if !collapsed {
@@ -499,7 +475,7 @@ fn render_thinking_block(
                 .w_full()
                 .min_w_0()
                 .mt(px(4.0))
-                .text_color(hex_alpha(OVERLAY0, 0.7))
+                .text_color(with_alpha(theme().text_faint, 0.7))
                 .text_size(px(font_size - 1.0))
                 .child(content.to_string()),
         );
@@ -521,9 +497,9 @@ fn render_tool_call(
     cx: &mut Context<RichView>,
 ) -> Div {
     let status_color = match result {
-        Some(r) if r.is_error => hex(RED),
-        Some(_) => hex(GREEN),
-        None => hex(PEACH), // still running
+        Some(r) if r.is_error => theme().danger,
+        Some(_) => theme().success,
+        None => theme().attention, // still running
     };
 
     let mut card = div()
@@ -532,7 +508,7 @@ fn render_tool_call(
         .px(px(10.0))
         .py(px(8.0))
         .rounded(px(6.0))
-        .bg(hex_alpha(SURFACE0, 0.6))
+        .bg(with_alpha(theme().bg_raised, 0.6))
         .border_l_2()
         .border_color(status_color);
 
@@ -549,14 +525,14 @@ fn render_tool_call(
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_color(hex(SUBTEXT0))
+                    .text_color(theme().text_secondary)
                     .text_size(px(font_size - 2.0))
                     .child(chevron(collapsed)),
             )
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_color(hex(BLUE))
+                    .text_color(theme().accent)
                     .text_size(px(font_size - 1.0))
                     .font_weight(FontWeight::BOLD)
                     .child(tool_name.to_string()),
@@ -565,7 +541,7 @@ fn render_tool_call(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_color(hex(SUBTEXT0))
+                    .text_color(theme().text_secondary)
                     .text_size(px(font_size - 1.0))
                     .child(input_summary.to_string()),
             )
@@ -595,7 +571,7 @@ fn render_tool_call(
                     .w_full()
                     .min_w_0()
                     .mt(px(4.0))
-                    .text_color(hex(RED))
+                    .text_color(theme().danger)
                     .text_size(px(font_size - 1.0))
                     .child(preview),
             );
@@ -622,7 +598,7 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
                         .w_full()
                         .min_w_0()
                         .mb(px(4.0))
-                        .text_color(hex(SUBTEXT0))
+                        .text_color(theme().text_secondary)
                         .text_size(px(code_size))
                         .child(desc.to_string()),
                 );
@@ -633,10 +609,10 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
                 .px(px(8.0))
                 .py(px(6.0))
                 .rounded(px(6.0))
-                .bg(hex_alpha(SURFACE1, 0.4))
-                .text_color(hex(GREEN))
+                .bg(with_alpha(theme().bg_hover, 0.4))
+                .text_color(theme().success)
                 .text_size(px(code_size))
-                .font_family("JetBrains Mono");
+                .font_family(crate::theme::FONT_MONO);
             for line in command.lines() {
                 code = code.child(div().w_full().min_w_0().child(line.to_string()));
             }
@@ -663,10 +639,10 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
                 .px(px(8.0))
                 .py(px(4.0))
                 .rounded(px(6.0))
-                .bg(hex_alpha(SURFACE1, 0.4))
-                .text_color(hex(SUBTEXT1))
+                .bg(with_alpha(theme().bg_hover, 0.4))
+                .text_color(theme().text_body)
                 .text_size(px(code_size))
-                .font_family("JetBrains Mono")
+                .font_family(crate::theme::FONT_MONO)
                 .child(detail)
         }
         "Write" | "write_file" => {
@@ -680,10 +656,10 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
                 .px(px(8.0))
                 .py(px(4.0))
                 .rounded(px(6.0))
-                .bg(hex_alpha(SURFACE1, 0.4))
-                .text_color(hex(SUBTEXT1))
+                .bg(with_alpha(theme().bg_hover, 0.4))
+                .text_color(theme().text_body)
                 .text_size(px(code_size))
-                .font_family("JetBrains Mono")
+                .font_family(crate::theme::FONT_MONO)
                 .child(format!("{path} ({line_count} lines)"))
         }
         "Grep" => {
@@ -704,10 +680,10 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
                 .px(px(8.0))
                 .py(px(4.0))
                 .rounded(px(6.0))
-                .bg(hex_alpha(SURFACE1, 0.4))
-                .text_color(hex(SUBTEXT1))
+                .bg(with_alpha(theme().bg_hover, 0.4))
+                .text_color(theme().text_body)
                 .text_size(px(code_size))
-                .font_family("JetBrains Mono")
+                .font_family(crate::theme::FONT_MONO)
                 .child(detail)
         }
         "Agent" => {
@@ -722,7 +698,7 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
                     .w_full()
                     .min_w_0()
                     .mb(px(4.0))
-                    .text_color(hex(LAVENDER))
+                    .text_color(theme().ready)
                     .text_size(px(code_size))
                     .font_weight(FontWeight::BOLD)
                     .child(desc.to_string()),
@@ -740,8 +716,8 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
                         .px(px(8.0))
                         .py(px(4.0))
                         .rounded(px(6.0))
-                        .bg(hex_alpha(SURFACE1, 0.4))
-                        .text_color(hex(SUBTEXT0))
+                        .bg(with_alpha(theme().bg_hover, 0.4))
+                        .text_color(theme().text_secondary)
                         .text_size(px(code_size))
                         .child(preview),
                 );
@@ -758,10 +734,10 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
                 .px(px(8.0))
                 .py(px(4.0))
                 .rounded(px(6.0))
-                .bg(hex_alpha(SURFACE1, 0.4))
-                .text_color(hex(SUBTEXT1))
+                .bg(with_alpha(theme().bg_hover, 0.4))
+                .text_color(theme().text_body)
                 .text_size(px(code_size))
-                .font_family("JetBrains Mono");
+                .font_family(crate::theme::FONT_MONO);
             for line in pretty.lines().take(40) {
                 json_block = json_block.child(div().w_full().min_w_0().child(line.to_string()));
             }
@@ -770,7 +746,7 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
                 json_block = json_block.child(
                     div()
                         .mt(px(4.0))
-                        .text_color(hex_alpha(OVERLAY0, 0.7))
+                        .text_color(with_alpha(theme().text_faint, 0.7))
                         .child(format!("…{} more lines", total_lines - 40)),
                 );
             }
@@ -797,10 +773,10 @@ fn render_tool_result_output(content: &str, font_size: f32) -> Div {
         .px(px(8.0))
         .py(px(6.0))
         .rounded(px(6.0))
-        .bg(hex_alpha(SURFACE1, 0.3))
-        .text_color(hex(SUBTEXT0))
+        .bg(with_alpha(theme().bg_hover, 0.3))
+        .text_color(theme().text_secondary)
         .text_size(px(code_size))
-        .font_family("JetBrains Mono");
+        .font_family(crate::theme::FONT_MONO);
 
     for line in visible {
         block = block.child(
@@ -816,7 +792,7 @@ fn render_tool_result_output(content: &str, font_size: f32) -> Div {
         block = block.child(
             div()
                 .mt(px(4.0))
-                .text_color(hex_alpha(OVERLAY0, 0.7))
+                .text_color(with_alpha(theme().text_faint, 0.7))
                 .text_size(px(code_size))
                 .child(format!("…{remaining} more lines")),
         );
@@ -854,7 +830,7 @@ fn render_diff(
         .w_full()
         .min_w_0()
         .rounded(px(6.0))
-        .bg(hex_alpha(SURFACE0, 0.4))
+        .bg(with_alpha(theme().bg_raised, 0.4))
         .overflow_hidden();
 
     // File path header (clickable — toggles collapsed state).
@@ -872,19 +848,19 @@ fn render_diff(
             .gap(px(8.0))
             .px(px(10.0))
             .py(px(4.0))
-            .bg(hex_alpha(SURFACE1, 0.6))
+            .bg(with_alpha(theme().bg_hover, 0.6))
             .cursor(gpui::CursorStyle::PointingHand)
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_color(hex(SUBTEXT0))
+                    .text_color(theme().text_secondary)
                     .text_size(px(code_size - 1.0))
                     .child(chevron(collapsed)),
             )
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_color(hex(PEACH))
+                    .text_color(theme().attention)
                     .text_size(px(code_size))
                     .font_weight(FontWeight::BOLD)
                     .child("Edit"),
@@ -893,25 +869,25 @@ fn render_diff(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_color(hex(SUBTEXT1))
+                    .text_color(theme().text_body)
                     .text_size(px(code_size))
-                    .font_family("JetBrains Mono")
+                    .font_family(crate::theme::FONT_MONO)
                     .child(short),
             )
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_color(hex(GREEN))
+                    .text_color(theme().success)
                     .text_size(px(code_size - 1.0))
-                    .font_family("JetBrains Mono")
+                    .font_family(crate::theme::FONT_MONO)
                     .child(format!("+{added}")),
             )
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_color(hex(RED))
+                    .text_color(theme().danger)
                     .text_size(px(code_size - 1.0))
-                    .font_family("JetBrains Mono")
+                    .font_family(crate::theme::FONT_MONO)
                     .child(format!("−{removed}")),
             )
             .on_mouse_down(
@@ -969,13 +945,13 @@ fn render_diff(
                 for j in del_start..del_end {
                     diff = diff.child(render_diff_line_plain(
                         "-", &changes[j].1, code_size,
-                        hex_alpha(RED, 0.8), hex_alpha(RED, 0.1),
+                        with_alpha(theme().danger, 0.8), with_alpha(theme().danger, 0.1),
                     ));
                 }
                 for j in ins_start..ins_end {
                     diff = diff.child(render_diff_line_plain(
                         "+", &changes[j].1, code_size,
-                        hex_alpha(GREEN, 0.8), hex_alpha(GREEN, 0.1),
+                        with_alpha(theme().success, 0.8), with_alpha(theme().success, 0.1),
                     ));
                 }
             } else {
@@ -995,24 +971,24 @@ fn render_diff(
                     } else {
                         diff = diff.child(render_diff_line_plain(
                             "-", del_line, code_size,
-                            hex_alpha(RED, 0.8), hex_alpha(RED, 0.1),
+                            with_alpha(theme().danger, 0.8), with_alpha(theme().danger, 0.1),
                         ));
                         diff = diff.child(render_diff_line_plain(
                             "+", ins_line, code_size,
-                            hex_alpha(GREEN, 0.8), hex_alpha(GREEN, 0.1),
+                            with_alpha(theme().success, 0.8), with_alpha(theme().success, 0.1),
                         ));
                     }
                 }
                 for j in paired..del_count {
                     diff = diff.child(render_diff_line_plain(
                         "-", &changes[del_start + j].1, code_size,
-                        hex_alpha(RED, 0.8), hex_alpha(RED, 0.1),
+                        with_alpha(theme().danger, 0.8), with_alpha(theme().danger, 0.1),
                     ));
                 }
                 for j in paired..ins_count {
                     diff = diff.child(render_diff_line_plain(
                         "+", &changes[ins_start + j].1, code_size,
-                        hex_alpha(GREEN, 0.8), hex_alpha(GREEN, 0.1),
+                        with_alpha(theme().success, 0.8), with_alpha(theme().success, 0.1),
                     ));
                 }
             }
@@ -1023,7 +999,7 @@ fn render_diff(
         if i < changes.len() && changes[i].0 == ChangeTag::Equal {
             diff = diff.child(render_diff_line_plain(
                 " ", &changes[i].1, code_size,
-                hex_alpha(SUBTEXT0, 0.5), hex_alpha(SURFACE0, 0.0),
+                with_alpha(theme().text_secondary, 0.5), with_alpha(theme().bg_raised, 0.0),
             ));
             i += 1;
         }
@@ -1067,7 +1043,7 @@ fn render_diff_line_plain(
                 .w(px(10.0))
                 .text_color(text_color)
                 .text_size(px(code_size))
-                .font_family("JetBrains Mono")
+                .font_family(crate::theme::FONT_MONO)
                 .child(prefix),
         )
         .child(
@@ -1076,7 +1052,7 @@ fn render_diff_line_plain(
                 .min_w_0()
                 .text_color(text_color)
                 .text_size(px(code_size))
-                .font_family("JetBrains Mono")
+                .font_family(crate::theme::FONT_MONO)
                 .child(text.to_string()),
         )
 }
@@ -1089,14 +1065,14 @@ fn render_diff_line_intraline(
     code_size: f32,
 ) -> Div {
     let (base_color, bg_color, highlight_bg) = if is_delete {
-        (hex_alpha(RED, 0.8), hex_alpha(RED, 0.1), hex_alpha(RED, 0.3))
+        (with_alpha(theme().danger, 0.8), with_alpha(theme().danger, 0.1), with_alpha(theme().danger, 0.3))
     } else {
-        (hex_alpha(GREEN, 0.8), hex_alpha(GREEN, 0.1), hex_alpha(GREEN, 0.3))
+        (with_alpha(theme().success, 0.8), with_alpha(theme().success, 0.1), with_alpha(theme().success, 0.3))
     };
 
     let word_diff = TextDiff::from_words(other_line, this_line);
     let mono = Font {
-        family: "JetBrains Mono".into(),
+        family: crate::theme::FONT_MONO.into(),
         weight: FontWeight::NORMAL,
         style: FontStyle::Normal,
         features: FontFeatures::disable_ligatures(),
@@ -1165,7 +1141,7 @@ fn render_diff_line_intraline(
                 .w(px(10.0))
                 .text_color(base_color)
                 .text_size(px(code_size))
-                .font_family("JetBrains Mono")
+                .font_family(crate::theme::FONT_MONO)
                 .child(prefix),
         )
         .child(
@@ -1187,7 +1163,7 @@ fn render_session_end(
     result_text: Option<&str>,
     font_size: f32,
 ) -> Div {
-    let color = if is_error { hex(RED) } else { hex(TEAL) };
+    let color = if is_error { theme().danger } else { theme().teal };
     let secs = duration_ms / 1000;
     let duration = if secs < 60 {
         format!("{secs}s")
@@ -1221,7 +1197,7 @@ fn render_session_end(
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_color(hex_alpha(SUBTEXT0, 0.7))
+                        .text_color(with_alpha(theme().text_secondary, 0.7))
                         .text_size(px(font_size - 2.0))
                         .child(format!("{duration} · ${cost_usd:.4}")),
                 ),
@@ -1243,12 +1219,12 @@ fn render_session_end(
                     .px(px(8.0))
                     .py(px(4.0))
                     .rounded(px(6.0))
-                    .bg(hex_alpha(SURFACE0, 0.4))
+                    .bg(with_alpha(theme().bg_raised, 0.4))
                     .child(
                         div()
                             .w_full()
                             .min_w_0()
-                            .text_color(if is_error { hex(RED) } else { hex(SUBTEXT0) })
+                            .text_color(if is_error { theme().danger } else { theme().text_secondary })
                             .text_size(px(font_size - 1.0))
                             .child(preview),
                     ),
@@ -1269,9 +1245,9 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
         .px(px(10.0))
         .py(px(6.0))
         .rounded(px(6.0))
-        .bg(hex_alpha(BLUE, 0.08))
+        .bg(with_alpha(theme().accent, 0.08))
         .border_l_2()
-        .border_color(hex_alpha(BLUE, 0.5))
+        .border_color(with_alpha(theme().accent, 0.5))
         .child(
             div()
                 .w_full()
@@ -1282,7 +1258,7 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
                 .child(
                     div()
                         .flex_shrink_0()
-                        .text_color(hex(BLUE))
+                        .text_color(theme().accent)
                         .text_size(px(font_size - 1.0))
                         .font_weight(FontWeight::BOLD)
                         .child("You"),
@@ -1291,7 +1267,7 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
                     div()
                         .flex_1()
                         .min_w_0()
-                        .text_color(hex(TEXT))
+                        .text_color(theme().text_primary)
                         .text_size(px(font_size))
                         .child(content.to_string()),
                 ),
@@ -1318,9 +1294,9 @@ fn render_permission_request(
         .px(px(12.0))
         .py(px(10.0))
         .rounded(px(6.0))
-        .bg(hex_alpha(PEACH, 0.1))
+        .bg(with_alpha(theme().attention, 0.1))
         .border_l_2()
-        .border_color(hex(PEACH));
+        .border_color(theme().attention);
 
     // Header row: icon + tool label
     card = card.child(
@@ -1333,7 +1309,7 @@ fn render_permission_request(
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_color(hex(PEACH))
+                    .text_color(theme().attention)
                     .text_size(px(font_size))
                     .child("⏸"),
             )
@@ -1341,7 +1317,7 @@ fn render_permission_request(
                 div()
                     .flex_1()
                     .min_w_0()
-                    .text_color(hex(PEACH))
+                    .text_color(theme().attention)
                     .text_size(px(font_size))
                     .font_weight(FontWeight::BOLD)
                     .child(label),
@@ -1356,9 +1332,9 @@ fn render_permission_request(
                 .min_w_0()
                 .mt(px(4.0))
                 .pl(px(24.0))
-                .text_color(hex(SUBTEXT1))
+                .text_color(theme().text_body)
                 .text_size(px(font_size - 1.0))
-                .font_family("JetBrains Mono")
+                .font_family(crate::theme::FONT_MONO)
                 .child(text.to_string()),
         );
     }
@@ -1376,8 +1352,8 @@ fn render_permission_request(
                     .px(px(12.0))
                     .py(px(4.0))
                     .rounded(px(6.0))
-                    .bg(hex_alpha(GREEN, 0.15))
-                    .text_color(hex(GREEN))
+                    .bg(with_alpha(theme().success, 0.15))
+                    .text_color(theme().success)
                     .text_size(px(font_size - 1.0))
                     .font_weight(FontWeight::BOLD)
                     .cursor(gpui::CursorStyle::PointingHand)
@@ -1406,13 +1382,13 @@ fn render_awaiting(font_size: f32) -> Div {
         .items_center()
         .child(
             div()
-                .text_color(hex(PEACH))
+                .text_color(theme().attention)
                 .text_size(px(font_size))
                 .child("●"),
         )
         .child(
             div()
-                .text_color(hex(SUBTEXT0))
+                .text_color(theme().text_secondary)
                 .text_size(px(font_size - 1.0))
                 .child("Thinking…"),
         )

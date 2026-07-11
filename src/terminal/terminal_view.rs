@@ -8,8 +8,9 @@ use gpui::*;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
+use crate::theme::theme;
 
-const FONT_FAMILY: &str = "JetBrains Mono";
+const FONT_FAMILY: &str = crate::theme::FONT_MONO;
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
 pub const MIN_FONT_SIZE: f32 = 8.0;
 pub const MAX_FONT_SIZE: f32 = 32.0;
@@ -1296,9 +1297,9 @@ impl TerminalView {
                 .px(px(14.0))
                 .py(px(6.0))
                 .text_size(px(12.0))
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(0x45475a)))
+                .hover(|s| s.bg(theme().bg_hover))
                 .child(label)
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1325,9 +1326,9 @@ impl TerminalView {
             .flex_col()
             .min_w(px(220.0))
             .py(px(4.0))
-            .bg(rgb(0x181825))
+            .bg(theme().bg_surface)
             .border_1()
-            .border_color(rgb(0x45475a))
+            .border_color(theme().border_default)
             .rounded(px(6.0))
             .shadow_md()
             .child(item(
@@ -1425,8 +1426,8 @@ impl Render for TerminalView {
         if let Some(ref error) = self.error {
             return div()
                 .size_full()
-                .bg(rgb(0x1e1e2e))
-                .text_color(rgb(0xf38ba8))
+                .bg(theme().bg_base)
+                .text_color(theme().danger)
                 .child(div().p(px(12.0)).child(error.clone()))
                 .into_any_element();
         }
@@ -1440,7 +1441,7 @@ impl Render for TerminalView {
         let Some(ref terminal) = self.terminal else {
             return div()
                 .size_full()
-                .bg(rgb(0x1e1e2e))
+                .bg(theme().bg_base)
                 .child("No terminal")
                 .into_any_element();
         };
@@ -1476,7 +1477,7 @@ impl Render for TerminalView {
         .origin_out(self.element_origin_x.clone(), self.element_origin_y.clone());
 
         let bell_active = self.bell_flash_start.is_some();
-        let bg_color = if bell_active { rgb(0x3a2e3a) } else { rgb(0x1e1e2e) };
+        let bg_color = if bell_active { theme().bg_bell } else { theme().bg_base };
         let clickable_hover = self.hovered_url.is_some() || self.hovered_path.is_some();
 
         let terminal = div()
@@ -2040,12 +2041,12 @@ impl Render for TerminalView {
                     .right(px(12.0))
                     .px(px(12.0))
                     .py(px(6.0))
-                    .bg(rgb(0x313244))
+                    .bg(theme().bg_raised)
                     .border_1()
-                    .border_color(rgb(0x585b70))
+                    .border_color(theme().border_strong)
                     .rounded(px(6.0))
                     .text_size(px(12.0))
-                    .text_color(rgb(0xcdd6f4))
+                    .text_color(theme().text_primary)
                     .child(label)
                     .into_any_element()]
             } else {

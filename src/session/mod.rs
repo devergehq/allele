@@ -55,14 +55,15 @@ impl SessionStatus {
         }
     }
 
-    pub fn color(&self) -> u32 {
+    pub fn color(&self) -> gpui::Hsla {
+        let t = crate::theme::theme();
         match self {
-            SessionStatus::Running => 0xa6e3a1,       // green
-            SessionStatus::Idle => 0xf9e2af,          // yellow
-            SessionStatus::Done => 0x6c7086,          // grey
-            SessionStatus::Suspended => 0x89b4fa,     // blue
-            SessionStatus::AwaitingInput => 0xfab387, // peach — urgent, blocker
-            SessionStatus::ResponseReady => 0xcba6f7, // lavender — done, review
+            SessionStatus::Running => t.success,
+            SessionStatus::Idle => t.warning,
+            SessionStatus::Done => t.text_faint,
+            SessionStatus::Suspended => t.accent,
+            SessionStatus::AwaitingInput => t.attention, // urgent, blocker
+            SessionStatus::ResponseReady => t.ready,     // done, review
         }
     }
 }

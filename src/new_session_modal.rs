@@ -3,6 +3,7 @@
 
 use gpui::*;
 use crate::text_input::{TextInput, TextInputEvent};
+use crate::theme::theme;
 
 /// Events emitted by the modal that AppState listens for.
 #[derive(Debug, Clone)]
@@ -177,7 +178,7 @@ impl NewSessionModal {
                     .w(px(110.0))
                     .flex_shrink_0()
                     .text_size(px(11.0))
-                    .text_color(rgb(0x6c7086))
+                    .text_color(theme().text_faint)
                     .child(label_text.to_string()),
             )
             .child(
@@ -195,10 +196,10 @@ impl NewSessionModal {
             .py(px(5.0))
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(0x45475a))
-            .bg(rgb(0x11111b))
+            .border_color(theme().border_default)
+            .bg(theme().bg_sunken)
             .text_size(px(12.0))
-            .text_color(rgb(0xcdd6f4))
+            .text_color(theme().text_primary)
             .overflow_hidden()
             .child(child)
     }
@@ -213,7 +214,7 @@ impl Render for NewSessionModal {
             .left(px(0.0))
             .right(px(0.0))
             .bottom(px(0.0))
-            .bg(rgba(0x00000099))
+            .bg(theme().backdrop)
             .flex()
             .items_center()
             .justify_center()
@@ -246,9 +247,9 @@ impl Render for NewSessionModal {
             .w(px(480.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x1e1e2e))
+            .bg(theme().bg_base)
             .border_1()
-            .border_color(rgb(0x45475a))
+            .border_color(theme().border_default)
             .rounded(px(8.0))
             .shadow_lg()
             .overflow_hidden()
@@ -262,7 +263,7 @@ impl Render for NewSessionModal {
                     .px(px(20.0))
                     .py(px(12.0))
                     .border_b_1()
-                    .border_color(rgb(0x313244))
+                    .border_color(theme().border_subtle)
                     .flex()
                     .flex_row()
                     .items_center()
@@ -271,7 +272,7 @@ impl Render for NewSessionModal {
                         div()
                             .text_size(px(14.0))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xcdd6f4))
+                            .text_color(theme().text_primary)
                             .child("New Session"),
                     )
                     .child(
@@ -282,8 +283,8 @@ impl Render for NewSessionModal {
                             .py(px(2.0))
                             .rounded(px(6.0))
                             .text_size(px(14.0))
-                            .text_color(rgb(0x6c7086))
-                            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .text_color(theme().text_faint)
+                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
                             .child("×")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -318,11 +319,11 @@ impl Render for NewSessionModal {
                                 BranchHint::Empty => div().h(px(13.0)),
                                 BranchHint::ExistingLocal => div()
                                     .text_size(px(10.0))
-                                    .text_color(rgb(0xa6e3a1))
+                                    .text_color(theme().success)
                                     .child("✓ existing branch — will be checked out"),
                                 BranchHint::NewOrRemote => div()
                                     .text_size(px(10.0))
-                                    .text_color(rgb(0x6c7086))
+                                    .text_color(theme().text_faint)
                                     .child(
                                         "new branch — or an existing remote branch is checked out",
                                     ),
@@ -339,11 +340,11 @@ impl Render for NewSessionModal {
                             .py(px(5.0))
                             .rounded(px(6.0))
                             .border_1()
-                            .border_color(rgb(0x45475a))
-                            .bg(rgb(0x11111b))
+                            .border_color(theme().border_default)
+                            .bg(theme().bg_sunken)
                             .text_size(px(12.0))
-                            .text_color(rgb(0x89b4fa))
-                            .hover(|s| s.bg(rgb(0x181825)))
+                            .text_color(theme().accent)
+                            .hover(|s| s.bg(theme().bg_surface))
                             .child(agent_display)
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -366,7 +367,7 @@ impl Render for NewSessionModal {
                     .px(px(20.0))
                     .py(px(12.0))
                     .border_t_1()
-                    .border_color(rgb(0x313244))
+                    .border_color(theme().border_subtle)
                     .flex()
                     .flex_row()
                     .justify_end()
@@ -378,10 +379,10 @@ impl Render for NewSessionModal {
                             .px(px(12.0))
                             .py(px(5.0))
                             .rounded(px(6.0))
-                            .bg(rgb(0x45475a))
+                            .bg(theme().bg_hover)
                             .text_size(px(11.0))
-                            .text_color(rgb(0xcdd6f4))
-                            .hover(|s| s.bg(rgb(0x585b70)))
+                            .text_color(theme().text_primary)
+                            .hover(|s| s.bg(theme().bg_active))
                             .child("Cancel")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -397,10 +398,10 @@ impl Render for NewSessionModal {
                             .px(px(12.0))
                             .py(px(5.0))
                             .rounded(px(6.0))
-                            .bg(rgb(0xa6e3a1))
+                            .bg(theme().success)
                             .text_size(px(11.0))
-                            .text_color(rgb(0x1e1e2e))
-                            .hover(|s| s.bg(rgb(0x94e2d5)))
+                            .text_color(theme().text_on_accent)
+                            .hover(|s| s.bg(theme().teal))
                             .child("Create")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -542,7 +543,7 @@ impl Render for EditSessionModal {
             .left(px(0.0))
             .right(px(0.0))
             .bottom(px(0.0))
-            .bg(rgba(0x00000099))
+            .bg(theme().backdrop)
             .flex()
             .items_center()
             .justify_center()
@@ -554,7 +555,7 @@ impl Render for EditSessionModal {
             );
 
         let pin_label = if self.pinned { "Pinned ✓" } else { "Not pinned" };
-        let pin_color = if self.pinned { rgb(0xf9e2af) } else { rgb(0x6c7086) };
+        let pin_color = if self.pinned { theme().warning } else { theme().text_faint };
 
         let card = div()
             .id("edit-session-card")
@@ -571,9 +572,9 @@ impl Render for EditSessionModal {
             .w(px(480.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x1e1e2e))
+            .bg(theme().bg_base)
             .border_1()
-            .border_color(rgb(0x45475a))
+            .border_color(theme().border_default)
             .rounded(px(8.0))
             .shadow_lg()
             .overflow_hidden()
@@ -587,7 +588,7 @@ impl Render for EditSessionModal {
                     .px(px(20.0))
                     .py(px(12.0))
                     .border_b_1()
-                    .border_color(rgb(0x313244))
+                    .border_color(theme().border_subtle)
                     .flex()
                     .flex_row()
                     .items_center()
@@ -596,7 +597,7 @@ impl Render for EditSessionModal {
                         div()
                             .text_size(px(14.0))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xcdd6f4))
+                            .text_color(theme().text_primary)
                             .child("Edit Session"),
                     )
                     .child(
@@ -607,8 +608,8 @@ impl Render for EditSessionModal {
                             .py(px(2.0))
                             .rounded(px(6.0))
                             .text_size(px(14.0))
-                            .text_color(rgb(0x6c7086))
-                            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .text_color(theme().text_faint)
+                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
                             .child("×")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -648,11 +649,11 @@ impl Render for EditSessionModal {
                             .py(px(5.0))
                             .rounded(px(6.0))
                             .border_1()
-                            .border_color(rgb(0x45475a))
-                            .bg(rgb(0x11111b))
+                            .border_color(theme().border_default)
+                            .bg(theme().bg_sunken)
                             .text_size(px(12.0))
                             .text_color(pin_color)
-                            .hover(|s| s.bg(rgb(0x181825)))
+                            .hover(|s| s.bg(theme().bg_surface))
                             .child(pin_label.to_string())
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -670,7 +671,7 @@ impl Render for EditSessionModal {
                     .px(px(20.0))
                     .py(px(12.0))
                     .border_t_1()
-                    .border_color(rgb(0x313244))
+                    .border_color(theme().border_subtle)
                     .flex()
                     .flex_row()
                     .justify_end()
@@ -682,10 +683,10 @@ impl Render for EditSessionModal {
                             .px(px(12.0))
                             .py(px(5.0))
                             .rounded(px(6.0))
-                            .bg(rgb(0x45475a))
+                            .bg(theme().bg_hover)
                             .text_size(px(11.0))
-                            .text_color(rgb(0xcdd6f4))
-                            .hover(|s| s.bg(rgb(0x585b70)))
+                            .text_color(theme().text_primary)
+                            .hover(|s| s.bg(theme().bg_active))
                             .child("Cancel")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -701,10 +702,10 @@ impl Render for EditSessionModal {
                             .px(px(12.0))
                             .py(px(5.0))
                             .rounded(px(6.0))
-                            .bg(rgb(0x89b4fa))
+                            .bg(theme().accent)
                             .text_size(px(11.0))
-                            .text_color(rgb(0x1e1e2e))
-                            .hover(|s| s.bg(rgb(0x74c7ec)))
+                            .text_color(theme().text_on_accent)
+                            .hover(|s| s.bg(theme().info))
                             .child("Save")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -800,10 +801,10 @@ impl Render for NamingModal {
         let mut card = div()
             .id("naming-modal-card")
             .w(px(340.0))
-            .bg(rgb(0x1e1e2e))
+            .bg(theme().bg_base)
             .rounded(px(12.0))
             .border_1()
-            .border_color(rgb(0x45475a))
+            .border_color(theme().border_default)
             .p(px(20.0))
             .flex()
             .flex_col()
@@ -817,7 +818,7 @@ impl Render for NamingModal {
                 div()
                     .text_size(px(14.0))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xcdd6f4))
+                    .text_color(theme().text_primary)
                     .child("Name this session"),
             );
 
@@ -831,8 +832,8 @@ impl Render for NamingModal {
                     .px(px(12.0))
                     .py(px(8.0))
                     .rounded(px(6.0))
-                    .bg(rgb(0x313244))
-                    .hover(|s| s.bg(rgb(0x45475a)))
+                    .bg(theme().bg_raised)
+                    .hover(|s| s.bg(theme().bg_hover))
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
@@ -841,11 +842,11 @@ impl Render for NamingModal {
                         this.pick(slug.clone(), cx);
                     }))
                     .child(
-                        div().text_size(px(13.0)).text_color(rgb(0xcdd6f4))
+                        div().text_size(px(13.0)).text_color(theme().text_primary)
                             .child(SharedString::from(display)),
                     )
                     .child(
-                        div().text_size(px(10.0)).text_color(rgb(0x6c7086))
+                        div().text_size(px(10.0)).text_color(theme().text_faint)
                             .child(SharedString::from(suggestion.clone())),
                     ),
             );
@@ -860,9 +861,9 @@ impl Render for NamingModal {
                         .id("naming-skip-btn")
                         .cursor_pointer()
                         .px(px(8.0)).py(px(4.0)).rounded(px(6.0))
-                        .bg(rgb(0x45475a))
-                        .hover(|s| s.bg(rgb(0x585b70)))
-                        .text_size(px(11.0)).text_color(rgb(0xa6adc8))
+                        .bg(theme().bg_hover)
+                        .hover(|s| s.bg(theme().bg_active))
+                        .text_size(px(11.0)).text_color(theme().text_secondary)
                         .on_mouse_down(MouseButton::Left, cx.listener(|this, _e, _w, cx| {
                             cx.stop_propagation();
                             this.dismiss(cx);
