@@ -52,7 +52,7 @@ use gpui::*;
 use project::Project;
 use crate::theme::{theme, with_alpha};
 use crate::icon::{icon, name as icons};
-actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction, CycleAttentionSession, CaptureUi, OpenFilePaletteAction, OpenSearchAction]);
+actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction, CycleAttentionSession, CaptureUi, OpenFilePaletteAction, OpenSearchAction, OpenCommandPaletteAction]);
 use session::{Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
@@ -2504,6 +2504,17 @@ fn main() {
                                 .ok();
                         }
                     });
+                    App::on_action::<OpenCommandPaletteAction>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            handle
+                                .update(cx, |this: &mut AppState, cx| {
+                                    this.pending_action = Some(OverlayAction::OpenCommandPalette.into());
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    });
                     App::on_action::<ToggleTranscriptTabAction>(cx, {
                         let handle = toggle_handle.clone();
                         move |_, cx| {
@@ -2734,6 +2745,15 @@ fn main() {
                             this.run_search(&q, cx);
                         }
                     }).detach();
+                    let command_palette_input = cx.new(|cx| {
+                        text_input::TextInput::new(cx, "", "Type a command…")
+                    });
+                    cx.subscribe(&command_palette_input, |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
+                        if matches!(event, text_input::TextInputEvent::Changed) {
+                            let q = input.read(cx).text().to_string();
+                            this.set_command_query(&q, cx);
+                        }
+                    }).detach();
 
                     // Auto-start the base infrastructure (Traefik + network)
                     // if enabled. Fire-and-forget on the background executor —
@@ -2818,6 +2838,8 @@ fn main() {
                         file_index: Default::default(),
                         search: None,
                         search_input,
+                        command_palette: None,
+                        command_palette_input,
                         project_branch_input,
                         project_remote_input,
                         sidebar_filter: String::new(),
@@ -3682,6 +3704,10 @@ impl Render for AppState {
 
         if self.search.is_some() {
             outer = outer.child(self.render_search(cx));
+        }
+
+        if self.command_palette.is_some() {
+            outer = outer.child(self.render_command_palette(cx));
         }
 
         if let Some(modal) = self.new_session_modal.clone() {

@@ -227,6 +227,10 @@ pub(crate) struct AppState {
     pub(crate) search: Option<crate::reader::search::SearchState>,
     /// Query input for the search overlay.
     pub(crate) search_input: Entity<text_input::TextInput>,
+    /// Cmd+Shift+P global command palette. `Some` while open.
+    pub(crate) command_palette: Option<crate::reader::command::CommandPalette>,
+    /// Query input for the command palette.
+    pub(crate) command_palette_input: Entity<text_input::TextInput>,
     /// Inline project-settings panel: default-branch override input.
     pub(crate) project_branch_input: Entity<text_input::TextInput>,
     /// Inline project-settings panel: remote-name override input.
