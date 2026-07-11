@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 
-use crate::app_state::{AppState, MainTab};
+use crate::app_state::AppState;
 use crate::theme::theme;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -115,16 +115,15 @@ impl AppState {
     /// Open the highlighted hit in the Reader at its file, highlighting the
     /// query. Precise scroll-to-line lands with the DEV-44 deep-link protocol.
     pub(crate) fn confirm_search(&mut self, cx: &mut Context<Self>) {
-        let Some((path, query)) = self.search.as_ref().and_then(|s| {
+        let Some((path, line, query)) = self.search.as_ref().and_then(|s| {
             s.results
                 .get(s.selected)
-                .map(|h| (h.path.clone(), s.query.clone()))
+                .map(|h| (h.path.clone(), h.line, s.query.clone()))
         }) else {
             return;
         };
-        self.reader.selected_path = Some(path.clone());
-        self.main_tab = MainTab::Reader;
-        self.load_preview(path);
+        // Deep-link to the exact file and line (DEV-44).
+        self.reveal_file(path, (line > 0).then_some(line), cx);
         if !query.is_empty() {
             self.reader.find_query = query;
             self.reader.find_active = true;

@@ -7,6 +7,7 @@
 //! Extracted from src/main.rs per docs/RE-DECOMPOSITION-PLAN.md §5 phase 7.
 //! See ARCHITECTURE.md §2 for module role.
 
+pub(crate) mod deeplink;
 pub(crate) mod highlight;
 pub(crate) mod index;
 pub(crate) mod palette;
@@ -133,7 +134,7 @@ impl AppState {
         let body: AnyElement = match &preview.kind {
             PreviewKind::Text(contents) => {
                 if is_markdown(&preview.path) && !self.reader.md_view_source {
-                    self.render_markdown_body(contents).into_any_element()
+                    self.render_markdown_body(&preview.path, contents, cx).into_any_element()
                 } else {
                     self.render_source_body(&preview.path, contents).into_any_element()
                 }
@@ -362,9 +363,11 @@ impl AppState {
         let gutter_w = px((format!("{total}").len().max(2) as f32) * 8.0 + 16.0);
         let query = self.reader.find_query.to_lowercase();
         let hl_bg = theme().bg_bell;
+        let reveal = self.reader.reveal_line.filter(|&l| l >= 1 && l <= shown);
 
         let mut body = div()
             .id("reader-source-body")
+            .track_scroll(&self.reader.source_scroll)
             .flex_1()
             .min_h(px(0.0))
             .overflow_scroll()
@@ -375,6 +378,7 @@ impl AppState {
             let line_no = idx + 1;
             let matched = !query.is_empty()
                 && line.text.to_lowercase().contains(&query);
+            let is_reveal = reveal == Some(line_no);
             let content = div()
                 .flex_1()
                 .min_w(px(0.0))
@@ -388,6 +392,7 @@ impl AppState {
                     .flex_row()
                     .items_start()
                     .px(px(4.0))
+                    .when(is_reveal, |d| d.bg(theme().bg_raised))
                     .child(
                         div()
                             .w(gutter_w)
@@ -416,12 +421,24 @@ impl AppState {
             );
         }
 
+        // Deep-link line reveal: scroll the target row into view. The handle is
+        // interior-mutable, so requesting from `&self` render is fine; it takes
+        // effect on the next layout pass.
+        if let Some(l) = reveal {
+            self.reader.source_scroll.scroll_to_item(l - 1);
+        }
+
         body
     }
 
     /// Rendered-Markdown body: the pulldown-cmark render (reused from the
-    /// transcript renderer) beside a heading outline rail.
-    fn render_markdown_body(&self, contents: &str) -> impl IntoElement {
+    /// transcript renderer) beside a clickable heading outline rail.
+    fn render_markdown_body(
+        &self,
+        path: &std::path::Path,
+        contents: &str,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let font_size = self.user_settings.font_size.max(12.0);
         let outline = markdown_outline(contents);
 
@@ -442,9 +459,67 @@ impl AppState {
             .flex_row()
             .child(rendered);
         if !outline.is_empty() {
-            row = row.child(render_md_outline(outline));
+            row = row.child(self.render_md_outline(path, outline, cx));
         }
         row
+    }
+
+    /// Right-hand heading outline. Clicking a heading emits a file deep link at
+    /// the heading's source line, which the Reader reveals (DEV-44).
+    fn render_md_outline(
+        &self,
+        path: &std::path::Path,
+        outline: Vec<OutlineItem>,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut rail = div()
+            .id("reader-md-outline")
+            .w(px(200.0))
+            .flex_shrink_0()
+            .h_full()
+            .overflow_y_scroll()
+            .bg(theme().bg_surface)
+            .border_l_1()
+            .border_color(theme().border_subtle)
+            .py(px(8.0))
+            .font_family(crate::theme::FONT_UI)
+            .child(
+                div()
+                    .px(px(12.0))
+                    .pb(px(6.0))
+                    .text_size(px(10.0))
+                    .text_color(theme().text_ghost)
+                    .child("OUTLINE"),
+            );
+        for (i, item) in outline.into_iter().enumerate() {
+            let indent = 12.0 + (item.level.saturating_sub(1) as f32) * 10.0;
+            let url = deeplink::DeepLink::File {
+                project: None,
+                session: None,
+                path: path.to_path_buf(),
+                line: Some(item.line),
+            }
+            .to_url();
+            rail = rail.child(
+                div()
+                    .id(("md-outline-item", i))
+                    .pl(px(indent))
+                    .pr(px(10.0))
+                    .py(px(2.0))
+                    .text_size(px(11.0))
+                    .cursor_pointer()
+                    .hover(|s| s.bg(theme().bg_hover))
+                    .text_color(if item.level <= 1 { theme().text_primary } else { theme().text_faint })
+                    .child(item.text)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this: &mut Self, _e, window, cx| {
+                            this.open_deep_link(&url, window, cx);
+                        }),
+                    ),
+            );
+        }
+        rail
     }
 
     /// Floating right-click menu for the file tree. Returns an empty `Div`
@@ -630,10 +705,12 @@ impl AppState {
             },
             Err(e) => PreviewKind::Unreadable(format!("Could not stat file: {e}")),
         };
-        // Selecting a new file resets the in-file find and Markdown view mode.
+        // Selecting a new file resets the in-file find, Markdown view mode, and
+        // any pending deep-link line reveal (set again by reveal_file after).
         self.reader.find_query.clear();
         self.reader.find_active = false;
         self.reader.md_view_source = false;
+        self.reader.reveal_line = None;
         // Record in the recents list (most-recent first, deduped, capped).
         self.reader.recent.retain(|p| p != &path);
         self.reader.recent.insert(0, path.clone());
@@ -650,8 +727,15 @@ fn is_markdown(path: &std::path::Path) -> bool {
     )
 }
 
-/// Extract (level, text) for every heading, for the outline rail.
-fn markdown_outline(contents: &str) -> Vec<(u8, String)> {
+/// A heading in the outline: nesting level, text, and 1-based source line.
+struct OutlineItem {
+    level: u8,
+    text: String,
+    line: usize,
+}
+
+/// Extract every heading (with its source line) for the outline rail.
+fn markdown_outline(contents: &str) -> Vec<OutlineItem> {
     use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
     let level_num = |l: HeadingLevel| match l {
         HeadingLevel::H1 => 1,
@@ -661,21 +745,25 @@ fn markdown_outline(contents: &str) -> Vec<(u8, String)> {
         HeadingLevel::H5 => 5,
         HeadingLevel::H6 => 6,
     };
-    let parser = Parser::new_ext(contents, Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS);
+    let line_of = |offset: usize| contents.as_bytes()[..offset].iter().filter(|b| **b == b'\n').count() + 1;
+    let parser = Parser::new_ext(contents, Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS)
+        .into_offset_iter();
     let mut out = Vec::new();
-    let mut cur: Option<(u8, String)> = None;
-    for ev in parser {
+    let mut cur: Option<(u8, String, usize)> = None;
+    for (ev, range) in parser {
         match ev {
-            Event::Start(Tag::Heading { level, .. }) => cur = Some((level_num(level), String::new())),
+            Event::Start(Tag::Heading { level, .. }) => {
+                cur = Some((level_num(level), String::new(), line_of(range.start)))
+            }
             Event::Text(t) | Event::Code(t) => {
-                if let Some((_, s)) = cur.as_mut() {
+                if let Some((_, s, _)) = cur.as_mut() {
                     s.push_str(&t);
                 }
             }
             Event::End(TagEnd::Heading(_)) => {
-                if let Some(h) = cur.take() {
-                    if !h.1.trim().is_empty() {
-                        out.push(h);
+                if let Some((level, text, line)) = cur.take() {
+                    if !text.trim().is_empty() {
+                        out.push(OutlineItem { level, text, line });
                     }
                 }
             }
@@ -683,43 +771,6 @@ fn markdown_outline(contents: &str) -> Vec<(u8, String)> {
         }
     }
     out
-}
-
-/// Right-hand heading outline for the Markdown reader. Display-only for now —
-/// scroll-to-heading arrives with the DEV-44 deep-link protocol.
-fn render_md_outline(outline: Vec<(u8, String)>) -> impl IntoElement {
-    let mut rail = div()
-        .id("reader-md-outline")
-        .w(px(200.0))
-        .flex_shrink_0()
-        .h_full()
-        .overflow_y_scroll()
-        .bg(theme().bg_surface)
-        .border_l_1()
-        .border_color(theme().border_subtle)
-        .py(px(8.0))
-        .font_family(crate::theme::FONT_UI)
-        .child(
-            div()
-                .px(px(12.0))
-                .pb(px(6.0))
-                .text_size(px(10.0))
-                .text_color(theme().text_ghost)
-                .child("OUTLINE"),
-        );
-    for (level, text) in outline {
-        let indent = 12.0 + (level.saturating_sub(1) as f32) * 10.0;
-        rail = rail.child(
-            div()
-                .pl(px(indent))
-                .pr(px(10.0))
-                .py(px(2.0))
-                .text_size(px(11.0))
-                .text_color(if level <= 1 { theme().text_primary } else { theme().text_faint })
-                .child(text),
-        );
-    }
-    rail
 }
 
 /// Centered explanatory panel for a file that can't be rendered as source.
