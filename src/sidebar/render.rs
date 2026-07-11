@@ -581,7 +581,7 @@ pub(crate) fn build_sidebar_items(
                                 div()
                                     .text_size(px(12.0))
                                     .text_color(theme().text_dim)
-                                    .child("Cloning…"),
+                                    .child(loading.status.clone()),
                             ),
                     )
                     .into_any_element(),
@@ -751,6 +751,7 @@ pub(crate) fn build_sidebar_items(
                     let session_comment = session.comment.clone();
                     let session_startup_status = session.startup_status.clone();
                     let session_operation_error = session.operation_error.clone();
+                    let session_operation_result = session.operation_result.clone();
                     let mut label_row = div()
                         .flex()
                         .flex_row()
@@ -863,6 +864,10 @@ pub(crate) fn build_sidebar_items(
                                             cx.notify();
                                         })),
                                 ),
+                        );
+                    } else if let Some(result) = session_operation_result {
+                        info_col = info_col.child(
+                            div().pl(px(16.0)).text_size(px(11.0)).text_color(theme().text_dim).child(result),
                         );
                     }
                     info_col

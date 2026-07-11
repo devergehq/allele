@@ -218,6 +218,8 @@ pub struct Session {
     pub active_since: Option<SystemTime>,
     /// Transient failure for an operation initiated from this session row.
     pub operation_error: Option<OperationError>,
+    /// Durable completion or degraded-result message for the latest operation.
+    pub operation_result: Option<String>,
 }
 
 impl Session {
@@ -261,6 +263,7 @@ impl Session {
             attention_context: None,
             startup_status: None,
             operation_error: None,
+            operation_result: None,
         }
     }
 
@@ -313,6 +316,7 @@ impl Session {
             attention_context: None,
             startup_status: None,
             operation_error: None,
+            operation_result: None,
         }
     }
 

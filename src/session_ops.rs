@@ -102,6 +102,11 @@ impl AppState {
         project.loading_sessions.push(project::LoadingSession {
             id: session_id.clone(),
             label: display_label.clone(),
+            status: if self.user_settings.git_pull_before_new_session {
+                "Pulling and cloning…".into()
+            } else {
+                "Cloning workspace…".into()
+            },
         });
         cx.notify();
 
@@ -309,13 +314,18 @@ impl AppState {
                 )
                 .detach();
 
-                let session = Session::new_with_id(
+                let mut session = Session::new_with_id(
                     session_id_for_session,
                     display_label_for_task,
                     terminal_view,
                 )
                 .with_clone(clone_path)
                 .with_agent_id(agent_id_for_task.clone());
+                session.operation_result = Some(if clone_succeeded {
+                    "Workspace cloned successfully.".into()
+                } else {
+                    "Clone failed; session is running in the project source.".into()
+                });
                 let Some(project) = this.projects.get_mut(project_idx) else {
                     return;
                 };
@@ -418,6 +428,11 @@ impl AppState {
         project.loading_sessions.push(project::LoadingSession {
             id: session_id.clone(),
             label: display_label.clone(),
+            status: if self.user_settings.git_pull_before_new_session {
+                "Pulling and cloning…".into()
+            } else {
+                "Cloning workspace…".into()
+            },
         });
         cx.notify();
 
@@ -639,6 +654,11 @@ impl AppState {
                 )
                 .with_clone(clone_path)
                 .with_agent_id(agent_id_for_task.clone());
+                session.operation_result = Some(if clone_succeeded {
+                    "Workspace cloned successfully.".into()
+                } else {
+                    "Clone failed; session is running in the project source.".into()
+                });
 
                 if skip_auto_naming {
                     session.auto_naming_fired = true;
@@ -1167,6 +1187,7 @@ impl AppState {
             project.loading_sessions.push(project::LoadingSession {
                 id: placeholder_id.clone(),
                 label: format!("{removed_label} (archiving)"),
+                status: "Archiving workspace…".into(),
             });
         }
 

@@ -8,6 +8,8 @@ use uuid::Uuid;
 pub struct LoadingSession {
     pub id: String,
     pub label: String,
+    /// Operation-specific progress text rendered beside the originating row.
+    pub status: String,
 }
 
 /// A project is a source directory that hosts zero or more sessions.
