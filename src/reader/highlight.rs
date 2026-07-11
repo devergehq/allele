@@ -267,13 +267,13 @@ pub(crate) fn highlight(contents: &str, ext: &str, colors: TokenColors) -> Vec<H
                 }
             }
 
-            // String / char literal.
+            // String / char literal. Scan to the closing quote (or end of
+            // line), honouring backslash escapes.
             if syntax.quotes.contains(&c) {
                 let quote = c;
                 let lit_start = start_byte;
                 i += 1;
                 let mut escaped = false;
-                let mut end_byte = line.len();
                 while i < chars.len() {
                     let (_b, ch) = chars[i];
                     if escaped {
@@ -288,20 +288,20 @@ pub(crate) fn highlight(contents: &str, ext: &str, colors: TokenColors) -> Vec<H
                     }
                     if ch == quote {
                         i += 1;
-                        end_byte = if i < chars.len() {
-                            chars[i].0
-                        } else {
-                            line.len()
-                        };
                         break;
                     }
                     i += 1;
-                    end_byte = if i < chars.len() {
-                        chars[i].0
-                    } else {
-                        line.len()
-                    };
                 }
+                // Derive the span end from the final cursor so it always lands
+                // on a char boundary and never lags behind `i` — every branch
+                // above advances `i`, and here we read its byte offset once.
+                // (Tracking end_byte per-branch previously undercounted when a
+                // literal ended on an escape, crashing StyledText.)
+                let end_byte = if i < chars.len() {
+                    chars[i].0
+                } else {
+                    line.len()
+                };
                 push(&mut spans, end_byte - lit_start, Tok::Str);
                 continue;
             }
@@ -410,5 +410,25 @@ mod tests {
         let lines = highlight("", "rs", colors());
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text.len(), 0);
+    }
+
+    /// Regression: strings ending on a backslash escape (very common in real
+    /// source) must not undercount run lengths — that crashed StyledText.
+    #[test]
+    fn run_lengths_cover_strings_with_trailing_escapes() {
+        let cases = [
+            r#"println!("hello\n");"#,   // escape mid-string, terminated
+            r#"let s = "unterminated\"#, // unterminated, ends on backslash
+            r#"let s = "esc\"#,          // ends on escape
+            r#"let c = '\''"#,           // escaped quote char literal
+            r#"path = "C:\\Users\\"#,    // trailing double backslash, unterminated
+            "let a = \"\\",              // string then lone backslash
+        ];
+        for src in cases {
+            for l in highlight(src, "rs", colors()) {
+                let sum: usize = l.runs.iter().map(|r| r.len).sum();
+                assert_eq!(sum, l.text.len(), "run-length mismatch for {src:?}");
+            }
+        }
     }
 }

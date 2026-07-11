@@ -359,13 +359,23 @@ impl AppState {
         for (idx, line) in lines.into_iter().take(shown).enumerate() {
             let line_no = idx + 1;
             let matched = !query.is_empty() && line.text.to_lowercase().contains(&query);
+            // Defensive: GPUI panics (aborting the whole app) if run lengths
+            // don't sum to the text length. Highlighting is cosmetic, so if a
+            // lexer edge case ever drifts, fall back to plain text rather than
+            // crash the render.
+            let runs_len: usize = line.runs.iter().map(|r| r.len).sum();
+            let styled = if runs_len == line.text.len() {
+                StyledText::new(line.text).with_runs(line.runs)
+            } else {
+                StyledText::new(line.text)
+            };
             let content = div()
                 .flex_1()
                 .min_w(px(0.0))
                 .whitespace_normal()
                 .font_family(crate::theme::FONT_MONO)
                 .when(matched, |d| d.bg(hl_bg))
-                .child(StyledText::new(line.text).with_runs(line.runs));
+                .child(styled);
             body = body.child(
                 div()
                     .flex()
