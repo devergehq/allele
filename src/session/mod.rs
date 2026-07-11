@@ -143,6 +143,8 @@ pub struct Session {
     pub pinned: bool,
     /// Optional user comment displayed as a subtitle on the session row.
     pub comment: Option<String>,
+    /// Per-session merge strategy. `None` = use the project's setting.
+    pub merge_strategy_override: Option<crate::settings::MergeStrategy>,
     /// The current git branch name for this session (e.g. "fix-auth-5dc47535").
     /// Persisted to state.json for orphan cleanup identification.
     pub branch_name: Option<String>,
@@ -190,6 +192,7 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
+            merge_strategy_override: None,
             branch_name: None,
             naming_suggestions: None,
             last_pre_tool_use: None,
@@ -232,6 +235,7 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
+            merge_strategy_override: None,
             branch_name: None,
             naming_suggestions: None,
             last_pre_tool_use: None,

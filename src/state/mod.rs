@@ -65,6 +65,9 @@ pub struct PersistedSession {
     /// cleanup identification now that branches don't carry the allele/session/ prefix.
     #[serde(default)]
     pub branch_name: Option<String>,
+    /// Per-session merge strategy override. `None` = project setting.
+    #[serde(default)]
+    pub merge_strategy_override: Option<crate::settings::MergeStrategy>,
 }
 
 impl PersistedSession {
@@ -91,6 +94,7 @@ impl PersistedSession {
             pinned: session.pinned,
             comment: session.comment.clone(),
             branch_name: session.branch_name.clone(),
+            merge_strategy_override: session.merge_strategy_override,
         }
     }
 }

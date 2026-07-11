@@ -46,7 +46,7 @@ pub struct AgentConfig {
 }
 
 /// How session work gets integrated back into the canonical branch.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MergeStrategy {
     /// `git merge --no-ff --no-edit` — preserves merge commit (default).
     Merge,
@@ -54,6 +54,16 @@ pub enum MergeStrategy {
     Squash,
     /// Rebase session commits onto target branch, then fast-forward merge — linear history.
     RebaseThenMerge,
+}
+
+impl MergeStrategy {
+    pub fn label(&self) -> &'static str {
+        match self {
+            MergeStrategy::Merge => "Merge",
+            MergeStrategy::Squash => "Squash",
+            MergeStrategy::RebaseThenMerge => "Rebase + merge",
+        }
+    }
 }
 
 impl Default for MergeStrategy {
