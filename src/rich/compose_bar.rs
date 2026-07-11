@@ -1195,7 +1195,7 @@ impl Render for ComposeBar {
             .justify_center()
             .px(px(12.0))
             .py(px(6.0))
-            .rounded(px(4.0))
+            .rounded(px(6.0))
             .bg(hex_alpha(SURFACE1, 0.6))
             .cursor(if can_send {
                 CursorStyle::PointingHand
@@ -1223,7 +1223,7 @@ impl Render for ComposeBar {
             .justify_center()
             .px(px(12.0))
             .py(px(6.0))
-            .rounded(px(4.0))
+            .rounded(px(6.0))
             .bg(hex_alpha(SURFACE1, 0.4))
             .cursor(CursorStyle::PointingHand)
             .child(
@@ -1280,7 +1280,7 @@ impl Render for ComposeBar {
                     .gap(px(6.0))
                     .px(px(8.0))
                     .py(px(4.0))
-                    .rounded(px(4.0))
+                    .rounded(px(6.0))
                     .bg(hex_alpha(SURFACE1, 0.5))
                     .child(
                         gpui::div()
