@@ -2737,6 +2737,7 @@ fn main() {
                             context_menu: None,
                             find_query: String::new(),
                             find_active: false,
+                            md_view_source: false,
                         },
                         confirming: ConfirmationState {
                             discard: None,
