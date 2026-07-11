@@ -7,6 +7,7 @@
 //! Extracted from src/main.rs per docs/RE-DECOMPOSITION-PLAN.md §5 phase 7.
 //! See ARCHITECTURE.md §2 for module role.
 
+pub(crate) mod command;
 pub(crate) mod deeplink;
 pub(crate) mod highlight;
 pub(crate) mod index;
