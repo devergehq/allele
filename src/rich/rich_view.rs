@@ -422,9 +422,17 @@ fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
 
 // ── Thinking block (collapsed by default, subtle) ─────────────────
 
-/// Chevron for collapsible blocks. `▸` = collapsed, `▾` = expanded.
-fn chevron(collapsed: bool) -> &'static str {
-    if collapsed { "▸" } else { "▾" }
+/// Chevron icon for collapsible blocks: right = collapsed, down = expanded.
+fn chevron(collapsed: bool) -> gpui::Svg {
+    crate::icon::icon(
+        if collapsed {
+            crate::icon::name::CHEVRON_RIGHT
+        } else {
+            crate::icon::name::CHEVRON_DOWN
+        },
+        10.0,
+        theme().text_faint,
+    )
 }
 
 fn render_thinking_block(
@@ -1307,11 +1315,7 @@ fn render_permission_request(
             .gap(px(8.0))
             .items_center()
             .child(
-                div()
-                    .flex_shrink_0()
-                    .text_color(theme().attention)
-                    .text_size(px(font_size))
-                    .child("⏸"),
+                crate::icon::icon(crate::icon::name::PAUSE, font_size, theme().attention),
             )
             .child(
                 div()
@@ -1381,10 +1385,7 @@ fn render_awaiting(font_size: f32) -> Div {
         .gap(px(8.0))
         .items_center()
         .child(
-            div()
-                .text_color(theme().attention)
-                .text_size(px(font_size))
-                .child("●"),
+            crate::icon::icon(crate::icon::name::CIRCLE_FILL, font_size - 4.0, theme().attention),
         )
         .child(
             div()

@@ -4,6 +4,7 @@
 use gpui::*;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::theme;
+use crate::icon::{icon, name as icons};
 
 /// Events emitted by the modal that AppState listens for.
 #[derive(Debug, Clone)]
@@ -282,10 +283,8 @@ impl Render for NewSessionModal {
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(6.0))
-                            .text_size(px(14.0))
-                            .text_color(theme().text_faint)
-                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
-                            .child("×")
+                            .hover(|s| s.bg(theme().bg_raised))
+                            .child(icon(icons::X, 13.0, theme().text_faint))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this: &mut Self, _ev, _w, cx| {
@@ -607,10 +606,8 @@ impl Render for EditSessionModal {
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(6.0))
-                            .text_size(px(14.0))
-                            .text_color(theme().text_faint)
-                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
-                            .child("×")
+                            .hover(|s| s.bg(theme().bg_raised))
+                            .child(icon(icons::X, 13.0, theme().text_faint))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this: &mut Self, _ev, _w, cx| {
