@@ -21,6 +21,7 @@
 pub mod attachments;
 pub mod compose_bar;
 mod document;
+pub use document::truncate_to_char_boundary;
 mod markdown;
 mod rich_view;
 
