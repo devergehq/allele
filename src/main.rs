@@ -52,7 +52,7 @@ use gpui::*;
 use project::Project;
 use crate::theme::{theme, with_alpha};
 use crate::icon::{icon, name as icons};
-actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction, CycleAttentionSession, CaptureUi]);
+actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction, CycleAttentionSession, CaptureUi, OpenFilePaletteAction]);
 use session::{Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
@@ -2482,6 +2482,17 @@ fn main() {
                                 .ok();
                         }
                     });
+                    App::on_action::<OpenFilePaletteAction>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            handle
+                                .update(cx, |this: &mut AppState, cx| {
+                                    this.pending_action = Some(OverlayAction::OpenFilePalette.into());
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    });
                     App::on_action::<ToggleTranscriptTabAction>(cx, {
                         let handle = toggle_handle.clone();
                         move |_, cx| {
@@ -2691,6 +2702,18 @@ fn main() {
                             cx.notify();
                         }
                     }).detach();
+                    let file_palette_input = cx.new(|cx| {
+                        text_input::TextInput::new(cx, "", "Go to file…")
+                    });
+                    cx.subscribe(&file_palette_input, |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
+                        if matches!(event, text_input::TextInputEvent::Changed) {
+                            let q = input.read(cx).text().to_string();
+                            if let Some(palette) = this.file_palette.as_mut() {
+                                palette.recompute(&q);
+                            }
+                            cx.notify();
+                        }
+                    }).detach();
 
                     // Auto-start the base infrastructure (Traefik + network)
                     // if enabled. Fire-and-forget on the background executor —
@@ -2738,6 +2761,7 @@ fn main() {
                             find_query: String::new(),
                             find_active: false,
                             md_view_source: false,
+                            recent: Vec::new(),
                         },
                         confirming: ConfirmationState {
                             discard: None,
@@ -2767,6 +2791,8 @@ fn main() {
                         naming_modal: None,
                         sidebar_filter_input,
                         reader_find_input,
+                        file_palette: None,
+                        file_palette_input,
                         project_branch_input,
                         project_remote_input,
                         sidebar_filter: String::new(),
@@ -3623,6 +3649,10 @@ impl Render for AppState {
 
         if let Some(pad) = self.scratch_pad.clone() {
             outer = outer.child(pad);
+        }
+
+        if self.file_palette.is_some() {
+            outer = outer.child(self.render_file_palette(cx));
         }
 
         if let Some(modal) = self.new_session_modal.clone() {
