@@ -17,6 +17,7 @@ pub mod name {
     pub const CIRCLE: &str = "circle";
     pub const CIRCLE_FILL: &str = "circle-fill";
     pub const FILE_TEXT: &str = "file-text";
+    pub const HELIX: &str = "helix";
     pub const IMAGE: &str = "image";
     pub const LOADER: &str = "loader";
     pub const PAPERCLIP: &str = "paperclip";
