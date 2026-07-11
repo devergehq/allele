@@ -76,6 +76,8 @@ pub enum SessionAction {
     RevealSessionInFinder { project_idx: usize, session_idx: usize },
     /// Copy the session's clone path to the clipboard.
     CopySessionPath { project_idx: usize, session_idx: usize },
+    /// Move a session within its project (drag-and-drop reorder).
+    ReorderSession { project_idx: usize, from: usize, to: usize },
     /// Toggle the pinned state of a session.
     TogglePinSession { project_idx: usize, session_idx: usize },
     /// Apply edits from the edit-session modal.
@@ -141,6 +143,8 @@ pub enum ProjectAction {
     RequestRemoveProject(usize),
     /// Reveal the project's source directory in Finder.
     RevealProjectInFinder(usize),
+    /// Move a project within the sidebar (drag-and-drop reorder).
+    ReorderProject { from: usize, to: usize },
     /// Copy the project's source path to the clipboard.
     CopyProjectPath(usize),
     /// Cancel an in-flight project removal confirmation.
@@ -256,3 +260,14 @@ pub struct SessionCursor {
     pub project_idx: usize,
     pub session_idx: usize,
 }
+
+/// Drag payload for a session row (sidebar drag-and-drop reorder).
+#[derive(Clone, Copy)]
+pub(crate) struct DraggedSession {
+    pub project_idx: usize,
+    pub session_idx: usize,
+}
+
+/// Drag payload for a project header.
+#[derive(Clone, Copy)]
+pub(crate) struct DraggedProject(pub usize);

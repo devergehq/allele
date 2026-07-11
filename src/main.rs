@@ -59,6 +59,25 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tracing::{error, info, warn};
 
+/// Ghost chip rendered under the cursor while dragging a sidebar row.
+pub(crate) struct DragPreview(pub String);
+
+impl Render for DragPreview {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(10.0))
+            .py(px(4.0))
+            .rounded(px(6.0))
+            .bg(theme().bg_raised)
+            .border_1()
+            .border_color(theme().border_default)
+            .shadow_lg()
+            .text_size(px(12.0))
+            .text_color(theme().text_primary)
+            .child(self.0.clone())
+    }
+}
+
 /// A minimal tooltip view for hover text on buttons.
 pub(crate) struct SimpleTooltip {
     pub(crate) text: SharedString,
