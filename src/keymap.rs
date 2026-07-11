@@ -39,8 +39,8 @@ use tracing::warn;
 use crate::rich::compose_bar as cb;
 use crate::text_input as ti;
 use crate::{
-    CycleAttentionSession, OpenFilePaletteAction, OpenScratchPadAction, OpenSettings, Quit,
-    ToggleDrawerAction, ToggleSidebarAction, ToggleTranscriptTabAction,
+    CycleAttentionSession, OpenFilePaletteAction, OpenScratchPadAction, OpenSearchAction,
+    OpenSettings, Quit, ToggleDrawerAction, ToggleSidebarAction, ToggleTranscriptTabAction,
 };
 
 // ── Deprecation aliases ───────────────────────────────────────────
@@ -194,6 +194,7 @@ fn build_binding(
         "allele.open_settings" => KeyBinding::new(keystroke, OpenSettings, ctx),
         "allele.open_scratch_pad" => KeyBinding::new(keystroke, OpenScratchPadAction, ctx),
         "allele.open_file_palette" => KeyBinding::new(keystroke, OpenFilePaletteAction, ctx),
+        "allele.open_search" => KeyBinding::new(keystroke, OpenSearchAction, ctx),
         "allele.cycle_attention" => KeyBinding::new(keystroke, CycleAttentionSession, ctx),
 
         unknown => panic!(
