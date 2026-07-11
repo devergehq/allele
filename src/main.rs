@@ -635,6 +635,17 @@ impl AppState {
                 )
                 .child(
                     div()
+                        .w(px(40.0))
+                        .h(px(2.0))
+                        .rounded(px(1.0))
+                        .bg(linear_gradient(
+                            90.0,
+                            linear_color_stop(theme().accent, 0.0),
+                            linear_color_stop(theme().ready, 1.0),
+                        )),
+                )
+                .child(
+                    div()
                         .text_size(px(11.0))
                         .text_color(theme().text_faint)
                         .child("Open a project and start a session to see its transcript here."),
@@ -2771,11 +2782,27 @@ impl Render for AppState {
                                         .justify_center()
                                         .gap(px(16.0))
                                         .bg(theme().bg_base)
+                                        .child(icon(
+                                            icons::HELIX,
+                                            28.0,
+                                            with_alpha(theme().ready, 0.7),
+                                        ))
                                         .child(
                                             div()
                                                 .text_size(px(16.0))
                                                 .text_color(theme().text_faint)
                                                 .child("No active session"),
+                                        )
+                                        .child(
+                                            div()
+                                                .w(px(56.0))
+                                                .h(px(2.0))
+                                                .rounded(px(1.0))
+                                                .bg(linear_gradient(
+                                                    90.0,
+                                                    linear_color_stop(theme().accent, 0.0),
+                                                    linear_color_stop(theme().ready, 1.0),
+                                                )),
                                         )
                                         .child(
                                             div()

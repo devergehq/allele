@@ -7,7 +7,7 @@
 use gpui::*;
 use gpui::prelude::FluentBuilder as _;
 use crate::icon::{icon, name as icons};
-use crate::theme::theme;
+use crate::theme::{theme, with_alpha};
 
 use crate::actions::{ArchiveAction, ProjectAction, SessionAction, SessionCursor};
 use crate::app_state::AppState;
@@ -889,6 +889,9 @@ pub(crate) fn build_sidebar_items(
             sidebar_items.push(
                 div()
                     .id(SharedString::from(format!("archives-header-{p_idx}")))
+                    // Lineage rail — archives are variants of the trunk.
+                    .border_l_2()
+                    .border_color(with_alpha(theme().ready, 0.3))
                     .px(px(16.0))
                     .py(px(4.0))
                     .flex()
@@ -921,6 +924,8 @@ pub(crate) fn build_sidebar_items(
                     div()
                         .id(SharedString::from(format!("archive-{p_idx}-{a_idx}")))
                         .group(format!("arch-{p_idx}-{a_idx}"))
+                        .border_l_2()
+                        .border_color(with_alpha(theme().ready, 0.3))
                         .pl(px(24.0))
                         .pr(px(12.0))
                         .py(px(3.0))
@@ -936,7 +941,7 @@ pub(crate) fn build_sidebar_items(
                                 .gap(px(6.0))
                                 .items_center()
                                 .child(
-                                    icon(icons::ARCHIVE, 12.0, theme().text_dim),
+                                    icon(icons::ARCHIVE, 12.0, with_alpha(theme().ready, 0.7)),
                                 )
                                 .child(
                                     div()

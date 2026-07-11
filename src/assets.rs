@@ -33,6 +33,7 @@ assets!(
     "icons/svg/circle-fill.svg",
     "icons/svg/circle.svg",
     "icons/svg/file-text.svg",
+    "icons/svg/helix.svg",
     "icons/svg/image.svg",
     "icons/svg/loader.svg",
     "icons/svg/paperclip.svg",
