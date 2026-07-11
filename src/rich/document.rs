@@ -419,6 +419,28 @@ impl RichDocument {
                 Some(id)
             }
 
+            RichEvent::Fallback {
+                raw,
+                reason,
+                parent_agent_id,
+            } => {
+                // An event we couldn't normalise. Render it collapsed so it
+                // stays inspectable without cluttering the narrative — the
+                // full raw payload is one click away.
+                self.close_text_stream();
+                let id = self.push_block(Block {
+                    id: self.next_id,
+                    kind: BlockKind::Text {
+                        content: format!("⚠ unsupported event ({reason})\n{raw}"),
+                        streaming: false,
+                    },
+                    parent_agent_id,
+                    collapsed: true,
+                    cached_height: None,
+                });
+                Some(id)
+            }
+
             RichEvent::Init { .. } | RichEvent::HookStatus { .. } => None,
         }
     }

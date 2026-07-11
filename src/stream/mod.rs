@@ -7,8 +7,10 @@
 //! The `StreamParser` transforms Layer 1 → Layer 2, accumulating partial JSON
 //! for tool inputs and extracting semantic events like `EditDiff`.
 
+mod ledger;
 mod parser;
 mod types;
 
+pub use ledger::*;
 pub use parser::*;
 pub use types::*;
