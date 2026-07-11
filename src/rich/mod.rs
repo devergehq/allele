@@ -36,6 +36,10 @@ mod tool_rail;
 // until that wiring lands.
 #[allow(dead_code)]
 mod reader;
+// Permission & decision model (DEV-34): request cards, actions, decision log.
+// Consumed by the permission card UI + hook wiring; allow dead_code until then.
+#[allow(dead_code)]
+mod permissions;
 mod rich_view;
 
 pub use rich_view::{RichView, RichViewEvent};
