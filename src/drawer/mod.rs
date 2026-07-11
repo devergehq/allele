@@ -449,7 +449,15 @@ pub(crate) fn build_drawer_items(
                 .child("Terminal drawer"),
         );
     }
-    items.push(drawer_panel.into_any_element());
+    items.push(
+        drawer_panel
+            .with_animation(
+                "drawer-panel-in",
+                Animation::new(std::time::Duration::from_millis(140)),
+                |panel, delta| panel.opacity(delta),
+            )
+            .into_any_element(),
+    );
 
     items
 }
