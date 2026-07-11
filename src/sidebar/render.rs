@@ -9,7 +9,7 @@ use gpui::prelude::FluentBuilder as _;
 use crate::icon::{icon, name as icons};
 use crate::theme::{theme, with_alpha};
 
-use crate::actions::{ArchiveAction, ProjectAction, SessionAction, SessionCursor};
+use crate::actions::{ArchiveAction, DraggedProject, DraggedSession, ProjectAction, SessionAction, SessionCursor};
 use crate::app_state::AppState;
 use crate::session::SessionStatus;
 use crate::SimpleTooltip;
@@ -43,9 +43,23 @@ pub(crate) fn build_sidebar_items(
         let is_confirming_remove = state.confirming.remove_project == Some(p_idx);
 
         // Project header
+        let header_drag_label = project_name.clone();
         let mut header = div()
             .id(SharedString::from(format!("project-{p_idx}")))
             .group(format!("proj-{p_idx}"))
+            .on_drag(DraggedProject(p_idx), move |_drag, _offset, _window, cx| {
+                cx.new(|_| crate::DragPreview(header_drag_label.clone()))
+            })
+            .drag_over::<DraggedProject>(|style, _, _, _| {
+                style.bg(theme().bg_hover_soft)
+            })
+            .on_drop(cx.listener(move |this: &mut AppState, dragged: &DraggedProject, _window, cx| {
+                this.pending_action = Some(ProjectAction::ReorderProject {
+                    from: dragged.0,
+                    to: p_idx,
+                }.into());
+                cx.notify();
+            }))
             .on_mouse_down(MouseButton::Right, cx.listener(move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
                 cx.stop_propagation();
                 this.session_context_menu = None;
@@ -576,9 +590,31 @@ pub(crate) fn build_sidebar_items(
                 theme().bg_surface
             };
 
+            let row_drag_label = label.clone();
             let mut row = div()
                 .id(SharedString::from(format!("session-{p_idx}-{s_idx}")))
                 .group(format!("sess-{p_idx}-{s_idx}"))
+                .on_drag(
+                    DraggedSession { project_idx: p_idx, session_idx: s_idx },
+                    move |_drag, _offset, _window, cx| {
+                        cx.new(|_| crate::DragPreview(row_drag_label.clone()))
+                    },
+                )
+                .drag_over::<DraggedSession>(|style, _, _, _| {
+                    style.bg(theme().bg_hover_soft)
+                })
+                .on_drop(cx.listener(move |this: &mut AppState, dragged: &DraggedSession, _window, cx| {
+                    // Same-project reorder only — sessions are clones of
+                    // their project's repo and can't change parents.
+                    if dragged.project_idx == p_idx {
+                        this.pending_action = Some(SessionAction::ReorderSession {
+                            project_idx: p_idx,
+                            from: dragged.session_idx,
+                            to: s_idx,
+                        }.into());
+                        cx.notify();
+                    }
+                }))
                 .pl(px(24.0))
                 .pr(px(12.0))
                 .py(px(5.0))
