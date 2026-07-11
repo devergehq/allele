@@ -411,7 +411,17 @@ impl Render for NewSessionModal {
                     ),
             );
 
-        backdrop.child(card)
+        let card = card.with_animation(
+            "modal-card-in",
+            Animation::new(std::time::Duration::from_millis(160))
+                .with_easing(gpui::ease_out_quint()),
+            |card, delta| card.opacity(delta).mt(px(12.0 * (1.0 - delta))),
+        );
+        backdrop.child(card).with_animation(
+            "modal-backdrop-in",
+            Animation::new(std::time::Duration::from_millis(120)),
+            |el, delta| el.opacity(delta),
+        )
     }
 }
 
@@ -713,7 +723,17 @@ impl Render for EditSessionModal {
                     ),
             );
 
-        backdrop.child(card)
+        let card = card.with_animation(
+            "modal-card-in",
+            Animation::new(std::time::Duration::from_millis(160))
+                .with_easing(gpui::ease_out_quint()),
+            |card, delta| card.opacity(delta).mt(px(12.0 * (1.0 - delta))),
+        );
+        backdrop.child(card).with_animation(
+            "modal-backdrop-in",
+            Animation::new(std::time::Duration::from_millis(120)),
+            |el, delta| el.opacity(delta),
+        )
     }
 }
 
@@ -869,6 +889,16 @@ impl Render for NamingModal {
                 ),
         );
 
-        backdrop.child(card)
+        let card = card.with_animation(
+            "modal-card-in",
+            Animation::new(std::time::Duration::from_millis(160))
+                .with_easing(gpui::ease_out_quint()),
+            |card, delta| card.opacity(delta).mt(px(12.0 * (1.0 - delta))),
+        );
+        backdrop.child(card).with_animation(
+            "modal-backdrop-in",
+            Animation::new(std::time::Duration::from_millis(120)),
+            |el, delta| el.opacity(delta),
+        )
     }
 }

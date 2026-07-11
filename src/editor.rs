@@ -166,7 +166,7 @@ impl AppState {
             .border_1()
             .border_color(theme().border_default)
             .rounded(px(6.0))
-            .shadow_md()
+            .shadow_lg()
             .child(item(
                 "editor-ctx-reveal",
                 "Reveal in Finder",

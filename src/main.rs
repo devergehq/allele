@@ -907,7 +907,7 @@ impl AppState {
             .border_1()
             .border_color(theme().border_default)
             .rounded(px(6.0))
-            .shadow_md()
+            .shadow_lg()
             .child(
                 menu_item("session-ctx-edit", "Edit Session…", theme().text_primary)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
@@ -2589,8 +2589,6 @@ impl Render for AppState {
                             .pl(px(78.0))
                             .pr(px(12.0))
                             .window_control_area(WindowControlArea::Drag)
-                            .border_b_1()
-                            .border_color(theme().border_subtle)
                             .flex()
                             .flex_row()
                             .items_center()
@@ -2626,8 +2624,6 @@ impl Render for AppState {
                         div()
                             .px(px(8.0))
                             .py(px(4.0))
-                            .border_b_1()
-                            .border_color(theme().border_subtle)
                             .child(
                                 div()
                                     .w_full()
@@ -2654,8 +2650,6 @@ impl Render for AppState {
                         let mut bar = div()
                             .px(px(12.0))
                             .py(px(8.0))
-                            .border_t_1()
-                            .border_color(theme().border_subtle)
                             .text_size(px(12.0))
                             .text_color(theme().text_faint)
                             .flex()
