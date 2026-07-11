@@ -33,12 +33,17 @@ pub struct ParsedLine {
 }
 
 impl ParsedLine {
-    fn new(events: Vec<RichEvent>, coverage: Coverage) -> Self {
+    pub fn new(events: Vec<RichEvent>, coverage: Coverage) -> Self {
         Self {
             events,
             coverage,
             diagnostics: Vec::new(),
         }
+    }
+
+    /// Fully-covered line: every part normalised, no diagnostics.
+    pub fn full(events: Vec<RichEvent>) -> Self {
+        Self::new(events, Coverage::Full)
     }
 }
 
@@ -58,6 +63,7 @@ impl StreamParser {
     /// Back-compatible thin wrapper over [`feed_line_detailed`]. Note that
     /// unknown/unparseable lines now yield a `RichEvent::Fallback` rather than
     /// an empty vec — nothing is silently dropped.
+    #[allow(dead_code)]
     pub fn feed_line(&mut self, line: &str) -> Vec<RichEvent> {
         self.feed_line_detailed(line).events
     }
