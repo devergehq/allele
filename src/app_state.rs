@@ -174,6 +174,10 @@ pub(crate) struct AppState {
     pub(crate) new_session_modal: Option<Entity<new_session_modal::NewSessionModal>>,
     /// Sidebar search/filter input entity.
     pub(crate) sidebar_filter_input: Entity<text_input::TextInput>,
+    /// Inline project-settings panel: default-branch override input.
+    pub(crate) project_branch_input: Entity<text_input::TextInput>,
+    /// Inline project-settings panel: remote-name override input.
+    pub(crate) project_remote_input: Entity<text_input::TextInput>,
     /// Current sidebar filter text (lowercased for matching).
     pub(crate) sidebar_filter: String,
     /// Right-click context menu on a session row: (cursor, click position).
