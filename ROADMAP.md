@@ -126,15 +126,18 @@ Added post-original-plan. Configurable merge/sync behaviour per project.
 
 ## Remaining Work
 
-Ordered by priority. These are the known gaps.
+**Tracked in Linear** — the [Allele initiative](https://linear.app/deverge/team/DEV/all)
+is the source of truth for scope, priority, and status. This file keeps the
+historical phase log only.
 
-### Nice-to-have
+## Phase 10: UI Refresh — DONE (2026-07-11)
 
-1. **Drag-and-drop reorder** — projects and sessions in the sidebar
-2. **Right-click context menus** — project/session actions
-3. **Grid renderer caching** — row-level paint cache, damage tracking (see Termy's approach in `docs/grid-renderer.md`)
-4. **Box-drawing character sprites** — pixel-snapped geometric rendering for U+2500-U+257F
-5. **Split terminal views** — side-by-side sessions
-6. **Git status indicator per workspace**
-7. **Session templates** — pre-configured Claude args
-8. **GPUI text input widget** — needed for inline editing of branch/remote in project settings
+The "Native Lab Instrument" redesign (see `Plans/UI-REFRESH-PROPOSAL.md`):
+
+- [x] Transparent unified titlebar, SF Pro chrome, hover-reveal actions (DEV-1)
+- [x] Design-token system — `src/theme.rs` semantic roles (DEV-2)
+- [x] Native macOS shell: vibrancy, 38px titlebar rows, drag regions (DEV-3)
+- [x] SVG icon language + colorblind-safe status shapes + hit targets (DEV-4)
+- [x] Depth & motion: breathing status, spinners, modal/drawer entrances (DEV-5)
+- [x] Identity accents: helix mark, gradient bars, archive lineage rail (DEV-6)
+- [x] Settings grouped cards + animated toggle component (DEV-17)
