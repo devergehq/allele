@@ -190,6 +190,8 @@ pub(crate) struct ConfirmationState {
     pub(crate) remove_project: Option<usize>,
     /// Session cursor awaiting merge-with-uncommitted-changes confirmation.
     pub(crate) dirty_merge: Option<SessionCursor>,
+    /// Archive awaiting permanent ref deletion confirmation.
+    pub(crate) delete_archive: Option<(usize, usize)>,
 }
 
 /// Rich Sidecar (transcript view) state. Lazily created the first time the
