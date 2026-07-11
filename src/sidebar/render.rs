@@ -192,6 +192,21 @@ pub(crate) fn build_sidebar_items(
                                 this.editing_project_settings = None;
                             } else {
                                 this.editing_project_settings = Some(p_idx);
+                                // Seed the panel inputs from this project's settings.
+                                let (branch, remote) = this
+                                    .projects
+                                    .get(p_idx)
+                                    .map(|p| {
+                                        (
+                                            p.settings.default_branch.clone().unwrap_or_default(),
+                                            p.settings.remote.clone().unwrap_or_default(),
+                                        )
+                                    })
+                                    .unwrap_or_default();
+                                this.project_branch_input
+                                    .update(cx, |i, cx| i.set_text_silent(&branch, cx));
+                                this.project_remote_input
+                                    .update(cx, |i, cx| i.set_text_silent(&remote, cx));
                             }
                             cx.notify();
                         })),
@@ -287,12 +302,6 @@ pub(crate) fn build_sidebar_items(
                 crate::settings::MergeStrategy::Squash => "Squash",
                 crate::settings::MergeStrategy::RebaseThenMerge => "Rebase + FF",
             };
-            let current_branch = project.settings.default_branch
-                .as_deref()
-                .unwrap_or("auto-detect");
-            let current_remote = project.settings.remote
-                .as_deref()
-                .unwrap_or("origin");
             let rebase_label = if project.settings.rebase_before_merge {
                 "Yes"
             } else {
@@ -300,30 +309,6 @@ pub(crate) fn build_sidebar_items(
             };
 
             // Helper: a settings row with label + clickable value
-            let settings_row = |_id: &str, label: &str, value: &str| -> AnyElement {
-                div()
-                    .pl(px(24.0))
-                    .pr(px(12.0))
-                    .py(px(3.0))
-                    .bg(theme().bg_base)
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme().text_faint)
-                            .child(SharedString::from(label.to_string())),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme().accent)
-                            .child(SharedString::from(value.to_string())),
-                    )
-                    .into_any_element()
-            };
 
             // Settings header
             sidebar_items.push(
@@ -426,18 +411,47 @@ pub(crate) fn build_sidebar_items(
                     .into_any_element(),
             );
 
-            // Default branch — read-only display (editing needs text input)
-            sidebar_items.push(settings_row(
-                &format!("setting-branch-{p_idx}"),
+            // Default branch + remote — live inputs (empty = auto/origin)
+            let settings_input_row = |label: &'static str,
+                                      input: Entity<crate::text_input::TextInput>|
+             -> AnyElement {
+                div()
+                    .pl(px(24.0))
+                    .pr(px(12.0))
+                    .py(px(3.0))
+                    .bg(theme().bg_base)
+                    .flex()
+                    .flex_row()
+                    .justify_between()
+                    .items_center()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme().text_faint)
+                            .child(label),
+                    )
+                    .child(
+                        div()
+                            .w(px(140.0))
+                            .px(px(6.0))
+                            .py(px(2.0))
+                            .rounded(px(6.0))
+                            .bg(theme().bg_sunken)
+                            .text_size(px(12.0))
+                            .text_color(theme().text_primary)
+                            .overflow_hidden()
+                            .child(input),
+                    )
+                    .into_any_element()
+            };
+            sidebar_items.push(settings_input_row(
                 "Default branch",
-                current_branch,
+                state.project_branch_input.clone(),
             ));
-
-            // Remote — read-only display
-            sidebar_items.push(settings_row(
-                &format!("setting-remote-{p_idx}"),
+            sidebar_items.push(settings_input_row(
                 "Remote",
-                current_remote,
+                state.project_remote_input.clone(),
             ));
 
             // Bottom border
@@ -449,12 +463,6 @@ pub(crate) fn build_sidebar_items(
                     .bg(theme().bg_base)
                     .border_b_1()
                     .border_color(theme().border_subtle)
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme().text_ghost)
-                            .child("Edit settings.json for branch/remote"),
-                    )
                     .into_any_element(),
             );
         }

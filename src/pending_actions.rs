@@ -286,7 +286,12 @@ impl AppState {
                 let session_id = session.id.clone();
                 let session_label = session.label.clone();
                 let canonical = project.source_path.clone();
-                let proj_settings = project.settings.clone();
+                let mut proj_settings = project.settings.clone();
+                // Per-session override beats the project-level strategy
+                // (archives merged later still use the project setting).
+                if let Some(strategy) = session.merge_strategy_override {
+                    proj_settings.merge_strategy = strategy;
+                }
 
                 let restore_started = session.started_at;
                 let restore_last_active = session.last_active;

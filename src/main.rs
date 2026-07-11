@@ -890,6 +890,16 @@ impl AppState {
             .unwrap_or(false);
         let pin_label = if is_pinned { "Unpin" } else { "Pin" };
 
+        let merge_override = self
+            .projects
+            .get(p_idx)
+            .and_then(|p| p.sessions.get(s_idx))
+            .and_then(|s| s.merge_strategy_override);
+        let merge_label = format!(
+            "Merge: {}",
+            merge_override.map_or("Project default", |m| m.label()),
+        );
+
         let menu_item = |id: &'static str, label: &str, color: Hsla| {
             div()
                 .id(id)
@@ -926,6 +936,29 @@ impl AppState {
                         cx.stop_propagation();
                         this.session_context_menu = None;
                         this.pending_action = Some(SessionAction::EditSession { project_idx: p_idx, session_idx: s_idx }.into());
+                        cx.notify();
+                    })),
+            )
+            .child(
+                menu_item("session-ctx-merge-strategy", &merge_label, theme().text_primary)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        use crate::settings::MergeStrategy as MS;
+                        if let Some(session) = this
+                            .projects
+                            .get_mut(p_idx)
+                            .and_then(|p| p.sessions.get_mut(s_idx))
+                        {
+                            // Cycle: project default -> Merge -> Squash -> Rebase+merge -> default.
+                            session.merge_strategy_override = match session.merge_strategy_override {
+                                None => Some(MS::Merge),
+                                Some(MS::Merge) => Some(MS::Squash),
+                                Some(MS::Squash) => Some(MS::RebaseThenMerge),
+                                Some(MS::RebaseThenMerge) => None,
+                            };
+                            this.mark_state_dirty();
+                        }
+                        // Menu stays open so the new value is visible.
                         cx.notify();
                     })),
             )
@@ -2063,6 +2096,7 @@ fn main() {
                         session.pinned = persisted.pinned;
                         session.comment = persisted.comment.clone();
                         session.branch_name = persisted.branch_name.clone();
+                        session.merge_strategy_override = persisted.merge_strategy_override;
                         project.sessions.push(session);
                     }
 
@@ -2352,6 +2386,36 @@ fn main() {
                     let sidebar_filter_input = cx.new(|cx| {
                         text_input::TextInput::new(cx, "", "Search sessions…")
                     });
+                    let project_branch_input = cx.new(|cx| {
+                        text_input::TextInput::new(cx, "", "auto")
+                    });
+                    cx.subscribe(&project_branch_input, |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
+                        if matches!(event, text_input::TextInputEvent::Changed) {
+                            if let Some(p_idx) = this.editing_project_settings {
+                                if let Some(project) = this.projects.get_mut(p_idx) {
+                                    let t = input.read(cx).text().trim().to_string();
+                                    project.settings.default_branch =
+                                        if t.is_empty() { None } else { Some(t) };
+                                    this.mark_settings_dirty();
+                                }
+                            }
+                        }
+                    }).detach();
+                    let project_remote_input = cx.new(|cx| {
+                        text_input::TextInput::new(cx, "", "origin")
+                    });
+                    cx.subscribe(&project_remote_input, |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
+                        if matches!(event, text_input::TextInputEvent::Changed) {
+                            if let Some(p_idx) = this.editing_project_settings {
+                                if let Some(project) = this.projects.get_mut(p_idx) {
+                                    let t = input.read(cx).text().trim().to_string();
+                                    project.settings.remote =
+                                        if t.is_empty() { None } else { Some(t) };
+                                    this.mark_settings_dirty();
+                                }
+                            }
+                        }
+                    }).detach();
                     cx.subscribe(&sidebar_filter_input, |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
                         if matches!(event, text_input::TextInputEvent::Changed) {
                             this.sidebar_filter = input.read(cx).text().to_lowercase();
@@ -2429,6 +2493,8 @@ fn main() {
                         edit_session_modal: None,
                         naming_modal: None,
                         sidebar_filter_input,
+                        project_branch_input,
+                        project_remote_input,
                         sidebar_filter: String::new(),
                         pending_startup: None,
                         base_infra_status: None,
