@@ -6,6 +6,7 @@
 
 use gpui::*;
 use gpui::prelude::FluentBuilder as _;
+use crate::theme::theme;
 
 use crate::actions::{ArchiveAction, ProjectAction, SessionAction, SessionCursor};
 use crate::app_state::AppState;
@@ -46,9 +47,9 @@ pub(crate) fn build_sidebar_items(
             .group(format!("proj-{p_idx}"))
             .px(px(12.0))
             .py(px(6.0))
-            .bg(if is_confirming_remove { rgb(0x3b1f28) } else { rgb(0x11111b) })
+            .bg(if is_confirming_remove { theme().tint_danger } else { theme().bg_sunken })
             .border_b_1()
-            .border_color(rgb(0x313244))
+            .border_color(theme().border_subtle)
             .flex()
             .flex_row()
             .gap(px(6.0))
@@ -64,14 +65,14 @@ pub(crate) fn build_sidebar_items(
                     .child(
                         div()
                             .text_size(px(10.0))
-                            .text_color(rgb(0x6c7086))
+                            .text_color(theme().text_faint)
                             .child("▾"),
                     )
                     .child(
                         div()
                             .text_size(px(12.0))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0xcdd6f4))
+                            .text_color(theme().text_primary)
                             .child(project_name),
                     ),
             );
@@ -91,10 +92,10 @@ pub(crate) fn build_sidebar_items(
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(6.0))
-                            .bg(rgb(0x45475a))
+                            .bg(theme().bg_hover)
                             .text_size(px(12.0))
-                            .text_color(rgb(0xf38ba8))
-                            .hover(|s| s.bg(rgb(0x58303a)))
+                            .text_color(theme().danger)
+                            .hover(|s| s.bg(theme().tint_danger_hover))
                             .child("Remove")
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                 cx.stop_propagation();
@@ -110,8 +111,8 @@ pub(crate) fn build_sidebar_items(
                             .py(px(2.0))
                             .rounded(px(6.0))
                             .text_size(px(12.0))
-                            .text_color(rgb(0x9399b2))
-                            .hover(|s| s.text_color(rgb(0xcdd6f4)))
+                            .text_color(theme().text_muted)
+                            .hover(|s| s.text_color(theme().text_primary))
                             .child("Cancel")
                             .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
                                 cx.stop_propagation();
@@ -131,8 +132,8 @@ pub(crate) fn build_sidebar_items(
                         .cursor_pointer()
                         .px(px(6.0))
                         .text_size(px(14.0))
-                        .text_color(rgb(0x6c7086))
-                        .hover(|s| s.text_color(rgb(0xa6e3a1)))
+                        .text_color(theme().text_faint)
+                        .hover(|s| s.text_color(theme().success))
                         .child("+")
                         .tooltip(|_window, cx| {
                             cx.new(|_| SimpleTooltip { text: "New session".into() }).into()
@@ -152,8 +153,8 @@ pub(crate) fn build_sidebar_items(
                         .cursor_pointer()
                         .px(px(4.0))
                         .text_size(px(11.0))
-                        .text_color(rgb(0x6c7086))
-                        .hover(|s| s.text_color(rgb(0xa6e3a1)))
+                        .text_color(theme().text_faint)
+                        .hover(|s| s.text_color(theme().success))
                         .child("▸")
                         .tooltip(|_window, cx| {
                             cx.new(|_| SimpleTooltip { text: "New session with details".into() }).into()
@@ -177,11 +178,11 @@ pub(crate) fn build_sidebar_items(
                         .px(px(4.0))
                         .text_size(px(11.0))
                         .text_color(if state.editing_project_settings == Some(p_idx) {
-                            rgb(0x89b4fa) // blue when active
+                            theme().accent // blue when active
                         } else {
-                            rgb(0x45475a)
+                            theme().bg_hover
                         })
-                        .hover(|s| s.text_color(rgb(0x89b4fa)))
+                        .hover(|s| s.text_color(theme().accent))
                         .child("⚙")
                         .tooltip(|_window, cx| {
                             cx.new(|_| SimpleTooltip { text: "Project settings".into() }).into()
@@ -205,8 +206,8 @@ pub(crate) fn build_sidebar_items(
                         .cursor_pointer()
                         .px(px(4.0))
                         .text_size(px(11.0))
-                        .text_color(rgb(0x45475a))
-                        .hover(|s| s.text_color(rgb(0xf38ba8)))
+                        .text_color(theme().text_ghost)
+                        .hover(|s| s.text_color(theme().danger))
                         .child("✕")
                         .tooltip(|_window, cx| {
                             cx.new(|_| SimpleTooltip { text: "Remove project".into() }).into()
@@ -229,7 +230,7 @@ pub(crate) fn build_sidebar_items(
                     .pl(px(24.0))
                     .pr(px(12.0))
                     .py(px(5.0))
-                    .bg(rgb(0x3b2f1e)) // subtle amber tint
+                    .bg(theme().tint_warning) // subtle amber tint
                     .flex()
                     .flex_row()
                     .gap(px(8.0))
@@ -238,7 +239,7 @@ pub(crate) fn build_sidebar_items(
                         div()
                             .flex_1()
                             .text_size(px(12.0))
-                            .text_color(rgb(0xf9e2af)) // yellow
+                            .text_color(theme().warning) // yellow
                             .child("Uncommitted changes — proceed?"),
                     )
                     .child(
@@ -248,10 +249,10 @@ pub(crate) fn build_sidebar_items(
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(6.0))
-                            .bg(rgb(0xa6e3a1))
+                            .bg(theme().success)
                             .text_size(px(12.0))
-                            .text_color(rgb(0x1e1e2e))
-                            .hover(|s| s.bg(rgb(0x94e2d5)))
+                            .text_color(theme().text_on_accent)
+                            .hover(|s| s.bg(theme().teal))
                             .child("Proceed")
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                 cx.stop_propagation();
@@ -266,10 +267,10 @@ pub(crate) fn build_sidebar_items(
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(6.0))
-                            .bg(rgb(0x45475a))
+                            .bg(theme().bg_hover)
                             .text_size(px(12.0))
-                            .text_color(rgb(0xcdd6f4))
-                            .hover(|s| s.bg(rgb(0x585b70)))
+                            .text_color(theme().text_primary)
+                            .hover(|s| s.bg(theme().bg_active))
                             .child("Cancel")
                             .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                 cx.stop_propagation();
@@ -306,7 +307,7 @@ pub(crate) fn build_sidebar_items(
                     .pl(px(24.0))
                     .pr(px(12.0))
                     .py(px(3.0))
-                    .bg(rgb(0x1e1e2e))
+                    .bg(theme().bg_base)
                     .flex()
                     .flex_row()
                     .justify_between()
@@ -314,13 +315,13 @@ pub(crate) fn build_sidebar_items(
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(0x6c7086))
+                            .text_color(theme().text_faint)
                             .child(SharedString::from(label.to_string())),
                     )
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(0x89b4fa))
+                            .text_color(theme().accent)
                             .child(SharedString::from(value.to_string())),
                     )
                     .into_any_element()
@@ -332,14 +333,14 @@ pub(crate) fn build_sidebar_items(
                     .pl(px(24.0))
                     .pr(px(12.0))
                     .py(px(4.0))
-                    .bg(rgb(0x1e1e2e))
+                    .bg(theme().bg_base)
                     .border_b_1()
-                    .border_color(rgb(0x313244))
+                    .border_color(theme().border_subtle)
                     .child(
                         div()
                             .text_size(px(12.0))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0x89b4fa))
+                            .text_color(theme().accent)
                             .child("PROJECT SETTINGS"),
                     )
                     .into_any_element(),
@@ -353,8 +354,8 @@ pub(crate) fn build_sidebar_items(
                     .pl(px(24.0))
                     .pr(px(12.0))
                     .py(px(3.0))
-                    .bg(rgb(0x1e1e2e))
-                    .hover(|s| s.bg(rgb(0x313244)))
+                    .bg(theme().bg_base)
+                    .hover(|s| s.bg(theme().bg_raised))
                     .flex()
                     .flex_row()
                     .justify_between()
@@ -362,13 +363,13 @@ pub(crate) fn build_sidebar_items(
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(0x6c7086))
+                            .text_color(theme().text_faint)
                             .child("Merge strategy"),
                     )
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(0x89b4fa))
+                            .text_color(theme().accent)
                             .child(SharedString::from(current_strategy.to_string())),
                     )
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
@@ -394,8 +395,8 @@ pub(crate) fn build_sidebar_items(
                     .pl(px(24.0))
                     .pr(px(12.0))
                     .py(px(3.0))
-                    .bg(rgb(0x1e1e2e))
-                    .hover(|s| s.bg(rgb(0x313244)))
+                    .bg(theme().bg_base)
+                    .hover(|s| s.bg(theme().bg_raised))
                     .flex()
                     .flex_row()
                     .justify_between()
@@ -403,16 +404,16 @@ pub(crate) fn build_sidebar_items(
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(0x6c7086))
+                            .text_color(theme().text_faint)
                             .child("Sync remote first"),
                     )
                     .child(
                         div()
                             .text_size(px(12.0))
                             .text_color(if project.settings.rebase_before_merge {
-                                rgb(0xa6e3a1) // green = on
+                                theme().success // green = on
                             } else {
-                                rgb(0xf38ba8) // red = off
+                                theme().danger // red = off
                             })
                             .child(SharedString::from(rebase_label.to_string())),
                     )
@@ -447,13 +448,13 @@ pub(crate) fn build_sidebar_items(
                     .pl(px(24.0))
                     .pr(px(12.0))
                     .py(px(2.0))
-                    .bg(rgb(0x1e1e2e))
+                    .bg(theme().bg_base)
                     .border_b_1()
-                    .border_color(rgb(0x313244))
+                    .border_color(theme().border_subtle)
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(0x45475a))
+                            .text_color(theme().text_ghost)
                             .child("Edit settings.json for branch/remote"),
                     )
                     .into_any_element(),
@@ -469,7 +470,7 @@ pub(crate) fn build_sidebar_items(
                     .pl(px(24.0))
                     .pr(px(12.0))
                     .py(px(5.0))
-                    .bg(rgb(0x181825))
+                    .bg(theme().bg_surface)
                     .flex()
                     .flex_row()
                     .gap(px(8.0))
@@ -484,19 +485,19 @@ pub(crate) fn build_sidebar_items(
                             .child(
                                 div()
                                     .text_size(px(10.0))
-                                    .text_color(rgb(0xf9e2af)) // yellow
+                                    .text_color(theme().warning) // yellow
                                     .child("◐"),
                             )
                             .child(
                                 div()
                                     .text_size(px(12.0))
-                                    .text_color(rgb(0x9399b2))
+                                    .text_color(theme().text_muted)
                                     .child(loading.label.clone()),
                             )
                             .child(
                                 div()
                                     .text_size(px(12.0))
-                                    .text_color(rgb(0x585b70))
+                                    .text_color(theme().text_dim)
                                     .child("Cloning…"),
                             ),
                     )
@@ -563,21 +564,21 @@ pub(crate) fn build_sidebar_items(
             let is_confirming_merge = state.confirming.dirty_merge == Some(session_cursor);
 
             let label_color = if is_suspended {
-                rgb(0x6c7086) // greyed out for Suspended
+                theme().text_faint // greyed out for Suspended
             } else if is_active {
-                rgb(0xcdd6f4)
+                theme().text_primary
             } else {
-                rgb(0x9399b2)
+                theme().text_muted
             };
 
             let row_bg = if is_confirming_discard {
-                rgb(0x3b1f28) // subtle red tint while confirming discard
+                theme().tint_danger // subtle red tint while confirming discard
             } else if is_confirming_merge {
-                rgb(0x3b2f1e) // subtle amber tint while confirming merge with uncommitted
+                theme().tint_warning // subtle amber tint while confirming merge with uncommitted
             } else if is_active {
-                rgb(0x313244)
+                theme().bg_raised
             } else {
-                rgb(0x181825)
+                theme().bg_surface
             };
 
             let mut row = div()
@@ -587,7 +588,7 @@ pub(crate) fn build_sidebar_items(
                 .pr(px(12.0))
                 .py(px(5.0))
                 .bg(row_bg)
-                .hover(|s| s.bg(rgb(0x313244)))
+                .hover(|s| s.bg(theme().bg_raised))
                 .cursor_pointer()
                 .flex()
                 .flex_row()
@@ -623,14 +624,14 @@ pub(crate) fn build_sidebar_items(
                         .child(
                             div()
                                 .text_size(px(10.0))
-                                .text_color(rgb(status_color))
+                                .text_color(status_color)
                                 .child(status_icon.to_string())
                         );
                     if session_pinned {
                         label_row = label_row.child(
                             div()
                                 .text_size(px(9.0))
-                                .text_color(rgb(0xf9e2af))
+                                .text_color(theme().warning)
                                 .child("📌"),
                         );
                     }
@@ -650,7 +651,7 @@ pub(crate) fn build_sidebar_items(
                             div()
                                 .flex_shrink_0()
                                 .text_size(px(12.0))
-                                .text_color(rgb(0x585b70))
+                                .text_color(theme().text_dim)
                                 .min_w(px(60.0))
                                 .child(elapsed),
                         );
@@ -668,7 +669,7 @@ pub(crate) fn build_sidebar_items(
                             div()
                                 .pl(px(16.0))
                                 .text_size(px(12.0))
-                                .text_color(rgb(0xf9e2af))
+                                .text_color(theme().warning)
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
@@ -679,7 +680,7 @@ pub(crate) fn build_sidebar_items(
                             div()
                                 .pl(px(16.0))
                                 .text_size(px(12.0))
-                                .text_color(rgb(0x585b70))
+                                .text_color(theme().text_dim)
                                 .overflow_hidden()
                                 .text_ellipsis()
                                 .whitespace_nowrap()
@@ -704,10 +705,10 @@ pub(crate) fn build_sidebar_items(
                                 .px(px(6.0))
                                 .py(px(2.0))
                                 .rounded(px(6.0))
-                                .bg(rgb(0x45475a))
+                                .bg(theme().bg_hover)
                                 .text_size(px(12.0))
-                                .text_color(rgb(0xf38ba8))
-                                .hover(|s| s.bg(rgb(0x58303a)))
+                                .text_color(theme().danger)
+                                .hover(|s| s.bg(theme().tint_danger_hover))
                                 .child("Discard")
                                 .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                     cx.stop_propagation();
@@ -726,8 +727,8 @@ pub(crate) fn build_sidebar_items(
                                 .py(px(2.0))
                                 .rounded(px(6.0))
                                 .text_size(px(12.0))
-                                .text_color(rgb(0x9399b2))
-                                .hover(|s| s.text_color(rgb(0xcdd6f4)))
+                                .text_color(theme().text_muted)
+                                .hover(|s| s.text_color(theme().text_primary))
                                 .child("Cancel")
                                 .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
                                     cx.stop_propagation();
@@ -746,7 +747,7 @@ pub(crate) fn build_sidebar_items(
                         .child(
                             div()
                                 .text_size(px(12.0))
-                                .text_color(rgb(0xf9e2af))
+                                .text_color(theme().warning)
                                 .child("Uncommitted changes"),
                         )
                         .child(
@@ -762,10 +763,10 @@ pub(crate) fn build_sidebar_items(
                                         .px(px(6.0))
                                         .py(px(2.0))
                                         .rounded(px(6.0))
-                                        .bg(rgb(0x45475a))
+                                        .bg(theme().bg_hover)
                                         .text_size(px(12.0))
-                                        .text_color(rgb(0xf9e2af))
-                                        .hover(|s| s.bg(rgb(0x4a3f2a)))
+                                        .text_color(theme().warning)
+                                        .hover(|s| s.bg(theme().tint_warning_hover))
                                         .child("Merge committed")
                                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                             cx.stop_propagation();
@@ -784,8 +785,8 @@ pub(crate) fn build_sidebar_items(
                                         .py(px(2.0))
                                         .rounded(px(6.0))
                                         .text_size(px(12.0))
-                                        .text_color(rgb(0x9399b2))
-                                        .hover(|s| s.text_color(rgb(0xcdd6f4)))
+                                        .text_color(theme().text_muted)
+                                        .hover(|s| s.text_color(theme().text_primary))
                                         .child("Cancel")
                                         .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
                                             cx.stop_propagation();
@@ -813,8 +814,8 @@ pub(crate) fn build_sidebar_items(
                                 .cursor_pointer()
                                 .px(px(4.0))
                                 .text_size(px(11.0))
-                                .text_color(rgb(0x45475a))
-                                .hover(|s| s.text_color(rgb(0xa6e3a1)))
+                                .text_color(theme().text_ghost)
+                                .hover(|s| s.text_color(theme().success))
                                 .child("✓")
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| SimpleTooltip { text: "Merge and close session".into() }).into()
@@ -834,8 +835,8 @@ pub(crate) fn build_sidebar_items(
                                 .cursor_pointer()
                                 .px(px(4.0))
                                 .text_size(px(11.0))
-                                .text_color(rgb(0x45475a))
-                                .hover(|s| s.text_color(rgb(0x89b4fa)))
+                                .text_color(theme().text_ghost)
+                                .hover(|s| s.text_color(theme().accent))
                                 .child("✕")
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| SimpleTooltip { text: "Suspend session".into() }).into()
@@ -855,8 +856,8 @@ pub(crate) fn build_sidebar_items(
                                 .cursor_pointer()
                                 .px(px(4.0))
                                 .text_size(px(11.0))
-                                .text_color(rgb(0x45475a))
-                                .hover(|s| s.text_color(rgb(0xf38ba8)))
+                                .text_color(theme().text_ghost)
+                                .hover(|s| s.text_color(theme().danger))
                                 .child("🗑")
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| SimpleTooltip { text: "Discard session".into() }).into()
@@ -890,7 +891,7 @@ pub(crate) fn build_sidebar_items(
                     .child(
                         div()
                             .text_size(px(12.0))
-                            .text_color(rgb(0x585b70))
+                            .text_color(theme().text_dim)
                             .child(format!("ARCHIVES ({})", project.archives.len())),
                     )
                     .into_any_element(),
@@ -931,19 +932,19 @@ pub(crate) fn build_sidebar_items(
                                 .child(
                                     div()
                                         .text_size(px(10.0))
-                                        .text_color(rgb(0x585b70))
+                                        .text_color(theme().text_dim)
                                         .child("📦"),
                                 )
                                 .child(
                                     div()
                                         .text_size(px(12.0))
-                                        .text_color(rgb(0x6c7086))
+                                        .text_color(theme().text_faint)
                                         .child(display_label),
                                 )
                                 .child(
                                     div()
                                         .text_size(px(12.0))
-                                        .text_color(rgb(0x45475a))
+                                        .text_color(theme().text_ghost)
                                         .child(age),
                                 ),
                         )
@@ -963,8 +964,8 @@ pub(crate) fn build_sidebar_items(
                                         .py(px(1.0))
                                         .rounded(px(6.0))
                                         .text_size(px(12.0))
-                                        .text_color(rgb(0xa6e3a1))
-                                        .hover(|s| s.bg(rgb(0x313244)))
+                                        .text_color(theme().success)
+                                        .hover(|s| s.bg(theme().bg_raised))
                                         .child("merge")
                                         .tooltip(|_window, cx| {
                                             cx.new(|_| SimpleTooltip { text: "Merge archive into project".into() }).into()
@@ -985,8 +986,8 @@ pub(crate) fn build_sidebar_items(
                                         .cursor_pointer()
                                         .px(px(4.0))
                                         .text_size(px(10.0))
-                                        .text_color(rgb(0x45475a))
-                                        .hover(|s| s.text_color(rgb(0xf38ba8)))
+                                        .text_color(theme().text_ghost)
+                                        .hover(|s| s.text_color(theme().danger))
                                         .child("×")
                                         .tooltip(|_window, cx| {
                                             cx.new(|_| SimpleTooltip { text: "Delete archive".into() }).into()

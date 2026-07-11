@@ -17,6 +17,7 @@
 //! `Changed` / `Submitted` events to push state out.
 
 use gpui::*;
+use crate::theme::theme;
 
 use crate::AppState;
 use crate::agents;
@@ -588,8 +589,8 @@ impl Render for SettingsWindowState {
             .flex()
             .flex_row()
             .size_full()
-            .bg(rgb(0x1e1e2e))
-            .text_color(rgb(0xcdd6f4))
+            .bg(theme().bg_base)
+            .text_color(theme().text_primary)
             .child(render_sidebar(self.selected, cx))
             .child(render_pane(self, cx))
     }
@@ -614,8 +615,8 @@ fn render_sidebar(selected: Section, cx: &mut Context<SettingsWindowState>) -> i
         .h_full()
         .py(px(12.0))
         .border_r_1()
-        .border_color(rgb(0x313244))
-        .bg(rgb(0x181825));
+        .border_color(theme().border_subtle)
+        .bg(theme().bg_surface);
 
     for section in sections {
         let is_selected = section == selected;
@@ -626,9 +627,9 @@ fn render_sidebar(selected: Section, cx: &mut Context<SettingsWindowState>) -> i
             .py(px(6.0))
             .text_size(px(12.0))
             .cursor_pointer()
-            .text_color(if is_selected { rgb(0xcdd6f4) } else { rgb(0xa6adc8) })
-            .bg(if is_selected { rgb(0x313244) } else { rgb(0x181825) })
-            .hover(|s| s.bg(rgb(0x313244)))
+            .text_color(if is_selected { theme().text_primary } else { theme().text_secondary })
+            .bg(if is_selected { theme().bg_raised } else { theme().bg_surface })
+            .hover(|s| s.bg(theme().bg_raised))
             .child(section.label())
             .on_mouse_down(
                 MouseButton::Left,
@@ -667,10 +668,10 @@ fn input_frame(child: Entity<TextInput>) -> Div {
         .py(px(5.0))
         .rounded(px(6.0))
         .border_1()
-        .border_color(rgb(0x45475a))
-        .bg(rgb(0x11111b))
+        .border_color(theme().border_default)
+        .bg(theme().bg_sunken)
         .text_size(px(12.0))
-        .text_color(rgb(0xcdd6f4))
+        .text_color(theme().text_primary)
         .overflow_hidden()
         .child(child)
 }
@@ -701,13 +702,13 @@ fn render_naming_pane(
             div()
                 .text_size(px(16.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child("Branch Naming"),
         )
         .child(
             div()
                 .text_size(px(12.0))
-                .text_color(rgb(0xa6adc8))
+                .text_color(theme().text_secondary)
                 .child(
                     "Uses the coding agent to generate meaningful branch names \
                      from your first prompt. Falls back to keyword extraction \
@@ -746,7 +747,7 @@ fn render_naming_pane(
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(rgb(0x6c7086))
+                        .text_color(theme().text_faint)
                         .min_w(px(50.0))
                         .child("Mode"),
                 )
@@ -755,15 +756,15 @@ fn render_naming_pane(
                         .px(px(8.0))
                         .py(px(2.0))
                         .rounded(px(6.0))
-                        .bg(rgb(0x313244))
+                        .bg(theme().bg_raised)
                         .text_size(px(12.0))
-                        .text_color(rgb(0x89b4fa))
+                        .text_color(theme().accent)
                         .child(SharedString::from(mode_label.to_string())),
                 )
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(rgb(0x6c7086))
+                        .text_color(theme().text_faint)
                         .child(SharedString::from(mode_desc.to_string())),
                 ),
         )
@@ -777,7 +778,7 @@ fn render_naming_pane(
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(rgb(0x6c7086))
+                        .text_color(theme().text_faint)
                         .min_w(px(50.0))
                         .child("Claude"),
                 )
@@ -793,7 +794,7 @@ fn render_naming_pane(
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(rgb(0x6c7086))
+                        .text_color(theme().text_faint)
                         .min_w(px(50.0))
                         .child("OpenCode"),
                 )
@@ -823,13 +824,13 @@ fn render_appearance_pane(
             .justify_center()
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(0x45475a))
-            .bg(rgb(0x11111b))
+            .border_color(theme().border_default)
+            .bg(theme().bg_sunken)
             .text_size(px(14.0))
-            .text_color(if enabled { rgb(0xcdd6f4) } else { rgb(0x585b70) })
+            .text_color(if enabled { theme().text_primary } else { theme().text_dim })
             .child(label);
         if enabled {
-            base.cursor_pointer().hover(|s| s.bg(rgb(0x313244)))
+            base.cursor_pointer().hover(|s| s.bg(theme().bg_raised))
         } else {
             base.hover(|s| s)
         }
@@ -858,9 +859,9 @@ fn render_appearance_pane(
         .items_center()
         .justify_center()
         .rounded(px(6.0))
-        .bg(rgb(0x181825))
+        .bg(theme().bg_surface)
         .text_size(px(12.0))
-        .text_color(rgb(0xcdd6f4))
+        .text_color(theme().text_primary)
         .child(format!("{:.0} pt", size));
 
     let reset = {
@@ -870,15 +871,15 @@ fn render_appearance_pane(
             .py(px(4.0))
             .rounded(px(6.0))
             .border_1()
-            .border_color(rgb(0x45475a))
-            .bg(rgb(0x11111b))
+            .border_color(theme().border_default)
+            .bg(theme().bg_sunken)
             .text_size(px(11.0))
-            .text_color(if at_default { rgb(0x585b70) } else { rgb(0xcdd6f4) })
+            .text_color(if at_default { theme().text_dim } else { theme().text_primary })
             .child("Reset");
         if at_default {
             base
         } else {
-            base.cursor_pointer().hover(|s| s.bg(rgb(0x313244))).on_mouse_down(
+            base.cursor_pointer().hover(|s| s.bg(theme().bg_raised)).on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, _window, cx| {
                     cx.stop_propagation();
@@ -910,14 +911,14 @@ fn render_appearance_pane(
             div()
                 .text_size(px(16.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child("Appearance"),
         )
         .child(
             div()
                 .w_full()
                 .text_size(px(12.0))
-                .text_color(rgb(0xa6adc8))
+                .text_color(theme().text_secondary)
                 .child(
                     "Terminal font size — applies to every terminal (sessions \
                      and drawer tabs) live. Cmd+= / Cmd+- / Cmd+0 change this \
@@ -952,7 +953,7 @@ fn render_browser_pane(
                 .w(px(32.0))
                 .h(px(18.0))
                 .rounded(px(9.0))
-                .bg(if enabled { rgb(0x89b4fa) } else { rgb(0x45475a) })
+                .bg(if enabled { theme().accent } else { theme().bg_hover })
                 .flex()
                 .items_center()
                 .justify_start()
@@ -962,14 +963,14 @@ fn render_browser_pane(
                         .w(px(14.0))
                         .h(px(14.0))
                         .rounded(px(7.0))
-                        .bg(rgb(0x1e1e2e))
+                        .bg(theme().bg_base)
                         .ml(if enabled { px(14.0) } else { px(0.0) }),
                 ),
         )
         .child(
             div()
                 .text_size(px(12.0))
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child(if enabled { "Enabled" } else { "Disabled" }),
         );
 
@@ -985,14 +986,14 @@ fn render_browser_pane(
             div()
                 .text_size(px(16.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child("Browser"),
         )
         .child(
             div()
                 .w_full()
                 .text_size(px(12.0))
-                .text_color(rgb(0xa6adc8))
+                .text_color(theme().text_secondary)
                 .child(
                     "Link each Allele session to a tab in your running \
                      Google Chrome. Switching sessions activates the \
@@ -1024,14 +1025,14 @@ fn render_editor_pane(
             div()
                 .text_size(px(16.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child("Editor"),
         )
         .child(
             div()
                 .w_full()
                 .text_size(px(12.0))
-                .text_color(rgb(0xa6adc8))
+                .text_color(theme().text_secondary)
                 .child(
                     "External editor command — used by \"Open in External Editor\" \
                      in the file tree's right-click menu. Bare binary name (e.g. \
@@ -1078,7 +1079,7 @@ fn render_infrastructure_pane(
                 .w(px(32.0))
                 .h(px(18.0))
                 .rounded(px(9.0))
-                .bg(if enabled { rgb(0x89b4fa) } else { rgb(0x45475a) })
+                .bg(if enabled { theme().accent } else { theme().bg_hover })
                 .flex()
                 .items_center()
                 .justify_start()
@@ -1088,24 +1089,24 @@ fn render_infrastructure_pane(
                         .w(px(14.0))
                         .h(px(14.0))
                         .rounded(px(7.0))
-                        .bg(rgb(0x1e1e2e))
+                        .bg(theme().bg_base)
                         .ml(if enabled { px(14.0) } else { px(0.0) }),
                 ),
         )
         .child(
             div()
                 .text_size(px(12.0))
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child("Enable global Traefik reverse proxy + shared network"),
         );
 
     let status_line = status.map(|s| {
         let color = if s.contains("Running") {
-            rgb(0xa6e3a1)
+            theme().success
         } else if s.contains("Starting") || s.contains("Stopping") || s.contains("Stopped") {
-            rgb(0xf9e2af)
+            theme().warning
         } else {
-            rgb(0xf38ba8) // error
+            theme().danger // error
         };
         div()
             .text_size(px(11.0))
@@ -1121,13 +1122,13 @@ fn render_infrastructure_pane(
             .child(
                 div()
                     .text_size(px(10.0))
-                    .text_color(rgb(0x6c7086))
+                    .text_color(theme().text_faint)
                     .child(SharedString::from(label.to_string())),
             )
             .child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(rgb(0xa6adc8))
+                    .text_color(theme().text_secondary)
                     .child(SharedString::from(value.to_string())),
             )
             .into_any_element()
@@ -1145,13 +1146,13 @@ fn render_infrastructure_pane(
             div()
                 .text_size(px(16.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child("Infrastructure"),
         )
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(rgb(0x6c7086))
+                .text_color(theme().text_faint)
                 .child(
                     "A single Traefik reverse proxy + shared 'allele' Docker network that all \
                      sessions register HTTPS routes against. Requires Docker. Allele manages \
@@ -1171,7 +1172,7 @@ fn render_infrastructure_pane(
         .child(
             div()
                 .text_size(px(10.0))
-                .text_color(rgb(0x6c7086))
+                .text_color(theme().text_faint)
                 .child(
                     "DNS: point your local domains at 127.0.0.1 via dnsmasq + /etc/resolver \
                      (one-time, needs sudo).",
@@ -1212,10 +1213,10 @@ fn render_projects_pane(
                 .px(px(10.0))
                 .py(px(5.0))
                 .rounded(px(6.0))
-                .bg(if is_selected { rgb(0x313244) } else { rgb(0x181825) })
-                .hover(|s| s.bg(rgb(0x313244)))
+                .bg(if is_selected { theme().bg_raised } else { theme().bg_surface })
+                .hover(|s| s.bg(theme().bg_raised))
                 .text_size(px(12.0))
-                .text_color(if is_selected { rgb(0xcdd6f4) } else { rgb(0xa6adc8) })
+                .text_color(if is_selected { theme().text_primary } else { theme().text_secondary })
                 .child(name.clone())
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1250,13 +1251,13 @@ fn render_projects_pane(
                     .px(px(10.0))
                     .py(px(5.0))
                     .rounded(px(6.0))
-                    .bg(rgb(0x181825))
+                    .bg(theme().bg_surface)
                     .child(
                         div()
                             .w(px(80.0))
                             .text_size(px(11.0))
                             .font_weight(FontWeight::BOLD)
-                            .text_color(rgb(0x89b4fa))
+                            .text_color(theme().accent)
                             .child(term.label.clone()),
                     )
                     .child(
@@ -1267,7 +1268,7 @@ fn render_projects_pane(
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .text_size(px(11.0))
-                            .text_color(rgb(0xa6adc8))
+                            .text_color(theme().text_secondary)
                             .child(if term.command.is_empty() {
                                 "(shell)".to_string()
                             } else {
@@ -1282,8 +1283,8 @@ fn render_projects_pane(
                             .py(px(2.0))
                             .rounded(px(6.0))
                             .text_size(px(11.0))
-                            .text_color(rgb(0x6c7086))
-                            .hover(|s| s.text_color(rgb(0xf38ba8)))
+                            .text_color(theme().text_faint)
+                            .hover(|s| s.text_color(theme().danger))
                             .child("✕")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -1331,10 +1332,10 @@ fn render_projects_pane(
                     .px(px(8.0))
                     .py(px(4.0))
                     .rounded(px(6.0))
-                    .bg(rgb(0x313244))
-                    .hover(|s| s.bg(rgb(0x45475a)))
+                    .bg(theme().bg_raised)
+                    .hover(|s| s.bg(theme().bg_hover))
                     .text_size(px(11.0))
-                    .text_color(rgb(0xa6e3a1))
+                    .text_color(theme().success)
                     .child("+ Add")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1390,7 +1391,7 @@ fn render_projects_pane(
             .child(
                 div()
                     .text_size(px(12.0))
-                    .text_color(rgb(0x6c7086))
+                    .text_color(theme().text_faint)
                     .child("Select a project to configure"),
             )
             .into_any_element()
@@ -1408,13 +1409,13 @@ fn render_projects_pane(
             div()
                 .text_size(px(16.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child("Projects"),
         )
         .child(
             div()
                 .text_size(px(11.0))
-                .text_color(rgb(0x6c7086))
+                .text_color(theme().text_faint)
                 .child("Configure per-session orchestration: startup/shutdown lifecycle and drawer terminals."),
         )
         .child(
@@ -1439,7 +1440,7 @@ fn section_header(label: &str) -> Div {
     div()
         .text_size(px(11.0))
         .font_weight(FontWeight::BOLD)
-        .text_color(rgb(0x89b4fa))
+        .text_color(theme().accent)
         .pb(px(2.0))
         .child(SharedString::from(label.to_string()))
 }
@@ -1460,13 +1461,13 @@ fn render_sessions_pane(
             .px(px(10.0))
             .py(px(6.0))
             .rounded(px(6.0))
-            .bg(rgb(0x181825))
+            .bg(theme().bg_surface)
             .child(
                 div()
                     .flex_1()
                     .min_w(px(0.0))
                     .text_size(px(12.0))
-                    .text_color(rgb(0xcdd6f4))
+                    .text_color(theme().text_primary)
                     .child(path.clone()),
             )
             .child(
@@ -1477,8 +1478,8 @@ fn render_sessions_pane(
                     .py(px(2.0))
                     .rounded(px(6.0))
                     .text_size(px(11.0))
-                    .text_color(rgb(0x6c7086))
-                    .hover(|s| s.text_color(rgb(0xf38ba8)))
+                    .text_color(theme().text_faint)
+                    .hover(|s| s.text_color(theme().danger))
                     .child("✕")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -1514,7 +1515,7 @@ fn render_sessions_pane(
                 .w(px(32.0))
                 .h(px(18.0))
                 .rounded(px(9.0))
-                .bg(if pull_enabled { rgb(0x89b4fa) } else { rgb(0x45475a) })
+                .bg(if pull_enabled { theme().accent } else { theme().bg_hover })
                 .flex()
                 .items_center()
                 .justify_start()
@@ -1524,14 +1525,14 @@ fn render_sessions_pane(
                         .w(px(14.0))
                         .h(px(14.0))
                         .rounded(px(7.0))
-                        .bg(rgb(0x1e1e2e))
+                        .bg(theme().bg_base)
                         .ml(if pull_enabled { px(14.0) } else { px(0.0) }),
                 ),
         )
         .child(
             div()
                 .text_size(px(12.0))
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child("Run `git pull` on source before creating a new session"),
         );
 
@@ -1556,7 +1557,7 @@ fn render_sessions_pane(
                 .w(px(32.0))
                 .h(px(18.0))
                 .rounded(px(9.0))
-                .bg(if promote_enabled { rgb(0x89b4fa) } else { rgb(0x45475a) })
+                .bg(if promote_enabled { theme().accent } else { theme().bg_hover })
                 .flex()
                 .items_center()
                 .justify_start()
@@ -1566,14 +1567,14 @@ fn render_sessions_pane(
                         .w(px(14.0))
                         .h(px(14.0))
                         .rounded(px(7.0))
-                        .bg(rgb(0x1e1e2e))
+                        .bg(theme().bg_base)
                         .ml(if promote_enabled { px(14.0) } else { px(0.0) }),
                 ),
         )
         .child(
             div()
                 .text_size(px(12.0))
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child("Move attention-needed sessions to top of list"),
         );
 
@@ -1583,10 +1584,10 @@ fn render_sessions_pane(
         .px(px(12.0))
         .py(px(6.0))
         .rounded(px(6.0))
-        .bg(rgb(0x89b4fa))
+        .bg(theme().accent)
         .text_size(px(12.0))
-        .text_color(rgb(0x1e1e2e))
-        .hover(|s| s.bg(rgb(0xb4befe)))
+        .text_color(theme().text_on_accent)
+        .hover(|s| s.bg(theme().lavender))
         .child("Add")
         .on_mouse_down(
             MouseButton::Left,
@@ -1610,7 +1611,7 @@ fn render_sessions_pane(
             div()
                 .text_size(px(16.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child("Sessions"),
         )
         .child(pull_toggle)
@@ -1619,7 +1620,7 @@ fn render_sessions_pane(
             div()
                 .w_full()
                 .text_size(px(12.0))
-                .text_color(rgb(0xa6adc8))
+                .text_color(theme().text_secondary)
                 .child(
                     "Cleanup paths — deleted from each new session clone. \
                      Useful for stale runtime files that the parent working \
@@ -1667,10 +1668,10 @@ fn render_agents_pane(
         .px(px(10.0))
         .py(px(6.0))
         .rounded(px(6.0))
-        .bg(rgb(0x45475a))
+        .bg(theme().bg_hover)
         .text_size(px(12.0))
-        .text_color(rgb(0xcdd6f4))
-        .hover(|s| s.bg(rgb(0x585b70)))
+        .text_color(theme().text_primary)
+        .hover(|s| s.bg(theme().bg_active))
         .child("Re-detect")
         .on_mouse_down(
             MouseButton::Left,
@@ -1700,10 +1701,10 @@ fn render_agents_pane(
         .px(px(10.0))
         .py(px(6.0))
         .rounded(px(6.0))
-        .bg(rgb(0x89b4fa))
+        .bg(theme().accent)
         .text_size(px(12.0))
-        .text_color(rgb(0x1e1e2e))
-        .hover(|s| s.bg(rgb(0xb4befe)))
+        .text_color(theme().text_on_accent)
+        .hover(|s| s.bg(theme().lavender))
         .child("+ Add custom")
         .on_mouse_down(
             MouseButton::Left,
@@ -1746,14 +1747,14 @@ fn render_agents_pane(
             div()
                 .text_size(px(16.0))
                 .font_weight(FontWeight::BOLD)
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child("Coding Agents"),
         )
         .child(
             div()
                 .w_full()
                 .text_size(px(12.0))
-                .text_color(rgb(0xa6adc8))
+                .text_color(theme().text_secondary)
                 .child(
                     "Configure which coding agents Allele can launch in a \
                      session. The default is used for every new session; \
@@ -1781,9 +1782,9 @@ fn render_agent_row(
         .px(px(6.0))
         .py(px(1.0))
         .rounded(px(6.0))
-        .bg(rgb(0x313244))
+        .bg(theme().bg_raised)
         .text_size(px(10.0))
-        .text_color(rgb(0x89b4fa))
+        .text_color(theme().accent)
         .child(format!("{:?}", agent.kind));
 
     let enabled = agent.enabled;
@@ -1807,7 +1808,7 @@ fn render_agent_row(
                 .w(px(30.0))
                 .h(px(16.0))
                 .rounded(px(8.0))
-                .bg(if enabled { rgb(0x89b4fa) } else { rgb(0x45475a) })
+                .bg(if enabled { theme().accent } else { theme().bg_hover })
                 .flex()
                 .items_center()
                 .px(px(2.0))
@@ -1816,7 +1817,7 @@ fn render_agent_row(
                         .w(px(12.0))
                         .h(px(12.0))
                         .rounded(px(6.0))
-                        .bg(rgb(0x1e1e2e))
+                        .bg(theme().bg_base)
                         .ml(if enabled { px(14.0) } else { px(0.0) }),
                 ),
         );
@@ -1828,9 +1829,9 @@ fn render_agent_row(
         .py(px(2.0))
         .rounded(px(6.0))
         .text_size(px(11.0))
-        .bg(if is_default { rgb(0x89b4fa) } else { rgb(0x313244) })
-        .text_color(if is_default { rgb(0x1e1e2e) } else { rgb(0xa6adc8) })
-        .hover(|s| s.bg(rgb(0x585b70)))
+        .bg(if is_default { theme().accent } else { theme().bg_raised })
+        .text_color(if is_default { theme().bg_base } else { theme().text_secondary })
+        .hover(|s| s.bg(theme().bg_active))
         .child(if is_default { "Default" } else { "Set default" })
         .on_mouse_down(
             MouseButton::Left,
@@ -1864,8 +1865,8 @@ fn render_agent_row(
             .py(px(2.0))
             .rounded(px(6.0))
             .text_size(px(11.0))
-            .text_color(rgb(0x6c7086))
-            .hover(|s| s.text_color(rgb(0xf38ba8)))
+            .text_color(theme().text_faint)
+            .hover(|s| s.text_color(theme().danger))
             .child("✕")
             .on_mouse_down(
                 MouseButton::Left,
@@ -1893,7 +1894,7 @@ fn render_agent_row(
                 div()
                     .w(px(60.0))
                     .text_size(px(11.0))
-                    .text_color(rgb(0xa6adc8))
+                    .text_color(theme().text_secondary)
                     .child(label),
             )
             .child(input_frame(body))
@@ -1905,9 +1906,9 @@ fn render_agent_row(
         .gap(px(6.0))
         .p(px(10.0))
         .rounded(px(6.0))
-        .bg(rgb(0x181825))
+        .bg(theme().bg_surface)
         .border_1()
-        .border_color(rgb(0x313244))
+        .border_color(theme().border_subtle)
         .child(header)
         .child(labelled("Path", path_input))
         .child(labelled("Args", args_input))

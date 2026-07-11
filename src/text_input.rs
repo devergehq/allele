@@ -13,9 +13,10 @@
 //! action types and the `on_action` listener wiring.
 
 use std::ops::Range;
+use crate::theme::theme;
 
 use gpui::{
-    actions, fill, hsla, point, prelude::*, px, relative, rgb, rgba, size, App, Bounds,
+    actions, fill, point, prelude::*, px, relative, size, App, Bounds,
     ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, EntityInputHandler,
     EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
     MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, ShapedLine, SharedString,
@@ -506,7 +507,7 @@ impl Element for TextElement {
 
         let (display_text, text_color) = if content.is_empty() {
             // Catppuccin overlay0 — readable but visibly placeholder.
-            (input.placeholder.clone(), hsla(228.0 / 360.0, 0.17, 0.45, 1.0))
+            (input.placeholder.clone(), theme().text_placeholder)
         } else {
             (content, style.color)
         };
@@ -577,7 +578,7 @@ impl Element for TextElement {
                         point(bounds.left() + cursor_pos - scroll_x, bounds.top()),
                         size(px(1.5), bounds.bottom() - bounds.top()),
                     ),
-                    rgb(0x89b4fa),
+                    theme().accent,
                 )),
             )
         } else {
@@ -593,7 +594,7 @@ impl Element for TextElement {
                             bounds.bottom(),
                         ),
                     ),
-                    rgba(0x89b4fa55),
+                    theme().selection,
                 )),
                 None,
             )

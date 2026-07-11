@@ -11,6 +11,7 @@
 //! the content column plus the optional drag overlay sibling.
 
 use gpui::*;
+use crate::theme::theme;
 
 use crate::actions::{DrawerAction, SessionCursor, SettingsAction};
 use crate::app_state::{AppState, DRAWER_MIN_HEIGHT};
@@ -182,8 +183,8 @@ pub(crate) fn build_drawer_items(
             .w_full()
             .h(px(6.0))
             .cursor_row_resize()
-            .bg(rgb(0x313244))
-            .hover(|s| s.bg(rgb(0x45475a)))
+            .bg(theme().bg_raised)
+            .hover(|s| s.bg(theme().bg_hover))
             .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
                 this.drawer.resizing = true;
                 cx.notify();
@@ -239,8 +240,8 @@ pub(crate) fn build_drawer_items(
     for (idx, name) in tabs_meta {
         let is_active = idx == active_tab_idx;
         let is_renaming = renaming_idx == Some(idx);
-        let tab_bg = if is_active { 0x313244 } else { 0x1e1e2e };
-        let tab_fg = if is_active { 0xcdd6f4 } else { 0xa6adc8 };
+        let tab_bg = if is_active { theme().bg_raised } else { theme().bg_base };
+        let tab_fg = if is_active { theme().text_primary } else { theme().text_secondary };
 
         let mut tab_el = div()
             .id(("drawer-tab", idx))
@@ -251,11 +252,11 @@ pub(crate) fn build_drawer_items(
             .px(px(10.0))
             .py(px(3.0))
             .rounded(px(6.0))
-            .bg(rgb(tab_bg))
+            .bg(tab_bg)
             .text_size(px(11.0))
-            .text_color(rgb(tab_fg))
+            .text_color(tab_fg)
             .cursor_pointer()
-            .hover(|s| s.bg(rgb(0x45475a)));
+            .hover(|s| s.bg(theme().bg_hover));
 
         if is_renaming {
             let display = if rename_buf.is_empty() {
@@ -267,10 +268,10 @@ pub(crate) fn build_drawer_items(
                 .min_w(px(40.0))
                 .px(px(4.0))
                 .border_1()
-                .border_color(rgb(0x89b4fa))
+                .border_color(theme().accent)
                 .rounded(px(6.0))
-                .bg(rgb(0x181825))
-                .text_color(rgb(0xcdd6f4))
+                .bg(theme().bg_surface)
+                .text_color(theme().text_primary)
                 .child(format!("{display}▎"));
             if let Some(fh) = rename_focus.clone() {
                 label = label
@@ -340,10 +341,10 @@ pub(crate) fn build_drawer_items(
                         .px(px(4.0))
                         .rounded(px(6.0))
                         .text_size(px(11.0))
-                        .text_color(rgb(0x6c7086))
+                        .text_color(theme().text_faint)
                         .hover(|s| {
-                            s.bg(rgb(0x585b70))
-                                .text_color(rgb(0xf38ba8))
+                            s.bg(theme().bg_active)
+                                .text_color(theme().danger)
                         })
                         .child("×")
                         .tooltip(|_window, cx| {
@@ -372,8 +373,8 @@ pub(crate) fn build_drawer_items(
             .py(px(3.0))
             .rounded(px(6.0))
             .text_size(px(13.0))
-            .text_color(rgb(0x6c7086))
-            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+            .text_color(theme().text_faint)
+            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
             .child("+")
             .tooltip(|_window, cx| {
                 cx.new(|_| SimpleTooltip { text: "New terminal tab".into() }).into()
@@ -393,9 +394,9 @@ pub(crate) fn build_drawer_items(
             .flex_shrink_0()
             .px(px(8.0))
             .py(px(4.0))
-            .bg(rgb(0x181825))
+            .bg(theme().bg_surface)
             .border_b_1()
-            .border_color(rgb(0x313244))
+            .border_color(theme().border_subtle)
             .flex()
             .flex_row()
             .items_center()
@@ -409,8 +410,8 @@ pub(crate) fn build_drawer_items(
                     .py(px(2.0))
                     .rounded(px(6.0))
                     .text_size(px(12.0))
-                    .text_color(rgb(0x6c7086))
-                    .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                    .text_color(theme().text_faint)
+                    .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
                     .child("×")
                     .tooltip(|_window, cx| {
                         cx.new(|_| SimpleTooltip { text: "Close drawer".into() }).into()
@@ -428,7 +429,7 @@ pub(crate) fn build_drawer_items(
         .w_full()
         .h(px(drawer_h))
         .flex_shrink_0()
-        .bg(rgb(0x1e1e2e));
+        .bg(theme().bg_base);
 
     if let Some(dt) = active_tab_view {
         // Drawer PTYs lose the same horizontal space to the right changes
@@ -450,7 +451,7 @@ pub(crate) fn build_drawer_items(
                 .items_center()
                 .justify_center()
                 .text_size(px(11.0))
-                .text_color(rgb(0x45475a))
+                .text_color(theme().text_ghost)
                 .child("Terminal drawer"),
         );
     }

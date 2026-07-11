@@ -7,6 +7,7 @@
 //! load can never clobber a newer one.
 
 use gpui::*;
+use crate::theme::theme;
 
 use crate::actions::SidebarAction;
 use crate::app_state::AppState;
@@ -211,7 +212,7 @@ impl AppState {
                     .pb(px(2.0))
                     .text_size(px(10.0))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0x6c7086))
+                    .text_color(theme().text_faint)
                     .child(format!("{} ({})", title.to_uppercase(), files.len())),
             );
             for file in files {
@@ -238,13 +239,13 @@ impl AppState {
         let selected =
             self.changes.selected.as_ref() == Some(&(file.path.clone(), file.staged));
         let badge_color = match file.kind {
-            ChangeKind::Modified => rgb(0xf9e2af),
-            ChangeKind::Added => rgb(0xa6e3a1),
-            ChangeKind::Deleted => rgb(0xf38ba8),
-            ChangeKind::Renamed | ChangeKind::Copied => rgb(0x89b4fa),
-            ChangeKind::TypeChange => rgb(0xfab387),
-            ChangeKind::Unmerged => rgb(0xf38ba8),
-            ChangeKind::Untracked => rgb(0x6c7086),
+            ChangeKind::Modified => theme().warning,
+            ChangeKind::Added => theme().success,
+            ChangeKind::Deleted => theme().danger,
+            ChangeKind::Renamed | ChangeKind::Copied => theme().accent,
+            ChangeKind::TypeChange => theme().attention,
+            ChangeKind::Unmerged => theme().danger,
+            ChangeKind::Untracked => theme().text_faint,
         };
         let path = file.path.clone();
         let staged = file.staged;
@@ -258,9 +259,9 @@ impl AppState {
             .gap(px(8.0))
             .cursor_pointer();
         if selected {
-            row = row.bg(rgb(0x313244));
+            row = row.bg(theme().bg_raised);
         }
-        row.hover(|s| s.bg(rgb(0x2a2a3c)))
+        row.hover(|s| s.bg(theme().bg_hover_soft))
             .child(
                 div()
                     .w(px(12.0))
@@ -277,7 +278,7 @@ impl AppState {
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .text_size(px(11.0))
-                    .text_color(rgb(0xcdd6f4))
+                    .text_color(theme().text_primary)
                     .whitespace_nowrap()
                     .child(file.path.clone()),
             )
@@ -308,7 +309,7 @@ impl AppState {
             .flex()
             .flex_col()
             .border_t_1()
-            .border_color(rgb(0x313244));
+            .border_color(theme().border_subtle);
 
         // Diff header: file name + side + close button.
         pane = pane.child(
@@ -319,7 +320,7 @@ impl AppState {
                 .flex_row()
                 .items_center()
                 .justify_between()
-                .bg(rgb(0x181825))
+                .bg(theme().bg_surface)
                 .child(
                     div()
                         .flex_1()
@@ -328,7 +329,7 @@ impl AppState {
                         .whitespace_nowrap()
                         .text_size(px(11.0))
                         .font_weight(FontWeight::BOLD)
-                        .text_color(rgb(0xcdd6f4))
+                        .text_color(theme().text_primary)
                         .child(format!(
                             "{} {}",
                             path,
@@ -342,8 +343,8 @@ impl AppState {
                         .px(px(6.0))
                         .rounded(px(6.0))
                         .text_size(px(12.0))
-                        .text_color(rgb(0x6c7086))
-                        .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                        .text_color(theme().text_faint)
+                        .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
                         .child("×")
                         .on_mouse_down(
                             MouseButton::Left,
@@ -383,11 +384,11 @@ impl AppState {
                     }
                     shown += 1;
                     let (color, bg) = match line.as_bytes().first() {
-                        Some(b'+') => (rgb(0xa6e3a1), Some(rgba(0xa6e3a118))),
-                        Some(b'-') => (rgb(0xf38ba8), Some(rgba(0xf38ba818))),
-                        Some(b'@') => (rgb(0x89b4fa), None),
-                        Some(b'd') | Some(b'i') => (rgb(0x6c7086), None), // diff --git / index headers
-                        _ => (rgb(0xbac2de), None),
+                        Some(b'+') => (theme().success, Some(theme().diff_add_bg)),
+                        Some(b'-') => (theme().danger, Some(theme().diff_del_bg)),
+                        Some(b'@') => (theme().accent, None),
+                        Some(b'd') | Some(b'i') => (theme().text_faint, None), // diff --git / index headers
+                        _ => (theme().text_body, None),
                     };
                     let mut row = div()
                         .px(px(4.0))
@@ -404,7 +405,7 @@ impl AppState {
                         div()
                             .px(px(4.0))
                             .py(px(6.0))
-                            .text_color(rgb(0x6c7086))
+                            .text_color(theme().text_faint)
                             .child("… diff truncated"),
                     );
                 }
@@ -424,6 +425,6 @@ fn centered_note(text: &'static str) -> Div {
         .justify_center()
         .py(px(20.0))
         .text_size(px(11.0))
-        .text_color(rgb(0x45475a))
+        .text_color(theme().text_ghost)
         .child(text)
 }

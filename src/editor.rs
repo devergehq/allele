@@ -5,6 +5,7 @@
 
 use gpui::*;
 use std::path::PathBuf;
+use crate::theme::theme;
 
 use crate::app_state::AppState;
 
@@ -34,12 +35,12 @@ impl AppState {
                 .flex_shrink_0()
                 .h_full()
                 .overflow_y_scroll()
-                .bg(rgb(0x181825))
+                .bg(theme().bg_surface)
                 .border_r_1()
-                .border_color(rgb(0x313244))
+                .border_color(theme().border_subtle)
                 .py(px(6.0))
                 .text_size(px(12.0))
-                .text_color(rgb(0xcdd6f4));
+                .text_color(theme().text_primary);
 
             if let Some(root_path) = root.clone() {
                 let mut rows: Vec<AnyElement> = Vec::new();
@@ -50,7 +51,7 @@ impl AppState {
                         div()
                             .px(px(10.0))
                             .py(px(6.0))
-                            .text_color(rgb(0x6c7086))
+                            .text_color(theme().text_faint)
                             .child("(empty workspace)"),
                     );
                 } else {
@@ -63,7 +64,7 @@ impl AppState {
                     div()
                         .px(px(10.0))
                         .py(px(6.0))
-                        .text_color(rgb(0x6c7086))
+                        .text_color(theme().text_faint)
                         .child("No active session"),
                 );
             }
@@ -78,10 +79,10 @@ impl AppState {
                 .min_w(px(0.0))
                 .h_full()
                 .overflow_scroll()
-                .bg(rgb(0x1e1e2e))
+                .bg(theme().bg_base)
                 .p(px(12.0))
                 .text_size(px(12.0))
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .font_family("monospace");
 
             match (&self.editor.selected_path, &self.editor.preview) {
@@ -100,7 +101,7 @@ impl AppState {
                         .flex()
                         .items_center()
                         .justify_center()
-                        .text_color(rgb(0x6c7086))
+                        .text_color(theme().text_faint)
                         .child("Select a file to preview");
                 }
             }
@@ -112,7 +113,7 @@ impl AppState {
             .size_full()
             .flex()
             .flex_row()
-            .bg(rgb(0x1e1e2e))
+            .bg(theme().bg_base)
             .child(tree_col)
             .child(preview_col);
 
@@ -137,9 +138,9 @@ impl AppState {
                 .px(px(14.0))
                 .py(px(6.0))
                 .text_size(px(12.0))
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(0x45475a)))
+                .hover(|s| s.bg(theme().bg_hover))
                 .child(label)
                 .on_mouse_down(
                     MouseButton::Left,
@@ -161,9 +162,9 @@ impl AppState {
             .flex_col()
             .min_w(px(220.0))
             .py(px(4.0))
-            .bg(rgb(0x181825))
+            .bg(theme().bg_surface)
             .border_1()
-            .border_color(rgb(0x45475a))
+            .border_color(theme().border_default)
             .rounded(px(6.0))
             .shadow_md()
             .child(item(
@@ -223,7 +224,7 @@ impl AppState {
                 format!("  {name}")
             };
 
-            let row_bg = if is_selected { 0x313244 } else { 0x181825 };
+            let row_bg = if is_selected { theme().bg_raised } else { theme().bg_surface };
             let path_for_click = path.clone();
 
             let row_id = *counter;
@@ -237,9 +238,9 @@ impl AppState {
                 .pl(indent)
                 .pr(px(8.0))
                 .py(px(2.0))
-                .bg(rgb(row_bg))
+                .bg(row_bg)
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(0x313244)))
+                .hover(|s| s.bg(theme().bg_raised))
                 .child(label)
                 .on_mouse_down(
                     MouseButton::Left,

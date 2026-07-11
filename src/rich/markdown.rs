@@ -10,36 +10,17 @@
 
 use gpui::{
     div, px, Div, Font, FontFeatures, FontStyle, FontWeight, Hsla,
-    ParentElement as _, Rgba, SharedString, StyledText, Styled as _, TextRun, UnderlineStyle,
+    ParentElement as _, SharedString, StyledText, Styled as _, TextRun, UnderlineStyle,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use crate::theme::{theme, with_alpha};
 
 // ── Palette (Catppuccin Mocha — matches rich_view.rs) ─────────────
 
-const SURFACE0: u32 = 0x313244;
-const TEXT: u32 = 0xcdd6f4;
-const SUBTEXT0: u32 = 0xa6adc8;
-const SUBTEXT1: u32 = 0xbac2de;
-const BLUE: u32 = 0x89b4fa;
-const PEACH: u32 = 0xfab387;
-const GREEN: u32 = 0xa6e3a1;
-const LAVENDER: u32 = 0xcba6f7;
 
-fn hex(c: u32) -> Hsla {
-    let r = ((c >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((c >> 8) & 0xFF) as f32 / 255.0;
-    let b = (c & 0xFF) as f32 / 255.0;
-    Rgba { r, g, b, a: 1.0 }.into()
-}
 
-fn hex_alpha(c: u32, alpha: f32) -> Hsla {
-    let r = ((c >> 16) & 0xFF) as f32 / 255.0;
-    let g = ((c >> 8) & 0xFF) as f32 / 255.0;
-    let b = (c & 0xFF) as f32 / 255.0;
-    Rgba { r, g, b, a: alpha }.into()
-}
 
-const MONO_FAMILY: &str = "JetBrains Mono";
+const MONO_FAMILY: &str = crate::theme::FONT_MONO;
 
 fn body_font(bold: bool, italic: bool) -> Font {
     Font {
@@ -74,20 +55,20 @@ struct InlineStyle {
 
 impl InlineStyle {
     fn to_run(self, len: usize, base_color: Hsla) -> TextRun {
-        let color = if self.link { hex(BLUE) } else { base_color };
+        let color = if self.link { theme().accent } else { base_color };
         let font = if self.code {
             mono_font(self.bold, self.italic)
         } else {
             body_font(self.bold, self.italic)
         };
         let background = if self.code {
-            Some(hex_alpha(SURFACE0, 0.6))
+            Some(with_alpha(theme().bg_raised, 0.6))
         } else {
             None
         };
         let underline = if self.link {
             Some(UnderlineStyle {
-                color: Some(hex(BLUE)),
+                color: Some(theme().accent),
                 thickness: px(1.0),
                 wavy: false,
             })
@@ -158,7 +139,7 @@ impl InlineBuilder {
 /// re-call every frame; pulldown-cmark parses at hundreds of MB/s for the sizes
 /// involved here.
 pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
-    let base_color = if streaming { hex(SUBTEXT1) } else { hex(TEXT) };
+    let base_color = if streaming { theme().text_body } else { theme().text_primary };
 
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -268,9 +249,9 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 let depth = list_stack.len().saturating_sub(1);
                 let indent = " ".repeat(depth * 2);
                 if checked {
-                    inline.push(&format!("{indent}☑ "), hex(GREEN));
+                    inline.push(&format!("{indent}☑ "), theme().success);
                 } else {
-                    inline.push(&format!("{indent}☐ "), hex_alpha(SUBTEXT0, 0.6));
+                    inline.push(&format!("{indent}☐ "), with_alpha(theme().text_secondary, 0.6));
                 }
             }
             Event::Start(Tag::Emphasis) => inline.style.italic = true,
@@ -321,7 +302,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                     div()
                         .my(px(6.0))
                         .h(px(1.0))
-                        .bg(hex_alpha(SUBTEXT0, 0.25)),
+                        .bg(with_alpha(theme().text_secondary, 0.25)),
                 );
             }
             // ── Tables ────────────────────────────────────────────
@@ -420,7 +401,7 @@ fn heading_element(level: HeadingLevel, text: SharedString, runs: Vec<TextRun>, 
             .mb(px(bottom))
             .pl(px(8.0))
             .border_l_2()
-            .border_color(hex_alpha(LAVENDER, 0.55))
+            .border_color(with_alpha(theme().ready, 0.55))
             .child(text_div),
         _ => div()
             .mt(px(top))
@@ -431,15 +412,15 @@ fn heading_element(level: HeadingLevel, text: SharedString, runs: Vec<TextRun>, 
 
 fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
     let code_size = font_size - 1.0;
-    let base_color = hex(GREEN);
+    let base_color = theme().success;
     let trimmed = if code.ends_with('\n') { &code[..code.len() - 1] } else { &code };
 
     let mut block = div()
         .my(px(10.0))
         .rounded(px(6.0))
-        .bg(hex_alpha(SURFACE0, 0.6))
+        .bg(with_alpha(theme().bg_raised, 0.6))
         .border_l_2()
-        .border_color(hex_alpha(PEACH, 0.5))
+        .border_color(with_alpha(theme().attention, 0.5))
         .flex()
         .flex_col();
 
@@ -452,7 +433,7 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
                 .pt(px(5.0))
                 .pb(px(1.0))
                 .text_size(px(font_size - 3.0).max(px(9.0)))
-                .text_color(hex_alpha(PEACH, 0.65))
+                .text_color(with_alpha(theme().attention, 0.65))
                 .font_family(MONO_FAMILY)
                 .child(lang),
         );
@@ -468,7 +449,7 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
                 .pb(px(6.0))
                 .text_size(px(code_size))
                 .h(px(code_size + 4.0))
-                .text_color(hex_alpha(SUBTEXT0, 0.5))
+                .text_color(with_alpha(theme().text_secondary, 0.5))
                 .child(""),
         );
         return block;
@@ -518,7 +499,7 @@ fn table_element(
         .flex_col();
 
     if !header.is_empty() {
-        let mut row = div().w_full().min_w_0().flex().bg(hex(SURFACE0));
+        let mut row = div().w_full().min_w_0().flex().bg(theme().bg_raised);
         for cell in header {
             let content = if let Some((text, runs)) = cell {
                 div()
@@ -527,7 +508,7 @@ fn table_element(
                     .px(px(8.0))
                     .py(px(5.0))
                     .text_size(px(cell_size))
-                    .text_color(hex(SUBTEXT1))
+                    .text_color(theme().text_body)
                     .child(StyledText::new(text).with_runs(runs))
             } else {
                 div().flex_1().min_w_0().px(px(8.0)).py(px(5.0))
@@ -538,7 +519,7 @@ fn table_element(
     }
 
     for (i, row_cells) in rows.into_iter().enumerate() {
-        let bg = if i % 2 == 0 { hex_alpha(SURFACE0, 0.45) } else { hex_alpha(SURFACE0, 0.2) };
+        let bg = if i % 2 == 0 { with_alpha(theme().bg_raised, 0.45) } else { with_alpha(theme().bg_raised, 0.2) };
         let mut row = div().w_full().min_w_0().flex().bg(bg);
         for cell in row_cells {
             let content = if let Some((text, runs)) = cell {
@@ -548,7 +529,7 @@ fn table_element(
                     .px(px(8.0))
                     .py(px(4.0))
                     .text_size(px(cell_size))
-                    .text_color(hex(TEXT))
+                    .text_color(theme().text_primary)
                     .child(StyledText::new(text).with_runs(runs))
             } else {
                 div().flex_1().min_w_0().px(px(8.0)).py(px(4.0))
