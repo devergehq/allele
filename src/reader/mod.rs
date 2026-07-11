@@ -8,6 +8,7 @@
 //! See ARCHITECTURE.md §2 for module role.
 
 pub(crate) mod highlight;
+pub(crate) mod palette;
 
 use gpui::*;
 use gpui::prelude::FluentBuilder as _;
@@ -641,6 +642,10 @@ impl AppState {
         self.reader.find_query.clear();
         self.reader.find_active = false;
         self.reader.md_view_source = false;
+        // Record in the recents list (most-recent first, deduped, capped).
+        self.reader.recent.retain(|p| p != &path);
+        self.reader.recent.insert(0, path.clone());
+        self.reader.recent.truncate(50);
         self.reader.preview = Some(Preview { path, kind });
     }
 }

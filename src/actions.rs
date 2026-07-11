@@ -220,6 +220,8 @@ pub enum BrowserAction {
 pub enum OverlayAction {
     /// Open (or re-focus) the scratch pad compose overlay.
     OpenScratchPad,
+    /// Open the Cmd+P fuzzy file-retrieval overlay.
+    OpenFilePalette,
 }
 
 impl From<SessionAction> for PendingAction {
