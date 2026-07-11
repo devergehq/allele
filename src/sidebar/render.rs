@@ -46,6 +46,12 @@ pub(crate) fn build_sidebar_items(
         let mut header = div()
             .id(SharedString::from(format!("project-{p_idx}")))
             .group(format!("proj-{p_idx}"))
+            .on_mouse_down(MouseButton::Right, cx.listener(move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.session_context_menu = None;
+                this.project_context_menu = Some((p_idx, event.position));
+                cx.notify();
+            }))
             .px(px(12.0))
             .py(px(6.0))
             .bg(if is_confirming_remove { theme().tint_danger } else { theme().bg_sunken })
@@ -188,27 +194,7 @@ pub(crate) fn build_sidebar_items(
                         })
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                             cx.stop_propagation();
-                            if this.editing_project_settings == Some(p_idx) {
-                                this.editing_project_settings = None;
-                            } else {
-                                this.editing_project_settings = Some(p_idx);
-                                // Seed the panel inputs from this project's settings.
-                                let (branch, remote) = this
-                                    .projects
-                                    .get(p_idx)
-                                    .map(|p| {
-                                        (
-                                            p.settings.default_branch.clone().unwrap_or_default(),
-                                            p.settings.remote.clone().unwrap_or_default(),
-                                        )
-                                    })
-                                    .unwrap_or_default();
-                                this.project_branch_input
-                                    .update(cx, |i, cx| i.set_text_silent(&branch, cx));
-                                this.project_remote_input
-                                    .update(cx, |i, cx| i.set_text_silent(&remote, cx));
-                            }
-                            cx.notify();
+                            this.toggle_project_settings_panel(p_idx, cx);
                         })),
                 )
                 .child(
@@ -606,6 +592,7 @@ pub(crate) fn build_sidebar_items(
                 .justify_between()
                 .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                     this.session_context_menu = None;
+                    this.project_context_menu = None;
                     this.pending_action = Some(SessionAction::SelectSession {
                         project_idx: p_idx,
                         session_idx: s_idx,
@@ -614,6 +601,7 @@ pub(crate) fn build_sidebar_items(
                 }))
                 .on_mouse_down(MouseButton::Right, cx.listener(move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
                     cx.stop_propagation();
+                    this.project_context_menu = None;
                     this.session_context_menu = Some((
                         SessionCursor { project_idx: p_idx, session_idx: s_idx },
                         event.position,

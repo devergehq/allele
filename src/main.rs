@@ -872,6 +872,128 @@ impl AppState {
         }
     }
 
+    /// Toggle the inline project-settings panel, seeding the branch/remote
+    /// inputs from the project's settings when opening.
+    pub(crate) fn toggle_project_settings_panel(&mut self, p_idx: usize, cx: &mut Context<Self>) {
+        if self.editing_project_settings == Some(p_idx) {
+            self.editing_project_settings = None;
+        } else {
+            self.editing_project_settings = Some(p_idx);
+            let (branch, remote) = self
+                .projects
+                .get(p_idx)
+                .map(|p| {
+                    (
+                        p.settings.default_branch.clone().unwrap_or_default(),
+                        p.settings.remote.clone().unwrap_or_default(),
+                    )
+                })
+                .unwrap_or_default();
+            self.project_branch_input
+                .update(cx, |i, cx| i.set_text_silent(&branch, cx));
+            self.project_remote_input
+                .update(cx, |i, cx| i.set_text_silent(&remote, cx));
+        }
+        cx.notify();
+    }
+
+    /// Floating right-click menu for a project header. Returns an empty
+    /// `Div` when closed, so callers can attach unconditionally.
+    fn render_project_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut root = div();
+        let Some((p_idx, position)) = self.project_context_menu else {
+            return root;
+        };
+
+        let menu_item = |id: &'static str, label: &str, color: Hsla| {
+            div()
+                .id(id)
+                .px(px(14.0))
+                .py(px(6.0))
+                .text_size(px(12.0))
+                .text_color(color)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme().bg_hover))
+                .child(label.to_string())
+        };
+        let separator = || {
+            div()
+                .w_full()
+                .h(px(1.0))
+                .my(px(4.0))
+                .bg(theme().bg_raised)
+        };
+
+        let menu = div()
+            .flex()
+            .flex_col()
+            .min_w(px(200.0))
+            .py(px(4.0))
+            .bg(theme().bg_surface)
+            .border_1()
+            .border_color(theme().border_default)
+            .rounded(px(6.0))
+            .shadow_lg()
+            .child(
+                menu_item("project-ctx-new-session", "New Session", theme().text_primary)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.project_context_menu = None;
+                        this.pending_action = Some(SessionAction::AddSessionToProject(p_idx).into());
+                        cx.notify();
+                    })),
+            )
+            .child(
+                menu_item("project-ctx-new-session-details", "New Session with Details…", theme().text_primary)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.project_context_menu = None;
+                        this.pending_action = Some(SessionAction::OpenNewSessionModal(p_idx).into());
+                        cx.notify();
+                    })),
+            )
+            .child(separator())
+            .child(
+                menu_item("project-ctx-settings", "Project Settings", theme().text_primary)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.project_context_menu = None;
+                        this.toggle_project_settings_panel(p_idx, cx);
+                    })),
+            )
+            .child(
+                menu_item("project-ctx-reveal", "Open in Finder", theme().text_primary)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.project_context_menu = None;
+                        this.pending_action = Some(ProjectAction::RevealProjectInFinder(p_idx).into());
+                        cx.notify();
+                    })),
+            )
+            .child(
+                menu_item("project-ctx-copy-path", "Copy Path", theme().text_primary)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.project_context_menu = None;
+                        this.pending_action = Some(ProjectAction::CopyProjectPath(p_idx).into());
+                        cx.notify();
+                    })),
+            )
+            .child(separator())
+            .child(
+                menu_item("project-ctx-remove", "Remove Project…", theme().danger)
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.project_context_menu = None;
+                        this.pending_action = Some(ProjectAction::RequestRemoveProject(p_idx).into());
+                        cx.notify();
+                    })),
+            );
+
+        root = root.child(deferred(anchored().position(position).snap_to_window().child(menu)));
+        root
+    }
+
     /// Floating right-click menu for a session row. Returns an empty `Div`
     /// when no context menu is open, so callers can attach unconditionally.
     fn render_session_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -2490,6 +2612,7 @@ fn main() {
                         scratch_pad_history: loaded_state.scratch_pad_history.clone(),
                         new_session_modal: None,
                         session_context_menu: None,
+                        project_context_menu: None,
                         edit_session_modal: None,
                         naming_modal: None,
                         sidebar_filter_input,
@@ -3308,6 +3431,7 @@ impl Render for AppState {
         }
 
         outer = outer.child(self.render_session_context_menu(cx));
+        outer = outer.child(self.render_project_context_menu(cx));
 
         // If a session has naming suggestions pending and no modal is open, spawn one.
         if self.naming_modal.is_none() {

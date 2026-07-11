@@ -139,6 +139,10 @@ pub enum ProjectAction {
     OpenProjectAtPath(PathBuf),
     /// Arm the inline confirmation gate for removing a project.
     RequestRemoveProject(usize),
+    /// Reveal the project's source directory in Finder.
+    RevealProjectInFinder(usize),
+    /// Copy the project's source path to the clipboard.
+    CopyProjectPath(usize),
     /// Cancel an in-flight project removal confirmation.
     CancelRemoveProject,
     /// Actually remove the project (after confirmation).
