@@ -24,7 +24,10 @@ pub(crate) const RIGHT_SIDEBAR_MIN_WIDTH: f32 = 160.0;
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum MainTab {
     Claude,
-    Editor,
+    /// Read-only project comprehension surface (file tree + preview).
+    /// Editing happens in an external editor — see `reader.rs`. Formerly
+    /// "Editor"; repositioned per DEV-43.
+    Reader,
     Browser,
     /// Read-only structured view of the active session's Claude Code
     /// transcript — rendered by `rich::RichView`, fed by `transcript::
@@ -89,15 +92,15 @@ pub(crate) struct DrawerState {
     pub(crate) rename_focus: Option<FocusHandle>,
 }
 
-/// Editor tab file-tree + preview state.
-pub(crate) struct EditorState {
-    /// File path currently selected in the Editor tab's file tree.
+/// Reader tab file-tree + preview state.
+pub(crate) struct ReaderState {
+    /// File path currently selected in the Reader tab's file tree.
     pub(crate) selected_path: Option<PathBuf>,
-    /// Directories expanded in the Editor tab's file tree.
+    /// Directories expanded in the Reader tab's file tree.
     pub(crate) expanded_dirs: HashSet<PathBuf>,
     /// Cached (path, contents) of the currently previewed file.
     pub(crate) preview: Option<(PathBuf, String)>,
-    /// Right-click context menu target for the Editor file tree.
+    /// Right-click context menu target for the Reader file tree.
     /// Stores (right-clicked path, window-space position of the click).
     pub(crate) context_menu: Option<(PathBuf, Point<Pixels>)>,
 }
@@ -141,7 +144,7 @@ pub(crate) struct AppState {
     pub(crate) right_panel: RightPanelState,
     pub(crate) changes: ChangesPanelState,
     pub(crate) drawer: DrawerState,
-    pub(crate) editor: EditorState,
+    pub(crate) reader: ReaderState,
     pub(crate) confirming: ConfirmationState,
     pub(crate) rich: RichState,
     /// Absolute path to the Allele hooks.json, passed to claude via

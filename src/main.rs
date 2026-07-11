@@ -9,7 +9,6 @@ mod clone;
 mod config;
 mod debug_capture;
 mod drawer;
-mod editor;
 mod errors;
 mod git;
 mod hook_events;
@@ -22,6 +21,7 @@ mod new_session_modal;
 mod pending_actions;
 mod platform;
 mod project;
+mod reader;
 mod remote_browser;
 mod repositories;
 mod rich;
@@ -48,7 +48,7 @@ use actions::{
     SettingsAction, SidebarAction,
 };
 use app_state::{
-    AppState, ChangesPanelState, ConfirmationState, DrawerState, EditorState, MainTab, RichState,
+    AppState, ChangesPanelState, ConfirmationState, DrawerState, MainTab, ReaderState, RichState,
     RightPanelState, SidebarState, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
 };
 use gpui::*;
@@ -343,7 +343,7 @@ impl AppState {
             .is_some()
     }
 
-    /// Tab strip above the main content column: Claude / Editor.
+    /// Tab strip above the main content column: Claude / Reader.
     fn render_main_tab_strip(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active = self.main_tab;
 
@@ -405,7 +405,7 @@ impl AppState {
             .items_center()
             .gap(px(4.0))
             .child(tab("main-tab-claude", "Claude", MainTab::Claude))
-            .child(tab("main-tab-editor", "Editor", MainTab::Editor))
+            .child(tab("main-tab-reader", "Reader", MainTab::Reader))
             .child(tab(
                 "main-tab-transcript",
                 "Transcript",
@@ -2925,7 +2925,7 @@ fn main() {
                             rename: None,
                             rename_focus: None,
                         },
-                        editor: EditorState {
+                        reader: ReaderState {
                             selected_path: None,
                             expanded_dirs: HashSet::new(),
                             preview: None,
@@ -3004,7 +3004,7 @@ impl Render for AppState {
                 active_session: active_session.map(|s| s.label.as_str()),
                 main_tab: match self.main_tab {
                     MainTab::Claude => "claude",
-                    MainTab::Editor => "editor",
+                    MainTab::Reader => "reader",
                     MainTab::Browser => "browser",
                     MainTab::Transcript => "transcript",
                 },
@@ -3383,7 +3383,7 @@ impl Render for AppState {
                 content_col = content_col.child(attention_bar);
             }
 
-            // --- Main-area tab strip: Claude / Editor ---
+            // --- Main-area tab strip: Claude / Reader ---
             content_col = content_col.child(self.render_main_tab_strip(cx));
 
             // --- Main terminal area (flex_1, takes remaining space) ---
@@ -3449,8 +3449,8 @@ impl Render for AppState {
                             );
                         }
                     }
-                    MainTab::Editor => {
-                        main_area = main_area.child(self.render_editor_view(cx));
+                    MainTab::Reader => {
+                        main_area = main_area.child(self.render_reader_view(cx));
                     }
                     MainTab::Browser => {
                         main_area = main_area.child(self.render_browser_placeholder(cx));
