@@ -13,6 +13,7 @@ use gpui::*;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use tracing::warn;
+use crate::theme::theme;
 
 /// One saved Scratch Pad submission shown in the history panel. Mirrors
 /// the shape of `state::ScratchPadEntry` so the caller (AppState) can
@@ -130,9 +131,9 @@ impl ScratchPad {
         let mut col = div()
             .flex()
             .flex_col()
-            .font_family("JetBrains Mono")
+            .font_family(crate::theme::FONT_MONO)
             .text_size(px(13.0))
-            .text_color(rgb(0xcdd6f4));
+            .text_color(theme().text_primary);
         for (line_idx, line_text) in self.editor.lines().iter().enumerate() {
             col = col.child(self.render_line(cx, line_idx, line_text, cursor, selection));
         }
@@ -149,7 +150,7 @@ impl ScratchPad {
     ) -> Stateful<Div> {
         let chars: Vec<char> = text.chars().collect();
         let len = chars.len();
-        let cursor_color = rgb(0xcdd6f4);
+        let cursor_color = theme().text_primary;
         let is_cursor_line = cursor.line == line_idx;
 
         // Row click handler — fires when the click lands in the row but
@@ -221,7 +222,7 @@ impl ScratchPad {
                 )
                 .child(ch_str);
             let cell = if in_sel {
-                cell_base.bg(rgb(0x45475a))
+                cell_base.bg(theme().bg_hover)
             } else {
                 cell_base
             };
@@ -236,7 +237,7 @@ impl ScratchPad {
                     row = row.child(
                         div()
                             .w(px(6.0))
-                            .bg(rgb(0x45475a))
+                            .bg(theme().bg_hover)
                             .h(px(17.0)),
                     );
                 }
@@ -253,7 +254,7 @@ impl ScratchPad {
         } else {
             "History".to_string()
         };
-        let history_toggle_bg = if self.history_open { 0x45475a } else { 0x1e1e2e };
+        let history_toggle_bg = if self.history_open { theme().bg_hover } else { theme().bg_base };
 
         div()
             .flex()
@@ -263,12 +264,12 @@ impl ScratchPad {
             .px(px(14.0))
             .py(px(10.0))
             .border_b_1()
-            .border_color(rgb(0x313244))
+            .border_color(theme().border_subtle)
             .child(
                 div()
                     .text_size(px(12.0))
                     .font_weight(FontWeight::BOLD)
-                    .text_color(rgb(0xcdd6f4))
+                    .text_color(theme().text_primary)
                     .child("Scratch Pad"),
             )
             .child(
@@ -285,11 +286,11 @@ impl ScratchPad {
                             .py(px(3.0))
                             .rounded(px(6.0))
                             .border_1()
-                            .border_color(rgb(0x45475a))
-                            .bg(rgb(history_toggle_bg))
+                            .border_color(theme().border_default)
+                            .bg(history_toggle_bg)
                             .text_size(px(11.0))
-                            .text_color(rgb(0xa6adc8))
-                            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .text_color(theme().text_secondary)
+                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
                             .child(history_label)
                             .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
                                 this.history_open = !this.history_open;
@@ -304,8 +305,8 @@ impl ScratchPad {
                             .py(px(2.0))
                             .rounded(px(6.0))
                             .text_size(px(14.0))
-                            .text_color(rgb(0x6c7086))
-                            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                            .text_color(theme().text_faint)
+                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
                             .child("×")
                             .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
                                 this.close(cx);
@@ -325,8 +326,8 @@ impl ScratchPad {
             .flex()
             .flex_col()
             .border_l_1()
-            .border_color(rgb(0x313244))
-            .bg(rgb(0x181825));
+            .border_color(theme().border_subtle)
+            .bg(theme().bg_surface);
 
         if self.history.is_empty() {
             list = list.child(
@@ -334,7 +335,7 @@ impl ScratchPad {
                     .px(px(14.0))
                     .py(px(12.0))
                     .text_size(px(11.0))
-                    .text_color(rgb(0x6c7086))
+                    .text_color(theme().text_faint)
                     .child("No history yet for this project."),
             );
             return list;
@@ -361,13 +362,13 @@ impl ScratchPad {
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(rgb(0xcdd6f4))
+                        .text_color(theme().text_primary)
                         .child(preview),
                 )
                 .child(
                     div()
                         .text_size(px(10.0))
-                        .text_color(rgb(0x6c7086))
+                        .text_color(theme().text_faint)
                         .pt(px(2.0))
                         .child(stamp),
                 )
@@ -392,9 +393,9 @@ impl ScratchPad {
                 .ml(px(8.0))
                 .rounded(px(6.0))
                 .text_size(px(14.0))
-                .text_color(rgb(0x6c7086))
+                .text_color(theme().text_faint)
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(0x45475a)).text_color(rgb(0xf38ba8)))
+                .hover(|s| s.bg(theme().bg_hover).text_color(theme().danger))
                 .child("×")
                 .on_mouse_down(
                     MouseButton::Left,
@@ -414,8 +415,8 @@ impl ScratchPad {
                 .px(px(12.0))
                 .py(px(8.0))
                 .border_b_1()
-                .border_color(rgb(0x313244))
-                .hover(|s| s.bg(rgb(0x313244)))
+                .border_color(theme().border_subtle)
+                .hover(|s| s.bg(theme().bg_raised))
                 .child(row_body)
                 .child(delete_btn);
             scroll = scroll.child(row);
@@ -433,7 +434,7 @@ impl ScratchPad {
             .px(px(14.0))
             .py(px(8.0))
             .border_b_1()
-            .border_color(rgb(0x313244));
+            .border_color(theme().border_subtle);
 
         for (idx, path) in self.attachments.iter().enumerate() {
             let label = path
@@ -449,16 +450,16 @@ impl ScratchPad {
                     .px(px(8.0))
                     .py(px(3.0))
                     .rounded(px(6.0))
-                    .bg(rgb(0x313244))
+                    .bg(theme().bg_raised)
                     .text_size(px(11.0))
-                    .text_color(rgb(0xcdd6f4))
+                    .text_color(theme().text_primary)
                     .child(label)
                     .child(
                         div()
                             .id(("scratch-chip-remove", idx))
                             .cursor_pointer()
-                            .text_color(rgb(0x6c7086))
-                            .hover(|s| s.text_color(rgb(0xf38ba8)))
+                            .text_color(theme().text_faint)
+                            .hover(|s| s.text_color(theme().danger))
                             .child("×")
                             .on_mouse_down(
                                 MouseButton::Left,
@@ -481,10 +482,10 @@ impl ScratchPad {
                 .py(px(3.0))
                 .rounded(px(6.0))
                 .border_1()
-                .border_color(rgb(0x45475a))
+                .border_color(theme().border_default)
                 .text_size(px(11.0))
-                .text_color(rgb(0xa6adc8))
-                .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                .text_color(theme().text_secondary)
+                .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
                 .child("+ Attach file")
                 .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
                     this.pick_files(cx);
@@ -503,11 +504,11 @@ impl ScratchPad {
             .px(px(14.0))
             .py(px(10.0))
             .border_t_1()
-            .border_color(rgb(0x313244))
+            .border_color(theme().border_subtle)
             .child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(rgb(0x6c7086))
+                    .text_color(theme().text_faint)
                     .child("Esc to cancel · Cmd+Enter to send"),
             )
             .child(
@@ -517,11 +518,11 @@ impl ScratchPad {
                     .px(px(14.0))
                     .py(px(5.0))
                     .rounded(px(6.0))
-                    .bg(rgb(0x89b4fa))
+                    .bg(theme().accent)
                     .text_size(px(11.0))
-                    .text_color(rgb(0x1e1e2e))
+                    .text_color(theme().text_on_accent)
                     .font_weight(FontWeight::BOLD)
-                    .hover(|s| s.bg(rgb(0x74c7ec)))
+                    .hover(|s| s.bg(theme().info))
                     .child("Send")
                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
                         this.submit(cx);
@@ -542,7 +543,7 @@ impl Render for ScratchPad {
             .left(px(0.0))
             .right(px(0.0))
             .bottom(px(0.0))
-            .bg(rgba(0x00000099))
+            .bg(theme().backdrop)
             .flex()
             .items_center()
             .justify_center()
@@ -559,9 +560,9 @@ impl Render for ScratchPad {
             .max_h(px(560.0))
             .flex()
             .flex_col()
-            .bg(rgb(0x1e1e2e))
+            .bg(theme().bg_base)
             .border_1()
-            .border_color(rgb(0x45475a))
+            .border_color(theme().border_default)
             .rounded(px(8.0))
             .shadow_lg()
             .overflow_hidden()

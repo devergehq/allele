@@ -5,6 +5,7 @@ mod base_infra;
 mod browser;
 mod changes;
 mod terminal;
+mod theme;
 mod sidebar;
 mod clone;
 mod config;
@@ -45,6 +46,7 @@ use app_state::{
 };
 use gpui::*;
 use project::Project;
+use crate::theme::theme;
 actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction, CycleAttentionSession]);
 use session::{Session, SessionStatus};
 use settings::{ProjectSave, Settings};
@@ -64,11 +66,11 @@ impl Render for SimpleTooltip {
             .px(px(8.0))
             .py(px(4.0))
             .rounded(px(6.0))
-            .bg(rgb(0x1e1e2e))
+            .bg(theme().bg_base)
             .border_1()
-            .border_color(rgb(0x45475a))
+            .border_color(theme().border_default)
             .text_size(px(11.0))
-            .text_color(rgb(0xcdd6f4))
+            .text_color(theme().text_primary)
             .child(self.text.clone())
     }
 }
@@ -303,18 +305,18 @@ impl AppState {
 
         let tab = |id: &'static str, label: &'static str, tab: MainTab| {
             let is_active = tab == active;
-            let bg = if is_active { 0x313244 } else { 0x1e1e2e };
-            let fg = if is_active { 0xcdd6f4 } else { 0xa6adc8 };
+            let bg = if is_active { theme().bg_raised } else { theme().bg_base };
+            let fg = if is_active { theme().text_primary } else { theme().text_secondary };
             div()
                 .id(id)
                 .px(px(12.0))
                 .py(px(4.0))
                 .rounded(px(6.0))
-                .bg(rgb(bg))
+                .bg(bg)
                 .text_size(px(12.0))
-                .text_color(rgb(fg))
+                .text_color(fg)
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(0x45475a)))
+                .hover(|s| s.bg(theme().bg_hover))
                 .child(label)
                 .on_mouse_down(
                     MouseButton::Left,
@@ -341,10 +343,10 @@ impl AppState {
             .pl(px(left_pad))
             .pr(px(8.0))
             .py(px(4.0))
-            .bg(rgb(0x181825))
+            .bg(theme().bg_surface)
             .border_b_1()
-            .border_color(rgb(0x313244))
-            .font_family(".SystemUIFont")
+            .border_color(theme().border_subtle)
+            .font_family(crate::theme::FONT_UI)
             .flex()
             .flex_row()
             .items_center()
@@ -401,9 +403,9 @@ impl AppState {
             .flex_shrink_0()
             .flex()
             .flex_col()
-            .bg(rgb(0x1e1e2e))
+            .bg(theme().bg_base)
             .border_b_1()
-            .border_color(rgb(0x45475a));
+            .border_color(theme().border_default);
 
         for (idx, (p_idx, s_idx, label, tool, summary, is_permission)) in items.into_iter().enumerate() {
             let row_id = SharedString::from(format!("attention-row-{p_idx}-{s_idx}"));
@@ -418,14 +420,14 @@ impl AppState {
                 .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
                 .unwrap_or(false);
 
-            let bg = if is_active { 0x2a2334 } else { if idx % 2 == 0 { 0x1e1e2e } else { 0x1a1a28 } };
+            let bg = if is_active { theme().bg_attention } else if idx % 2 == 0 { theme().bg_base } else { theme().bg_row_alt };
 
             let mut row = div()
                 .id(row_id)
                 .w_full()
                 .px(px(12.0))
                 .py(px(5.0))
-                .bg(rgb(bg))
+                .bg(bg)
                 .flex()
                 .flex_row()
                 .items_center()
@@ -433,7 +435,7 @@ impl AppState {
                 .child(
                     div()
                         .text_size(px(12.0))
-                        .text_color(rgb(0xfab387)) // peach — attention
+                        .text_color(theme().attention) // peach — attention
                         .child("❗"),
                 )
                 .child(
@@ -456,7 +458,7 @@ impl AppState {
                         .child(
                             div()
                                 .text_size(px(11.0))
-                                .text_color(rgb(0xcdd6f4))
+                                .text_color(theme().text_primary)
                                 .font_weight(FontWeight::SEMIBOLD)
                                 .child(label),
                         )
@@ -466,7 +468,7 @@ impl AppState {
                                 .min_w(px(0.0))
                                 .overflow_x_hidden()
                                 .text_size(px(11.0))
-                                .text_color(rgb(0xa6adc8))
+                                .text_color(theme().text_secondary)
                                 .child(format!("{tool_display}{summary}")),
                         ),
                 );
@@ -483,10 +485,10 @@ impl AppState {
                         .px(px(8.0))
                         .py(px(2.0))
                         .rounded(px(6.0))
-                        .bg(rgb(0x313244))
+                        .bg(theme().bg_raised)
                         .text_size(px(10.0))
-                        .text_color(rgb(0xa6e3a1)) // green
-                        .hover(|s| s.bg(rgb(0x45475a)))
+                        .text_color(theme().success) // green
+                        .hover(|s| s.bg(theme().bg_hover))
                         .child("Allow")
                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                             if let Some(session) = this.projects
@@ -623,17 +625,17 @@ impl AppState {
                 .items_center()
                 .justify_center()
                 .gap(px(8.0))
-                .bg(rgb(0x1e1e2e))
+                .bg(theme().bg_base)
                 .child(
                     div()
                         .text_size(px(13.0))
-                        .text_color(rgb(0xcdd6f4))
+                        .text_color(theme().text_primary)
                         .child("No active session"),
                 )
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(rgb(0x6c7086))
+                        .text_color(theme().text_faint)
                         .child("Open a project and start a session to see its transcript here."),
                 )
                 .into_any_element();
@@ -658,17 +660,17 @@ impl AppState {
                 .items_center()
                 .justify_center()
                 .gap(px(8.0))
-                .bg(rgb(0x1e1e2e))
+                .bg(theme().bg_base)
                 .child(
                     div()
                         .text_size(px(13.0))
-                        .text_color(rgb(0xcdd6f4))
+                        .text_color(theme().text_primary)
                         .child("Chrome browser integration is disabled"),
                 )
                 .child(
                     div()
                         .text_size(px(11.0))
-                        .text_color(rgb(0x6c7086))
+                        .text_color(theme().text_faint)
                         .child(
                             "Enable it in Allele → Settings → Browser to link \
                              each session to a tab in your running Chrome.",
@@ -696,12 +698,12 @@ impl AppState {
             .items_center()
             .justify_center()
             .gap(px(10.0))
-            .bg(rgb(0x1e1e2e));
+            .bg(theme().bg_base);
 
         root = root.child(
             div()
                 .text_size(px(13.0))
-                .text_color(rgb(0xcdd6f4))
+                .text_color(theme().text_primary)
                 .child(headline),
         );
 
@@ -712,7 +714,7 @@ impl AppState {
             root = root.child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(rgb(0x89b4fa))
+                    .text_color(theme().accent)
                     .child(format!("Preview URL: {url}")),
             );
         }
@@ -721,7 +723,7 @@ impl AppState {
             root = root.child(
                 div()
                     .text_size(px(11.0))
-                    .text_color(rgb(0x6c7086))
+                    .text_color(theme().text_faint)
                     .child(self.browser_status.clone()),
             );
         }
@@ -736,10 +738,10 @@ impl AppState {
                     .px(px(10.0))
                     .py(px(4.0))
                     .rounded(px(6.0))
-                    .bg(rgb(0x89b4fa))
+                    .bg(theme().accent)
                     .text_size(px(11.0))
-                    .text_color(rgb(0x1e1e2e))
-                    .hover(|s| s.bg(rgb(0x74c7ec)))
+                    .text_color(theme().text_on_accent)
+                    .hover(|s| s.bg(theme().info))
                     .child("Open in Chrome")
                     .on_mouse_down(
                         MouseButton::Left,
@@ -759,10 +761,10 @@ impl AppState {
                         .px(px(10.0))
                         .py(px(4.0))
                         .rounded(px(6.0))
-                        .bg(rgb(0x45475a))
+                        .bg(theme().bg_hover)
                         .text_size(px(11.0))
-                        .text_color(rgb(0xcdd6f4))
-                        .hover(|s| s.bg(rgb(0x585b70)))
+                        .text_color(theme().text_primary)
+                        .hover(|s| s.bg(theme().bg_active))
                         .child("Close Chrome tab")
                         .on_mouse_down(
                             MouseButton::Left,
@@ -786,7 +788,7 @@ impl AppState {
         root = root.child(
             div()
                 .text_size(px(10.0))
-                .text_color(rgb(0x6c7086))
+                .text_color(theme().text_faint)
                 .child(
                     "Allow Automation for Google Chrome in System Settings \
                      → Privacy & Security → Automation if tab switching \
@@ -875,15 +877,15 @@ impl AppState {
             .unwrap_or(false);
         let pin_label = if is_pinned { "Unpin" } else { "Pin" };
 
-        let menu_item = |id: &'static str, label: &str, color: u32| {
+        let menu_item = |id: &'static str, label: &str, color: Hsla| {
             div()
                 .id(id)
                 .px(px(14.0))
                 .py(px(6.0))
                 .text_size(px(12.0))
-                .text_color(rgb(color))
+                .text_color(color)
                 .cursor_pointer()
-                .hover(|s| s.bg(rgb(0x45475a)))
+                .hover(|s| s.bg(theme().bg_hover))
                 .child(label.to_string())
         };
 
@@ -892,7 +894,7 @@ impl AppState {
                 .w_full()
                 .h(px(1.0))
                 .my(px(4.0))
-                .bg(rgb(0x313244))
+                .bg(theme().bg_raised)
         };
 
         let menu = div()
@@ -900,13 +902,13 @@ impl AppState {
             .flex_col()
             .min_w(px(200.0))
             .py(px(4.0))
-            .bg(rgb(0x181825))
+            .bg(theme().bg_surface)
             .border_1()
-            .border_color(rgb(0x45475a))
+            .border_color(theme().border_default)
             .rounded(px(6.0))
             .shadow_md()
             .child(
-                menu_item("session-ctx-edit", "Edit Session…", 0xcdd6f4)
+                menu_item("session-ctx-edit", "Edit Session…", theme().text_primary)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
@@ -916,7 +918,7 @@ impl AppState {
             )
             .child(separator())
             .child(
-                menu_item("session-ctx-reveal", "Open in Finder", 0xcdd6f4)
+                menu_item("session-ctx-reveal", "Open in Finder", theme().text_primary)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
@@ -925,7 +927,7 @@ impl AppState {
                     })),
             )
             .child(
-                menu_item("session-ctx-copy-path", "Copy Path", 0xcdd6f4)
+                menu_item("session-ctx-copy-path", "Copy Path", theme().text_primary)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
@@ -935,7 +937,7 @@ impl AppState {
             )
             .child(separator())
             .child(
-                menu_item("session-ctx-pin", pin_label, 0xcdd6f4)
+                menu_item("session-ctx-pin", pin_label, theme().text_primary)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
@@ -944,7 +946,7 @@ impl AppState {
                     })),
             )
             .child(
-                menu_item("session-ctx-comment", "Add Comment…", 0xcdd6f4)
+                menu_item("session-ctx-comment", "Add Comment…", theme().text_primary)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
@@ -954,7 +956,7 @@ impl AppState {
             )
             .child(separator())
             .child(
-                menu_item("session-ctx-delete", "Delete", 0xf38ba8)
+                menu_item("session-ctx-delete", "Delete", theme().danger)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
@@ -2556,8 +2558,8 @@ impl Render for AppState {
             .id("app-root")
             .flex()
             .size_full()
-            .bg(rgb(0x1e1e2e))
-            .text_color(rgb(0xcdd6f4));
+            .bg(theme().bg_base)
+            .text_color(theme().text_primary);
 
         // --- Left sidebar (conditional on sidebar_visible) ---
         if sidebar_visible {
@@ -2567,10 +2569,10 @@ impl Render for AppState {
                     .w(px(sidebar_w))
                     .flex_shrink_0()
                     .h_full()
-                    .bg(rgb(0x181825))
+                    .bg(theme().bg_surface)
                     .border_r_1()
-                    .border_color(rgb(0x313244))
-                    .font_family(".SystemUIFont")
+                    .border_color(theme().border_subtle)
+                    .font_family(crate::theme::FONT_UI)
                     .flex()
                     .flex_col()
                     // Header — top inset clears the traffic lights drawn over
@@ -2581,7 +2583,7 @@ impl Render for AppState {
                             .pt(px(34.0))
                             .pb(px(10.0))
                             .border_b_1()
-                            .border_color(rgb(0x313244))
+                            .border_color(theme().border_subtle)
                             .flex()
                             .flex_row()
                             .items_center()
@@ -2601,8 +2603,8 @@ impl Render for AppState {
                                     .py(px(2.0))
                                     .rounded(px(6.0))
                                     .text_size(px(16.0))
-                                    .text_color(rgb(0x6c7086))
-                                    .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xa6e3a1)))
+                                    .text_color(theme().text_faint)
+                                    .hover(|s| s.bg(theme().bg_raised).text_color(theme().success))
                                     .child("+")
                                     .tooltip(|_window, cx| {
                                         cx.new(|_| SimpleTooltip { text: "Open project".into() }).into()
@@ -2618,16 +2620,16 @@ impl Render for AppState {
                             .px(px(8.0))
                             .py(px(4.0))
                             .border_b_1()
-                            .border_color(rgb(0x313244))
+                            .border_color(theme().border_subtle)
                             .child(
                                 div()
                                     .w_full()
                                     .px(px(8.0))
                                     .py(px(4.0))
                                     .rounded(px(6.0))
-                                    .bg(rgb(0x11111b))
+                                    .bg(theme().bg_sunken)
                                     .text_size(px(12.0))
-                                    .text_color(rgb(0xcdd6f4))
+                                    .text_color(theme().text_primary)
                                     .overflow_hidden()
                                     .child(self.sidebar_filter_input.clone()),
                             ),
@@ -2646,9 +2648,9 @@ impl Render for AppState {
                             .px(px(12.0))
                             .py(px(8.0))
                             .border_t_1()
-                            .border_color(rgb(0x313244))
+                            .border_color(theme().border_subtle)
                             .text_size(px(12.0))
-                            .text_color(rgb(0x6c7086))
+                            .text_color(theme().text_faint)
                             .flex()
                             .flex_row()
                             .gap(px(8.0))
@@ -2660,14 +2662,14 @@ impl Render for AppState {
                         if awaiting > 0 {
                             bar = bar.child(
                                 div()
-                                    .text_color(rgb(SessionStatus::AwaitingInput.color()))
+                                    .text_color(SessionStatus::AwaitingInput.color())
                                     .child(format!("⚠ {awaiting} need input")),
                             );
                         }
                         if response_ready > 0 {
                             bar = bar.child(
                                 div()
-                                    .text_color(rgb(SessionStatus::ResponseReady.color()))
+                                    .text_color(SessionStatus::ResponseReady.color())
                                     .child(format!("★ {response_ready} ready")),
                             );
                         }
@@ -2681,7 +2683,7 @@ impl Render for AppState {
                     .w(px(6.0))
                     .h_full()
                     .cursor_col_resize()
-                    .hover(|s| s.bg(rgb(0x45475a)))
+                    .hover(|s| s.bg(theme().bg_hover))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                         this.sidebar.resizing = true;
                         cx.notify();
@@ -2748,17 +2750,17 @@ impl Render for AppState {
                                         .items_center()
                                         .justify_center()
                                         .gap(px(16.0))
-                                        .bg(rgb(0x1e1e2e))
+                                        .bg(theme().bg_base)
                                         .child(
                                             div()
                                                 .text_size(px(16.0))
-                                                .text_color(rgb(0x6c7086))
+                                                .text_color(theme().text_faint)
                                                 .child("No active session"),
                                         )
                                         .child(
                                             div()
                                                 .text_size(px(12.0))
-                                                .text_color(rgb(0x45475a))
+                                                .text_color(theme().text_ghost)
                                                 .child("Click + in the sidebar to open a project"),
                                         ),
                                 );
@@ -2789,10 +2791,10 @@ impl Render for AppState {
                                     .px(px(10.0))
                                     .py(px(4.0))
                                     .rounded(px(6.0))
-                                    .bg(rgb(0x89b4fa))
+                                    .bg(theme().accent)
                                     .text_size(px(11.0))
-                                    .text_color(rgb(0x1e1e2e))
-                                    .hover(|s| s.bg(rgb(0x74c7ec)))
+                                    .text_color(theme().text_on_accent)
+                                    .hover(|s| s.bg(theme().info))
                                     .child("Resume")
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                         if let Some(active) = this.active {
@@ -2813,10 +2815,10 @@ impl Render for AppState {
                                 .px(px(10.0))
                                 .py(px(4.0))
                                 .rounded(px(6.0))
-                                .bg(rgb(0x45475a))
+                                .bg(theme().bg_hover)
                                 .text_size(px(11.0))
-                                .text_color(rgb(0xcdd6f4))
-                                .hover(|s| s.bg(rgb(0x585b70)))
+                                .text_color(theme().text_primary)
+                                .hover(|s| s.bg(theme().bg_active))
                                 .child("New Session")
                                 .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                     if let Some(active) = this.active {
@@ -2835,9 +2837,9 @@ impl Render for AppState {
                                 .right(px(0.0))
                                 .px(px(16.0))
                                 .py(px(10.0))
-                                .bg(rgb(0x313244))
+                                .bg(theme().bg_raised)
                                 .border_t_1()
-                                .border_color(rgb(0x45475a))
+                                .border_color(theme().border_default)
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -2845,7 +2847,7 @@ impl Render for AppState {
                                 .child(
                                     div()
                                         .text_size(px(12.0))
-                                        .text_color(rgb(0x6c7086))
+                                        .text_color(theme().text_faint)
                                         .child("Session ended"),
                                 )
                                 .child(buttons),
@@ -2878,9 +2880,9 @@ impl Render for AppState {
                                 .right(px(0.0))
                                 .px(px(16.0))
                                 .py(px(10.0))
-                                .bg(rgb(0x3b1e1e)) // subtle red tint
+                                .bg(theme().tint_danger_soft) // subtle red tint
                                 .border_b_1()
-                                .border_color(rgb(0xf38ba8))
+                                .border_color(theme().danger)
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -2888,7 +2890,7 @@ impl Render for AppState {
                                 .child(
                                     div()
                                         .text_size(px(13.0))
-                                        .text_color(rgb(0xf38ba8)) // red
+                                        .text_color(theme().danger) // red
                                         .child(label),
                                 )
                                 .child(
@@ -2903,10 +2905,10 @@ impl Render for AppState {
                                                 .px(px(10.0))
                                                 .py(px(4.0))
                                                 .rounded(px(6.0))
-                                                .bg(rgb(0xf38ba8))
+                                                .bg(theme().danger)
                                                 .text_size(px(11.0))
-                                                .text_color(rgb(0x1e1e2e))
-                                                .hover(|s| s.bg(rgb(0xeba0ac)))
+                                                .text_color(theme().text_on_accent)
+                                                .hover(|s| s.bg(theme().danger_soft))
                                                 .child("Quit")
                                                 .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                                     this.confirming.quit = false;
@@ -2920,10 +2922,10 @@ impl Render for AppState {
                                                 .px(px(10.0))
                                                 .py(px(4.0))
                                                 .rounded(px(6.0))
-                                                .bg(rgb(0x45475a))
+                                                .bg(theme().bg_hover)
                                                 .text_size(px(11.0))
-                                                .text_color(rgb(0xcdd6f4))
-                                                .hover(|s| s.bg(rgb(0x585b70)))
+                                                .text_color(theme().text_primary)
+                                                .hover(|s| s.bg(theme().bg_active))
                                                 .child("Cancel")
                                                 .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                                     this.confirming.quit = false;
@@ -2945,9 +2947,9 @@ impl Render for AppState {
                                 .right(px(0.0))
                                 .px(px(16.0))
                                 .py(px(10.0))
-                                .bg(rgb(0x2e2a1e)) // subtle amber tint
+                                .bg(theme().tint_warning_soft) // subtle amber tint
                                 .border_b_1()
-                                .border_color(rgb(0xf9e2af)) // yellow
+                                .border_color(theme().warning) // yellow
                                 .flex()
                                 .flex_row()
                                 .items_center()
@@ -2955,7 +2957,7 @@ impl Render for AppState {
                                 .child(
                                     div()
                                         .text_size(px(13.0))
-                                        .text_color(rgb(0xf9e2af)) // yellow
+                                        .text_color(theme().warning) // yellow
                                         .child(label),
                                 )
                                 .child(
@@ -2965,10 +2967,10 @@ impl Render for AppState {
                                         .px(px(10.0))
                                         .py(px(4.0))
                                         .rounded(px(6.0))
-                                        .bg(rgb(0x45475a))
+                                        .bg(theme().bg_hover)
                                         .text_size(px(11.0))
-                                        .text_color(rgb(0xcdd6f4))
-                                        .hover(|s| s.bg(rgb(0x585b70)))
+                                        .text_color(theme().text_primary)
+                                        .hover(|s| s.bg(theme().bg_active))
                                         .child("Dismiss")
                                         .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                                             this.pull_warning = None;
@@ -2999,7 +3001,7 @@ impl Render for AppState {
                     .w(px(6.0))
                     .h_full()
                     .cursor_col_resize()
-                    .hover(|s| s.bg(rgb(0x45475a)))
+                    .hover(|s| s.bg(theme().bg_hover))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
                         this.right_panel.resizing = true;
                         cx.notify();
@@ -3010,9 +3012,9 @@ impl Render for AppState {
                     .w(px(right_sidebar_w))
                     .flex_shrink_0()
                     .h_full()
-                    .bg(rgb(0x181825))
+                    .bg(theme().bg_surface)
                     .border_l_1()
-                    .border_color(rgb(0x313244))
+                    .border_color(theme().border_subtle)
                     .flex()
                     .flex_col()
                     // Header
@@ -3021,7 +3023,7 @@ impl Render for AppState {
                             .px(px(12.0))
                             .py(px(10.0))
                             .border_b_1()
-                            .border_color(rgb(0x313244))
+                            .border_color(theme().border_subtle)
                             .flex()
                             .flex_row()
                             .items_center()
@@ -3043,7 +3045,7 @@ impl Render for AppState {
                                         let unstaged = self.changes.files.len() - staged;
                                         div()
                                             .text_size(px(10.0))
-                                            .text_color(rgb(0x6c7086))
+                                            .text_color(theme().text_faint)
                                             .child(if self.changes.loading {
                                                 "…".to_string()
                                             } else {
@@ -3065,8 +3067,8 @@ impl Render for AppState {
                                             .py(px(2.0))
                                             .rounded(px(6.0))
                                             .text_size(px(12.0))
-                                            .text_color(rgb(0x6c7086))
-                                            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                                            .text_color(theme().text_faint)
+                                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
                                             .child("↻")
                                             .tooltip(|_window, cx| {
                                                 cx.new(|_| SimpleTooltip { text: "Refresh changes".into() }).into()
@@ -3084,8 +3086,8 @@ impl Render for AppState {
                                             .py(px(2.0))
                                             .rounded(px(6.0))
                                             .text_size(px(14.0))
-                                            .text_color(rgb(0x6c7086))
-                                            .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
+                                            .text_color(theme().text_faint)
+                                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
                                             .child("×")
                                             .tooltip(|_window, cx| {
                                                 cx.new(|_| SimpleTooltip { text: "Close changes panel".into() }).into()
