@@ -5,6 +5,7 @@
 //! (status changes on existing nodes).
 
 use crate::rich::narrative::{Annotation, NarrativeProjector};
+use crate::rich::permissions::{DecisionLog, PermissionAction, PermissionRequest};
 use crate::rich::tool_rail::{classify_tool, default_collapsed};
 use crate::stream::RichEvent;
 use std::collections::HashMap;
@@ -83,6 +84,8 @@ pub enum BlockKind {
     PermissionRequest {
         tool_name: Option<String>,
         summary: Option<String>,
+        /// Raw tool input, when known — drives the risk/purpose card (DEV-34).
+        input: Option<serde_json::Value>,
     },
 }
 
@@ -109,6 +112,8 @@ pub struct RichDocument {
     projector: NarrativeProjector,
     /// Per-block narrative annotation, keyed by stable BlockId.
     annotations: HashMap<BlockId, Annotation>,
+    /// Retained history of resolved permission decisions (DEV-34).
+    decisions: DecisionLog,
 }
 
 impl RichDocument {
@@ -122,6 +127,7 @@ impl RichDocument {
             next_id: 0,
             projector: NarrativeProjector::new(),
             annotations: HashMap::new(),
+            decisions: DecisionLog::new(),
         }
     }
 
@@ -202,17 +208,52 @@ impl RichDocument {
         &mut self,
         tool_name: Option<String>,
         summary: Option<String>,
+        input: Option<serde_json::Value>,
     ) -> BlockId {
         self.clear_permission_request();
         let id = self.push_block(Block {
             id: self.next_id,
-            kind: BlockKind::PermissionRequest { tool_name, summary },
+            kind: BlockKind::PermissionRequest {
+                tool_name,
+                summary,
+                input,
+            },
             parent_agent_id: None,
             collapsed: false,
             cached_height: None,
         });
         self.permission_block = Some(id);
         id
+    }
+
+    /// Record the user's decision on the active permission prompt into the
+    /// durable decision log (DEV-34). No-op if there is no active prompt or it
+    /// carries no tool name.
+    pub fn record_permission_decision(&mut self, action: PermissionAction) {
+        let built = self.permission_block.and_then(|id| {
+            let block = self.blocks.iter().find(|b| b.id == id)?;
+            if let BlockKind::PermissionRequest {
+                tool_name: Some(name),
+                input,
+                ..
+            } = &block.kind
+            {
+                let value = input.clone().unwrap_or(serde_json::Value::Null);
+                Some((PermissionRequest::from_tool(name, &value), id))
+            } else {
+                None
+            }
+        });
+        if let Some((request, id)) = built {
+            self.decisions.record(request, action, id);
+        }
+    }
+
+    /// The retained permission decision log. Consumed by the audit UI
+    /// (follow-up); retained here so the history survives prompt dismissal.
+    #[allow(dead_code)]
+    pub fn decision_log(&self) -> &DecisionLog {
+        &self.decisions
     }
 
     /// Remove the permission request block (session left AwaitingInput).
@@ -638,6 +679,41 @@ mod truncate_tests {
             assert!(t.len() <= max);
             assert!(s.starts_with(t));
         }
+    }
+}
+
+#[cfg(test)]
+mod permission_wiring_tests {
+    use super::*;
+    use crate::rich::permissions::{PermissionAction, RiskLevel};
+
+    #[test]
+    fn permission_decision_recorded_with_assessed_risk() {
+        let mut doc = RichDocument::new();
+        doc.push_permission_request(
+            Some("Bash".into()),
+            Some("rm -rf build".into()),
+            Some(serde_json::json!({ "command": "rm -rf build" })),
+        );
+        doc.record_permission_decision(PermissionAction::Allow);
+
+        let log = doc.decision_log();
+        assert_eq!(log.len(), 1);
+        let d = &log.decisions()[0];
+        assert_eq!(d.action, PermissionAction::Allow);
+        assert_eq!(d.request.tool_name, "Bash");
+        assert_eq!(
+            d.request.risk,
+            RiskLevel::High,
+            "rm -rf must assess as high risk"
+        );
+    }
+
+    #[test]
+    fn no_decision_recorded_without_active_prompt() {
+        let mut doc = RichDocument::new();
+        doc.record_permission_decision(PermissionAction::Allow);
+        assert!(doc.decision_log().is_empty());
     }
 }
 

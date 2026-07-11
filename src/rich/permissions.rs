@@ -72,7 +72,10 @@ pub enum PermissionAction {
 /// Which actions apply to a request. Allow/Reject are always offered;
 /// open-terminal is offered only when a real terminal is attached (so an
 /// isolated/headless session doesn't advertise a dead button).
-pub fn available_actions(_req: &PermissionRequest, terminal_available: bool) -> Vec<PermissionAction> {
+pub fn available_actions(
+    _req: &PermissionRequest,
+    terminal_available: bool,
+) -> Vec<PermissionAction> {
     let mut actions = vec![PermissionAction::Allow, PermissionAction::Reject];
     if terminal_available {
         actions.push(PermissionAction::OpenTerminal);
@@ -102,7 +105,11 @@ impl DecisionLog {
     }
 
     pub fn record(&mut self, request: PermissionRequest, action: PermissionAction, at_seq: usize) {
-        self.decisions.push(Decision { request, action, at_seq });
+        self.decisions.push(Decision {
+            request,
+            action,
+            at_seq,
+        });
     }
 
     pub fn decisions(&self) -> &[Decision] {
@@ -120,14 +127,20 @@ impl DecisionLog {
     /// The most recent decision for a given tool, if any — lets the UI show
     /// "you allowed this last time".
     pub fn last_for_tool(&self, tool_name: &str) -> Option<&Decision> {
-        self.decisions.iter().rev().find(|d| d.request.tool_name == tool_name)
+        self.decisions
+            .iter()
+            .rev()
+            .find(|d| d.request.tool_name == tool_name)
     }
 }
 
 /// Whether a hook/notification actually needs human input, versus routine
 /// status noise. Only genuine permission/idle waits should raise a card.
 pub fn requires_input(hook_event: &str) -> bool {
-    matches!(hook_event, "Notification" | "PermissionRequest" | "AwaitingInput")
+    matches!(
+        hook_event,
+        "Notification" | "PermissionRequest" | "AwaitingInput"
+    )
 }
 
 /// Extract the acted-on target from a tool input.
@@ -162,7 +175,9 @@ fn describe_purpose(tool_name: &str) -> String {
 pub fn assess_risk(tool_name: &str, target: Option<&str>) -> RiskLevel {
     match tool_name {
         "Read" | "read_file" | "Grep" | "Glob" | "LS" | "WebSearch" | "WebFetch" => RiskLevel::Low,
-        "Write" | "write_file" | "Edit" | "edit_file" | "MultiEdit" | "apply_patch" => RiskLevel::Medium,
+        "Write" | "write_file" | "Edit" | "edit_file" | "MultiEdit" | "apply_patch" => {
+            RiskLevel::Medium
+        }
         "Bash" | "bash" => match target {
             Some(cmd) if is_destructive_command(cmd) => RiskLevel::High,
             Some(_) => RiskLevel::Medium,
@@ -176,9 +191,24 @@ pub fn assess_risk(tool_name: &str, target: Option<&str>) -> RiskLevel {
 fn is_destructive_command(cmd: &str) -> bool {
     let c = cmd.to_lowercase();
     const DANGER: &[&str] = &[
-        "rm -rf", "rm -r", "rm -f", "sudo ", "mkfs", "dd if=", ":(){", "> /dev/",
-        "git push --force", "git push -f", "git reset --hard", "git clean -",
-        "chmod -r", "chown -r", "killall", "shutdown", "reboot", "truncate ",
+        "rm -rf",
+        "rm -r",
+        "rm -f",
+        "sudo ",
+        "mkfs",
+        "dd if=",
+        ":(){",
+        "> /dev/",
+        "git push --force",
+        "git push -f",
+        "git reset --hard",
+        "git clean -",
+        "chmod -r",
+        "chown -r",
+        "killall",
+        "shutdown",
+        "reboot",
+        "truncate ",
     ];
     DANGER.iter().any(|d| c.contains(d))
 }
@@ -198,8 +228,14 @@ mod tests {
     #[test]
     fn destructive_shell_is_high_risk() {
         assert_eq!(assess_risk("Bash", Some("rm -rf build/")), RiskLevel::High);
-        assert_eq!(assess_risk("Bash", Some("git push --force origin main")), RiskLevel::High);
-        assert_eq!(assess_risk("Bash", Some("sudo rm /etc/hosts")), RiskLevel::High);
+        assert_eq!(
+            assess_risk("Bash", Some("git push --force origin main")),
+            RiskLevel::High
+        );
+        assert_eq!(
+            assess_risk("Bash", Some("sudo rm /etc/hosts")),
+            RiskLevel::High
+        );
         // A benign command is only medium.
         assert_eq!(assess_risk("Bash", Some("ls -la")), RiskLevel::Medium);
     }
