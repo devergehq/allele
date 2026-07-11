@@ -481,7 +481,13 @@ pub(crate) fn build_sidebar_items(
                             .gap(px(6.0))
                             .items_center()
                             .child(
-                                icon(icons::LOADER, 12.0, theme().warning),
+                                icon(icons::LOADER, 12.0, theme().warning).with_animation(
+                                    SharedString::from(format!("cloning-spin-{p_idx}")),
+                                    Animation::new(std::time::Duration::from_millis(900)).repeat(),
+                                    |ic, delta| {
+                                        ic.with_transformation(Transformation::rotate(percentage(delta)))
+                                    },
+                                ),
                             )
                             .child(
                                 div()
@@ -616,7 +622,23 @@ pub(crate) fn build_sidebar_items(
                         .gap(px(6.0))
                         .items_center()
                         .overflow_hidden()
-                        .child(icon(status_icon, 11.0, status_color));
+                        .child({
+                            // Running sessions breathe; everything else is still.
+                            let status_dot = icon(status_icon, 11.0, status_color);
+                            if session.status == SessionStatus::Running {
+                                status_dot
+                                    .with_animation(
+                                        SharedString::from(format!("status-pulse-{p_idx}-{s_idx}")),
+                                        Animation::new(std::time::Duration::from_millis(2200))
+                                            .repeat()
+                                            .with_easing(pulsating_between(0.35, 1.0)),
+                                        |dot, delta| dot.opacity(delta),
+                                    )
+                                    .into_any_element()
+                            } else {
+                                status_dot.into_any_element()
+                            }
+                        });
                     if session_pinned {
                         label_row = label_row.child(
                             icon(icons::PIN, 11.0, theme().warning),
