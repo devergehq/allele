@@ -94,17 +94,41 @@ pub(crate) struct DrawerState {
     pub(crate) rename_focus: Option<FocusHandle>,
 }
 
+/// Outcome of loading a file into the Reader preview. Distinguishes readable
+/// text from files that intentionally degrade (binary, oversized, unreadable)
+/// so the UI can explain *why* nothing is shown rather than rendering noise.
+pub(crate) enum PreviewKind {
+    /// UTF-8 (lossy) text ready to render.
+    Text(String),
+    /// Contained NUL bytes — treated as binary and not rendered.
+    Binary,
+    /// Exceeded the preview size cap; the value is the file's byte length.
+    TooLarge(u64),
+    /// `stat`/`read` failed; the value is the error message.
+    Unreadable(String),
+}
+
+/// A loaded Reader preview: which file, and what came back.
+pub(crate) struct Preview {
+    pub(crate) path: PathBuf,
+    pub(crate) kind: PreviewKind,
+}
+
 /// Reader tab file-tree + preview state.
 pub(crate) struct ReaderState {
     /// File path currently selected in the Reader tab's file tree.
     pub(crate) selected_path: Option<PathBuf>,
     /// Directories expanded in the Reader tab's file tree.
     pub(crate) expanded_dirs: HashSet<PathBuf>,
-    /// Cached (path, contents) of the currently previewed file.
-    pub(crate) preview: Option<(PathBuf, String)>,
+    /// Cached preview of the currently selected file.
+    pub(crate) preview: Option<Preview>,
     /// Right-click context menu target for the Reader file tree.
     /// Stores (right-clicked path, window-space position of the click).
     pub(crate) context_menu: Option<(PathBuf, Point<Pixels>)>,
+    /// In-file find query (substring). Empty when the find bar is inactive.
+    pub(crate) find_query: String,
+    /// Whether the in-file find bar is visible.
+    pub(crate) find_active: bool,
 }
 
 /// Cluster of confirmation-gate flags.
@@ -177,6 +201,9 @@ pub(crate) struct AppState {
     pub(crate) new_session_modal: Option<Entity<new_session_modal::NewSessionModal>>,
     /// Sidebar search/filter input entity.
     pub(crate) sidebar_filter_input: Entity<text_input::TextInput>,
+    /// Reader in-file find input entity. Its text mirrors into
+    /// `ReaderState::find_query` for match highlighting.
+    pub(crate) reader_find_input: Entity<text_input::TextInput>,
     /// Inline project-settings panel: default-branch override input.
     pub(crate) project_branch_input: Entity<text_input::TextInput>,
     /// Inline project-settings panel: remote-name override input.
