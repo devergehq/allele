@@ -660,6 +660,20 @@ pub(crate) fn build_sidebar_items(
                                 .min_w(px(60.0))
                                 .child(elapsed),
                         );
+                    if session.git_dirty == Some(true) {
+                        label_row = label_row.child(
+                            div()
+                                .id(SharedString::from(format!("dirty-{p_idx}-{s_idx}")))
+                                .flex_shrink_0()
+                                .child(icon(icons::CIRCLE_FILL, 7.0, theme().warning))
+                                .tooltip(|_window, cx| {
+                                    cx.new(|_| SimpleTooltip {
+                                        text: "Uncommitted changes in workspace".into(),
+                                    })
+                                    .into()
+                                }),
+                        );
+                    }
 
                     let mut info_col = div()
                         .flex_1()
