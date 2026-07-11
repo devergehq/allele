@@ -279,6 +279,8 @@ pub enum OverlayAction {
     OpenFilePalette,
     /// Open the Cmd+Shift+F content/symbol search overlay.
     OpenSearch,
+    /// Open the Cmd+Shift+P global command palette.
+    OpenCommandPalette,
 }
 
 impl From<SessionAction> for PendingAction {
