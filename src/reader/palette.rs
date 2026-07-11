@@ -8,17 +8,20 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 
 use crate::app_state::{AppState, MainTab};
+use crate::reader::index::IndexStatus;
 use crate::theme::theme;
 
 /// A candidate file plus the signals that bias its ranking.
 pub(crate) struct FilePalette {
-    /// All candidate paths, absolute.
-    pub(crate) files: Vec<PathBuf>,
+    /// All candidate paths, absolute. Shared (cheaply cloned) from the
+    /// background-built [`FileIndex`](crate::reader::index::FileIndex).
+    pub(crate) files: Arc<Vec<PathBuf>>,
     /// Recently opened files (most-recent first), for the empty-query view and
     /// a ranking bonus. Absolute paths.
     pub(crate) recent: Vec<PathBuf>,
@@ -39,8 +42,12 @@ const MAX_FILES: usize = 20_000;
 pub(crate) const MAX_RESULTS: usize = 50;
 
 impl FilePalette {
-    pub(crate) fn new(root: PathBuf, recent: Vec<PathBuf>, changed: HashSet<PathBuf>) -> Self {
-        let files = collect_files(&root);
+    pub(crate) fn new(
+        root: PathBuf,
+        files: Arc<Vec<PathBuf>>,
+        recent: Vec<PathBuf>,
+        changed: HashSet<PathBuf>,
+    ) -> Self {
         let mut p = FilePalette {
             files,
             recent,
@@ -193,15 +200,19 @@ pub(crate) fn fuzzy_score(query: &str, hay: &str) -> Option<i32> {
 }
 
 /// List candidate files. Prefers `git ls-files` (exact `.gitignore` semantics);
-/// falls back to a bounded manual walk for non-git workspaces.
-pub(crate) fn collect_files(root: &Path) -> Vec<PathBuf> {
+/// falls back to a bounded manual walk for non-git workspaces. Surfaces a
+/// missing/unreadable root as an error so the index can show the failure.
+pub(crate) fn collect_files_result(root: &Path) -> Result<Vec<PathBuf>, String> {
+    if !root.exists() {
+        return Err(format!("Workspace path not found: {}", root.display()));
+    }
     if let Some(files) = git_ls_files(root) {
-        return files;
+        return Ok(files);
     }
     let mut out = Vec::new();
     walk(root, root, &mut out);
     out.truncate(MAX_FILES);
-    out
+    Ok(out)
 }
 
 fn git_ls_files(root: &Path) -> Option<Vec<PathBuf>> {
@@ -262,6 +273,11 @@ impl AppState {
         let Some(root) = self.reader_workspace_root() else {
             return;
         };
+        // Ensure a background index exists / is fresh for this root. The
+        // palette renders whatever is cached now and re-points when the index
+        // build completes (see refresh_file_index).
+        self.ensure_file_index(cx);
+        let files = self.file_index.files.clone();
         let recent = self.reader.recent.clone();
         let changed: HashSet<PathBuf> = self
             .changes
@@ -269,7 +285,7 @@ impl AppState {
             .iter()
             .map(|f| root.join(&f.path))
             .collect();
-        self.file_palette = Some(FilePalette::new(root, recent, changed));
+        self.file_palette = Some(FilePalette::new(root, files, recent, changed));
         self.file_palette_input
             .update(cx, |i, cx| i.set_text_silent("", cx));
         self.file_palette_input.focus_handle(cx).focus(window, cx);
@@ -316,13 +332,18 @@ impl AppState {
 
         let mut list = div().flex().flex_col().py(px(4.0)).overflow_hidden();
         if palette.results.is_empty() {
+            let msg = match &self.file_index.status {
+                IndexStatus::Building => "Indexing workspace…",
+                IndexStatus::Failed(_) => "Could not index workspace",
+                _ => "No matching files",
+            };
             list = list.child(
                 div()
                     .px(px(12.0))
                     .py(px(10.0))
                     .text_size(px(12.0))
                     .text_color(theme().text_faint)
-                    .child("No matching files"),
+                    .child(msg),
             );
         }
         for (row, &file_idx) in palette.results.iter().enumerate() {
@@ -414,7 +435,26 @@ impl AppState {
                     .min_h(px(0.0))
                     .overflow_y_scroll()
                     .child(list),
-            );
+            )
+            .child({
+                let (text, color) = match &self.file_index.status {
+                    IndexStatus::Building => ("Indexing…".to_string(), theme().text_ghost),
+                    IndexStatus::Failed(e) => (e.clone(), theme().warning),
+                    _ => (
+                        format!("{} files · {} shown", palette.files.len(), palette.results.len()),
+                        theme().text_ghost,
+                    ),
+                };
+                div()
+                    .flex_shrink_0()
+                    .px(px(12.0))
+                    .py(px(5.0))
+                    .border_t_1()
+                    .border_color(theme().border_subtle)
+                    .text_size(px(10.0))
+                    .text_color(color)
+                    .child(text)
+            });
 
         root = root.child(
             deferred(

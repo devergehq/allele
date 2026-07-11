@@ -214,6 +214,9 @@ pub(crate) struct AppState {
     pub(crate) file_palette: Option<crate::reader::palette::FilePalette>,
     /// Query input for the Cmd+P overlay. Text mirrors into palette results.
     pub(crate) file_palette_input: Entity<text_input::TextInput>,
+    /// Background-built, cached workspace file index (DEV-40). Backs Cmd+P and
+    /// content search so large repos stay responsive.
+    pub(crate) file_index: crate::reader::index::FileIndex,
     /// Inline project-settings panel: default-branch override input.
     pub(crate) project_branch_input: Entity<text_input::TextInput>,
     /// Inline project-settings panel: remote-name override input.
