@@ -79,9 +79,22 @@ pub struct AssistantMessage {
 pub struct AssistantMessageBody {
     pub id: Option<String>,
     pub model: Option<String>,
-    pub content: Vec<ContentBlock>,
+    /// Content blocks. Wrapped in `MaybeBlock` so any block whose `type`
+    /// we don't recognise is preserved as raw JSON rather than discarded.
+    pub content: Vec<MaybeBlock>,
     pub stop_reason: Option<String>,
     pub usage: Option<Usage>,
+}
+
+/// A content block that is either a recognised [`ContentBlock`] or, when the
+/// block's `type` is unknown, its raw JSON value. This is what makes the
+/// assistant-message path lossless: unrecognised blocks survive as `Raw`
+/// instead of collapsing into a data-free catch-all.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum MaybeBlock {
+    Known(ContentBlock),
+    Raw(serde_json::Value),
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -106,9 +119,9 @@ pub enum ContentBlock {
         #[serde(default)]
         signature: Option<String>,
     },
-
-    #[serde(other)]
-    Other,
+    // NOTE: intentionally NO `#[serde(other)]` catch-all. Unknown block
+    // types must fail to deserialise here so the enclosing `MaybeBlock`
+    // untagged wrapper preserves them as `Raw` (lossless ingestion).
 }
 
 // ── User message (tool results) ───────────────────────────────────
@@ -303,5 +316,17 @@ pub enum RichEvent {
     HookStatus {
         hook_event: String,
         hook_name: String,
+    },
+
+    /// An event or content block that could not be normalised. Carries the
+    /// exact raw payload plus a human-readable reason so unsupported states
+    /// remain inspectable and are never silently dropped. This is the
+    /// in-band representation of "fallback rendering" (DEV-33).
+    Fallback {
+        /// The exact raw JSON (whole line, or the unrecognised block).
+        raw: String,
+        /// Why normalisation was unsupported (unknown type, invalid JSON…).
+        reason: String,
+        parent_agent_id: Option<String>,
     },
 }
