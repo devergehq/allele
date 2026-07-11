@@ -214,6 +214,8 @@ pub(crate) struct AppState {
     /// startup. Background tasks get cheap Arc clones. See
     /// ARCHITECTURE.md §3.2 + §4.1.
     pub(crate) platform: crate::platform::Platform,
+    /// Set by the Debug menu or agent request-file watcher.
+    pub(crate) capture_ui_requested: bool,
 }
 
 impl AppState {

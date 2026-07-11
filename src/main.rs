@@ -12,6 +12,7 @@ mod sidebar;
 mod clone;
 mod config;
 mod drawer;
+mod debug_capture;
 mod editor;
 mod errors;
 mod git;
@@ -51,7 +52,7 @@ use gpui::*;
 use project::Project;
 use crate::theme::{theme, with_alpha};
 use crate::icon::{icon, name as icons};
-actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction, CycleAttentionSession]);
+actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction, CycleAttentionSession, CaptureUi]);
 use session::{Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
@@ -1897,6 +1898,10 @@ fn install_app_menu(cx: &mut App) {
                 MenuItem::action("Open Scratch Pad", OpenScratchPadAction),
             ],
         },
+        Menu {
+            name: "Debug".into(),
+            items: vec![MenuItem::action("Capture UI for Agent", CaptureUi)],
+        },
     ]);
 }
 
@@ -1987,6 +1992,17 @@ fn main() {
     // Fix launchd's bare GUI PATH before anything spawns — PTY sessions,
     // the git availability check, and agent detection all inherit it.
     shell_env::fix_launchd_path();
+
+    if std::env::args().any(|arg| arg == "--capture-ui") {
+        match debug_capture::request_capture_and_wait() {
+            Ok(path) => println!("{}", path.display()),
+            Err(error) => {
+                eprintln!("{error}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
 
     // OS-abstraction layer. Detected once and installed into the
     // process-wide OnceLock so call sites without an AppState handle
@@ -2346,6 +2362,29 @@ fn main() {
                     })
                     .detach();
 
+                    // Agent-facing capture requests arrive through a tiny file
+                    // protocol so shell agents need no Accessibility permission.
+                    cx.spawn(async move |this, cx| {
+                        loop {
+                            cx.background_executor()
+                                .timer(std::time::Duration::from_millis(250))
+                                .await;
+                            if !debug_capture::take_request() {
+                                continue;
+                            }
+                            if this
+                                .update(cx, |state: &mut AppState, cx| {
+                                    state.capture_ui_requested = true;
+                                    cx.notify();
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    })
+                    .detach();
+
                     // Rich Sidecar transcript tailer poll. Runs on a much
                     // gentler cadence than the old 120ms spinner timer so
                     // it doesn't drive full AppState re-renders that trigger
@@ -2548,6 +2587,15 @@ fn main() {
                             }
                         }
                     });
+                    App::on_action::<CaptureUi>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            handle.update(cx, |state: &mut AppState, cx| {
+                                state.capture_ui_requested = true;
+                                cx.notify();
+                            }).ok();
+                        }
+                    });
 
                     // macOS convention: the red ✕ hides the window rather
                     // than quitting the app. Clicking the dock icon will
@@ -2715,6 +2763,7 @@ fn main() {
                         settings_dirty: false,
                         repos: repositories::Repositories::production(),
                         platform: crate::platform::global().clone_arcs(),
+                        capture_ui_requested: false,
                     }
                 })
             },
@@ -2727,6 +2776,57 @@ impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Process pending actions — dispatcher lives in src/pending_actions.rs.
         self.dispatch_pending_action(window, cx);
+
+        if self.capture_ui_requested {
+            self.capture_ui_requested = false;
+            let active = self.active;
+            let active_project = active.and_then(|c| self.projects.get(c.project_idx));
+            let active_session = active_project.and_then(|p| active.and_then(|c| p.sessions.get(c.session_idx)));
+            let metadata = debug_capture::CaptureMetadata {
+                status: "ok",
+                timestamp_ms: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+                image_path: debug_capture::debug_dir()
+                    .map(|p| p.join("latest.png").to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                width: f32::from(window.viewport_size().width) as f64,
+                height: f32::from(window.viewport_size().height) as f64,
+                active_project: active_project.map(|p| p.name.as_str()),
+                active_session: active_session.map(|s| s.label.as_str()),
+                main_tab: match self.main_tab {
+                    MainTab::Claude => "claude",
+                    MainTab::Editor => "editor",
+                    MainTab::Browser => "browser",
+                    MainTab::Transcript => "transcript",
+                },
+                sidebar_visible: self.sidebar.visible,
+                changes_visible: self.right_panel.visible,
+                drawer_visible: active_session.map(|s| s.drawer_visible).unwrap_or(false),
+                error: None,
+            };
+            if let Err(error) = debug_capture::capture(metadata) {
+                let fallback = debug_capture::CaptureMetadata {
+                    status: "error",
+                    timestamp_ms: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis(),
+                    image_path: String::new(),
+                    width: 0.0,
+                    height: 0.0,
+                    active_project: None,
+                    active_session: None,
+                    main_tab: "unknown",
+                    sidebar_visible: self.sidebar.visible,
+                    changes_visible: self.right_panel.visible,
+                    drawer_visible: false,
+                    error: None,
+                };
+                debug_capture::write_error(fallback, error);
+            }
+        }
 
         // If the user is on the Browser tab but it's no longer eligible
         // (flag turned off, switched to a session without a preview URL,
