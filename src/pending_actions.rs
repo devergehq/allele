@@ -216,6 +216,36 @@ impl AppState {
                     Self::reveal_in_finder(path);
                 }
             }
+            SessionAction::ReorderSession { project_idx, from, to } => {
+                if from != to {
+                    if let Some(project) = self.projects.get_mut(project_idx) {
+                        if from < project.sessions.len() && to < project.sessions.len() {
+                            let session = project.sessions.remove(from);
+                            project.sessions.insert(to, session);
+                            // Remap the active cursor through the move.
+                            if let Some(active) = &mut self.active {
+                                if active.project_idx == project_idx {
+                                    let a = active.session_idx;
+                                    active.session_idx = if a == from {
+                                        to
+                                    } else if from < a && to >= a {
+                                        a - 1
+                                    } else if from > a && to <= a {
+                                        a + 1
+                                    } else {
+                                        a
+                                    };
+                                }
+                            }
+                            // Index-carrying confirm states are now stale.
+                            self.confirming.discard = None;
+                            self.confirming.dirty_merge = None;
+                            self.mark_state_dirty();
+                            cx.notify();
+                        }
+                    }
+                }
+            }
             SessionAction::CopySessionPath { project_idx, session_idx } => {
                 if let Some(session) = self.projects.get(project_idx)
                     .and_then(|p| p.sessions.get(session_idx))
@@ -721,6 +751,35 @@ impl AppState {
                 let idx = self.create_project(path, cx);
                 // Auto-create first session for the new project
                 self.add_session_to_project(idx, window, cx);
+            }
+            ProjectAction::ReorderProject { from, to } => {
+                if from != to && from < self.projects.len() && to < self.projects.len() {
+                    let project = self.projects.remove(from);
+                    self.projects.insert(to, project);
+                    let remap = |i: usize| -> usize {
+                        if i == from {
+                            to
+                        } else if from < i && to >= i {
+                            i - 1
+                        } else if from > i && to <= i {
+                            i + 1
+                        } else {
+                            i
+                        }
+                    };
+                    if let Some(active) = &mut self.active {
+                        active.project_idx = remap(active.project_idx);
+                    }
+                    if let Some(editing) = &mut self.editing_project_settings {
+                        *editing = remap(*editing);
+                    }
+                    self.confirming.remove_project = None;
+                    self.confirming.discard = None;
+                    self.confirming.dirty_merge = None;
+                    self.mark_settings_dirty();
+                    self.mark_state_dirty();
+                    cx.notify();
+                }
             }
             ProjectAction::RevealProjectInFinder(project_idx) => {
                 if let Some(project) = self.projects.get(project_idx) {
