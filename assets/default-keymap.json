@@ -95,6 +95,7 @@
       "cmd-,":               "allele.open_settings",
       "cmd-k":               "allele.open_scratch_pad",
       "cmd-p":               "allele.open_file_palette",
+      "cmd-shift-f":         "allele.open_search",
       "cmd-shift-a":         "allele.cycle_attention"
     }
   }
