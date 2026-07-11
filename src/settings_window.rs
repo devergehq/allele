@@ -17,7 +17,7 @@
 //! `Changed` / `Submitted` events to push state out.
 
 use gpui::*;
-use crate::theme::theme;
+use crate::theme::{theme, with_alpha};
 use crate::icon::{icon, name as icons};
 
 use crate::AppState;
@@ -677,6 +677,84 @@ fn input_frame(child: Entity<TextInput>) -> Div {
         .child(child)
 }
 
+/// Pane heading rendered above cards.
+fn section_title(text: &'static str) -> Div {
+    div()
+        .text_size(px(crate::theme::TEXT_LG))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme().text_primary)
+        .child(text)
+}
+
+/// Explanatory copy under a section title, outside the card.
+fn section_note(text: &'static str) -> Div {
+    div()
+        .w_full()
+        .text_size(px(crate::theme::TEXT_SM))
+        .text_color(theme().text_secondary)
+        .child(text)
+}
+
+/// Card container grouping a section's controls (macOS Settings style).
+fn card() -> Div {
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(10.0))
+        .p(px(14.0))
+        .rounded(px(crate::theme::RADIUS_LG))
+        .bg(with_alpha(theme().bg_raised, 0.4))
+        .border_1()
+        .border_color(with_alpha(theme().border_subtle, 0.6))
+}
+
+/// Labeled control row: fixed-width caption + control.
+fn labeled_row(label: &'static str, control: impl IntoElement) -> Div {
+    div()
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(8.0))
+        .child(
+            div()
+                .text_size(px(crate::theme::TEXT_XS))
+                .text_color(theme().text_faint)
+                .min_w(px(64.0))
+                .child(label),
+        )
+        .child(control)
+}
+
+/// Animated toggle switch — 36x20 track, 16px knob, 120ms travel.
+/// Pure display; the enclosing row owns the click handler.
+fn toggle_switch(id: &'static str, enabled: bool) -> impl IntoElement {
+    div()
+        .w(px(36.0))
+        .h(px(20.0))
+        .flex_shrink_0()
+        .rounded_full()
+        .bg(if enabled { theme().accent } else { theme().bg_hover })
+        .flex()
+        .items_center()
+        .px(px(2.0))
+        .child(
+            div()
+                .w(px(16.0))
+                .h(px(16.0))
+                .rounded_full()
+                .bg(theme().bg_base)
+                .with_animation(
+                    SharedString::from(format!("{id}-{enabled}")),
+                    Animation::new(std::time::Duration::from_millis(120))
+                        .with_easing(gpui::ease_out_quint()),
+                    move |knob, delta| {
+                        let t = if enabled { delta } else { 1.0 - delta };
+                        knob.ml(px(16.0 * t))
+                    },
+                ),
+        )
+}
+
 fn render_naming_pane(
     this: &mut SettingsWindowState,
     cx: &mut Context<SettingsWindowState>,
@@ -700,24 +778,19 @@ fn render_naming_pane(
         .p(px(20.0))
         .gap(px(12.0))
         .child(
-            div()
-                .text_size(px(16.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme().text_primary)
-                .child("Branch Naming"),
+            section_title("Branch Naming"),
         )
         .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(theme().text_secondary)
-                .child(
+            section_note(
                     "Uses the coding agent to generate meaningful branch names \
                      from your first prompt. Falls back to keyword extraction \
                      when the agent binary is unavailable.",
                 ),
         )
-        // Mode toggle (clickable to cycle)
         .child(
+            card()
+                // Mode toggle (clickable to cycle)
+                .child(
             div()
                 .id("naming-mode-toggle")
                 .cursor_pointer()
@@ -770,36 +843,15 @@ fn render_naming_pane(
                 ),
         )
         // Claude model
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme().text_faint)
-                        .min_w(px(50.0))
-                        .child("Claude"),
-                )
-                .child(input_frame(this.naming_claude_model_input.clone())),
-        )
+        .child(labeled_row(
+            "Claude",
+            input_frame(this.naming_claude_model_input.clone()),
+        ))
         // OpenCode model
-        .child(
-            div()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme().text_faint)
-                        .min_w(px(50.0))
-                        .child("OpenCode"),
-                )
-                .child(input_frame(this.naming_opencode_model_input.clone())),
+        .child(labeled_row(
+            "OpenCode",
+            input_frame(this.naming_opencode_model_input.clone()),
+        )),
         )
 }
 
@@ -909,24 +961,16 @@ fn render_appearance_pane(
         .p(px(20.0))
         .gap(px(12.0))
         .child(
-            div()
-                .text_size(px(16.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme().text_primary)
-                .child("Appearance"),
+            section_title("Appearance"),
         )
         .child(
-            div()
-                .w_full()
-                .text_size(px(12.0))
-                .text_color(theme().text_secondary)
-                .child(
+            section_note(
                     "Terminal font size — applies to every terminal (sessions \
                      and drawer tabs) live. Cmd+= / Cmd+- / Cmd+0 change this \
                      same value from inside a terminal.",
                 ),
         )
-        .child(controls)
+        .child(card().child(controls))
 }
 
 fn render_browser_pane(
@@ -949,25 +993,7 @@ fn render_browser_pane(
                 cx.notify();
             }),
         )
-        .child(
-            div()
-                .w(px(32.0))
-                .h(px(18.0))
-                .rounded(px(9.0))
-                .bg(if enabled { theme().accent } else { theme().bg_hover })
-                .flex()
-                .items_center()
-                .justify_start()
-                .px(px(2.0))
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .h(px(14.0))
-                        .rounded(px(7.0))
-                        .bg(theme().bg_base)
-                        .ml(if enabled { px(14.0) } else { px(0.0) }),
-                ),
-        )
+        .child(toggle_switch("browser-knob", enabled))
         .child(
             div()
                 .text_size(px(12.0))
@@ -984,18 +1010,10 @@ fn render_browser_pane(
         .p(px(20.0))
         .gap(px(12.0))
         .child(
-            div()
-                .text_size(px(16.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme().text_primary)
-                .child("Browser"),
+            section_title("Browser"),
         )
         .child(
-            div()
-                .w_full()
-                .text_size(px(12.0))
-                .text_color(theme().text_secondary)
-                .child(
+            section_note(
                     "Link each Allele session to a tab in your running \
                      Google Chrome. Switching sessions activates the \
                      matching tab; new sessions open a tab at the project's \
@@ -1005,7 +1023,7 @@ fn render_browser_pane(
                      your system default browser.",
                 ),
         )
-        .child(toggle)
+        .child(card().child(toggle))
 }
 
 fn render_editor_pane(
@@ -1023,25 +1041,17 @@ fn render_editor_pane(
         .p(px(20.0))
         .gap(px(12.0))
         .child(
-            div()
-                .text_size(px(16.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme().text_primary)
-                .child("Editor"),
+            section_title("Editor"),
         )
         .child(
-            div()
-                .w_full()
-                .text_size(px(12.0))
-                .text_color(theme().text_secondary)
-                .child(
+            section_note(
                     "External editor command — used by \"Open in External Editor\" \
                      in the file tree's right-click menu. Bare binary name (e.g. \
                      `subl`, `code`, `mate`) if on PATH, or an absolute path. \
                      Leave blank to use the default (Sublime Text's `subl`).",
                 ),
         )
-        .child(input)
+        .child(card().child(input))
 }
 
 fn render_infrastructure_pane(
@@ -1075,25 +1085,7 @@ fn render_infrastructure_pane(
                 cx.notify();
             }),
         )
-        .child(
-            div()
-                .w(px(32.0))
-                .h(px(18.0))
-                .rounded(px(9.0))
-                .bg(if enabled { theme().accent } else { theme().bg_hover })
-                .flex()
-                .items_center()
-                .justify_start()
-                .px(px(2.0))
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .h(px(14.0))
-                        .rounded(px(7.0))
-                        .bg(theme().bg_base)
-                        .ml(if enabled { px(14.0) } else { px(0.0) }),
-                ),
-        )
+        .child(toggle_switch("base-infra-knob", enabled))
         .child(
             div()
                 .text_size(px(12.0))
@@ -1144,41 +1136,35 @@ fn render_infrastructure_pane(
         .gap(px(14.0))
         .overflow_y_scroll()
         .child(
-            div()
-                .text_size(px(16.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme().text_primary)
-                .child("Infrastructure"),
+            section_title("Infrastructure"),
         )
         .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(theme().text_faint)
-                .child(
+            section_note(
                     "A single Traefik reverse proxy + shared 'allele' Docker network that all \
                      sessions register HTTPS routes against. Requires Docker. Allele manages \
                      only the proxy and network — project services stay in your startup scripts.",
-                ),
+            ),
         )
-        .child(toggle);
+        .child(card().child(toggle));
 
     if let Some(line) = status_line {
         pane = pane.child(line);
     }
 
-    pane = pane
-        .child(section_header("Paths"))
-        .child(path_row("Dynamic routes (session-start writes here)", &dynamic_path))
-        .child(path_row("TLS certificates (drop *.pem here)", &certs_path))
-        .child(
-            div()
-                .text_size(px(10.0))
-                .text_color(theme().text_faint)
-                .child(
-                    "DNS: point your local domains at 127.0.0.1 via dnsmasq + /etc/resolver \
-                     (one-time, needs sudo).",
-                ),
-        );
+    pane = pane.child(section_header("Paths")).child(
+        card()
+            .child(path_row("Dynamic routes (session-start writes here)", &dynamic_path))
+            .child(path_row("TLS certificates (drop *.pem here)", &certs_path))
+            .child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme().text_faint)
+                    .child(
+                        "DNS: point your local domains at 127.0.0.1 via dnsmasq + /etc/resolver \
+                         (one-time, needs sudo).",
+                    ),
+            ),
+    );
 
     pane
 }
@@ -1405,17 +1391,10 @@ fn render_projects_pane(
         .gap(px(12.0))
         .overflow_y_scroll()
         .child(
-            div()
-                .text_size(px(16.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme().text_primary)
-                .child("Projects"),
+            section_title("Projects"),
         )
         .child(
-            div()
-                .text_size(px(11.0))
-                .text_color(theme().text_faint)
-                .child("Configure per-session orchestration: startup/shutdown lifecycle and drawer terminals."),
+            section_note("Configure per-session orchestration: startup/shutdown lifecycle and drawer terminals."),
         )
         .child(
             div()
@@ -1431,7 +1410,7 @@ fn render_projects_pane(
                         .gap(px(2.0))
                         .child(project_list),
                 )
-                .child(detail),
+                .child(card().flex_1().child(detail)),
         )
 }
 
@@ -1507,25 +1486,7 @@ fn render_sessions_pane(
                 cx.notify();
             }),
         )
-        .child(
-            div()
-                .w(px(32.0))
-                .h(px(18.0))
-                .rounded(px(9.0))
-                .bg(if pull_enabled { theme().accent } else { theme().bg_hover })
-                .flex()
-                .items_center()
-                .justify_start()
-                .px(px(2.0))
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .h(px(14.0))
-                        .rounded(px(7.0))
-                        .bg(theme().bg_base)
-                        .ml(if pull_enabled { px(14.0) } else { px(0.0) }),
-                ),
-        )
+        .child(toggle_switch("git-pull-knob", pull_enabled))
         .child(
             div()
                 .text_size(px(12.0))
@@ -1549,25 +1510,7 @@ fn render_sessions_pane(
                 cx.notify();
             }),
         )
-        .child(
-            div()
-                .w(px(32.0))
-                .h(px(18.0))
-                .rounded(px(9.0))
-                .bg(if promote_enabled { theme().accent } else { theme().bg_hover })
-                .flex()
-                .items_center()
-                .justify_start()
-                .px(px(2.0))
-                .child(
-                    div()
-                        .w(px(14.0))
-                        .h(px(14.0))
-                        .rounded(px(7.0))
-                        .bg(theme().bg_base)
-                        .ml(if promote_enabled { px(14.0) } else { px(0.0) }),
-                ),
-        )
+        .child(toggle_switch("promote-knob", promote_enabled))
         .child(
             div()
                 .text_size(px(12.0))
@@ -1605,37 +1548,31 @@ fn render_sessions_pane(
         .p(px(20.0))
         .gap(px(12.0))
         .child(
-            div()
-                .text_size(px(16.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme().text_primary)
-                .child("Sessions"),
+            section_title("Sessions"),
         )
-        .child(pull_toggle)
-        .child(promote_toggle)
+        .child(card().child(pull_toggle).child(promote_toggle))
         .child(
-            div()
-                .w_full()
-                .text_size(px(12.0))
-                .text_color(theme().text_secondary)
-                .child(
+            section_note(
                     "Cleanup paths — deleted from each new session clone. \
                      Useful for stale runtime files that the parent working \
                      tree left behind (e.g. .overmind.sock, \
                      tmp/pids/server.pid).",
                 ),
         )
-        .child(list.w_full())
         .child(
-            div()
-                .flex()
-                .flex_row()
-                .w_full()
-                .min_w(px(0.0))
-                .gap(px(8.0))
-                .items_center()
-                .child(input)
-                .child(add_button),
+            card()
+                .child(list.w_full())
+                .child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .w_full()
+                        .min_w(px(0.0))
+                        .gap(px(8.0))
+                        .items_center()
+                        .child(input)
+                        .child(add_button),
+                ),
         )
 }
 
@@ -1741,18 +1678,10 @@ fn render_agents_pane(
         .p(px(20.0))
         .gap(px(12.0))
         .child(
-            div()
-                .text_size(px(16.0))
-                .font_weight(FontWeight::BOLD)
-                .text_color(theme().text_primary)
-                .child("Coding Agents"),
+            section_title("Coding Agents"),
         )
         .child(
-            div()
-                .w_full()
-                .text_size(px(12.0))
-                .text_color(theme().text_secondary)
-                .child(
+            section_note(
                     "Configure which coding agents Allele can launch in a \
                      session. The default is used for every new session; \
                      a project can override it by adding an \"agent\" key \
