@@ -85,30 +85,72 @@ pub(crate) fn capture(metadata: CaptureMetadata<'_>) -> anyhow::Result<()> {
         use cocoa::appkit::NSApp;
         use cocoa::base::{id, nil};
         use cocoa::foundation::NSString;
-        use objc::{msg_send, sel, sel_impl};
+        use objc::{class, msg_send, sel, sel_impl};
+        use std::ffi::c_void;
+
+        type CGWindowID = u32;
+        type CGWindowListOption = u32;
+        type CGWindowImageOption = u32;
+
+        #[link(name = "CoreGraphics", kind = "framework")]
+        extern "C" {
+            static CGRectNull: cocoa::foundation::NSRect;
+            fn CGWindowListCreateImage(
+                screen_bounds: cocoa::foundation::NSRect,
+                list_option: CGWindowListOption,
+                window_id: CGWindowID,
+                image_option: CGWindowImageOption,
+            ) -> *mut c_void;
+            fn CGImageRelease(image: *mut c_void);
+            fn CGImageGetWidth(image: *mut c_void) -> usize;
+            fn CGImageGetHeight(image: *mut c_void) -> usize;
+        }
+
+        // Capture only our key window. Unlike NSView bitmap caching, the
+        // window server includes GPUI's CAMetalLayer in the resulting image.
+        const OPTION_INCLUDING_WINDOW: CGWindowListOption = 1 << 3;
+        const IMAGE_BOUNDS_IGNORE_FRAMING: CGWindowImageOption = 1 << 0;
+        const IMAGE_BEST_RESOLUTION: CGWindowImageOption = 1 << 3;
 
         let app = NSApp();
         let window: id = msg_send![app, keyWindow];
         if window == nil {
             anyhow::bail!("Allele has no key window");
         }
-        let view: id = msg_send![window, contentView];
-        let bounds: cocoa::foundation::NSRect = msg_send![view, bounds];
-        let rep: id = msg_send![view, bitmapImageRepForCachingDisplayInRect: bounds];
-        if rep == nil {
-            anyhow::bail!("failed to allocate window bitmap");
+        let window_id: CGWindowID = msg_send![window, windowNumber];
+        let image = CGWindowListCreateImage(
+            CGRectNull,
+            OPTION_INCLUDING_WINDOW,
+            window_id,
+            IMAGE_BOUNDS_IGNORE_FRAMING | IMAGE_BEST_RESOLUTION,
+        );
+        if image.is_null() {
+            anyhow::bail!("window server returned no image for window {window_id}");
         }
-        let _: () = msg_send![view, cacheDisplayInRect: bounds toBitmapImageRep: rep];
+
+        let rep: id = msg_send![class!(NSBitmapImageRep), alloc];
+        let rep: id = msg_send![rep, initWithCGImage: image];
+        let width = CGImageGetWidth(image);
+        let height = CGImageGetHeight(image);
+        CGImageRelease(image);
+        if rep == nil {
+            anyhow::bail!("failed to create bitmap from window image");
+        }
         // NSBitmapImageFileTypePNG = 4.
         let data: id = msg_send![rep, representationUsingType: 4usize properties: nil];
         if data == nil {
+            let _: () = msg_send![rep, release];
             anyhow::bail!("failed to encode window bitmap as PNG");
         }
         let path = NSString::alloc(nil).init_str(&image_path.to_string_lossy());
         let wrote: bool = msg_send![data, writeToFile: path atomically: true];
         let _: () = msg_send![path, release];
+        let _: () = msg_send![rep, release];
         if !wrote {
             anyhow::bail!("failed to write {}", image_path.display());
+        }
+        if width == 0 || height == 0 {
+            anyhow::bail!("window server returned an empty image");
         }
     }
 
