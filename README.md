@@ -152,6 +152,26 @@ symlinked into `~/.allele` for cross-machine parity.
 
 See `docs/architecture.md` for the full technical deep-dive and `ROADMAP.md` for the phased build plan.
 
+## Agent UI capture
+
+Agents can ask a running Allele instance to capture its own window without
+macOS Screen Recording permission:
+
+```sh
+Allele --capture-ui
+```
+
+The command prints the PNG path on success. Allele writes the latest capture
+and machine-readable UI context to:
+
+```text
+~/.allele/debug/latest.png
+~/.allele/debug/latest.json
+```
+
+The same capture is available to humans from **Debug → Capture UI for Agent**.
+The command times out after five seconds when Allele is not running.
+
 ## Building from source
 
 Requirements:
