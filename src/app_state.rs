@@ -130,6 +130,9 @@ pub(crate) struct ReaderState {
     /// For Markdown files: show raw source instead of the rendered view.
     /// Ignored for non-Markdown files. Reset on each file selection.
     pub(crate) md_view_source: bool,
+    /// Recently opened files (most-recent first, deduped, capped). Feeds the
+    /// Cmd+P empty-query view and biases fuzzy ranking.
+    pub(crate) recent: Vec<PathBuf>,
 }
 
 /// Cluster of confirmation-gate flags.
@@ -208,6 +211,10 @@ pub(crate) struct AppState {
     /// Reader in-file find input entity. Its text mirrors into
     /// `ReaderState::find_query` for match highlighting.
     pub(crate) reader_find_input: Entity<text_input::TextInput>,
+    /// Cmd+P fuzzy file-retrieval overlay. `Some` while open.
+    pub(crate) file_palette: Option<crate::reader::palette::FilePalette>,
+    /// Query input for the Cmd+P overlay. Text mirrors into palette results.
+    pub(crate) file_palette_input: Entity<text_input::TextInput>,
     /// Inline project-settings panel: default-branch override input.
     pub(crate) project_branch_input: Entity<text_input::TextInput>,
     /// Inline project-settings panel: remote-name override input.

@@ -1314,6 +1314,10 @@ impl AppState {
                 *skip_refocus = true;
                 self.open_scratch_pad(window, cx);
             }
+            OverlayAction::OpenFilePalette => {
+                *skip_refocus = true;
+                self.open_file_palette(window, cx);
+            }
         }
     }
 }
