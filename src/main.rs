@@ -953,6 +953,10 @@ impl AppState {
             .border_color(theme().border_default)
             .rounded(px(6.0))
             .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this: &mut Self, _event, _window, cx| {
+                this.project_context_menu = None;
+                cx.notify();
+            }))
             .child(
                 menu_item("project-ctx-new-session", "New Session", theme().text_primary)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
@@ -1071,6 +1075,10 @@ impl AppState {
             .border_color(theme().border_default)
             .rounded(px(6.0))
             .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this: &mut Self, _event, _window, cx| {
+                this.session_context_menu = None;
+                cx.notify();
+            }))
             .child(
                 menu_item("session-ctx-edit", "Edit Session…", theme().text_primary)
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
@@ -2988,6 +2996,9 @@ impl Render for AppState {
                     .id("sidebar-resize-handle")
                     .w(px(6.0))
                     .h_full()
+                    // Opaque at rest — an unpainted strip would show the raw
+                    // blurred desktop through the vibrant window background.
+                    .bg(theme().bg_base)
                     .cursor_col_resize()
                     .hover(|s| s.bg(theme().bg_hover))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
@@ -3323,6 +3334,7 @@ impl Render for AppState {
                     .id("right-sidebar-resize-handle")
                     .w(px(6.0))
                     .h_full()
+                    .bg(theme().bg_base)
                     .cursor_col_resize()
                     .hover(|s| s.bg(theme().bg_hover))
                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {

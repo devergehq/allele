@@ -184,7 +184,9 @@ pub(crate) fn build_drawer_items(
             .w_full()
             .h(px(6.0))
             .cursor_row_resize()
-            .bg(theme().bg_raised)
+            // Invisible at rest (matches the content background); the hover
+            // tint is the affordance.
+            .bg(theme().bg_base)
             .hover(|s| s.bg(theme().bg_hover))
             .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
                 this.drawer.resizing = true;
