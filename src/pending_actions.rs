@@ -1075,6 +1075,10 @@ impl AppState {
                 *skip_refocus = true;
                 self.open_file_palette(window, cx);
             }
+            OverlayAction::OpenSearch => {
+                *skip_refocus = true;
+                self.open_search(window, cx);
+            }
         }
     }
 }

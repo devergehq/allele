@@ -217,6 +217,10 @@ pub(crate) struct AppState {
     /// Background-built, cached workspace file index (DEV-40). Backs Cmd+P and
     /// content search so large repos stay responsive.
     pub(crate) file_index: crate::reader::index::FileIndex,
+    /// Cmd+Shift+F content/symbol search overlay. `Some` while open.
+    pub(crate) search: Option<crate::reader::search::SearchState>,
+    /// Query input for the search overlay.
+    pub(crate) search_input: Entity<text_input::TextInput>,
     /// Inline project-settings panel: default-branch override input.
     pub(crate) project_branch_input: Entity<text_input::TextInput>,
     /// Inline project-settings panel: remote-name override input.

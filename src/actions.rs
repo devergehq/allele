@@ -222,6 +222,8 @@ pub enum OverlayAction {
     OpenScratchPad,
     /// Open the Cmd+P fuzzy file-retrieval overlay.
     OpenFilePalette,
+    /// Open the Cmd+Shift+F content/symbol search overlay.
+    OpenSearch,
 }
 
 impl From<SessionAction> for PendingAction {
