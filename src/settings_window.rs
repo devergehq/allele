@@ -18,6 +18,7 @@
 
 use gpui::*;
 use crate::theme::theme;
+use crate::icon::{icon, name as icons};
 
 use crate::AppState;
 use crate::agents;
@@ -1282,10 +1283,8 @@ fn render_projects_pane(
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(6.0))
-                            .text_size(px(11.0))
-                            .text_color(theme().text_faint)
-                            .hover(|s| s.text_color(theme().danger))
-                            .child("✕")
+                            .hover(|s| s.bg(theme().bg_raised))
+                            .child(icon(icons::X, 12.0, theme().text_faint))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _event, _window, cx| {
@@ -1477,10 +1476,8 @@ fn render_sessions_pane(
                     .px(px(6.0))
                     .py(px(2.0))
                     .rounded(px(6.0))
-                    .text_size(px(11.0))
-                    .text_color(theme().text_faint)
-                    .hover(|s| s.text_color(theme().danger))
-                    .child("✕")
+                    .hover(|s| s.bg(theme().bg_raised))
+                    .child(icon(icons::X, 12.0, theme().text_faint))
                     .on_mouse_down(
                         MouseButton::Left,
                         cx.listener(move |this, _event, _window, cx| {
@@ -1864,10 +1861,8 @@ fn render_agent_row(
             .px(px(6.0))
             .py(px(2.0))
             .rounded(px(6.0))
-            .text_size(px(11.0))
-            .text_color(theme().text_faint)
-            .hover(|s| s.text_color(theme().danger))
-            .child("✕")
+            .hover(|s| s.bg(theme().bg_raised))
+            .child(icon(icons::X, 12.0, theme().text_faint))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _event, _window, cx| {
