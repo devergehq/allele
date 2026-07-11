@@ -15,7 +15,7 @@ use crate::actions::{
 };
 use crate::app_state::AppState;
 use crate::project::{self, Project};
-use crate::session::{Session, SessionStatus};
+use crate::session::{OperationError, OperationErrorKind, Session, SessionStatus};
 use crate::settings::{ProjectSave, Settings};
 use crate::terminal::{clamp_font_size, TerminalView};
 use crate::{browser, clone, git, hooks};
@@ -544,6 +544,11 @@ impl AppState {
                                     false,
                                 )
                                 .with_agent_id(restore_agent_id.clone());
+                                let mut restored = restored;
+                                restored.operation_error = Some(OperationError {
+                                    kind: OperationErrorKind::MergeAndClose,
+                                    message: e.to_string(),
+                                });
                                 if let Some(project) = this.projects.get_mut(project_idx_for_task) {
                                     project.sessions.push(restored);
                                 }
@@ -618,6 +623,9 @@ impl AppState {
                             }
                             Err(e) => {
                                 warn!("merge_archive failed for {session_id}: {e}");
+                                project.archives[archive_idx].merge_error = Some(format!(
+                                    "Merge failed. Resolve conflicts, then retry: {e}"
+                                ));
                             }
                         }
                     }
@@ -1287,17 +1295,22 @@ impl AppState {
                     .and_then(|p| p.sessions.get(cursor.session_idx))
                     .and_then(|s| s.browser_tab_id);
                 if let Some(id) = tab_id {
-                    let _ = browser::close_tab(id);
+                    if browser::close_tab(id) {
+                        if let Some(session) = self
+                            .projects
+                            .get_mut(cursor.project_idx)
+                            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                        {
+                            session.browser_tab_id = None;
+                        }
+                        self.browser_status = "Chrome tab closed.".to_string();
+                        self.mark_state_dirty();
+                    } else {
+                        self.browser_status = "Could not close the Chrome tab. Check Chrome and Automation permission, then retry.".to_string();
+                    }
+                } else {
+                    self.browser_status = "This session has no linked Chrome tab.".to_string();
                 }
-                if let Some(session) = self
-                    .projects
-                    .get_mut(cursor.project_idx)
-                    .and_then(|p| p.sessions.get_mut(cursor.session_idx))
-                {
-                    session.browser_tab_id = None;
-                }
-                self.browser_status = "Chrome tab closed.".to_string();
-                self.mark_state_dirty();
             }
         }
     }

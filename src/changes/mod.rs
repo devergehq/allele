@@ -56,6 +56,8 @@ impl AppState {
             self.changes.files.clear();
             self.changes.selected = None;
             self.changes.diff = None;
+            self.changes.error = None;
+            self.changes.diff_error = None;
             self.changes.diff_gen += 1; // invalidate any in-flight diff
         }
 
@@ -92,6 +94,7 @@ impl AppState {
                     }
                     Some(Ok(files)) => {
                         this.changes.is_repo = true;
+                        this.changes.error = None;
                         // Drop the selection if its row disappeared (e.g.
                         // the file was committed or reverted).
                         if let Some((path, staged)) = this.changes.selected.clone() {
@@ -127,6 +130,7 @@ impl AppState {
                     Some(Err(e)) => {
                         tracing::warn!("changes panel: git status failed: {e}");
                         this.changes.files.clear();
+                        this.changes.error = Some(format!("Could not load changes: {e}"));
                     }
                 }
                 cx.notify();
@@ -159,6 +163,7 @@ impl AppState {
         // Clear the previous file's diff so the pane shows the loading
         // state instead of stale content under the new header.
         self.changes.diff = None;
+        self.changes.diff_error = None;
         cx.notify();
         cx.spawn(async move |this, cx| {
             let result = cx
@@ -171,10 +176,14 @@ impl AppState {
                 }
                 this.changes.diff_loading = false;
                 match result {
-                    Ok(diff) => this.changes.diff = Some(diff),
+                    Ok(diff) => {
+                        this.changes.diff = Some(diff);
+                        this.changes.diff_error = None;
+                    }
                     Err(e) => {
                         tracing::warn!("changes panel: git diff failed: {e}");
                         this.changes.diff = None;
+                        this.changes.diff_error = Some(format!("Could not load diff: {e}"));
                     }
                 }
                 cx.notify();
@@ -195,6 +204,36 @@ impl AppState {
         }
         if !self.changes.is_repo {
             return body.child(centered_note("Not a git repository"));
+        }
+        if let Some(error) = &self.changes.error {
+            return body.child(
+                div()
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(8.0))
+                    .child(centered_note(error.clone()))
+                    .child(
+                        div()
+                            .id("changes-retry")
+                            .cursor_pointer()
+                            .px(px(10.0))
+                            .py(px(4.0))
+                            .rounded(px(6.0))
+                            .bg(theme().bg_hover)
+                            .text_size(px(11.0))
+                            .text_color(theme().text_primary)
+                            .child("Retry")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.refresh_changes(cx);
+                                }),
+                            ),
+                    ),
+            );
         }
         if self.changes.files.is_empty() {
             let note = if self.changes.loading {
@@ -390,6 +429,37 @@ impl AppState {
             None if self.changes.diff_loading => {
                 diff_body = diff_body.child(centered_note("Loading diff…"));
             }
+            None if self.changes.diff_error.is_some() => {
+                let message = self.changes.diff_error.clone().unwrap_or_default();
+                let retry_path = path.to_string();
+                diff_body = diff_body.child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(8.0))
+                        .child(centered_note(message))
+                        .child(
+                            div()
+                                .id("changes-diff-retry")
+                                .cursor_pointer()
+                                .px(px(10.0))
+                                .py(px(4.0))
+                                .rounded(px(6.0))
+                                .bg(theme().bg_hover)
+                                .text_color(theme().text_primary)
+                                .child("Retry")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _, _, cx| {
+                                        this.load_changes_diff(retry_path.clone(), staged, cx);
+                                    }),
+                                ),
+                        ),
+                );
+            }
             None => {
                 diff_body = diff_body.child(centered_note("No diff available"));
             }
@@ -437,7 +507,8 @@ impl AppState {
 }
 
 /// Small centered grey note used for the panel's empty/fallback states.
-fn centered_note(text: &'static str) -> Div {
+fn centered_note(text: impl Into<SharedString>) -> Div {
+    let text: SharedString = text.into();
     div()
         .flex_1()
         .flex()

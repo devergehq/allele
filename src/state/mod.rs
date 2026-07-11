@@ -135,6 +135,9 @@ pub struct ArchivedSession {
     pub label: String,
     /// Unix timestamp when the session was archived (seconds since epoch).
     pub archived_at: u64,
+    /// Transient merge failure, shown beside this archive with a retry action.
+    #[serde(skip)]
+    pub merge_error: Option<String>,
 }
 
 /// One saved Scratch Pad entry. Persisted so users can recall past

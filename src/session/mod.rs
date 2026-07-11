@@ -87,6 +87,18 @@ pub struct DrawerTab {
     pub name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationErrorKind {
+    Resume,
+    MergeAndClose,
+}
+
+#[derive(Debug, Clone)]
+pub struct OperationError {
+    pub kind: OperationErrorKind,
+    pub message: String,
+}
+
 /// A single Claude Code session.
 ///
 /// `terminal_view` is `None` for sessions that were rehydrated from
@@ -204,6 +216,8 @@ pub struct Session {
     /// Transient — rehydrated sessions come back Suspended, so this resets to
     /// `None` across restarts and only `active_accumulated` survives.
     pub active_since: Option<SystemTime>,
+    /// Transient failure for an operation initiated from this session row.
+    pub operation_error: Option<OperationError>,
 }
 
 impl Session {
@@ -246,6 +260,7 @@ impl Session {
             last_pre_tool_use: None,
             attention_context: None,
             startup_status: None,
+            operation_error: None,
         }
     }
 
@@ -297,6 +312,7 @@ impl Session {
             last_pre_tool_use: None,
             attention_context: None,
             startup_status: None,
+            operation_error: None,
         }
     }
 

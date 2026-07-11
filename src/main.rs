@@ -993,8 +993,7 @@ impl AppState {
                 self.mark_state_dirty();
             }
             None => {
-                self.browser_status = "Could not create Chrome tab (check \
-                    Automation permission)."
+                self.browser_status = "Could not create the Chrome tab. Allow Allele to control Google Chrome in System Settings > Privacy & Security > Automation, then click Open in Chrome to retry."
                     .to_string();
             }
         }
@@ -2525,6 +2524,7 @@ fn main() {
                                             &entry.session_id[..8.min(entry.session_id.len())]
                                         ),
                                         archived_at: entry.timestamp,
+                                        merge_error: None,
                                     });
                                 }
                             }

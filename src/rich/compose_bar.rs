@@ -137,6 +137,10 @@ pub struct ComposeBar {
     /// error chips instead of vanishing silently (DEV-30/79). These are never
     /// submitted — they only inform the user.
     attachment_failures: Vec<AttachmentChip>,
+    /// Transient banner for attach failures that aren't per-file copy errors —
+    /// file-picker and pasted-image failures (DEV-27). Complements the per-file
+    /// `attachment_failures` chips above.
+    attachment_error: Option<String>,
     /// Chunks from large clipboard pastes, referenced by sentinel tokens
     /// (`⟪paste-N-K⟫`) embedded in `content`. Expanded back into the
     /// submitted prompt by `expand_paste_tokens`.
@@ -176,6 +180,7 @@ impl ComposeBar {
             session_id,
             attachments: Vec::new(),
             attachment_failures: Vec::new(),
+            attachment_error: None,
             pasted_chunks: Vec::new(),
             next_paste_id: 0,
         }
@@ -498,10 +503,13 @@ impl ComposeBar {
                 match attachments::save_image(image, &self.session_id) {
                     Ok(attachment) => {
                         self.attachments.push(attachment);
+                        self.attachment_error = None;
                         cx.notify();
                     }
                     Err(e) => {
                         warn!("allele: failed to save pasted image: {e}");
+                        self.attachment_error = Some(format!("Could not attach pasted image: {e}"));
+                        cx.notify();
                     }
                 }
                 return;
@@ -576,8 +584,22 @@ impl ComposeBar {
         cx.spawn(async move |this, cx| {
             let paths = match receiver.await {
                 Ok(Ok(Some(paths))) => paths,
-                // Cancelled or error — nothing to attach.
-                _ => return,
+                Ok(Ok(None)) => return,
+                Ok(Err(e)) => {
+                    let _ = this.update(cx, |this: &mut Self, cx| {
+                        this.attachment_error = Some(format!("Could not open file picker: {e}"));
+                        cx.notify();
+                    });
+                    return;
+                }
+                Err(e) => {
+                    let _ = this.update(cx, |this: &mut Self, cx| {
+                        this.attachment_error =
+                            Some(format!("File picker closed unexpectedly: {e}"));
+                        cx.notify();
+                    });
+                    return;
+                }
             };
             this.update(cx, |this: &mut Self, cx| {
                 this.add_paths(&paths, cx);
@@ -1345,6 +1367,18 @@ impl Render for ComposeBar {
             Some(row)
         };
 
+        let attachment_error = self.attachment_error.as_ref().map(|message| {
+            gpui::div()
+                .px(px(8.0))
+                .py(px(5.0))
+                .border_b_1()
+                .border_color(with_alpha(theme().danger, 0.35))
+                .bg(with_alpha(theme().danger, 0.08))
+                .text_size(px(font_size - 2.0))
+                .text_color(theme().danger)
+                .child(message.clone())
+        });
+
         gpui::div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
@@ -1416,6 +1450,9 @@ impl Render for ComposeBar {
                     .overflow_hidden();
                 if let Some(row) = attachments_row {
                     input_col = input_col.child(row);
+                }
+                if let Some(error) = attachment_error {
+                    input_col = input_col.child(error);
                 }
                 input_col.child(text_area)
             })
