@@ -102,6 +102,22 @@ impl AppState {
                             }
                         }
                         this.changes.files = files;
+                        // DEV-40: keep the file index consistent. A changed
+                        // file absent from the cached index means the file set
+                        // moved (add/rename) — rebuild so Cmd+P and search stay
+                        // correct. Modified tracked files are already indexed,
+                        // so ordinary edits never trigger a rebuild.
+                        if this.file_index.status != crate::reader::index::IndexStatus::Building {
+                            if let Some(root) = this.file_index.root.clone() {
+                                let stale =
+                                    this.changes.files.iter().any(|f| {
+                                        !this.file_index.files.contains(&root.join(&f.path))
+                                    });
+                                if stale {
+                                    this.refresh_file_index(cx);
+                                }
+                            }
+                        }
                         // Reload the surviving selection's diff — its
                         // content may be what just changed.
                         if let Some((path, staged)) = this.changes.selected.clone() {

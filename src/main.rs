@@ -3007,6 +3007,7 @@ fn main() {
                         reader_find_input,
                         file_palette: None,
                         file_palette_input,
+                        file_index: Default::default(),
                         project_branch_input,
                         project_remote_input,
                         sidebar_filter: String::new(),

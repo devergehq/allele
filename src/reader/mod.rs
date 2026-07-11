@@ -8,6 +8,7 @@
 //! See ARCHITECTURE.md §2 for module role.
 
 pub(crate) mod highlight;
+pub(crate) mod index;
 pub(crate) mod palette;
 
 use crate::theme::theme;
