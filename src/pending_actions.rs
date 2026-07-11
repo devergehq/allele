@@ -722,6 +722,18 @@ impl AppState {
                 // Auto-create first session for the new project
                 self.add_session_to_project(idx, window, cx);
             }
+            ProjectAction::RevealProjectInFinder(project_idx) => {
+                if let Some(project) = self.projects.get(project_idx) {
+                    Self::reveal_in_finder(&project.source_path);
+                }
+            }
+            ProjectAction::CopyProjectPath(project_idx) => {
+                if let Some(project) = self.projects.get(project_idx) {
+                    cx.write_to_clipboard(ClipboardItem::new_string(
+                        project.source_path.to_string_lossy().to_string(),
+                    ));
+                }
+            }
             ProjectAction::RequestRemoveProject(project_idx) => {
                 self.confirming.remove_project = Some(project_idx);
                 cx.notify();

@@ -182,6 +182,8 @@ pub(crate) struct AppState {
     pub(crate) sidebar_filter: String,
     /// Right-click context menu on a session row: (cursor, click position).
     pub(crate) session_context_menu: Option<(SessionCursor, Point<Pixels>)>,
+    /// Right-click context menu for a project header: (project_idx, position).
+    pub(crate) project_context_menu: Option<(usize, Point<Pixels>)>,
     /// "Edit session" modal for renaming/commenting an existing session.
     pub(crate) edit_session_modal: Option<Entity<new_session_modal::EditSessionModal>>,
     /// Interactive naming modal — shown when NamingMode::Interactive generates suggestions.
