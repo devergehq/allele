@@ -39,6 +39,13 @@ If that's not you, you're probably better served by tmux, iTerm2 split panes, or
 
 ## Features
 
+### Interface
+- Native macOS shell: transparent unified titlebar, sidebar vibrancy, window-drag top bar
+- Semantic design-token theming (`src/theme.rs`) with SF Pro chrome + JetBrains Mono content
+- SVG icon language with colorblind-safe session-status shapes
+- Purposeful motion: breathing running-dots, animated toggles, modal/drawer entrances
+- Grouped, macOS-style settings window
+
 ### Terminal
 - Cell-accurate grid renderer with JetBrains Mono font
 - 256-colour + truecolor ANSI rendering (Catppuccin Mocha palette)
