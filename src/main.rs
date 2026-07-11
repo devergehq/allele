@@ -2075,6 +2075,20 @@ fn install_app_menu(cx: &mut App) {
                 MenuItem::action("Open Scratch Pad", OpenScratchPadAction),
             ],
         },
+        // Global navigation overlays. These MUST be menu items: the focused
+        // terminal swallows any Cmd-combo it doesn't recognise (see
+        // terminal/keymap.rs), so their keymap bindings never fire on their
+        // own. macOS dispatches menu key-equivalents before the terminal sees
+        // the event, which is what makes Cmd+P / Cmd+Shift+F / Cmd+Shift+P work.
+        Menu {
+            name: "Go".into(),
+            items: vec![
+                MenuItem::action("Command Palette", OpenCommandPaletteAction),
+                MenuItem::separator(),
+                MenuItem::action("Go to File…", OpenFilePaletteAction),
+                MenuItem::action("Search Project…", OpenSearchAction),
+            ],
+        },
         Menu {
             name: "Debug".into(),
             items: vec![MenuItem::action("Capture UI for Agent", CaptureUi)],
