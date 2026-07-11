@@ -502,7 +502,7 @@ fn summarise_tool_input(tool_name: &str, input: Option<&serde_json::Value>) -> O
     }?;
 
     if raw.len() > 80 {
-        Some(format!("{}…", &raw[..77]))
+        Some(format!("{}…", crate::rich::truncate_to_char_boundary(&raw, 77)))
     } else {
         Some(raw)
     }

@@ -19,7 +19,7 @@ use similar::{ChangeTag, TextDiff};
 use crate::theme::{theme, with_alpha};
 
 use super::compose_bar::{ComposeBar, ComposeBarEvent};
-use super::document::{short_path, Block, BlockKind, RichDocument};
+use super::document::{short_path, truncate_to_char_boundary, Block, BlockKind, RichDocument};
 use crate::stream::RichEvent;
 
 // ── Catppuccin Mocha palette (matching terminal) ──────────────────
@@ -570,7 +570,7 @@ fn render_tool_call(
         if r.is_error {
             let cleaned = strip_ansi(&r.content);
             let preview = if cleaned.len() > 200 {
-                format!("{}...", &cleaned[..197])
+                format!("{}...", truncate_to_char_boundary(&cleaned, 197))
             } else {
                 cleaned
             };
@@ -713,7 +713,7 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
             );
             if !prompt.is_empty() {
                 let preview = if prompt.len() > 500 {
-                    format!("{}…", &prompt[..497])
+                    format!("{}…", truncate_to_char_boundary(&prompt, 497))
                 } else {
                     prompt.to_string()
                 };
@@ -1215,7 +1215,7 @@ fn render_session_end(
     if let Some(text) = result_text {
         if !text.is_empty() {
             let preview = if text.len() > 500 {
-                format!("{}...", &text[..497])
+                format!("{}...", truncate_to_char_boundary(&text, 497))
             } else {
                 text.to_string()
             };

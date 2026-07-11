@@ -452,7 +452,7 @@ fn summarise_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             .and_then(|v| v.as_str())
             .map(|c| {
                 if c.len() > 60 {
-                    format!("{}…", &c[..57])
+                    format!("{}…", truncate_to_char_boundary(c, 57))
                 } else {
                     c.to_string()
                 }
@@ -483,7 +483,7 @@ fn summarise_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
                 for (_, val) in obj.iter().take(1) {
                     if let Some(s) = val.as_str() {
                         return if s.len() > 50 {
-                            format!("{}…", &s[..47])
+                            format!("{}…", truncate_to_char_boundary(s, 47))
                         } else {
                             s.to_string()
                         };
@@ -495,6 +495,21 @@ fn summarise_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
     }
 }
 
+/// Truncate `s` to at most `max_bytes`, backing up to the nearest UTF-8
+/// character boundary so the slice can never panic. Fixed-byte-index
+/// truncation previously aborted the app when a multi-byte character
+/// straddled the cut (DEV-15).
+pub fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Shorten a file path to just the last 2 components.
 pub fn short_path(path: &str) -> String {
     let parts: Vec<&str> = path.rsplit('/').take(2).collect();
@@ -502,5 +517,40 @@ pub fn short_path(path: &str) -> String {
         format!("{}/{}", parts[1], parts[0])
     } else {
         parts.first().unwrap_or(&"?").to_string()
+    }
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::truncate_to_char_boundary;
+
+    #[test]
+    fn shorter_than_max_is_unchanged() {
+        assert_eq!(truncate_to_char_boundary("hello", 10), "hello");
+    }
+
+    #[test]
+    fn ascii_cuts_exactly_at_max() {
+        assert_eq!(truncate_to_char_boundary("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn backs_up_when_cut_lands_inside_a_multibyte_char() {
+        // "a—b": '—' is 3 bytes starting at index 1; cutting at 2 or 3
+        // would split it (the DEV-15 crash), so we back up to 1.
+        let s = "a\u{2014}b";
+        assert_eq!(truncate_to_char_boundary(s, 2), "a");
+        assert_eq!(truncate_to_char_boundary(s, 3), "a");
+        assert_eq!(truncate_to_char_boundary(s, 4), "a\u{2014}");
+    }
+
+    #[test]
+    fn emoji_heavy_input_never_panics() {
+        let s = "🧬🧬🧬🧬🧬"; // 4 bytes each
+        for max in 0..=s.len() {
+            let t = truncate_to_char_boundary(s, max);
+            assert!(t.len() <= max);
+            assert!(s.starts_with(t));
+        }
     }
 }
