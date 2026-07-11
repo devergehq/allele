@@ -30,7 +30,12 @@ mod narrative;
 // Tool-activity classification (DEV-35). classify_tool/default_collapsed drive
 // the document's collapse behaviour today; the rail summary lands with the
 // reader UI (DEV-31).
-mod rich_view;
 mod tool_rail;
+// Transcript reading & navigation spine (DEV-31): search, jump index, and the
+// "Since last viewed" model. The view layer renders on top; allow dead_code
+// until that wiring lands.
+#[allow(dead_code)]
+mod reader;
+mod rich_view;
 
 pub use rich_view::{RichView, RichViewEvent};
