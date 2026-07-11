@@ -1,8 +1,8 @@
 # Allele UI/UX Review: Attention Inbox + Session Workbench
 
-**Date:** 2026-07-11  
-**Baseline:** Current post-refresh build through DEV-17  
-**Scope:** Product experience, interaction design, information architecture, accessibility, and visual hierarchy  
+**Date:** 2026-07-11
+**Baseline:** Current post-refresh build through DEV-17
+**Scope:** Product experience, interaction design, information architecture, accessibility, and visual hierarchy
 **Method:** Independent workflow audit first; previous refresh proposal and Linear plan compared afterward
 
 ## Executive Summary
@@ -86,8 +86,8 @@ Each item should show project, session, reason, age, and one primary action. Sup
 
 Keep the tree as navigation. Do not turn it into the inbox by repeatedly reordering it; stable location lowers spatial-memory cost.
 
-**Impact:** Very high  
-**Confidence:** High  
+**Impact:** Very high
+**Confidence:** High
 **Effort:** Large
 
 ### P0: Make Permission Handling a Decision Surface
@@ -108,8 +108,8 @@ Render permission requests as compact decision cards:
 
 The inbox item and Rich permission block should be two views of the same decision object.
 
-**Impact:** Very high  
-**Confidence:** High  
+**Impact:** Very high
+**Confidence:** High
 **Effort:** Medium
 
 ### P0: Surface Failures In Context
@@ -136,8 +136,8 @@ Use a shared in-app feedback pattern:
 
 Do not use an empty state to represent an error.
 
-**Impact:** Very high  
-**Confidence:** High  
+**Impact:** Very high
+**Confidence:** High
 **Effort:** Medium
 
 ### P1: Replace Modes With a Session Workbench
@@ -159,8 +159,8 @@ Activity should become the default once fidelity and permission handling are tru
 
 The external editor/file tree can live in a left or right workbench pane rather than competing as an equal top-level mode.
 
-**Impact:** High  
-**Confidence:** Medium-high  
+**Impact:** High
+**Confidence:** Medium-high
 **Effort:** Large
 
 ### P1: Add Session Summary Headers
@@ -183,8 +183,8 @@ Give every active session a compact header containing:
 
 Keep elapsed runtime secondary. “Waiting for approval: Bash” is more valuable than “9m 44s.”
 
-**Impact:** High  
-**Confidence:** High  
+**Impact:** High
+**Confidence:** High
 **Effort:** Medium
 
 ### P1: Consolidate Lifecycle Actions
@@ -211,8 +211,8 @@ Group actions by outcome:
 
 Irreversible actions require explicit consequences and confirmation. Reversible actions should prefer undo.
 
-**Impact:** High  
-**Confidence:** High  
+**Impact:** High
+**Confidence:** High
 **Effort:** Medium
 
 ### P1: Fix Creation Discoverability
@@ -229,8 +229,8 @@ Opening a project is represented by a small `+`. New session and detailed new se
 - Put advanced creation in the adjacent menu, not a second unexplained icon.
 - Replace click-to-cycle agent selection with a real menu listing choices.
 
-**Impact:** High  
-**Confidence:** High  
+**Impact:** High
+**Confidence:** High
 **Effort:** Small-medium
 
 ### P1: Add a Global Command Palette
@@ -254,8 +254,8 @@ Add `Cmd+P` or `Cmd+Shift+P` command search covering:
 
 Commands should be contextual, grouped, and explicit about destructive effects.
 
-**Impact:** High  
-**Confidence:** High  
+**Impact:** High
+**Confidence:** High
 **Effort:** Medium-large
 
 ### P2: Stabilize Navigation
@@ -272,8 +272,8 @@ Attention promotion changes row positions, while stable spatial location is valu
 - Add explicit unread or changed-since-view markers.
 - Keep pinned sessions stable within their project.
 
-**Impact:** Medium-high  
-**Confidence:** Medium-high  
+**Impact:** Medium-high
+**Confidence:** Medium-high
 **Effort:** Medium
 
 ### P2: Unify Configuration
@@ -290,8 +290,8 @@ Configuration spans inline project settings, the separate settings window, `sett
 - Offer `Open allele.json` only for advanced overrides.
 - Remove the partial inline project settings panel after equivalent controls exist.
 
-**Impact:** Medium-high  
-**Confidence:** High  
+**Impact:** Medium-high
+**Confidence:** High
 **Effort:** Medium
 
 ### P2: Establish Accessibility Floors
@@ -310,8 +310,8 @@ The refresh replaced glyphs and added shapes, but the app still uses 20px and sm
 - Test Increase Contrast and Reduce Transparency.
 - Expose status changes through native accessibility announcements.
 
-**Impact:** Medium-high  
-**Confidence:** High  
+**Impact:** Medium-high
+**Confidence:** High
 **Effort:** Large, incremental
 
 ### P2: Simplify Operational Telemetry
@@ -324,8 +324,8 @@ The sidebar footer mixes project/session counts, running count, attention counts
 
 Keep only user-relevant global status in the footer. Move FPS and diagnostics behind a developer diagnostics toggle or About/Debug surface.
 
-**Impact:** Medium  
-**Confidence:** High  
+**Impact:** Medium
+**Confidence:** High
 **Effort:** Small
 
 ## Surface Review
@@ -376,24 +376,24 @@ Empty states should contain the relevant primary action. Loading states should s
 
 Continue improving the current tree-plus-terminal structure.
 
-**Strengths:** Lowest change risk, preserves density, fastest delivery.  
-**Weaknesses:** Does not solve cross-project attention or context reconstruction.  
+**Strengths:** Lowest change risk, preserves density, fastest delivery.
+**Weaknesses:** Does not solve cross-project attention or context reconstruction.
 **Verdict:** Necessary incremental work, insufficient as the product direction.
 
 ### B. Mission Control Dashboard
 
 Make the default view a dashboard of running sessions, states, progress, and metrics.
 
-**Strengths:** Excellent overview and visual differentiation.  
-**Weaknesses:** Risks becoming a monitoring screen that users leave immediately to do real work; card layouts scale poorly with many sessions.  
+**Strengths:** Excellent overview and visual differentiation.
+**Weaknesses:** Risks becoming a monitoring screen that users leave immediately to do real work; card layouts scale poorly with many sessions.
 **Verdict:** Use selectively for overview, not as the primary shell.
 
 ### C. Attention Inbox + Session Workbench
 
 Separate triage from navigation, then give each selected session a coherent workbench.
 
-**Strengths:** Directly addresses the scarce resource, scales across projects, preserves terminal fidelity, supports durable triage.  
-**Weaknesses:** Requires new state semantics such as unread/reviewed/snoozed and careful migration from existing signals.  
+**Strengths:** Directly addresses the scarce resource, scales across projects, preserves terminal fidelity, supports durable triage.
+**Weaknesses:** Requires new state semantics such as unread/reviewed/snoozed and careful migration from existing signals.
 **Verdict:** Recommended.
 
 ## Recommended Information Architecture
