@@ -2887,6 +2887,18 @@ fn main() {
                         },
                     )
                     .detach();
+                    let reader_find_input =
+                        cx.new(|cx| text_input::TextInput::new(cx, "", "Find in file…"));
+                    cx.subscribe(
+                        &reader_find_input,
+                        |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
+                            if matches!(event, text_input::TextInputEvent::Changed) {
+                                this.reader.find_query = input.read(cx).text().to_string();
+                                cx.notify();
+                            }
+                        },
+                    )
+                    .detach();
 
                     // Auto-start the base infrastructure (Traefik + network)
                     // if enabled. Fire-and-forget on the background executor —
@@ -2930,6 +2942,8 @@ fn main() {
                             expanded_dirs: HashSet::new(),
                             preview: None,
                             context_menu: None,
+                            find_query: String::new(),
+                            find_active: false,
                         },
                         confirming: ConfirmationState {
                             discard: None,
@@ -2960,6 +2974,7 @@ fn main() {
                         naming_modal: None,
                         remote_browser: None,
                         sidebar_filter_input,
+                        reader_find_input,
                         project_branch_input,
                         project_remote_input,
                         sidebar_filter: String::new(),
