@@ -4,6 +4,7 @@
 //! parent (for subagent nesting). The tree is append-heavy with rare in-place updates
 //! (status changes on existing nodes).
 
+use crate::rich::tool_rail::{classify_tool, default_collapsed};
 use crate::stream::RichEvent;
 use std::collections::HashMap;
 
@@ -312,6 +313,10 @@ impl RichDocument {
             RichEvent::ToolUse { tool_use_id, tool_name, input, parent_agent_id } => {
                 self.close_text_stream();
                 let summary = summarise_tool_input(&tool_name, &input);
+                // Routine reads/searches/shell collapse into the rail; mutations
+                // and notable calls stay expanded (DEV-35). Classify before the
+                // name is moved into the block.
+                let collapsed = default_collapsed(classify_tool(&tool_name), false);
                 let id = self.push_block(Block {
                     id: self.next_id,
                     kind: BlockKind::ToolCall {
@@ -322,9 +327,7 @@ impl RichDocument {
                         result: None,
                     },
                     parent_agent_id,
-                    // Collapsed by default — header shows name + summary; click
-                    // expands to the full JSON input.
-                    collapsed: true,
+                    collapsed,
                     cached_height: None,
                 });
                 self.tool_use_index.insert(tool_use_id, id);
@@ -363,6 +366,11 @@ impl RichDocument {
                             BlockKind::ToolCall { result: r, .. } => *r = Some(result),
                             BlockKind::Diff { result: r, .. } => *r = Some(result),
                             _ => {}
+                        }
+                        // Auto-expand failures so an error is never hidden in
+                        // the collapsed routine rail (DEV-35).
+                        if is_error {
+                            block.collapsed = false;
                         }
                         block.cached_height = None; // invalidate
                     }
@@ -570,5 +578,46 @@ mod truncate_tests {
             assert!(t.len() <= max);
             assert!(s.starts_with(t));
         }
+    }
+}
+
+#[cfg(test)]
+mod rail_tests {
+    use super::*;
+
+    fn tool_use(id: &str, name: &str) -> RichEvent {
+        RichEvent::ToolUse {
+            tool_use_id: id.into(),
+            tool_name: name.into(),
+            input: serde_json::json!({"file_path": "/tmp/x.rs"}),
+            parent_agent_id: None,
+        }
+    }
+
+    fn collapsed_of(doc: &RichDocument, id: BlockId) -> bool {
+        doc.blocks().iter().find(|b| b.id == id).unwrap().collapsed
+    }
+
+    #[test]
+    fn routine_tool_starts_collapsed_mutation_expanded() {
+        let mut doc = RichDocument::new();
+        let read_id = doc.apply_event(tool_use("t1", "Read")).unwrap();
+        let write_id = doc.apply_event(tool_use("t2", "Write")).unwrap();
+        assert!(collapsed_of(&doc, read_id), "routine Read should collapse into the rail");
+        assert!(!collapsed_of(&doc, write_id), "Write is a mutation and stays prominent");
+    }
+
+    #[test]
+    fn errored_routine_result_auto_expands() {
+        let mut doc = RichDocument::new();
+        let read_id = doc.apply_event(tool_use("t1", "Read")).unwrap();
+        assert!(collapsed_of(&doc, read_id));
+        doc.apply_event(RichEvent::ToolResult {
+            tool_use_id: "t1".into(),
+            content: "No such file".into(),
+            is_error: true,
+            parent_agent_id: None,
+        });
+        assert!(!collapsed_of(&doc, read_id), "an errored routine call must auto-expand");
     }
 }
