@@ -2782,6 +2782,8 @@ fn main() {
                             find_active: false,
                             md_view_source: false,
                             recent: Vec::new(),
+                            reveal_line: None,
+                            source_scroll: gpui::ScrollHandle::new(),
                         },
                         confirming: ConfirmationState {
                             discard: None,

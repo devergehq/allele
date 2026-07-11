@@ -135,6 +135,12 @@ pub(crate) struct ReaderState {
     /// Recently opened files (most-recent first, deduped, capped). Feeds the
     /// Cmd+P empty-query view and biases fuzzy ranking.
     pub(crate) recent: Vec<PathBuf>,
+    /// Target line (1-based) to reveal/scroll-to in the source view after a
+    /// deep-link navigation. Cleared when the user picks a different file.
+    pub(crate) reveal_line: Option<usize>,
+    /// Scroll handle for the source body, so deep links can scroll a target
+    /// line into view (DEV-44).
+    pub(crate) source_scroll: gpui::ScrollHandle,
 }
 
 /// Cluster of confirmation-gate flags.
