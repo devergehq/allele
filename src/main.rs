@@ -31,6 +31,7 @@ mod session;
 mod session_ops;
 mod settings;
 mod settings_window;
+mod shell_env;
 mod state;
 mod stream;
 mod text_input;
@@ -1800,6 +1801,10 @@ fn show_about_panel() {
 fn main() {
     errors::init_tracing();
     install_panic_hook();
+
+    // Fix launchd's bare GUI PATH before anything spawns — PTY sessions,
+    // the git availability check, and agent detection all inherit it.
+    shell_env::fix_launchd_path();
 
     // OS-abstraction layer. Detected once and installed into the
     // process-wide OnceLock so call sites without an AppState handle
