@@ -340,7 +340,7 @@ impl AppState {
                         .id("changes-diff-close")
                         .cursor_pointer()
                         .px(px(6.0))
-                        .rounded(px(4.0))
+                        .rounded(px(6.0))
                         .text_size(px(12.0))
                         .text_color(rgb(0x6c7086))
                         .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))

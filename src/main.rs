@@ -63,7 +63,7 @@ impl Render for SimpleTooltip {
         div()
             .px(px(8.0))
             .py(px(4.0))
-            .rounded(px(4.0))
+            .rounded(px(6.0))
             .bg(rgb(0x1e1e2e))
             .border_1()
             .border_color(rgb(0x45475a))
@@ -309,9 +309,9 @@ impl AppState {
                 .id(id)
                 .px(px(12.0))
                 .py(px(4.0))
-                .rounded(px(4.0))
+                .rounded(px(6.0))
                 .bg(rgb(bg))
-                .text_size(px(11.0))
+                .text_size(px(12.0))
                 .text_color(rgb(fg))
                 .cursor_pointer()
                 .hover(|s| s.bg(rgb(0x45475a)))
@@ -332,14 +332,19 @@ impl AppState {
                 )
         };
 
+        // With the transparent titlebar, the strip sits at the very top of the
+        // window when the sidebar is hidden — pad past the traffic lights.
+        let left_pad = if self.sidebar.visible { 8.0 } else { 78.0 };
         let mut strip = div()
             .w_full()
             .flex_shrink_0()
-            .px(px(8.0))
+            .pl(px(left_pad))
+            .pr(px(8.0))
             .py(px(4.0))
             .bg(rgb(0x181825))
             .border_b_1()
             .border_color(rgb(0x313244))
+            .font_family(".SystemUIFont")
             .flex()
             .flex_row()
             .items_center()
@@ -477,7 +482,7 @@ impl AppState {
                         .cursor_pointer()
                         .px(px(8.0))
                         .py(px(2.0))
-                        .rounded(px(3.0))
+                        .rounded(px(6.0))
                         .bg(rgb(0x313244))
                         .text_size(px(10.0))
                         .text_color(rgb(0xa6e3a1)) // green
@@ -730,7 +735,7 @@ impl AppState {
                     .cursor_pointer()
                     .px(px(10.0))
                     .py(px(4.0))
-                    .rounded(px(4.0))
+                    .rounded(px(6.0))
                     .bg(rgb(0x89b4fa))
                     .text_size(px(11.0))
                     .text_color(rgb(0x1e1e2e))
@@ -753,7 +758,7 @@ impl AppState {
                         .cursor_pointer()
                         .px(px(10.0))
                         .py(px(4.0))
-                        .rounded(px(4.0))
+                        .rounded(px(6.0))
                         .bg(rgb(0x45475a))
                         .text_size(px(11.0))
                         .text_color(rgb(0xcdd6f4))
@@ -1929,7 +1934,10 @@ fn main() {
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("Allele".into()),
-                    ..Default::default()
+                    // Content extends under the titlebar; the sidebar header
+                    // reserves top inset for the traffic lights.
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(12.0), px(12.0))),
                 }),
                 window_min_size: Some(size(px(800.0), px(600.0))),
                 window_bounds,
@@ -2562,13 +2570,16 @@ impl Render for AppState {
                     .bg(rgb(0x181825))
                     .border_r_1()
                     .border_color(rgb(0x313244))
+                    .font_family(".SystemUIFont")
                     .flex()
                     .flex_col()
-                    // Header
+                    // Header — top inset clears the traffic lights drawn over
+                    // the transparent titlebar region.
                     .child(
                         div()
                             .px(px(12.0))
-                            .py(px(10.0))
+                            .pt(px(34.0))
+                            .pb(px(10.0))
                             .border_b_1()
                             .border_color(rgb(0x313244))
                             .flex()
@@ -2588,7 +2599,7 @@ impl Render for AppState {
                                     .cursor_pointer()
                                     .px(px(6.0))
                                     .py(px(2.0))
-                                    .rounded(px(4.0))
+                                    .rounded(px(6.0))
                                     .text_size(px(16.0))
                                     .text_color(rgb(0x6c7086))
                                     .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xa6e3a1)))
@@ -2613,9 +2624,9 @@ impl Render for AppState {
                                     .w_full()
                                     .px(px(8.0))
                                     .py(px(4.0))
-                                    .rounded(px(4.0))
+                                    .rounded(px(6.0))
                                     .bg(rgb(0x11111b))
-                                    .text_size(px(11.0))
+                                    .text_size(px(12.0))
                                     .text_color(rgb(0xcdd6f4))
                                     .overflow_hidden()
                                     .child(self.sidebar_filter_input.clone()),
@@ -2636,7 +2647,7 @@ impl Render for AppState {
                             .py(px(8.0))
                             .border_t_1()
                             .border_color(rgb(0x313244))
-                            .text_size(px(10.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0x6c7086))
                             .flex()
                             .flex_row()
@@ -2777,7 +2788,7 @@ impl Render for AppState {
                                     .cursor_pointer()
                                     .px(px(10.0))
                                     .py(px(4.0))
-                                    .rounded(px(4.0))
+                                    .rounded(px(6.0))
                                     .bg(rgb(0x89b4fa))
                                     .text_size(px(11.0))
                                     .text_color(rgb(0x1e1e2e))
@@ -2801,7 +2812,7 @@ impl Render for AppState {
                                 .cursor_pointer()
                                 .px(px(10.0))
                                 .py(px(4.0))
-                                .rounded(px(4.0))
+                                .rounded(px(6.0))
                                 .bg(rgb(0x45475a))
                                 .text_size(px(11.0))
                                 .text_color(rgb(0xcdd6f4))
@@ -2891,7 +2902,7 @@ impl Render for AppState {
                                                 .cursor_pointer()
                                                 .px(px(10.0))
                                                 .py(px(4.0))
-                                                .rounded(px(4.0))
+                                                .rounded(px(6.0))
                                                 .bg(rgb(0xf38ba8))
                                                 .text_size(px(11.0))
                                                 .text_color(rgb(0x1e1e2e))
@@ -2908,7 +2919,7 @@ impl Render for AppState {
                                                 .cursor_pointer()
                                                 .px(px(10.0))
                                                 .py(px(4.0))
-                                                .rounded(px(4.0))
+                                                .rounded(px(6.0))
                                                 .bg(rgb(0x45475a))
                                                 .text_size(px(11.0))
                                                 .text_color(rgb(0xcdd6f4))
@@ -2953,7 +2964,7 @@ impl Render for AppState {
                                         .cursor_pointer()
                                         .px(px(10.0))
                                         .py(px(4.0))
-                                        .rounded(px(4.0))
+                                        .rounded(px(6.0))
                                         .bg(rgb(0x45475a))
                                         .text_size(px(11.0))
                                         .text_color(rgb(0xcdd6f4))
@@ -3052,7 +3063,7 @@ impl Render for AppState {
                                             .cursor_pointer()
                                             .px(px(6.0))
                                             .py(px(2.0))
-                                            .rounded(px(4.0))
+                                            .rounded(px(6.0))
                                             .text_size(px(12.0))
                                             .text_color(rgb(0x6c7086))
                                             .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))
@@ -3071,7 +3082,7 @@ impl Render for AppState {
                                             .cursor_pointer()
                                             .px(px(6.0))
                                             .py(px(2.0))
-                                            .rounded(px(4.0))
+                                            .rounded(px(6.0))
                                             .text_size(px(14.0))
                                             .text_color(rgb(0x6c7086))
                                             .hover(|s| s.bg(rgb(0x313244)).text_color(rgb(0xcdd6f4)))

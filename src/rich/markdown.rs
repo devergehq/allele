@@ -436,7 +436,7 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
 
     let mut block = div()
         .my(px(10.0))
-        .rounded(px(4.0))
+        .rounded(px(6.0))
         .bg(hex_alpha(SURFACE0, 0.6))
         .border_l_2()
         .border_color(hex_alpha(PEACH, 0.5))
@@ -512,7 +512,7 @@ fn table_element(
         .my(px(6.0))
         .w_full()
         .min_w_0()
-        .rounded(px(4.0))
+        .rounded(px(6.0))
         .overflow_hidden()
         .flex()
         .flex_col();

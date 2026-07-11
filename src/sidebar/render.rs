@@ -5,6 +5,7 @@
 //! that the top-level render lays out into the left sidebar flex column.
 
 use gpui::*;
+use gpui::prelude::FluentBuilder as _;
 
 use crate::actions::{ArchiveAction, ProjectAction, SessionAction, SessionCursor};
 use crate::app_state::AppState;
@@ -42,6 +43,7 @@ pub(crate) fn build_sidebar_items(
         // Project header
         let mut header = div()
             .id(SharedString::from(format!("project-{p_idx}")))
+            .group(format!("proj-{p_idx}"))
             .px(px(12.0))
             .py(px(6.0))
             .bg(if is_confirming_remove { rgb(0x3b1f28) } else { rgb(0x11111b) })
@@ -67,7 +69,7 @@ pub(crate) fn build_sidebar_items(
                     )
                     .child(
                         div()
-                            .text_size(px(11.0))
+                            .text_size(px(12.0))
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgb(0xcdd6f4))
                             .child(project_name),
@@ -88,9 +90,9 @@ pub(crate) fn build_sidebar_items(
                             .cursor_pointer()
                             .px(px(6.0))
                             .py(px(2.0))
-                            .rounded(px(3.0))
+                            .rounded(px(6.0))
                             .bg(rgb(0x45475a))
-                            .text_size(px(10.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0xf38ba8))
                             .hover(|s| s.bg(rgb(0x58303a)))
                             .child("Remove")
@@ -106,8 +108,8 @@ pub(crate) fn build_sidebar_items(
                             .cursor_pointer()
                             .px(px(6.0))
                             .py(px(2.0))
-                            .rounded(px(3.0))
-                            .text_size(px(10.0))
+                            .rounded(px(6.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0x9399b2))
                             .hover(|s| s.text_color(rgb(0xcdd6f4)))
                             .child("Cancel")
@@ -121,9 +123,11 @@ pub(crate) fn build_sidebar_items(
         } else {
             header = header
                 .child(
-                    // New session button
+                    // New session button — revealed on header hover
                     div()
                         .id(SharedString::from(format!("new-session-{p_idx}")))
+                        .invisible()
+                        .group_hover(format!("proj-{p_idx}"), |s| s.visible())
                         .cursor_pointer()
                         .px(px(6.0))
                         .text_size(px(14.0))
@@ -140,9 +144,11 @@ pub(crate) fn build_sidebar_items(
                         })),
                 )
                 .child(
-                    // New session with details button
+                    // New session with details button — revealed on header hover
                     div()
                         .id(SharedString::from(format!("new-session-details-{p_idx}")))
+                        .invisible()
+                        .group_hover(format!("proj-{p_idx}"), |s| s.visible())
                         .cursor_pointer()
                         .px(px(4.0))
                         .text_size(px(11.0))
@@ -159,9 +165,14 @@ pub(crate) fn build_sidebar_items(
                         })),
                 )
                 .child(
-                    // Project settings button
+                    // Project settings button — revealed on header hover,
+                    // pinned visible while its panel is open
                     div()
                         .id(SharedString::from(format!("settings-project-{p_idx}")))
+                        .when(state.editing_project_settings != Some(p_idx), |el| {
+                            el.invisible()
+                                .group_hover(format!("proj-{p_idx}"), |s| s.visible())
+                        })
                         .cursor_pointer()
                         .px(px(4.0))
                         .text_size(px(11.0))
@@ -186,9 +197,11 @@ pub(crate) fn build_sidebar_items(
                         })),
                 )
                 .child(
-                    // Remove project button
+                    // Remove project button — revealed on header hover
                     div()
                         .id(SharedString::from(format!("remove-project-{p_idx}")))
+                        .invisible()
+                        .group_hover(format!("proj-{p_idx}"), |s| s.visible())
                         .cursor_pointer()
                         .px(px(4.0))
                         .text_size(px(11.0))
@@ -224,7 +237,7 @@ pub(crate) fn build_sidebar_items(
                     .child(
                         div()
                             .flex_1()
-                            .text_size(px(11.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0xf9e2af)) // yellow
                             .child("Uncommitted changes — proceed?"),
                     )
@@ -234,9 +247,9 @@ pub(crate) fn build_sidebar_items(
                             .cursor_pointer()
                             .px(px(6.0))
                             .py(px(2.0))
-                            .rounded(px(3.0))
+                            .rounded(px(6.0))
                             .bg(rgb(0xa6e3a1))
-                            .text_size(px(10.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0x1e1e2e))
                             .hover(|s| s.bg(rgb(0x94e2d5)))
                             .child("Proceed")
@@ -252,9 +265,9 @@ pub(crate) fn build_sidebar_items(
                             .cursor_pointer()
                             .px(px(6.0))
                             .py(px(2.0))
-                            .rounded(px(3.0))
+                            .rounded(px(6.0))
                             .bg(rgb(0x45475a))
-                            .text_size(px(10.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0xcdd6f4))
                             .hover(|s| s.bg(rgb(0x585b70)))
                             .child("Cancel")
@@ -300,13 +313,13 @@ pub(crate) fn build_sidebar_items(
                     .items_center()
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0x6c7086))
                             .child(SharedString::from(label.to_string())),
                     )
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0x89b4fa))
                             .child(SharedString::from(value.to_string())),
                     )
@@ -324,7 +337,7 @@ pub(crate) fn build_sidebar_items(
                     .border_color(rgb(0x313244))
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(12.0))
                             .font_weight(FontWeight::BOLD)
                             .text_color(rgb(0x89b4fa))
                             .child("PROJECT SETTINGS"),
@@ -348,13 +361,13 @@ pub(crate) fn build_sidebar_items(
                     .items_center()
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0x6c7086))
                             .child("Merge strategy"),
                     )
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0x89b4fa))
                             .child(SharedString::from(current_strategy.to_string())),
                     )
@@ -389,13 +402,13 @@ pub(crate) fn build_sidebar_items(
                     .items_center()
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0x6c7086))
                             .child("Sync remote first"),
                     )
                     .child(
                         div()
-                            .text_size(px(10.0))
+                            .text_size(px(12.0))
                             .text_color(if project.settings.rebase_before_merge {
                                 rgb(0xa6e3a1) // green = on
                             } else {
@@ -439,7 +452,7 @@ pub(crate) fn build_sidebar_items(
                     .border_color(rgb(0x313244))
                     .child(
                         div()
-                            .text_size(px(9.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0x45475a))
                             .child("Edit settings.json for branch/remote"),
                     )
@@ -482,7 +495,7 @@ pub(crate) fn build_sidebar_items(
                             )
                             .child(
                                 div()
-                                    .text_size(px(10.0))
+                                    .text_size(px(12.0))
                                     .text_color(rgb(0x585b70))
                                     .child("Cloning…"),
                             ),
@@ -569,6 +582,7 @@ pub(crate) fn build_sidebar_items(
 
             let mut row = div()
                 .id(SharedString::from(format!("session-{p_idx}-{s_idx}")))
+                .group(format!("sess-{p_idx}-{s_idx}"))
                 .pl(px(24.0))
                 .pr(px(12.0))
                 .py(px(5.0))
@@ -635,7 +649,7 @@ pub(crate) fn build_sidebar_items(
                         .child(
                             div()
                                 .flex_shrink_0()
-                                .text_size(px(10.0))
+                                .text_size(px(12.0))
                                 .text_color(rgb(0x585b70))
                                 .min_w(px(60.0))
                                 .child(elapsed),
@@ -653,7 +667,7 @@ pub(crate) fn build_sidebar_items(
                         info_col = info_col.child(
                             div()
                                 .pl(px(16.0))
-                                .text_size(px(10.0))
+                                .text_size(px(12.0))
                                 .text_color(rgb(0xf9e2af))
                                 .overflow_hidden()
                                 .text_ellipsis()
@@ -664,7 +678,7 @@ pub(crate) fn build_sidebar_items(
                         info_col = info_col.child(
                             div()
                                 .pl(px(16.0))
-                                .text_size(px(10.0))
+                                .text_size(px(12.0))
                                 .text_color(rgb(0x585b70))
                                 .overflow_hidden()
                                 .text_ellipsis()
@@ -689,9 +703,9 @@ pub(crate) fn build_sidebar_items(
                                 .cursor_pointer()
                                 .px(px(6.0))
                                 .py(px(2.0))
-                                .rounded(px(3.0))
+                                .rounded(px(6.0))
                                 .bg(rgb(0x45475a))
-                                .text_size(px(10.0))
+                                .text_size(px(12.0))
                                 .text_color(rgb(0xf38ba8))
                                 .hover(|s| s.bg(rgb(0x58303a)))
                                 .child("Discard")
@@ -710,8 +724,8 @@ pub(crate) fn build_sidebar_items(
                                 .cursor_pointer()
                                 .px(px(6.0))
                                 .py(px(2.0))
-                                .rounded(px(3.0))
-                                .text_size(px(10.0))
+                                .rounded(px(6.0))
+                                .text_size(px(12.0))
                                 .text_color(rgb(0x9399b2))
                                 .hover(|s| s.text_color(rgb(0xcdd6f4)))
                                 .child("Cancel")
@@ -731,7 +745,7 @@ pub(crate) fn build_sidebar_items(
                         .gap(px(2.0))
                         .child(
                             div()
-                                .text_size(px(9.0))
+                                .text_size(px(12.0))
                                 .text_color(rgb(0xf9e2af))
                                 .child("Uncommitted changes"),
                         )
@@ -747,9 +761,9 @@ pub(crate) fn build_sidebar_items(
                                         .cursor_pointer()
                                         .px(px(6.0))
                                         .py(px(2.0))
-                                        .rounded(px(3.0))
+                                        .rounded(px(6.0))
                                         .bg(rgb(0x45475a))
-                                        .text_size(px(10.0))
+                                        .text_size(px(12.0))
                                         .text_color(rgb(0xf9e2af))
                                         .hover(|s| s.bg(rgb(0x4a3f2a)))
                                         .child("Merge committed")
@@ -768,8 +782,8 @@ pub(crate) fn build_sidebar_items(
                                         .cursor_pointer()
                                         .px(px(6.0))
                                         .py(px(2.0))
-                                        .rounded(px(3.0))
-                                        .text_size(px(10.0))
+                                        .rounded(px(6.0))
+                                        .text_size(px(12.0))
                                         .text_color(rgb(0x9399b2))
                                         .hover(|s| s.text_color(rgb(0xcdd6f4)))
                                         .child("Cancel")
@@ -783,9 +797,12 @@ pub(crate) fn build_sidebar_items(
                 );
             } else {
                 // Normal state: Merge & Close, Close (keep clone), and Discard.
+                // Action cluster revealed on row hover.
                 row = row.child(
                     div()
                         .flex_shrink_0()
+                        .invisible()
+                        .group_hover(format!("sess-{p_idx}-{s_idx}"), |s| s.visible())
                         .flex()
                         .flex_row()
                         .gap(px(2.0))
@@ -872,7 +889,7 @@ pub(crate) fn build_sidebar_items(
                     .items_center()
                     .child(
                         div()
-                            .text_size(px(9.0))
+                            .text_size(px(12.0))
                             .text_color(rgb(0x585b70))
                             .child(format!("ARCHIVES ({})", project.archives.len())),
                     )
@@ -896,6 +913,7 @@ pub(crate) fn build_sidebar_items(
                 sidebar_items.push(
                     div()
                         .id(SharedString::from(format!("archive-{p_idx}-{a_idx}")))
+                        .group(format!("arch-{p_idx}-{a_idx}"))
                         .pl(px(24.0))
                         .pr(px(12.0))
                         .py(px(3.0))
@@ -918,19 +936,21 @@ pub(crate) fn build_sidebar_items(
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(10.0))
+                                        .text_size(px(12.0))
                                         .text_color(rgb(0x6c7086))
                                         .child(display_label),
                                 )
                                 .child(
                                     div()
-                                        .text_size(px(9.0))
+                                        .text_size(px(12.0))
                                         .text_color(rgb(0x45475a))
                                         .child(age),
                                 ),
                         )
                         .child(
                             div()
+                                .invisible()
+                                .group_hover(format!("arch-{p_idx}-{a_idx}"), |s| s.visible())
                                 .flex()
                                 .flex_row()
                                 .gap(px(4.0))
@@ -941,8 +961,8 @@ pub(crate) fn build_sidebar_items(
                                         .cursor_pointer()
                                         .px(px(4.0))
                                         .py(px(1.0))
-                                        .rounded(px(3.0))
-                                        .text_size(px(9.0))
+                                        .rounded(px(6.0))
+                                        .text_size(px(12.0))
                                         .text_color(rgb(0xa6e3a1))
                                         .hover(|s| s.bg(rgb(0x313244)))
                                         .child("merge")
