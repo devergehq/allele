@@ -4,6 +4,8 @@ mod app_state;
 mod base_infra;
 mod browser;
 mod changes;
+mod assets;
+mod icon;
 mod terminal;
 mod theme;
 mod sidebar;
@@ -47,6 +49,7 @@ use app_state::{
 use gpui::*;
 use project::Project;
 use crate::theme::{theme, with_alpha};
+use crate::icon::{icon, name as icons};
 actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction, CycleAttentionSession]);
 use session::{Session, SessionStatus};
 use settings::{ProjectSave, Settings};
@@ -434,10 +437,7 @@ impl AppState {
                 .items_center()
                 .gap(px(8.0))
                 .child(
-                    div()
-                        .text_size(px(12.0))
-                        .text_color(theme().attention) // peach — attention
-                        .child("❗"),
+                    icon(icons::ALERT_TRIANGLE, 13.0, theme().attention),
                 )
                 .child(
                     div()
@@ -1819,7 +1819,7 @@ fn main() {
         }
     }
 
-    let application = Application::new();
+    let application = Application::new().with_assets(crate::assets::Assets);
 
     // macOS: clicking the dock icon while the app is hidden (window was
     // closed via the red ✕) should bring the window back.
@@ -2669,15 +2669,33 @@ impl Render for AppState {
                         if awaiting > 0 {
                             bar = bar.child(
                                 div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(4.0))
                                     .text_color(SessionStatus::AwaitingInput.color())
-                                    .child(format!("⚠ {awaiting} need input")),
+                                    .child(icon(
+                                        icons::ALERT_TRIANGLE,
+                                        11.0,
+                                        SessionStatus::AwaitingInput.color(),
+                                    ))
+                                    .child(format!("{awaiting} need input")),
                             );
                         }
                         if response_ready > 0 {
                             bar = bar.child(
                                 div()
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(4.0))
                                     .text_color(SessionStatus::ResponseReady.color())
-                                    .child(format!("★ {response_ready} ready")),
+                                    .child(icon(
+                                        icons::STAR_FILL,
+                                        11.0,
+                                        SessionStatus::ResponseReady.color(),
+                                    ))
+                                    .child(format!("{response_ready} ready")),
                             );
                         }
                         bar
@@ -3090,13 +3108,10 @@ impl Render for AppState {
                                         div()
                                             .id("right-sidebar-close-btn")
                                             .cursor_pointer()
-                                            .px(px(6.0))
-                                            .py(px(2.0))
+                                            .p(px(4.0))
                                             .rounded(px(6.0))
-                                            .text_size(px(14.0))
-                                            .text_color(theme().text_faint)
-                                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
-                                            .child("×")
+                                            .hover(|s| s.bg(theme().bg_raised))
+                                            .child(icon(icons::X, 13.0, theme().text_faint))
                                             .tooltip(|_window, cx| {
                                                 cx.new(|_| SimpleTooltip { text: "Close changes panel".into() }).into()
                                             })

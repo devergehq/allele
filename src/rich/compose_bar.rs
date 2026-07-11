@@ -23,6 +23,7 @@
 use std::ops::Range;
 use std::path::PathBuf;
 use crate::theme::{theme, with_alpha};
+use crate::icon::{icon, name as icons};
 
 use gpui::{
     actions, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry,
@@ -1210,10 +1211,7 @@ impl Render for ComposeBar {
             .bg(with_alpha(theme().bg_hover, 0.4))
             .cursor(CursorStyle::PointingHand)
             .child(
-                gpui::div()
-                    .text_size(px(font_size + 1.0))
-                    .text_color(theme().text_secondary)
-                    .child("📎"),
+                icon(icons::PAPERCLIP, font_size + 1.0, theme().text_secondary),
             )
             .on_mouse_down(
                 MouseButton::Left,
@@ -1249,12 +1247,12 @@ impl Render for ComposeBar {
                 let label = attachment.display_label();
                 let is_image = attachment.is_image;
                 let warn = attachment.is_binary_unreadable();
-                let prefix = if warn {
-                    "⚠ "
+                let kind_icon = if warn {
+                    icons::ALERT_TRIANGLE
                 } else if is_image {
-                    "🖼 "
+                    icons::IMAGE
                 } else {
-                    "📄 "
+                    icons::FILE_TEXT
                 };
                 let card = gpui::div()
                     .id(ElementId::Name(format!("attachment-card-{id}").into()))
@@ -1265,19 +1263,18 @@ impl Render for ComposeBar {
                     .py(px(4.0))
                     .rounded(px(6.0))
                     .bg(with_alpha(theme().bg_hover, 0.5))
+                    .child(icon(kind_icon, font_size - 2.0, theme().text_secondary))
                     .child(
                         gpui::div()
                             .text_size(px(font_size - 2.0))
                             .text_color(if warn { with_alpha(theme().text_primary, 0.9) } else { theme().text_primary })
-                            .child(format!("{prefix}{label}")),
+                            .child(label.clone()),
                     )
                     .child(
                         gpui::div()
                             .id(ElementId::Name(format!("attachment-x-{id}").into()))
                             .cursor(CursorStyle::PointingHand)
-                            .text_size(px(font_size - 2.0))
-                            .text_color(theme().text_secondary)
-                            .child("✕")
+                            .child(icon(icons::X, font_size - 2.0, theme().text_secondary))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this: &mut Self, _event, _window, cx| {

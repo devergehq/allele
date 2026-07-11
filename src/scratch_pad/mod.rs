@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use std::time::SystemTime;
 use tracing::warn;
 use crate::theme::theme;
+use crate::icon::{icon, name as icons};
 
 /// One saved Scratch Pad submission shown in the history panel. Mirrors
 /// the shape of `state::ScratchPadEntry` so the caller (AppState) can
@@ -304,10 +305,8 @@ impl ScratchPad {
                             .px(px(6.0))
                             .py(px(2.0))
                             .rounded(px(6.0))
-                            .text_size(px(14.0))
-                            .text_color(theme().text_faint)
-                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
-                            .child("×")
+                            .hover(|s| s.bg(theme().bg_raised))
+                            .child(icon(icons::X, 13.0, theme().text_faint))
                             .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
                                 this.close(cx);
                             })),
@@ -392,11 +391,10 @@ impl ScratchPad {
                 .h(px(20.0))
                 .ml(px(8.0))
                 .rounded(px(6.0))
-                .text_size(px(14.0))
                 .text_color(theme().text_faint)
                 .cursor_pointer()
-                .hover(|s| s.bg(theme().bg_hover).text_color(theme().danger))
-                .child("×")
+                .hover(|s| s.bg(theme().bg_hover))
+                .child(icon(icons::X, 12.0, theme().text_faint))
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |_this: &mut Self, _ev, _w, cx| {
@@ -458,9 +456,8 @@ impl ScratchPad {
                         div()
                             .id(("scratch-chip-remove", idx))
                             .cursor_pointer()
-                            .text_color(theme().text_faint)
-                            .hover(|s| s.text_color(theme().danger))
-                            .child("×")
+                            .hover(|s| s.bg(theme().bg_raised))
+                            .child(icon(icons::X, 10.0, theme().text_faint))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this: &mut Self, _ev, _w, cx| {

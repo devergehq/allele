@@ -6,6 +6,7 @@
 
 use gpui::*;
 use gpui::prelude::FluentBuilder as _;
+use crate::icon::{icon, name as icons};
 use crate::theme::theme;
 
 use crate::actions::{ArchiveAction, ProjectAction, SessionAction, SessionCursor};
@@ -63,10 +64,7 @@ pub(crate) fn build_sidebar_items(
                     .gap(px(6.0))
                     .items_center()
                     .child(
-                        div()
-                            .text_size(px(10.0))
-                            .text_color(theme().text_faint)
-                            .child("▾"),
+                        icon(icons::CHEVRON_DOWN, 12.0, theme().text_faint),
                     )
                     .child(
                         div()
@@ -130,11 +128,10 @@ pub(crate) fn build_sidebar_items(
                         .invisible()
                         .group_hover(format!("proj-{p_idx}"), |s| s.visible())
                         .cursor_pointer()
-                        .px(px(6.0))
-                        .text_size(px(14.0))
-                        .text_color(theme().text_faint)
-                        .hover(|s| s.text_color(theme().success))
-                        .child("+")
+                        .p(px(4.0))
+                        .rounded(px(6.0))
+                        .hover(|s| s.bg(theme().bg_raised))
+                        .child(icon(icons::PLUS, 13.0, theme().text_faint))
                         .tooltip(|_window, cx| {
                             cx.new(|_| SimpleTooltip { text: "New session".into() }).into()
                         })
@@ -151,11 +148,10 @@ pub(crate) fn build_sidebar_items(
                         .invisible()
                         .group_hover(format!("proj-{p_idx}"), |s| s.visible())
                         .cursor_pointer()
-                        .px(px(4.0))
-                        .text_size(px(11.0))
-                        .text_color(theme().text_faint)
-                        .hover(|s| s.text_color(theme().success))
-                        .child("▸")
+                        .p(px(4.0))
+                        .rounded(px(6.0))
+                        .hover(|s| s.bg(theme().bg_raised))
+                        .child(icon(icons::CHEVRON_RIGHT, 13.0, theme().text_faint))
                         .tooltip(|_window, cx| {
                             cx.new(|_| SimpleTooltip { text: "New session with details".into() }).into()
                         })
@@ -175,15 +171,18 @@ pub(crate) fn build_sidebar_items(
                                 .group_hover(format!("proj-{p_idx}"), |s| s.visible())
                         })
                         .cursor_pointer()
-                        .px(px(4.0))
-                        .text_size(px(11.0))
-                        .text_color(if state.editing_project_settings == Some(p_idx) {
-                            theme().accent // blue when active
-                        } else {
-                            theme().bg_hover
-                        })
-                        .hover(|s| s.text_color(theme().accent))
-                        .child("⚙")
+                        .p(px(4.0))
+                        .rounded(px(6.0))
+                        .hover(|s| s.bg(theme().bg_raised))
+                        .child(icon(
+                            icons::SETTINGS,
+                            13.0,
+                            if state.editing_project_settings == Some(p_idx) {
+                                theme().accent
+                            } else {
+                                theme().text_ghost
+                            },
+                        ))
                         .tooltip(|_window, cx| {
                             cx.new(|_| SimpleTooltip { text: "Project settings".into() }).into()
                         })
@@ -204,11 +203,10 @@ pub(crate) fn build_sidebar_items(
                         .invisible()
                         .group_hover(format!("proj-{p_idx}"), |s| s.visible())
                         .cursor_pointer()
-                        .px(px(4.0))
-                        .text_size(px(11.0))
-                        .text_color(theme().text_ghost)
-                        .hover(|s| s.text_color(theme().danger))
-                        .child("✕")
+                        .p(px(4.0))
+                        .rounded(px(6.0))
+                        .hover(|s| s.bg(theme().bg_raised))
+                        .child(icon(icons::X, 13.0, theme().text_ghost))
                         .tooltip(|_window, cx| {
                             cx.new(|_| SimpleTooltip { text: "Remove project".into() }).into()
                         })
@@ -483,10 +481,7 @@ pub(crate) fn build_sidebar_items(
                             .gap(px(6.0))
                             .items_center()
                             .child(
-                                div()
-                                    .text_size(px(10.0))
-                                    .text_color(theme().warning) // yellow
-                                    .child("◐"),
+                                icon(icons::LOADER, 12.0, theme().warning),
                             )
                             .child(
                                 div()
@@ -541,7 +536,7 @@ pub(crate) fn build_sidebar_items(
                 .unwrap_or(false);
             let is_suspended = session.status == SessionStatus::Suspended;
             let status_color = session.status.color();
-            let status_icon = session.status.icon();
+            let status_icon = session.status.icon_name();
             // Prefer the auto-named label once it's no longer a
             // placeholder ("Claude N" / "Shell N").  Fall back to the
             // terminal's OSC title only while waiting for auto-naming,
@@ -621,18 +616,10 @@ pub(crate) fn build_sidebar_items(
                         .gap(px(6.0))
                         .items_center()
                         .overflow_hidden()
-                        .child(
-                            div()
-                                .text_size(px(10.0))
-                                .text_color(status_color)
-                                .child(status_icon.to_string())
-                        );
+                        .child(icon(status_icon, 11.0, status_color));
                     if session_pinned {
                         label_row = label_row.child(
-                            div()
-                                .text_size(px(9.0))
-                                .text_color(theme().warning)
-                                .child("📌"),
+                            icon(icons::PIN, 11.0, theme().warning),
                         );
                     }
                     label_row = label_row
@@ -812,11 +799,10 @@ pub(crate) fn build_sidebar_items(
                             div()
                                 .id(SharedString::from(format!("merge-{p_idx}-{s_idx}")))
                                 .cursor_pointer()
-                                .px(px(4.0))
-                                .text_size(px(11.0))
-                                .text_color(theme().text_ghost)
-                                .hover(|s| s.text_color(theme().success))
-                                .child("✓")
+                                .p(px(4.0))
+                                .rounded(px(6.0))
+                                .hover(|s| s.bg(theme().bg_raised))
+                                .child(icon(icons::CHECK, 13.0, theme().text_ghost))
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| SimpleTooltip { text: "Merge and close session".into() }).into()
                                 })
@@ -833,11 +819,10 @@ pub(crate) fn build_sidebar_items(
                             div()
                                 .id(SharedString::from(format!("close-{p_idx}-{s_idx}")))
                                 .cursor_pointer()
-                                .px(px(4.0))
-                                .text_size(px(11.0))
-                                .text_color(theme().text_ghost)
-                                .hover(|s| s.text_color(theme().accent))
-                                .child("✕")
+                                .p(px(4.0))
+                                .rounded(px(6.0))
+                                .hover(|s| s.bg(theme().bg_raised))
+                                .child(icon(icons::X, 13.0, theme().text_ghost))
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| SimpleTooltip { text: "Suspend session".into() }).into()
                                 })
@@ -854,11 +839,10 @@ pub(crate) fn build_sidebar_items(
                             div()
                                 .id(SharedString::from(format!("discard-{p_idx}-{s_idx}")))
                                 .cursor_pointer()
-                                .px(px(4.0))
-                                .text_size(px(11.0))
-                                .text_color(theme().text_ghost)
-                                .hover(|s| s.text_color(theme().danger))
-                                .child("🗑")
+                                .p(px(4.0))
+                                .rounded(px(6.0))
+                                .hover(|s| s.bg(theme().bg_raised))
+                                .child(icon(icons::TRASH, 13.0, theme().text_ghost))
                                 .tooltip(|_window, cx| {
                                     cx.new(|_| SimpleTooltip { text: "Discard session".into() }).into()
                                 })
@@ -930,10 +914,7 @@ pub(crate) fn build_sidebar_items(
                                 .gap(px(6.0))
                                 .items_center()
                                 .child(
-                                    div()
-                                        .text_size(px(10.0))
-                                        .text_color(theme().text_dim)
-                                        .child("📦"),
+                                    icon(icons::ARCHIVE, 12.0, theme().text_dim),
                                 )
                                 .child(
                                     div()
@@ -984,11 +965,10 @@ pub(crate) fn build_sidebar_items(
                                     div()
                                         .id(SharedString::from(format!("delarchive-{p_idx}-{a_idx}")))
                                         .cursor_pointer()
-                                        .px(px(4.0))
-                                        .text_size(px(10.0))
-                                        .text_color(theme().text_ghost)
-                                        .hover(|s| s.text_color(theme().danger))
-                                        .child("×")
+                                        .p(px(3.0))
+                                        .rounded(px(6.0))
+                                        .hover(|s| s.bg(theme().bg_raised))
+                                        .child(icon(icons::X, 12.0, theme().text_ghost))
                                         .tooltip(|_window, cx| {
                                             cx.new(|_| SimpleTooltip { text: "Delete archive".into() }).into()
                                         })

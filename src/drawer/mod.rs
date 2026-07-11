@@ -12,6 +12,7 @@
 
 use gpui::*;
 use crate::theme::theme;
+use crate::icon::{icon, name as icons};
 
 use crate::actions::{DrawerAction, SessionCursor, SettingsAction};
 use crate::app_state::{AppState, DRAWER_MIN_HEIGHT};
@@ -340,13 +341,8 @@ pub(crate) fn build_drawer_items(
                         .id(("drawer-tab-close", idx))
                         .px(px(4.0))
                         .rounded(px(6.0))
-                        .text_size(px(11.0))
-                        .text_color(theme().text_faint)
-                        .hover(|s| {
-                            s.bg(theme().bg_active)
-                                .text_color(theme().danger)
-                        })
-                        .child("×")
+                        .hover(|s| s.bg(theme().bg_active))
+                        .child(icon(icons::X, 11.0, theme().text_faint))
                         .tooltip(|_window, cx| {
                             cx.new(|_| SimpleTooltip { text: "Close tab".into() }).into()
                         })
@@ -409,10 +405,8 @@ pub(crate) fn build_drawer_items(
                     .px(px(6.0))
                     .py(px(2.0))
                     .rounded(px(6.0))
-                    .text_size(px(12.0))
-                    .text_color(theme().text_faint)
-                    .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
-                    .child("×")
+                    .hover(|s| s.bg(theme().bg_raised))
+                    .child(icon(icons::X, 12.0, theme().text_faint))
                     .tooltip(|_window, cx| {
                         cx.new(|_| SimpleTooltip { text: "Close drawer".into() }).into()
                     })

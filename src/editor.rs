@@ -185,7 +185,7 @@ impl AppState {
     }
 
     /// Recursively build file-tree rows starting at `dir`.
-    /// Directories render as "▸"/"▾" rows; files as plain rows.
+    /// Directories render with chevron icons; files as plain rows.
     pub(crate) fn collect_tree_rows(
         &self,
         dir: &std::path::Path,
@@ -217,11 +217,14 @@ impl AppState {
             let is_expanded = self.editor.expanded_dirs.contains(&path);
             let is_selected = self.editor.selected_path.as_ref() == Some(&path);
 
-            let label = if is_dir {
-                let glyph = if is_expanded { "▾" } else { "▸" };
-                format!("{glyph} {name}")
+            let tree_chevron = if is_dir {
+                Some(if is_expanded {
+                    crate::icon::name::CHEVRON_DOWN
+                } else {
+                    crate::icon::name::CHEVRON_RIGHT
+                })
             } else {
-                format!("  {name}")
+                None
             };
 
             let row_bg = if is_selected { theme().bg_raised } else { theme().bg_surface };
@@ -241,7 +244,13 @@ impl AppState {
                 .bg(row_bg)
                 .cursor_pointer()
                 .hover(|s| s.bg(theme().bg_raised))
-                .child(label)
+                .gap(px(4.0))
+                .child(match tree_chevron {
+                    Some(ch) => crate::icon::icon(ch, 11.0, theme().text_faint)
+                        .into_any_element(),
+                    None => div().w(px(11.0)).flex_shrink_0().into_any_element(),
+                })
+                .child(name)
                 .on_mouse_down(
                     MouseButton::Left,
                     cx.listener(move |this: &mut Self, _event, _window, cx| {

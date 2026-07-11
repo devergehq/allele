@@ -44,14 +44,17 @@ pub enum SessionStatus {
 }
 
 impl SessionStatus {
-    pub fn icon(&self) -> &'static str {
+    /// SVG icon name for this status (assets/icons/svg/). Shapes are
+    /// distinct per status so state reads without color vision.
+    pub fn icon_name(&self) -> &'static str {
+        use crate::icon::name;
         match self {
-            SessionStatus::Running => "●",
-            SessionStatus::Idle => "○",
-            SessionStatus::Done => "✓",
-            SessionStatus::Suspended => "⏸",
-            SessionStatus::AwaitingInput => "❗",
-            SessionStatus::ResponseReady => "★",
+            SessionStatus::Running => name::CIRCLE_FILL,
+            SessionStatus::Idle => name::CIRCLE,
+            SessionStatus::Done => name::CHECK,
+            SessionStatus::Suspended => name::PAUSE,
+            SessionStatus::AwaitingInput => name::ALERT_TRIANGLE,
+            SessionStatus::ResponseReady => name::STAR_FILL,
         }
     }
 

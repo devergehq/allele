@@ -8,6 +8,7 @@
 
 use gpui::*;
 use crate::theme::theme;
+use crate::icon::{icon, name as icons};
 
 use crate::actions::SidebarAction;
 use crate::app_state::AppState;
@@ -342,10 +343,8 @@ impl AppState {
                         .cursor_pointer()
                         .px(px(6.0))
                         .rounded(px(6.0))
-                        .text_size(px(12.0))
-                        .text_color(theme().text_faint)
-                        .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
-                        .child("×")
+                        .hover(|s| s.bg(theme().bg_raised))
+                        .child(icon(icons::X, 12.0, theme().text_faint))
                         .on_mouse_down(
                             MouseButton::Left,
                             cx.listener(|this: &mut Self, _event, _window, cx| {
