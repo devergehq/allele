@@ -46,7 +46,7 @@ use app_state::{
 };
 use gpui::*;
 use project::Project;
-use crate::theme::theme;
+use crate::theme::{theme, with_alpha};
 actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction, CycleAttentionSession]);
 use session::{Session, SessionStatus};
 use settings::{ProjectSave, Settings};
@@ -339,10 +339,11 @@ impl AppState {
         let left_pad = if self.sidebar.visible { 8.0 } else { 78.0 };
         let mut strip = div()
             .w_full()
+            .h(px(38.0))
             .flex_shrink_0()
             .pl(px(left_pad))
             .pr(px(8.0))
-            .py(px(4.0))
+            .window_control_area(WindowControlArea::Drag)
             .bg(theme().bg_surface)
             .border_b_1()
             .border_color(theme().border_subtle)
@@ -1936,11 +1937,13 @@ fn main() {
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
                     title: Some("Allele".into()),
-                    // Content extends under the titlebar; the sidebar header
-                    // reserves top inset for the traffic lights.
+                    // Content extends under the titlebar; the 38px header/tab
+                    // rows below center against the traffic lights.
                     appears_transparent: true,
-                    traffic_light_position: Some(point(px(12.0), px(12.0))),
+                    traffic_light_position: Some(point(px(12.0), px(13.0))),
                 }),
+                // Vibrancy: the sidebar paints a translucent surface over this.
+                window_background: WindowBackgroundAppearance::Blurred,
                 window_min_size: Some(size(px(800.0), px(600.0))),
                 window_bounds,
                 ..Default::default()
@@ -2554,11 +2557,13 @@ impl Render for AppState {
         // Outer non-flex container that hosts the flex row AND the drag overlay.
         // Keeping the overlay OUTSIDE the flex container ensures Taffy's layout
         // engine doesn't try to allocate flex space to an absolutely-positioned element.
+        // No window-wide opaque bg: the blurred window background shows
+        // through the translucent sidebar; the content column paints its own
+        // opaque base so terminal/content legibility is untouched.
         let mut flex_row = div()
             .id("app-root")
             .flex()
             .size_full()
-            .bg(theme().bg_base)
             .text_color(theme().text_primary);
 
         // --- Left sidebar (conditional on sidebar_visible) ---
@@ -2569,19 +2574,21 @@ impl Render for AppState {
                     .w(px(sidebar_w))
                     .flex_shrink_0()
                     .h_full()
-                    .bg(theme().bg_surface)
+                    .bg(with_alpha(theme().bg_surface, 0.85))
                     .border_r_1()
                     .border_color(theme().border_subtle)
                     .font_family(crate::theme::FONT_UI)
                     .flex()
                     .flex_col()
-                    // Header — top inset clears the traffic lights drawn over
-                    // the transparent titlebar region.
+                    // Header — one 38px titlebar row beside the traffic
+                    // lights; empty space drags the window.
                     .child(
                         div()
-                            .px(px(12.0))
-                            .pt(px(34.0))
-                            .pb(px(10.0))
+                            .h(px(38.0))
+                            .flex_shrink_0()
+                            .pl(px(78.0))
+                            .pr(px(12.0))
+                            .window_control_area(WindowControlArea::Drag)
                             .border_b_1()
                             .border_color(theme().border_subtle)
                             .flex()
@@ -2698,6 +2705,7 @@ impl Render for AppState {
                     .min_w(px(0.0))
                     .overflow_hidden()
                     .h_full()
+                    .bg(theme().bg_base)
                     .flex()
                     .flex_col();
 
