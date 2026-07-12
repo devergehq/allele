@@ -8,17 +8,20 @@
 //! for tool inputs and extracting semantic events like `EditDiff`.
 
 mod parser;
+mod types;
 // The ledger and adapter model are foundational APIs consumed incrementally by
 // later work (narrative projection, transcript reader). Allow dead_code so each
 // stacked change builds clean before its consumer lands.
 #[allow(dead_code)]
-mod ledger;
-#[allow(dead_code)]
 mod adapter;
-mod types;
+#[allow(dead_code)]
+mod ledger;
 
+pub use types::*;
+// Parser types (StreamParser/ParsedLine/Coverage) are now reached through the
+// adapter layer (DEV-32); keep them re-exported as public API but don't warn
+// when nothing names them via `crate::stream::` directly.
+pub use adapter::*;
 pub use ledger::*;
 #[allow(unused_imports)]
-pub use adapter::*;
 pub use parser::*;
-pub use types::*;

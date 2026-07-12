@@ -90,14 +90,22 @@ pub struct ClaudeNormalizer {
 
 impl ClaudeNormalizer {
     pub fn new() -> Self {
-        Self { parser: StreamParser::new() }
+        Self {
+            parser: StreamParser::new(),
+        }
     }
 }
 
 impl NormalizingAdapter for ClaudeNormalizer {
-    fn agent_kind(&self) -> AgentKind { AgentKind::Claude }
-    fn format_label(&self) -> &'static str { "claude-jsonl" }
-    fn capabilities(&self) -> Capabilities { Capabilities::ALL }
+    fn agent_kind(&self) -> AgentKind {
+        AgentKind::Claude
+    }
+    fn format_label(&self) -> &'static str {
+        "claude-jsonl"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::ALL
+    }
     fn feed_line(&mut self, line: &str) -> ParsedLine {
         self.parser.feed_line_detailed(line)
     }
@@ -111,15 +119,28 @@ impl NormalizingAdapter for ClaudeNormalizer {
 pub struct TerminalNormalizer;
 
 impl NormalizingAdapter for TerminalNormalizer {
-    fn agent_kind(&self) -> AgentKind { AgentKind::Generic }
-    fn format_label(&self) -> &'static str { "terminal-text" }
-    fn capabilities(&self) -> Capabilities { Capabilities::NONE }
+    fn agent_kind(&self) -> AgentKind {
+        AgentKind::Generic
+    }
+    fn format_label(&self) -> &'static str {
+        "terminal-text"
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities::NONE
+    }
     fn feed_line(&mut self, line: &str) -> ParsedLine {
         if line.trim().is_empty() {
-            return ParsedLine { events: Vec::new(), coverage: Coverage::Ignored, diagnostics: Vec::new() };
+            return ParsedLine {
+                events: Vec::new(),
+                coverage: Coverage::Ignored,
+                diagnostics: Vec::new(),
+            };
         }
         ParsedLine {
-            events: vec![RichEvent::TextBlock { text: line.to_string(), parent_agent_id: None }],
+            events: vec![RichEvent::TextBlock {
+                text: line.to_string(),
+                parent_agent_id: None,
+            }],
             coverage: Coverage::Full,
             diagnostics: Vec::new(),
         }
@@ -146,25 +167,42 @@ impl OpencodeNormalizer {
 }
 
 impl NormalizingAdapter for OpencodeNormalizer {
-    fn agent_kind(&self) -> AgentKind { AgentKind::Opencode }
-    fn format_label(&self) -> &'static str { "opencode-json" }
+    fn agent_kind(&self) -> AgentKind {
+        AgentKind::Opencode
+    }
+    fn format_label(&self) -> &'static str {
+        "opencode-json"
+    }
     fn capabilities(&self) -> Capabilities {
         // OpenCode reports reasoning, tool calls, and usage; it does not (yet,
         // as modeled here) expose Allele-style structured diffs or permission
         // prompts. Declaring these false lets the UI say so explicitly.
-        Capabilities { thinking: true, tools: true, diffs: false, permissions: false, usage: true }
+        Capabilities {
+            thinking: true,
+            tools: true,
+            diffs: false,
+            permissions: false,
+            usage: true,
+        }
     }
     fn feed_line(&mut self, line: &str) -> ParsedLine {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            return ParsedLine { events: Vec::new(), coverage: Coverage::Ignored, diagnostics: Vec::new() };
+            return ParsedLine {
+                events: Vec::new(),
+                coverage: Coverage::Ignored,
+                diagnostics: Vec::new(),
+            };
         }
         // Non-JSON → plain terminal text (OpenCode interleaves logs).
         let value: serde_json::Value = match serde_json::from_str(trimmed) {
             Ok(v) => v,
             Err(_) => {
                 return ParsedLine {
-                    events: vec![RichEvent::TextBlock { text: line.to_string(), parent_agent_id: None }],
+                    events: vec![RichEvent::TextBlock {
+                        text: line.to_string(),
+                        parent_agent_id: None,
+                    }],
                     coverage: Coverage::Full,
                     diagnostics: Vec::new(),
                 };
@@ -176,13 +214,19 @@ impl NormalizingAdapter for OpencodeNormalizer {
         match ty {
             "text" | "message" => {
                 if let Some(text) = extract_text(&value) {
-                    return ParsedLine::full(vec![RichEvent::TextBlock { text, parent_agent_id: None }]);
+                    return ParsedLine::full(vec![RichEvent::TextBlock {
+                        text,
+                        parent_agent_id: None,
+                    }]);
                 }
                 fallback(line, "opencode text part missing text field")
             }
             "reasoning" | "thinking" => {
                 if let Some(text) = extract_text(&value) {
-                    return ParsedLine::full(vec![RichEvent::ThinkingBlock { thinking: text, parent_agent_id: None }]);
+                    return ParsedLine::full(vec![RichEvent::ThinkingBlock {
+                        thinking: text,
+                        parent_agent_id: None,
+                    }]);
                 }
                 fallback(line, "opencode reasoning part missing text field")
             }
@@ -199,7 +243,11 @@ impl NormalizingAdapter for OpencodeNormalizer {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let input = value.get("input").or_else(|| value.get("args")).cloned().unwrap_or(serde_json::Value::Null);
+                let input = value
+                    .get("input")
+                    .or_else(|| value.get("args"))
+                    .cloned()
+                    .unwrap_or(serde_json::Value::Null);
                 ParsedLine::full(vec![RichEvent::ToolUse {
                     tool_use_id: id,
                     tool_name: name,
@@ -209,9 +257,11 @@ impl NormalizingAdapter for OpencodeNormalizer {
             }
             // Structural/no-op events we intentionally don't render, but whose
             // raw form the ledger still retains.
-            "step-start" | "step-finish" | "start" | "finish" => {
-                ParsedLine { events: Vec::new(), coverage: Coverage::Ignored, diagnostics: Vec::new() }
-            }
+            "step-start" | "step-finish" | "start" | "finish" => ParsedLine {
+                events: Vec::new(),
+                coverage: Coverage::Ignored,
+                diagnostics: Vec::new(),
+            },
             _ => fallback(line, &format!("unrecognised opencode event type: {ty}")),
         }
     }
@@ -253,7 +303,10 @@ mod tests {
         let mut a = normalizer_for(AgentKind::Claude);
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"stop_reason":null}}"#;
         let parsed = a.feed_line(line);
-        assert!(matches!(parsed.events.first(), Some(RichEvent::TextBlock { .. })));
+        assert!(matches!(
+            parsed.events.first(),
+            Some(RichEvent::TextBlock { .. })
+        ));
     }
 
     #[test]
@@ -271,10 +324,16 @@ mod tests {
     fn opencode_adapter_normalizes_known_shapes() {
         let mut a = OpencodeNormalizer::new();
         let text = a.feed_line(r#"{"type":"text","text":"hello"}"#);
-        assert!(matches!(text.events.first(), Some(RichEvent::TextBlock { .. })));
+        assert!(matches!(
+            text.events.first(),
+            Some(RichEvent::TextBlock { .. })
+        ));
 
         let reasoning = a.feed_line(r#"{"type":"reasoning","text":"let me think"}"#);
-        assert!(matches!(reasoning.events.first(), Some(RichEvent::ThinkingBlock { .. })));
+        assert!(matches!(
+            reasoning.events.first(),
+            Some(RichEvent::ThinkingBlock { .. })
+        ));
 
         let tool = a.feed_line(r#"{"type":"tool","tool":"bash","id":"c1","input":{"cmd":"ls"}}"#);
         match tool.events.first() {
@@ -299,7 +358,10 @@ mod tests {
         let a = OpencodeNormalizer::new();
         let caps = a.capabilities();
         assert!(caps.thinking && caps.tools && caps.usage);
-        assert!(!caps.diffs, "diffs must be declared unsupported, not silently absent");
+        assert!(
+            !caps.diffs,
+            "diffs must be declared unsupported, not silently absent"
+        );
         assert!(!caps.permissions);
     }
 }

@@ -23,7 +23,8 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use crate::stream::{EventSource, RichEvent, SessionLedger, StreamParser};
+use crate::settings::AgentKind;
+use crate::stream::{normalizer_for, EventSource, NormalizingAdapter, RichEvent, SessionLedger};
 
 /// Emitted for every new line parsed from a transcript.
 pub enum TranscriptEvent {
@@ -72,8 +73,12 @@ struct TailedFile {
     offset: u64,
     /// Buffer for a partial last line (incomplete write).
     leftover: String,
-    /// Per-file parser — keeps init/session state.
-    parser: StreamParser,
+    /// Per-file normalizing adapter, chosen by agent kind (DEV-32) — keeps
+    /// per-file init/session state, just as the concrete parser did.
+    adapter: Box<dyn NormalizingAdapter>,
+    /// Agent kind this file is parsed as, so the adapter can be rebuilt on
+    /// truncation/rotation.
+    kind: AgentKind,
     /// Where this file's lines originate, used to tag ledger entries and to
     /// stamp emitted events with the owning subagent id.
     source: EventSource,
@@ -85,12 +90,13 @@ struct TailedFile {
 }
 
 impl TailedFile {
-    fn new(path: PathBuf, source: EventSource, emit_live: bool) -> Self {
+    fn new(path: PathBuf, source: EventSource, emit_live: bool, kind: AgentKind) -> Self {
         Self {
             path,
             offset: 0,
             leftover: String::new(),
-            parser: StreamParser::new(),
+            adapter: normalizer_for(kind),
+            kind,
             source,
             emit_live,
         }
@@ -121,7 +127,7 @@ impl TailedFile {
         if size < self.offset {
             self.offset = 0;
             self.leftover.clear();
-            self.parser = StreamParser::new();
+            self.adapter = normalizer_for(self.kind);
         }
         if size == self.offset {
             return out;
@@ -170,7 +176,7 @@ impl TailedFile {
         // JSONL records are a superset of stream-json (extra uuid, parentUuid,
         // timestamp, isSidechain, sessionId fields are ignored by the wire
         // types); the ledger retains those raw regardless.
-        let events = ledger.ingest(&mut self.parser, self.source.clone(), line);
+        let events = ledger.ingest(&mut *self.adapter, self.source.clone(), line);
 
         // Historical/quiet files are recorded but not shown live.
         if !self.emit_live {
@@ -266,21 +272,25 @@ pub struct TranscriptTailer {
     /// live, so they don't get appended after current events and anchor the
     /// viewport in the past.
     created_at: std::time::SystemTime,
+    /// Agent kind whose transcript format this tailer normalises (DEV-32).
+    kind: AgentKind,
     /// Lossless record of every line seen across the main file and all
     /// subagent files (current and historical).
     ledger: SessionLedger,
 }
 
 impl TranscriptTailer {
-    /// Create a tailer for the JSONL at `session_jsonl`. The subagents
-    /// directory is derived by stripping the `.jsonl` extension.
-    pub fn new(session_jsonl: PathBuf) -> Self {
+    /// Create a tailer for the JSONL at `session_jsonl`, parsed with the
+    /// adapter for `kind`. The subagents directory is derived by stripping the
+    /// `.jsonl` extension.
+    pub fn new(session_jsonl: PathBuf, kind: AgentKind) -> Self {
         let subagents_dir = session_jsonl.with_extension("").join("subagents");
         Self {
-            main: TailedFile::new(session_jsonl, EventSource::Main, true),
+            main: TailedFile::new(session_jsonl, EventSource::Main, true, kind),
             subagents_dir,
             subagents: HashMap::new(),
             created_at: std::time::SystemTime::now(),
+            kind,
             ledger: SessionLedger::new(),
         }
     }
@@ -335,8 +345,10 @@ impl TranscriptTailer {
                         agent_id,
                         historical: !is_current,
                     };
-                    self.subagents
-                        .insert(path.clone(), TailedFile::new(path, source, is_current));
+                    self.subagents.insert(
+                        path.clone(),
+                        TailedFile::new(path, source, is_current, self.kind),
+                    );
                 }
             }
         }
@@ -402,7 +414,7 @@ mod tests {
 "#,
         )
         .unwrap();
-        let mut tailer = TranscriptTailer::new(path.clone());
+        let mut tailer = TranscriptTailer::new(path.clone(), AgentKind::Claude);
         let events = tailer.poll();
         assert_eq!(events.len(), 1);
         match &events[0] {

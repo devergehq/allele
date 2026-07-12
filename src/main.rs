@@ -633,7 +633,7 @@ impl AppState {
             return self.rich.view.clone();
         }
 
-        let (allele_session_id, claude_session_id, cwd) = {
+        let (allele_session_id, claude_session_id, cwd, agent_kind) = {
             let project = self.projects.get(active.project_idx)?;
             let session = project.sessions.get(active.session_idx)?;
             let cwd = session
@@ -642,10 +642,21 @@ impl AppState {
                 .unwrap_or_else(|| project.source_path.clone());
             // Attachments scope by the stable workspace id (must not move on
             // /clear); the transcript tails the *current* Claude conversation.
+            //
+            // Resolve which agent format the transcript is in, so the tailer
+            // uses the matching normalizing adapter (DEV-32). Defaults to
+            // Claude when the session has no recorded agent.
+            let agent_kind = session
+                .agent_id
+                .as_ref()
+                .and_then(|id| self.user_settings.agents.iter().find(|a| &a.id == id))
+                .map(|a| a.kind)
+                .unwrap_or(crate::settings::AgentKind::Claude);
             (
                 session.id.clone(),
                 session.claude_session_id().to_string(),
                 cwd,
+                agent_kind,
             )
         };
         // Transcript density differs from terminal density — the
@@ -697,7 +708,7 @@ impl AppState {
         // empty state ("Send a message to start.") and auto-populates
         // as soon as the first turn lands on disk, without any re-wire.
         self.rich.transcript_tailer = transcript::expected_session_jsonl(&cwd, &claude_session_id)
-            .map(transcript::TranscriptTailer::new);
+            .map(|jsonl| transcript::TranscriptTailer::new(jsonl, agent_kind));
         self.rich.view = Some(view);
         self.rich.cursor = Some(active);
         self.rich.view.clone()
