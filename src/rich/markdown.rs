@@ -173,6 +173,15 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
     let parser = Parser::new_ext(content, opts);
 
     let mut container = div().flex().flex_col();
+    // Parent containers while inside blockquotes: on BlockQuote start we swap
+    // `container` for a fresh body and push the parent here; on end we wrap the
+    // body and append it back to the popped parent. Supports nesting.
+    let mut parents: Vec<Div> = Vec::new();
+
+    // Image capture: alt text arrives as Text events between Start/End(Image).
+    let mut in_image = false;
+    let mut image_alt = String::new();
+    let mut image_dest = String::new();
 
     let mut inline = InlineBuilder::new();
     let mut current_heading: Option<HeadingLevel> = None;
@@ -315,7 +324,10 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 if let Some(prefix) = pending_list_prefix.take() {
                     inline.push(&prefix, base_color);
                 }
-                if in_code_block {
+                if in_image {
+                    // Alt text — collected for the image placeholder, not body.
+                    image_alt.push_str(&s);
+                } else if in_code_block {
                     code_buffer.push_str(&s);
                 } else {
                     inline.push(&s, base_color);
@@ -389,8 +401,54 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 let cell = std::mem::replace(&mut inline, InlineBuilder::new()).finish();
                 current_row.push(cell);
             }
+            // ── Blockquotes ───────────────────────────────────────
+            Event::Start(Tag::BlockQuote(_)) => {
+                if let Some((text, runs)) =
+                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
+                {
+                    container = container.child(paragraph_element(text, runs, font_size));
+                }
+                // Start a fresh body for the quote; remember the parent.
+                parents.push(std::mem::replace(&mut container, div().flex().flex_col()));
+            }
+            Event::End(TagEnd::BlockQuote(_)) => {
+                if let Some((text, runs)) =
+                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
+                {
+                    container = container.child(paragraph_element(text, runs, font_size));
+                }
+                let body = std::mem::replace(&mut container, div());
+                let parent = parents.pop().unwrap_or_else(|| div().flex().flex_col());
+                let quoted = div()
+                    .my(px(4.0))
+                    .pl(px(10.0))
+                    .border_l_2()
+                    .border_color(with_alpha(theme().text_secondary, 0.4))
+                    .child(body);
+                container = parent.child(quoted);
+            }
+            // ── Images ────────────────────────────────────────────
+            Event::Start(Tag::Image { dest_url, .. }) => {
+                in_image = true;
+                image_alt.clear();
+                image_dest = dest_url.to_string();
+            }
+            Event::End(TagEnd::Image) => {
+                in_image = false;
+                // Flush any inline text before the image sits on its own line.
+                if let Some((text, runs)) =
+                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
+                {
+                    container = container.child(paragraph_element(text, runs, font_size));
+                }
+                container = container.child(image_element(
+                    std::mem::take(&mut image_alt),
+                    std::mem::take(&mut image_dest),
+                    font_size,
+                ));
+            }
             _ => {
-                // Ignore unhandled events (images, footnotes, etc.)
+                // Ignore still-unhandled events (footnotes, inline HTML, …).
             }
         }
     }
@@ -413,7 +471,56 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
         ));
     }
 
+    // Unwind any unterminated blockquotes (streaming: closing not seen yet).
+    while let Some(parent) = parents.pop() {
+        let body = std::mem::replace(&mut container, div());
+        let quoted = div()
+            .my(px(4.0))
+            .pl(px(10.0))
+            .border_l_2()
+            .border_color(with_alpha(theme().text_secondary, 0.4))
+            .child(body);
+        container = parent.child(quoted);
+    }
+
     container
+}
+
+/// Placeholder for an image (we don't fetch/decode image data): an icon plus
+/// the alt text, with the destination shown muted when both are present.
+fn image_element(alt: String, dest: String, font_size: f32) -> Div {
+    let has_alt = !alt.trim().is_empty();
+    let primary = if has_alt {
+        alt
+    } else if !dest.is_empty() {
+        dest.clone()
+    } else {
+        "image".to_string()
+    };
+    let mut row = div()
+        .my(px(6.0))
+        .px(px(10.0))
+        .py(px(6.0))
+        .rounded(px(6.0))
+        .bg(with_alpha(theme().bg_raised, 0.5))
+        .border_1()
+        .border_color(with_alpha(theme().text_secondary, 0.25))
+        .flex()
+        .flex_row()
+        .items_center()
+        .gap(px(6.0))
+        .text_size(px(font_size - 1.0))
+        .child(div().text_color(theme().text_secondary).child("🖼"))
+        .child(div().text_color(theme().text_secondary).child(primary));
+    if has_alt && !dest.is_empty() {
+        row = row.child(
+            div()
+                .text_size(px((font_size - 3.0).max(9.0)))
+                .text_color(with_alpha(theme().text_secondary, 0.6))
+                .child(dest),
+        );
+    }
+    row
 }
 
 // ── Block builders ────────────────────────────────────────────────
