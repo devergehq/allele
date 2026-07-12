@@ -16,6 +16,7 @@
 //! navigation. The settings window subscribes to each input's
 //! `Changed` / `Submitted` events to push state out.
 
+use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::theme;
 use crate::AppState;
 use gpui::*;
@@ -72,6 +73,8 @@ impl Section {
 pub struct SettingsWindowState {
     app: WeakEntity<AppState>,
     selected: Section,
+    /// Global settings search box — filters the section list (DEV-25).
+    settings_search_input: Entity<TextInput>,
     /// Sessions section (cleanup paths + creation toggles).
     sessions: SessionsSection,
     /// Editor section (external-editor command).
@@ -102,9 +105,16 @@ impl SettingsWindowState {
             .map(|app| app.read(cx).user_settings.clone())
             .unwrap_or_default();
 
+        let settings_search_input = cx.new(|cx| TextInput::new(cx, "", "Search settings"));
+        cx.subscribe(&settings_search_input, |_, _, _: &TextInputEvent, cx| {
+            cx.notify()
+        })
+        .detach();
+
         let mut s = Self {
             app,
             selected: Section::Sessions,
+            settings_search_input,
             sessions: SessionsSection::new(
                 cx,
                 settings.session_cleanup_paths.clone(),
@@ -140,12 +150,22 @@ impl Render for SettingsWindowState {
             .size_full()
             .bg(theme().bg_base)
             .text_color(theme().text_primary)
-            .child(render_sidebar(self.selected, cx))
+            .child(render_sidebar(self, cx))
             .child(render_pane(self, cx))
     }
 }
 
-fn render_sidebar(selected: Section, cx: &mut Context<SettingsWindowState>) -> impl IntoElement {
+fn render_sidebar(
+    this: &mut SettingsWindowState,
+    cx: &mut Context<SettingsWindowState>,
+) -> impl IntoElement {
+    let selected = this.selected;
+    let query = this
+        .settings_search_input
+        .read(cx)
+        .text()
+        .trim()
+        .to_lowercase();
     let sections = [
         Section::Projects,
         Section::Infrastructure,
@@ -166,9 +186,24 @@ fn render_sidebar(selected: Section, cx: &mut Context<SettingsWindowState>) -> i
         .py(px(12.0))
         .border_r_1()
         .border_color(theme().border_subtle)
-        .bg(theme().bg_surface);
+        .bg(theme().bg_surface)
+        .child(
+            div()
+                .mx(px(10.0))
+                .mb(px(8.0))
+                .px(px(8.0))
+                .py(px(5.0))
+                .rounded(px(6.0))
+                .border_1()
+                .border_color(theme().border_default)
+                .bg(theme().bg_sunken)
+                .child(this.settings_search_input.clone()),
+        );
 
     for section in sections {
+        if !query.is_empty() && !section.label().to_lowercase().contains(&query) {
+            continue;
+        }
         let is_selected = section == selected;
         let id: SharedString = format!("settings-section-{}", section.label()).into();
         let row = div()
