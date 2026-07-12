@@ -26,6 +26,7 @@ use super::narrative::{Annotation, LocusPhase, NarrativeRole};
 use super::permissions::{PermissionAction, PermissionRequest, RiskLevel};
 use super::reader::{JumpKind, NarrativeIndex, NavCounts, UnreadTracker};
 use crate::stream::RichEvent;
+use crate::text_input::{TextInput, TextInputEvent};
 
 // ── Catppuccin Mocha palette (matching terminal) ──────────────────
 
@@ -72,6 +73,12 @@ pub struct RichView {
     /// afterwards are unread until acknowledged.
     unread: UnreadTracker,
     unread_baselined: bool,
+    /// Transcript search (DEV-75): embedded query input, whether the search
+    /// bar is open, matching block seqs, and the current match position.
+    search_input: Entity<TextInput>,
+    search_open: bool,
+    search_matches: Vec<usize>,
+    search_pos: usize,
 }
 
 /// A navigable category selected from the navigation strip (DEV-75).
@@ -122,6 +129,18 @@ impl RichView {
         let mut document = RichDocument::new();
         document.set_tool_visibility(tool_visibility);
 
+        // DEV-75: embedded search input. Changed → recompute matches;
+        // Submitted (Enter) → advance to the next match.
+        let search_input = cx.new(|cx| TextInput::new(cx, "", "Search transcript…"));
+        cx.subscribe(
+            &search_input,
+            |this: &mut Self, _input, event: &TextInputEvent, cx| match event {
+                TextInputEvent::Changed => this.recompute_search(cx),
+                TextInputEvent::Submitted => this.search_step(1, cx),
+            },
+        )
+        .detach();
+
         Self {
             focus_handle,
             document,
@@ -133,7 +152,55 @@ impl RichView {
             last_jump_seq: None,
             unread: UnreadTracker::new(),
             unread_baselined: false,
+            search_input,
+            search_open: false,
+            search_matches: Vec::new(),
+            search_pos: 0,
         }
+    }
+
+    /// Scroll the virtual list to the block with the given stable seq (BlockId).
+    fn scroll_to_seq(&self, seq: usize) {
+        if let Some(ix) = self.document.blocks().iter().position(|b| b.id == seq) {
+            self.list_state.scroll_to_reveal_item(ix);
+        }
+    }
+
+    /// Toggle the search bar; focus the input when opening, clear results when
+    /// closing (DEV-75).
+    fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = !self.search_open;
+        if self.search_open {
+            let fh = self.search_input.read(cx).focus_handle(cx);
+            fh.focus(window, cx);
+        } else {
+            self.search_matches.clear();
+            self.search_pos = 0;
+        }
+        cx.notify();
+    }
+
+    /// Recompute matches from the current query and jump to the first (DEV-75).
+    fn recompute_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).text().to_string();
+        self.search_matches = self.index.search(&query);
+        self.search_pos = 0;
+        if let Some(&seq) = self.search_matches.first() {
+            self.scroll_to_seq(seq);
+        }
+        cx.notify();
+    }
+
+    /// Advance the current match by `delta`, wrapping, and scroll to it.
+    fn search_step(&mut self, delta: i32, cx: &mut Context<Self>) {
+        let n = self.search_matches.len();
+        if n == 0 {
+            return;
+        }
+        self.search_pos = (self.search_pos as i32 + delta).rem_euclid(n as i32) as usize;
+        let seq = self.search_matches[self.search_pos];
+        self.scroll_to_seq(seq);
+        cx.notify();
     }
 
     /// Highest block id currently in the document (its newest seq), if any.
@@ -425,13 +492,12 @@ impl Render for RichView {
             .flex()
             .flex_col()
             .bg(theme().bg_base)
-            // DEV-31 navigation strip: a compact tally of navigable points
-            // (phases / decisions / errors / files), plus a DEV-76 "N new"
-            // jump chip. Shown once there's anything to navigate or read.
-            .children(
-                (nav_counts.any() || unread > 0)
-                    .then(|| self.render_nav_strip(nav_counts, unread, cx)),
-            )
+            // Navigation strip: search toggle (DEV-75) + "N new" jump chip
+            // (DEV-76) + navigable-point chips (DEV-31/75). Always present in
+            // the non-empty view so search is reachable.
+            .child(self.render_nav_strip(nav_counts, unread, cx))
+            // DEV-75 search bar, shown when toggled open.
+            .children(self.search_open.then(|| self.render_search_bar(cx)))
             .child(
                 div()
                     .relative()
@@ -658,6 +724,26 @@ impl RichView {
             .border_b_1()
             .border_color(with_alpha(theme().text_faint, 0.15))
             .bg(theme().bg_base);
+        // DEV-75 search toggle.
+        row = row.child(
+            div()
+                .id("nav-search")
+                .px(px(6.0))
+                .rounded(px(4.0))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .text_color(if self.search_open {
+                    theme().ready
+                } else {
+                    theme().text_faint
+                })
+                .text_size(px(fs - 2.0))
+                .font_weight(FontWeight::BOLD)
+                .child("⌕")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _event, window, cx| this.toggle_search(window, cx)),
+                ),
+        );
         if unread > 0 {
             // "N new ↓" — jump to the first unread block and mark read.
             row = row.child(
@@ -777,6 +863,73 @@ impl RichView {
                 cx.listener(move |this, _event, _window, cx| {
                     this.jump_next_category(cat, cx);
                 }),
+            )
+    }
+
+    /// The search bar (DEV-75): query input + match position + prev/next/close.
+    fn render_search_bar(&self, cx: &mut Context<Self>) -> Div {
+        let fs = self.font_size;
+        let total = self.search_matches.len();
+        let pos = if total == 0 { 0 } else { self.search_pos + 1 };
+        div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(8.0))
+            .px(px(12.0))
+            .py(px(4.0))
+            .border_b_1()
+            .border_color(with_alpha(theme().text_faint, 0.15))
+            .bg(theme().bg_base)
+            .child(div().flex_1().min_w_0().child(self.search_input.clone()))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .text_color(theme().text_faint)
+                    .text_size(px(fs - 2.0))
+                    .child(format!("{pos}/{total}")),
+            )
+            .child(self.search_button("search-prev", "↑", -1, cx))
+            .child(self.search_button("search-next", "↓", 1, cx))
+            .child(
+                div()
+                    .id("search-close")
+                    .flex_shrink_0()
+                    .px(px(6.0))
+                    .rounded(px(4.0))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .text_color(theme().text_faint)
+                    .text_size(px(fs - 2.0))
+                    .child("✕")
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, window, cx| this.toggle_search(window, cx)),
+                    ),
+            )
+    }
+
+    /// A prev/next match button for the search bar.
+    fn search_button(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        delta: i32,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let fs = self.font_size;
+        div()
+            .id(id)
+            .flex_shrink_0()
+            .px(px(6.0))
+            .rounded(px(4.0))
+            .cursor(gpui::CursorStyle::PointingHand)
+            .text_color(theme().text_secondary)
+            .text_size(px(fs - 2.0))
+            .font_weight(FontWeight::BOLD)
+            .child(label)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| this.search_step(delta, cx)),
             )
     }
 }
