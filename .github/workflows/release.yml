@@ -141,3 +141,21 @@ jobs:
               --generate-notes \
               $PRERELEASE_FLAG
           fi
+
+          # Prepend the macOS first-launch instructions to the (generated) notes.
+          # Idempotent: skips if already present, or if this (older) ref lacks the file.
+          PREAMBLE=".github/RELEASE_INSTALL.md"
+          if [ -f "$PREAMBLE" ]; then
+            BODY="$(gh release view "$TAG" --json body --jq .body)"
+            MARKER="$(head -n 1 "$PREAMBLE")"
+            if printf '%s' "$BODY" | grep -qF "$MARKER"; then
+              echo "Install instructions already present in $TAG notes — skipping."
+            else
+              NOTES="${RUNNER_TEMP:-/tmp}/release-notes.md"
+              { cat "$PREAMBLE"; printf '\n---\n\n'; printf '%s\n' "$BODY"; } > "$NOTES"
+              gh release edit "$TAG" --notes-file "$NOTES"
+              echo "Prepended install instructions to $TAG notes."
+            fi
+          else
+            echo "No $PREAMBLE in this ref — skipping install-instructions prepend."
+          fi

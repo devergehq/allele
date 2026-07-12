@@ -197,14 +197,16 @@ First build is slow (~5-10 minutes) because GPUI and alacritty_terminal are larg
 
 Tagged releases are published on the **[GitHub Releases page](https://github.com/devergehq/allele/releases)**, each carrying an auto-generated changelog and a pre-built macOS app bundle (`Allele-<version>-macos.zip`). See [CHANGELOG.md](CHANGELOG.md) for curated highlights and [RELEASING.md](RELEASING.md) for how releases are cut and versioned.
 
-**Binaries are currently unsigned and un-notarised** (pre-alpha). After downloading and unzipping, clear the Gatekeeper quarantine attribute before the first launch:
+**Binaries are ad-hoc signed but not yet notarised** (pre-alpha), so macOS Gatekeeper shows a one-time warning on first launch. It's expected — pick either route:
 
-```sh
-xattr -dr com.apple.quarantine Allele.app
-open Allele.app
-```
+- **Fastest (Terminal)** — clear the download quarantine, then open normally:
+  ```sh
+  xattr -dr com.apple.quarantine /path/to/Allele.app
+  open /path/to/Allele.app
+  ```
+- **Finder** — double-click **Allele**, dismiss the warning, then open **System Settings → Privacy & Security**, scroll to the bottom, and click **Open Anyway** (macOS 15 Sequoia removed the old right-click → Open shortcut).
 
-Alternatively, right-click the app in Finder and choose **Open** the first time. Signed and notarised builds are planned for the beta milestone. If you'd rather build it yourself, see [Building from source](#building-from-source) above.
+Requires macOS 14+ on Apple silicon. Notarised builds (double-click, no prompt) are planned for the beta milestone. If you'd rather build it yourself, see [Building from source](#building-from-source) above.
 
 ## Project status
 
