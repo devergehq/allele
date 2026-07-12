@@ -46,7 +46,7 @@ First build is slow because GPUI and alacritty_terminal are large. Incremental b
 
 ## Code conventions
 
-- **Rust 2021 edition.** Standard `rustfmt` and `clippy` — no custom rules yet.
+- **Rust 2021 edition.** Standard `rustfmt` and `clippy` — no custom rules yet. Run `cargo fmt` before pushing: CI runs `cargo fmt --all -- --check` on every PR (`.github/workflows/ci.yml`), and `master` requires that check to pass.
 - **One logical change per PR.** If you find yourself touching unrelated files, split the PR.
 - **Clear commit messages.** Explain *why*, not just *what*. The commit message is the primary documentation for future-you and future-anyone-else.
 - **No aggressive refactors in feature PRs.** If you want to refactor, do it in a separate PR with its own discussion.

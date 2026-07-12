@@ -1,0 +1,35 @@
+name: CI
+
+# Fast, per-PR checks. Kept separate from release.yml (which only runs on
+# `v*` tags). Add further jobs here (clippy, test) as the tree is made clean
+# enough to enforce them.
+#
+# The `rustfmt` job is advisory until `master` has a branch-protection rule
+# requiring it — see CONTRIBUTING.md.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rustfmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        # Reads rust-toolchain.toml (channel + rustfmt component).
+        run: rustup show
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
