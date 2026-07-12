@@ -40,6 +40,12 @@ pub enum AppAction {
     ToggleRightSidebar,
     /// Open the scratch pad compose overlay (Cmd+K).
     OpenScratchPad,
+    /// Open the fuzzy file palette (Cmd+P).
+    OpenFilePalette,
+    /// Open the project content/symbol search (Cmd+Shift+F).
+    OpenProjectSearch,
+    /// Open the global command palette (Cmd+Shift+P).
+    OpenCommandPalette,
     /// Send raw bytes to the PTY (for Cmd shortcuts that map to control
     /// characters, e.g. Cmd+Backspace → 0x15).
     SendBytes(&'static [u8]),
@@ -57,6 +63,11 @@ pub fn app_action(key: &str, mods: &Modifiers) -> Option<AppAction> {
     Some(match key {
         "v" => AppAction::Paste,
         "c" => AppAction::Copy,
+        // Reader/global overlays (Cmd+P, Cmd+Shift+F, Cmd+Shift+P). Shift-guarded
+        // arms must precede their unshifted siblings.
+        "p" if mods.shift => AppAction::OpenCommandPalette,
+        "p" => AppAction::OpenFilePalette,
+        "f" if mods.shift => AppAction::OpenProjectSearch,
         "f" => AppAction::OpenSearch,
         "g" if mods.shift => AppAction::FindPrevious,
         "g" => AppAction::FindNext,

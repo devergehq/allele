@@ -44,6 +44,12 @@ pub enum TerminalEvent {
     ToggleRightSidebar,
     /// Open the scratch pad compose overlay (Cmd+K).
     OpenScratchPad,
+    /// Open the fuzzy file palette (Cmd+P).
+    OpenFilePalette,
+    /// Open the project content/symbol search (Cmd+Shift+F).
+    OpenProjectSearch,
+    /// Open the global command palette (Cmd+Shift+P).
+    OpenCommandPalette,
     /// User hit Cmd+= / Cmd+- — adjust the global default font size by `delta`
     /// points. AppState clamps, persists, and broadcasts to every terminal.
     AdjustFontSize(f32),
@@ -1633,6 +1639,9 @@ impl Render for TerminalView {
                         AppAction::ToggleSidebar => cx.emit(TerminalEvent::ToggleSidebar),
                         AppAction::ToggleRightSidebar => cx.emit(TerminalEvent::ToggleRightSidebar),
                         AppAction::OpenScratchPad => cx.emit(TerminalEvent::OpenScratchPad),
+                        AppAction::OpenFilePalette => cx.emit(TerminalEvent::OpenFilePalette),
+                        AppAction::OpenProjectSearch => cx.emit(TerminalEvent::OpenProjectSearch),
+                        AppAction::OpenCommandPalette => cx.emit(TerminalEvent::OpenCommandPalette),
                         AppAction::SendBytes(bytes) => {
                             if let Some(ref terminal) = this.terminal {
                                 terminal.write(bytes);

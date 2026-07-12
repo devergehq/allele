@@ -261,6 +261,18 @@ impl AppState {
                             this.pending_action = Some(OverlayAction::OpenScratchPad.into());
                             cx.notify();
                         }
+                        TerminalEvent::OpenFilePalette => {
+                            this.pending_action = Some(OverlayAction::OpenFilePalette.into());
+                            cx.notify();
+                        }
+                        TerminalEvent::OpenProjectSearch => {
+                            this.pending_action = Some(OverlayAction::OpenSearch.into());
+                            cx.notify();
+                        }
+                        TerminalEvent::OpenCommandPalette => {
+                            this.pending_action = Some(OverlayAction::OpenCommandPalette.into());
+                            cx.notify();
+                        }
                         TerminalEvent::AdjustFontSize(delta) => {
                             let new_size = clamp_font_size(this.user_settings.font_size + delta);
                             this.pending_action = Some(SettingsAction::UpdateFontSize(new_size).into());
@@ -547,6 +559,18 @@ impl AppState {
                         }
                         TerminalEvent::OpenScratchPad => {
                             this.pending_action = Some(OverlayAction::OpenScratchPad.into());
+                            cx.notify();
+                        }
+                        TerminalEvent::OpenFilePalette => {
+                            this.pending_action = Some(OverlayAction::OpenFilePalette.into());
+                            cx.notify();
+                        }
+                        TerminalEvent::OpenProjectSearch => {
+                            this.pending_action = Some(OverlayAction::OpenSearch.into());
+                            cx.notify();
+                        }
+                        TerminalEvent::OpenCommandPalette => {
+                            this.pending_action = Some(OverlayAction::OpenCommandPalette.into());
                             cx.notify();
                         }
                         TerminalEvent::AdjustFontSize(delta) => {
@@ -878,6 +902,18 @@ impl AppState {
                 }
                 TerminalEvent::OpenScratchPad => {
                     this.pending_action = Some(OverlayAction::OpenScratchPad.into());
+                    cx.notify();
+                }
+                TerminalEvent::OpenFilePalette => {
+                    this.pending_action = Some(OverlayAction::OpenFilePalette.into());
+                    cx.notify();
+                }
+                TerminalEvent::OpenProjectSearch => {
+                    this.pending_action = Some(OverlayAction::OpenSearch.into());
+                    cx.notify();
+                }
+                TerminalEvent::OpenCommandPalette => {
+                    this.pending_action = Some(OverlayAction::OpenCommandPalette.into());
                     cx.notify();
                 }
                 TerminalEvent::AdjustFontSize(delta) => {

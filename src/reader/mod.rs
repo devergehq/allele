@@ -275,12 +275,16 @@ impl AppState {
                                 MouseButton::Left,
                                 cx.listener(|this: &mut Self, _e, window, cx| {
                                     this.reader.find_active = !this.reader.find_active;
+                                    // Always start (and leave) Find empty: clear the
+                                    // query, matches, AND the input entity's text so a
+                                    // stale value never lingers un-actioned.
+                                    this.reader.find_query.clear();
+                                    this.reader.find_matches.clear();
+                                    this.reader.find_current = 0;
+                                    this.reader_find_input
+                                        .update(cx, |i, cx| i.set_text_silent("", cx));
                                     if this.reader.find_active {
                                         this.reader_find_input.focus_handle(cx).focus(window, cx);
-                                    } else {
-                                        this.reader.find_query.clear();
-                                        this.reader.find_matches.clear();
-                                        this.reader.find_current = 0;
                                     }
                                     cx.notify();
                                 }),
@@ -929,6 +933,9 @@ impl AppState {
                 self.reader.expanded_dirs = sel.expanded_dirs;
                 match sel.selected_path {
                     Some(p) if p.exists() => {
+                        // Set selected_path so the file-tree row shows as selected
+                        // (load_preview only fills the preview, not the selection).
+                        self.reader.selected_path = Some(p.clone());
                         self.load_preview(p);
                         // load_preview resets md_view_source; reapply the saved mode.
                         self.reader.md_view_source = sel.md_view_source;
