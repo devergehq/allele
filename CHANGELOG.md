@@ -41,6 +41,10 @@ batch of work merged after the 0.1.0 baseline.
 - Repository ownership moved to **Deverge Consulting Pty Ltd** (`devergehq/allele`);
   `LICENSE`, `NOTICE`, and `CLA.md` updated accordingly.
 
+### Removed
+- `ROADMAP.md` — the historical phase log is retired. The roadmap now lives in Linear
+  (Deverge / DEV); a published, always-current roadmap page is planned.
+
 ## [0.1.0] - 2026-07-02
 
 Initial pre-alpha baseline — the state of the project at PR #34, before the large

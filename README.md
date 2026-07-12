@@ -150,7 +150,7 @@ symlinked into `~/.allele` for cross-machine parity.
 - **Settings:** `~/.config/allele/settings.json` for user preferences.
 - **Async runtime:** tokio.
 
-See `docs/architecture.md` for the full technical deep-dive and `ROADMAP.md` for the phased build plan.
+See `docs/architecture.md` for the full technical deep-dive.
 
 ## Agent UI capture
 
@@ -223,7 +223,9 @@ All core phases complete. Working:
 - Per-session drawer terminal panel
 - Auto-naming sessions from first prompt
 
-See `ROADMAP.md` for the full phase breakdown and remaining work.
+## Roadmap
+
+The live roadmap is tracked in **[Linear (Deverge / DEV)](https://linear.app/deverge/team/DEV/all)** — the source of truth for scope, priority, and status. Shipped work lands on the **[Releases page](https://github.com/devergehq/allele/releases)** and is summarised in **[CHANGELOG.md](CHANGELOG.md)**. A published, always-current roadmap page (derived from Linear) is planned.
 
 ## Contributing
 
