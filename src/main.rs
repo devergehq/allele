@@ -2253,6 +2253,7 @@ fn main() {
                             persisted.label.clone(),
                             persisted.started_at,
                             persisted.last_active,
+                            std::time::Duration::from_secs(persisted.active_runtime_secs),
                             persisted.clone_path.clone(),
                             persisted.merged,
                         )
@@ -2877,13 +2878,13 @@ impl Render for AppState {
                             session.id
                         );
                         session.terminal_view = None;
-                        session.status = SessionStatus::Suspended;
+                        session.set_status(SessionStatus::Suspended);
                     } else {
                         warn!(
                             "PTY exited for session {} ({}) — marking Done",
                             session.id, session.label
                         );
-                        session.status = SessionStatus::Done;
+                        session.set_status(SessionStatus::Done);
                     }
                     session.last_active = std::time::SystemTime::now();
                     session.resuming_until = None;

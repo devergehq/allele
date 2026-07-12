@@ -325,6 +325,7 @@ impl AppState {
 
                 let restore_started = session.started_at;
                 let restore_last_active = session.last_active;
+                let restore_active_runtime = session.active_runtime();
                 let restore_agent_id = session.agent_id.clone();
 
                 let needs_git = clone_path.as_ref().map_or(false, |cp| *cp != canonical);
@@ -448,6 +449,7 @@ impl AppState {
                                     restore_label.clone(),
                                     restore_started,
                                     restore_last_active,
+                                    restore_active_runtime,
                                     Some(restore_clone.clone()),
                                     false,
                                 )
@@ -619,6 +621,7 @@ impl AppState {
                     label,
                     started_at,
                     now,
+                    std::time::Duration::ZERO,
                     Some(clone_path),
                     false,
                 )

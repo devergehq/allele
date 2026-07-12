@@ -69,6 +69,16 @@ impl SessionStatus {
             SessionStatus::ResponseReady => t.ready,     // done, review
         }
     }
+
+    /// Whether the session's runtime timer should be accruing in this status.
+    ///
+    /// The timer runs whenever the session is "on" — i.e. has (or had) a live
+    /// PTY attached — regardless of whether the agent is actively producing
+    /// output. Only `Suspended` (paused, PTY killed) and `Done` (ended, PTY
+    /// exited) freeze the clock.
+    pub fn counts_toward_runtime(&self) -> bool {
+        !matches!(self, SessionStatus::Suspended | SessionStatus::Done)
+    }
 }
 
 /// One named drawer terminal tab.
@@ -184,6 +194,16 @@ pub struct Session {
     /// Transient status line from the allele.json `startup` command.
     /// Updated line-by-line as the script runs, cleared when it finishes.
     pub startup_status: Option<String>,
+    /// Total active runtime banked from all prior "on" stretches — the sum of
+    /// wall-clock time the session spent in a runtime-counting status (see
+    /// [`SessionStatus::counts_toward_runtime`]). Persisted. Paused and idle
+    /// spans are never added here, so this is true active runtime, not age.
+    pub active_accumulated: Duration,
+    /// When `Some(t)`, the session is currently in a runtime-counting status
+    /// and the live stretch began at `t`. `None` while frozen (Suspended/Done).
+    /// Transient — rehydrated sessions come back Suspended, so this resets to
+    /// `None` across restarts and only `active_accumulated` survives.
+    pub active_since: Option<SystemTime>,
 }
 
 impl Session {
@@ -201,6 +221,9 @@ impl Session {
             status: SessionStatus::Idle,
             started_at: now,
             last_active: now,
+            // Idle is a runtime-counting status, so the clock starts now.
+            active_accumulated: Duration::ZERO,
+            active_since: Some(now),
             clone_path: None,
             drawer_tabs: Vec::new(),
             drawer_active_tab: 0,
@@ -236,6 +259,7 @@ impl Session {
         label: String,
         started_at: SystemTime,
         last_active: SystemTime,
+        active_accumulated: Duration,
         clone_path: Option<PathBuf>,
         merged: bool,
     ) -> Self {
@@ -247,6 +271,10 @@ impl Session {
             status: SessionStatus::Suspended,
             started_at,
             last_active,
+            // Suspended is frozen, so the clock is not running; only the
+            // banked runtime restored from disk carries over.
+            active_accumulated,
+            active_since: None,
             clone_path,
             drawer_tabs: Vec::new(),
             drawer_active_tab: 0,
@@ -327,36 +355,58 @@ impl Session {
         self
     }
 
-    /// Format elapsed time since `started_at` as a human-readable string.
+    /// Change the session's status, keeping the active-runtime accounting in
+    /// sync. This is the ONLY sanctioned way to mutate `status` — routing all
+    /// transitions through here is what guarantees the timer counts active
+    /// runtime and not paused/idle wall-clock.
     ///
-    /// For `Running` and `Idle` sessions the timer is live — wall-clock
-    /// since `started_at`. For `Suspended` and `Done` sessions the timer
-    /// is frozen at the last observed activity, so a paused or completed
-    /// session stops ticking in the sidebar.
+    /// On a live→frozen transition it banks the in-flight stretch into
+    /// `active_accumulated`; on a frozen→live transition it starts a new
+    /// stretch. Transitions that stay on the same side of the boundary (e.g.
+    /// Running↔AwaitingInput) leave the running clock untouched.
+    pub fn set_status(&mut self, new: SessionStatus) {
+        let was_counting = self.status.counts_toward_runtime();
+        let now_counting = new.counts_toward_runtime();
+        if was_counting && !now_counting {
+            // Leaving a live state — bank whatever the current stretch accrued.
+            if let Some(since) = self.active_since.take() {
+                self.active_accumulated += since.elapsed().unwrap_or(Duration::ZERO);
+            }
+        } else if !was_counting && now_counting {
+            // Entering a live state — start a fresh stretch.
+            self.active_since = Some(SystemTime::now());
+        }
+        self.status = new;
+    }
+
+    /// Total active runtime as a `Duration`: the banked accumulator plus the
+    /// in-flight stretch if the session is currently in a counting status.
+    /// Paused and completed sessions report exactly their banked runtime.
+    pub fn active_runtime(&self) -> Duration {
+        let mut total = self.active_accumulated;
+        if let Some(since) = self.active_since {
+            total += since.elapsed().unwrap_or(Duration::ZERO);
+        }
+        total
+    }
+
+    /// Format active runtime as a human-readable string.
+    ///
+    /// The value is accumulated active runtime (see [`Session::active_runtime`]),
+    /// so a paused session's display stops advancing and a resumed session
+    /// continues from where it left off — never the session's wall-clock age.
+    /// Days are surfaced once the total reaches 24h so long-lived sessions read
+    /// as e.g. "3d 5h" rather than "77h".
     pub fn elapsed_display(&self) -> String {
-        let elapsed = match self.status {
-            // Frozen — timer stops ticking in the sidebar when the session
-            // is not actively running something.
-            SessionStatus::Suspended
-            | SessionStatus::Done
-            | SessionStatus::AwaitingInput
-            | SessionStatus::ResponseReady => self
-                .last_active
-                .duration_since(self.started_at)
-                .unwrap_or(Duration::ZERO),
-            // Live — still doing work.
-            SessionStatus::Running | SessionStatus::Idle => self
-                .started_at
-                .elapsed()
-                .unwrap_or(Duration::ZERO),
-        };
-        let secs = elapsed.as_secs();
+        let secs = self.active_runtime().as_secs();
         if secs < 60 {
             format!("{secs}s")
         } else if secs < 3600 {
             format!("{}m {}s", secs / 60, secs % 60)
-        } else {
+        } else if secs < 86_400 {
             format!("{}h {}m", secs / 3600, (secs % 3600) / 60)
+        } else {
+            format!("{}d {}h", secs / 86_400, (secs % 86_400) / 3600)
         }
     }
 }
@@ -371,7 +421,15 @@ mod tests {
 
     fn sample(id: &str) -> Session {
         let now = SystemTime::now();
-        Session::suspended_from_persisted(id.to_string(), "L".into(), now, now, None, false)
+        Session::suspended_from_persisted(
+            id.to_string(),
+            "L".into(),
+            now,
+            now,
+            std::time::Duration::ZERO,
+            None,
+            false,
+        )
     }
 
     #[test]
@@ -403,5 +461,89 @@ mod tests {
     fn with_claude_session_id_keeps_divergent_pointer() {
         let s = sample("workspace-abc").with_claude_session_id(Some("rotated-xyz".into()));
         assert_eq!(s.claude_session_id.as_deref(), Some("rotated-xyz"));
+    }
+
+    // --- Active-runtime timer -------------------------------------------
+
+    #[test]
+    fn counts_toward_runtime_only_excludes_paused_and_done() {
+        use super::SessionStatus::*;
+        for s in [Running, Idle, AwaitingInput, ResponseReady] {
+            assert!(s.counts_toward_runtime(), "{s:?} should count");
+        }
+        for s in [Suspended, Done] {
+            assert!(!s.counts_toward_runtime(), "{s:?} should be frozen");
+        }
+    }
+
+    #[test]
+    fn paused_session_reports_only_banked_runtime() {
+        use std::time::Duration;
+        // Frozen session: active_since is None, so runtime == accumulator and
+        // does not advance with wall-clock time.
+        let mut s = sample("s");
+        s.active_accumulated = Duration::from_secs(5 * 3600);
+        assert_eq!(s.active_runtime(), Duration::from_secs(5 * 3600));
+        assert_eq!(s.elapsed_display(), "5h 0m");
+    }
+
+    #[test]
+    fn set_status_banks_in_flight_stretch_on_pause() {
+        use super::SessionStatus;
+        use std::time::Duration;
+        let mut s = sample("s");
+        // Simulate a live session that has been running for ~10s.
+        s.set_status(SessionStatus::Running);
+        s.active_since = Some(SystemTime::now() - Duration::from_secs(10));
+        s.set_status(SessionStatus::Suspended);
+        // Stretch is banked and the clock is stopped.
+        assert!(s.active_since.is_none());
+        assert!(s.active_accumulated >= Duration::from_secs(10));
+    }
+
+    #[test]
+    fn set_status_resumes_clock_from_frozen() {
+        use super::SessionStatus;
+        use std::time::Duration;
+        let mut s = sample("s");
+        s.active_accumulated = Duration::from_secs(120);
+        assert!(s.active_since.is_none());
+        s.set_status(SessionStatus::Running);
+        // Clock restarts; prior banked runtime is preserved.
+        assert!(s.active_since.is_some());
+        assert_eq!(s.active_accumulated, Duration::from_secs(120));
+    }
+
+    #[test]
+    fn transition_within_live_states_does_not_rebank() {
+        use super::SessionStatus;
+        use std::time::Duration;
+        let mut s = sample("s");
+        s.set_status(SessionStatus::Running);
+        let since = s.active_since;
+        s.set_status(SessionStatus::AwaitingInput);
+        // Both are counting states — the running stretch is untouched.
+        assert_eq!(s.active_since, since);
+        assert_eq!(s.active_accumulated, Duration::ZERO);
+    }
+
+    #[test]
+    fn elapsed_display_surfaces_days_past_24h() {
+        use std::time::Duration;
+        let mut s = sample("s");
+        s.active_accumulated = Duration::from_secs(3 * 86_400 + 5 * 3600 + 42 * 60);
+        assert_eq!(s.elapsed_display(), "3d 5h");
+    }
+
+    #[test]
+    fn elapsed_display_sub_day_formats() {
+        use std::time::Duration;
+        let mut s = sample("s");
+        s.active_accumulated = Duration::from_secs(45);
+        assert_eq!(s.elapsed_display(), "45s");
+        s.active_accumulated = Duration::from_secs(3 * 60 + 7);
+        assert_eq!(s.elapsed_display(), "3m 7s");
+        s.active_accumulated = Duration::from_secs(2 * 3600 + 13 * 60);
+        assert_eq!(s.elapsed_display(), "2h 13m");
     }
 }

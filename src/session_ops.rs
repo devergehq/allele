@@ -652,7 +652,7 @@ impl AppState {
                 if session.terminal_view.as_ref() == Some(tv)
                     && session.status == SessionStatus::AwaitingInput
                 {
-                    session.status = SessionStatus::Running;
+                    session.set_status(SessionStatus::Running);
                     session.attention_context = None;
                     matched_cursor = Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
                     break;
@@ -698,7 +698,7 @@ impl AppState {
         session.drawer_tabs.clear();
         session.pending_drawer_tab_names = names;
         session.drawer_visible = false;
-        session.status = SessionStatus::Suspended;
+        session.set_status(SessionStatus::Suspended);
         session.last_active = std::time::SystemTime::now();
 
         // If this was the active session, clear the active cursor — the main
@@ -920,7 +920,7 @@ impl AppState {
             .and_then(|p| p.sessions.get_mut(cursor.session_idx))
         {
             session.terminal_view = Some(terminal_view);
-            session.status = SessionStatus::Running;
+            session.set_status(SessionStatus::Running);
             session.last_active = std::time::SystemTime::now();
             // Pin the resolved agent so subsequent resumes pick up the
             // same adapter even if the global default changes. Leaves a
