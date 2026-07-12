@@ -86,26 +86,21 @@ impl AppState {
         let is_placeholder = session.label.starts_with("Claude ")
             || session.label.starts_with("opencode ")
             || session.label.starts_with("Shell ");
-        let auto_name_data = if is_placeholder {
-            if !session.auto_naming_fired {
-                // First attempt — start polling for the prompt file.
-                session.auto_naming_fired = true;
-                info!(
-                    "auto-naming: triggered for {} label={:?} on {:?}",
-                    session.id, session.label, event.kind
-                );
-                Some((session.id.clone(), session.clone_path.clone()))
-            } else if event.kind == "user_prompt_submit" {
-                // Retry — first attempt likely timed out before user typed.
-                // The .prompt file is guaranteed to exist now.
-                info!(
-                    "auto-naming: retrying for {} on user_prompt_submit (label still {:?})",
-                    session.id, session.label
-                );
-                Some((session.id.clone(), session.clone_path.clone()))
-            } else {
-                None
-            }
+        // Fire exactly once per session. `auto_naming_fired` guards against
+        // spawning a second task while the first is still polling for the
+        // prompt file. It is reset back to `false` only if that task times out
+        // waiting for the prompt (see `trigger_auto_naming`), which lets a
+        // later event retry — without ever running two naming tasks at once.
+        // (An unconditional retry on `user_prompt_submit` used to live here and
+        // caused a duplicate naming task — and a second modal with different
+        // suggestions — on every session.)
+        let auto_name_data = if is_placeholder && !session.auto_naming_fired {
+            session.auto_naming_fired = true;
+            info!(
+                "auto-naming: triggered for {} label={:?} on {:?}",
+                session.id, session.label, event.kind
+            );
+            Some((session.id.clone(), session.clone_path.clone()))
         } else {
             None
         };
@@ -350,7 +345,7 @@ impl AppState {
 
                     let Some(prompt) = prompt_text else {
                         warn!("auto-naming: no prompt file found after 4min for {session_id}");
-                        return None;
+                        return NamingOutcome::TimedOut { session_id };
                     };
                     info!(
                         "auto-naming: prompt file read for {session_id} ({} chars)",
@@ -399,11 +394,11 @@ impl AppState {
                             let slug_raw = git::extract_slug_from_prompt(&prompt, 4);
                             if slug_raw.is_empty() {
                                 warn!("auto-naming: empty slug from keyword extraction");
-                                return None;
+                                return NamingOutcome::Skip;
                             }
                             let slug = git::slugify(&slug_raw, 50);
                             if slug.is_empty() {
-                                return None;
+                                return NamingOutcome::Skip;
                             }
                             let branch = naming::branch_name_from_slug(&slug, &short_id);
                             let label = naming::slug_to_label(&slug);
@@ -425,14 +420,41 @@ impl AppState {
                         }
                     }
 
-                    Some((session_id, mode, branch_name, display_label, suggestions))
+                    NamingOutcome::Named {
+                        session_id,
+                        mode,
+                        branch_name,
+                        display_label,
+                        suggestions,
+                    }
                 })
                 .await;
 
             // Back on the foreground — apply results to UI state.
-            let Some((session_id, mode, branch_name, display_label, suggestions)) = result
-            else {
-                return;
+            let (session_id, mode, branch_name, display_label, suggestions) = match result {
+                NamingOutcome::Named {
+                    session_id,
+                    mode,
+                    branch_name,
+                    display_label,
+                    suggestions,
+                } => (session_id, mode, branch_name, display_label, suggestions),
+                NamingOutcome::TimedOut { session_id } => {
+                    // No task is in flight now — reset the guard so a later
+                    // event can retry naming for this session.
+                    let _ = this.update(cx, |this: &mut AppState, _cx| {
+                        for project in &mut this.projects {
+                            for session in &mut project.sessions {
+                                if session.id == session_id {
+                                    session.auto_naming_fired = false;
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                    return;
+                }
+                NamingOutcome::Skip => return,
             };
 
             // In Interactive mode, hand off to the main thread to show the
@@ -475,6 +497,23 @@ impl AppState {
         })
         .detach();
     }
+}
+
+/// Outcome of the background auto-naming task, interpreted on the foreground.
+enum NamingOutcome {
+    /// The prompt file never appeared within the poll window. No naming task is
+    /// in flight anymore, so `auto_naming_fired` is reset to allow a retry.
+    TimedOut { session_id: String },
+    /// Naming completed and produced a result to apply.
+    Named {
+        session_id: String,
+        mode: NamingMode,
+        branch_name: String,
+        display_label: String,
+        suggestions: Option<Vec<String>>,
+    },
+    /// Naming produced nothing usable (genuine failure); retrying won't help.
+    Skip,
 }
 
 fn short_path(path: &str) -> String {
