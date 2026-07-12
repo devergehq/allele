@@ -52,8 +52,10 @@ over rare, giant ones so the auto-generated notes stay readable.
    git push origin vX.Y.Z
    ```
 5. The [`release.yml`](.github/workflows/release.yml) workflow builds the macOS `.app`,
-   zips it as `Allele-vX.Y.Z-macos.zip`, and creates a GitHub Release for the tag with
-   **auto-generated notes** (every PR since the previous release) plus the binary asset.
+   ad-hoc signs it, zips it as `Allele-vX.Y.Z-macos.zip`, and creates a GitHub Release
+   for the tag with **auto-generated notes** (every PR since the previous release) plus
+   the binary asset. It also prepends the macOS first-launch instructions from
+   [`.github/RELEASE_INSTALL.md`](.github/RELEASE_INSTALL.md) to the release notes.
 6. **Optionally polish the notes.** Open the release on GitHub and paste the curated
    highlights from `CHANGELOG.md` above the auto-generated PR list.
 
