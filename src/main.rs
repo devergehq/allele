@@ -251,6 +251,128 @@ impl AppState {
         )
     }
 
+    fn render_project_overview(&self, cx: &mut Context<Self>) -> Div {
+        let Some(project) = self.projects.first() else {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(theme().text_faint)
+                .child("Open a project to begin");
+        };
+        let changed = project
+            .sessions
+            .iter()
+            .filter(|session| session.git_dirty == Some(true))
+            .count();
+        let processes: usize = project
+            .sessions
+            .iter()
+            .map(|session| session.drawer_tabs.len())
+            .sum();
+        let metric = |label: &'static str, value: String| {
+            div()
+                .p(px(12.0))
+                .rounded(px(8.0))
+                .bg(theme().bg_surface)
+                .border_1()
+                .border_color(theme().border_subtle)
+                .min_w(px(130.0))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme().text_faint)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .mt(px(4.0))
+                        .text_size(px(15.0))
+                        .text_color(theme().text_primary)
+                        .child(value),
+                )
+        };
+
+        div()
+            .size_full()
+            .p(px(24.0))
+            .flex()
+            .flex_col()
+            .gap(px(16.0))
+            .bg(theme().bg_base)
+            .child(
+                div()
+                    .text_size(px(17.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme().text_primary)
+                    .child(project.name.clone()),
+            )
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme().text_secondary)
+                    .child(
+                        "Optional project overview · canonical navigation remains in the sidebar",
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .gap(px(10.0))
+                    .child(metric("Sessions", project.sessions.len().to_string()))
+                    .child(metric("Changed workspaces", changed.to_string()))
+                    .child(metric("Processes", processes.to_string()))
+                    .child(metric("Pull requests", "GitHub not connected".into()))
+                    .child(metric("Stacks", "Stack model not available".into())),
+            )
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.0))
+                    .child(
+                        div()
+                            .id("overview-reader")
+                            .cursor_pointer()
+                            .px(px(10.0))
+                            .py(px(5.0))
+                            .rounded(px(6.0))
+                            .bg(theme().bg_hover)
+                            .text_size(px(11.0))
+                            .text_color(theme().text_primary)
+                            .child("Open Reader")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.main_tab = MainTab::Reader;
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("overview-changes")
+                            .cursor_pointer()
+                            .px(px(10.0))
+                            .py(px(5.0))
+                            .rounded(px(6.0))
+                            .bg(theme().bg_hover)
+                            .text_size(px(11.0))
+                            .text_color(theme().text_primary)
+                            .child("Open Changes")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, _, _, cx| {
+                                    this.right_panel.visible = true;
+                                    this.refresh_changes(cx);
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            )
+    }
+
     /// Open the scratch pad compose overlay, or re-focus it if already open.
     pub(crate) fn open_scratch_pad(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Collect per-project history entries before creating the overlay so
@@ -3744,7 +3866,7 @@ impl Render for AppState {
                                 tv.right_inset = right_inset;
                             });
                             main_area = main_area.child(tv);
-                        } else {
+                        } else if self.projects.is_empty() {
                             main_area = main_area.child(
                                 div()
                                     .size_full()
@@ -3775,6 +3897,8 @@ impl Render for AppState {
                                             .child("Click + in the sidebar to open a project"),
                                     ),
                             );
+                        } else {
+                            main_area = main_area.child(self.render_project_overview(cx));
                         }
                     }
                     MainTab::Reader => {
