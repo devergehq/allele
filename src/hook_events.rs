@@ -17,6 +17,77 @@ use crate::settings::AgentKind;
 use crate::{git, hooks, session, settings};
 
 impl AppState {
+    /// Re-associate a hook event whose Claude session id matches no known
+    /// session back to the workspace it fired in, by matching the event's
+    /// `cwd` against each session's working directory (its clone dir, or the
+    /// project source for fallback sessions). On a *unique* match this adopts
+    /// the new id as the session's `claude_session_id` — the workspace `id`
+    /// stays put — and returns the session's cursor so the caller processes
+    /// the event normally.
+    ///
+    /// Guards against mis-attachment: it only re-keys when exactly one live
+    /// session's cwd matches. Zero or multiple matches → `None` (drop).
+    fn rekey_session_by_cwd(
+        &mut self,
+        event: &hooks::HookEvent,
+        cx: &mut Context<Self>,
+    ) -> Option<crate::actions::SessionCursor> {
+        // No cwd (jq unavailable on the receiver) → nothing to anchor on.
+        let raw_cwd = event.cwd.as_ref()?;
+        let target = std::fs::canonicalize(raw_cwd)
+            .unwrap_or_else(|_| std::path::PathBuf::from(raw_cwd));
+
+        // Resolve each session's working directory and compare to the event's.
+        let same_dir = |dir: &std::path::Path| -> bool {
+            let canon = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+            canon == target
+        };
+
+        let mut matches = self.projects.iter().enumerate().flat_map(|(p_idx, p)| {
+            p.sessions.iter().enumerate().filter_map(move |(s_idx, s)| {
+                let cwd = s
+                    .clone_path
+                    .clone()
+                    .unwrap_or_else(|| p.source_path.clone());
+                if same_dir(&cwd) {
+                    Some((p_idx, s_idx))
+                } else {
+                    None
+                }
+            })
+        });
+
+        let (p_idx, s_idx) = matches.next()?;
+        if matches.next().is_some() {
+            // Ambiguous — more than one session lives in this cwd. Don't guess.
+            warn!(
+                "hook-event: cwd {:?} matches multiple sessions; not re-keying {:?}",
+                raw_cwd, event.session_id
+            );
+            return None;
+        }
+
+        let session = self.projects.get_mut(p_idx)?.sessions.get_mut(s_idx)?;
+        let old_id = session.claude_session_id().to_string();
+        tracing::info!(
+            "hook-event: re-keying session {} claude id {} -> {} (cwd {:?}, kind {:?})",
+            session.id, old_id, event.session_id, raw_cwd, event.kind
+        );
+        session.claude_session_id = Some(event.session_id.clone());
+        self.mark_state_dirty();
+
+        // If the re-keyed session is the one on screen, drop the cached rich
+        // cursor so `ensure_rich_view` rebuilds the transcript tailer against
+        // the new conversation's `.jsonl` on the next render.
+        let cursor = crate::actions::SessionCursor { project_idx: p_idx, session_idx: s_idx };
+        if self.rich.cursor == Some(cursor) {
+            self.rich.cursor = None;
+        }
+        cx.notify();
+
+        Some(cursor)
+    }
+
     /// Apply a single agent event to the matching session.
     ///
     /// Interpretation is delegated to the session's [`AgentAdapter`]: the raw
@@ -33,19 +104,37 @@ impl AppState {
     /// - `TurnComplete`  → `ResponseReady` (finished a response turn)
     /// - `End`           → `Idle`          (PTY watcher handles real exit → Done)
     pub(crate) fn apply_hook_event(&mut self, event: hooks::HookEvent, cx: &mut Context<Self>) {
-        // Find the matching session by its internal ID (= agent session ID).
-        let Some((p_idx, s_idx)) = self.projects.iter().enumerate().find_map(|(p_idx, p)| {
+        // Find the matching session by the Claude conversation id currently
+        // backing it. This is `id` for sessions that never `/clear`ed, or the
+        // rotated id for those that did.
+        let matched = self.projects.iter().enumerate().find_map(|(p_idx, p)| {
             p.sessions
                 .iter()
-                .position(|s| s.id == event.session_id)
+                .position(|s| s.claude_session_id() == event.session_id)
                 .map(|s_idx| (p_idx, s_idx))
-        }) else {
-            // Event for an unknown session — probably stale, drop it.
-            warn!(
-                "hook-event: no matching session for {:?} kind={:?}",
-                event.session_id, event.kind
-            );
-            return;
+        });
+
+        let (p_idx, s_idx) = match matched {
+            Some(cursor) => cursor,
+            None => {
+                // No session owns this id. The likeliest cause is a `/clear`
+                // (or `/compact`): Claude Code rotated to a fresh session id +
+                // transcript while staying in the same workspace. Re-associate
+                // by cwd — the workspace directory is stable across a rotation
+                // — and adopt the new id so status, resume, and the transcript
+                // all follow the live conversation. Falls through to a drop if
+                // no unique workspace matches (a genuinely stale/foreign event).
+                match self.rekey_session_by_cwd(&event, cx) {
+                    Some(cursor) => (cursor.project_idx, cursor.session_idx),
+                    None => {
+                        warn!(
+                            "hook-event: no matching session for {:?} kind={:?} cwd={:?}",
+                            event.session_id, event.kind, event.cwd
+                        );
+                        return;
+                    }
+                }
+            }
         };
 
         // Resolve the adapter for this session's agent BEFORE taking a mutable
