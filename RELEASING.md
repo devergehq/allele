@@ -27,6 +27,14 @@ over rare, giant ones so the auto-generated notes stay readable.
 
 ## Cutting a release (normal path)
 
+> **Invariant:** the commit a release tag points at must have its `Cargo.toml`
+> `version` equal to the tag without the `v` (e.g. tag `v0.2.0` → `version = "0.2.0"`).
+> The version bump and the tag therefore live on the **same commit** — never bump
+> `master` to a version ahead of the latest release "in advance". Between releases,
+> `master` carries the last released version. (`Cargo.toml` drives the binary's own
+> `--version`; the workflow only stamps the `.app` bundle, so the source must be right
+> at the tagged commit.)
+
 1. **Make sure `master` is green and coherent.** All intended PRs merged.
 2. **Prepare the version.** In a short release PR (or as the final change in the last
    feature PR):
