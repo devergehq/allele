@@ -74,7 +74,12 @@ impl RichView {
     /// `session_id` is used only for per-session attachment scoping
     /// (`~/.allele/attachments/<session_id>/`). The view does not start a
     /// CLI process and does not tail files itself — the caller drives both.
-    pub fn new(cx: &mut Context<Self>, session_id: String, font_size: f32) -> Self {
+    pub fn new(
+        cx: &mut Context<Self>,
+        session_id: String,
+        font_size: f32,
+        tool_visibility: std::collections::HashMap<String, bool>,
+    ) -> Self {
         let focus_handle = cx.focus_handle();
 
         let compose_bar = cx.new(|cx| ComposeBar::new(cx, font_size, session_id.clone()));
@@ -96,9 +101,12 @@ impl RichView {
 
         let list_state = ListState::new(0, ListAlignment::Bottom, px(200.0));
 
+        let mut document = RichDocument::new();
+        document.set_tool_visibility(tool_visibility);
+
         Self {
             focus_handle,
-            document: RichDocument::new(),
+            document,
             compose_bar,
             font_size,
             busy: false,

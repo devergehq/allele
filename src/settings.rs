@@ -248,6 +248,14 @@ pub struct Settings {
     #[serde(default)]
     pub default_agent: Option<String>,
 
+    /// Per-tool visibility override for the transcript's tool-activity rail
+    /// (DEV-81), keyed by tool name (e.g. `"Bash"`). `true` forces the call
+    /// collapsed into the rail, `false` forces it expanded; absent tools fall
+    /// back to the routine/mutation classification default. Errors always
+    /// auto-expand regardless.
+    #[serde(default)]
+    pub tool_visibility: std::collections::HashMap<String, bool>,
+
     /// When true, run `git pull` on each project's source root before
     /// creating a new session clone. Failures are logged but do not abort
     /// the session — the clone proceeds against whatever is on disk.
@@ -432,6 +440,7 @@ impl Default for Settings {
             base_infra_enabled: false,
             agents: Vec::new(),
             default_agent: None,
+            tool_visibility: std::collections::HashMap::new(),
             git_pull_before_new_session: false,
             promote_attention_sessions: true,
             naming: NamingConfig::default(),

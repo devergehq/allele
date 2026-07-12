@@ -666,7 +666,10 @@ impl AppState {
         // stays legible even when the user has shrunk the terminal.
         let font_size = (self.user_settings.font_size + 2.0).max(15.0);
 
-        let view = cx.new(|cx| rich::RichView::new(cx, allele_session_id.clone(), font_size));
+        let tool_visibility = self.user_settings.tool_visibility.clone();
+        let view = cx.new(|cx| {
+            rich::RichView::new(cx, allele_session_id.clone(), font_size, tool_visibility)
+        });
 
         // ComposeBar submits bubble up as RichViewEvent::Submit. Route
         // them into the active PTY via the same bracketed-paste path

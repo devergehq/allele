@@ -114,6 +114,9 @@ pub struct RichDocument {
     annotations: HashMap<BlockId, Annotation>,
     /// Retained history of resolved permission decisions (DEV-34).
     decisions: DecisionLog,
+    /// Per-tool rail visibility overrides (DEV-81), keyed by tool name.
+    /// `true` = force collapsed, `false` = force expanded.
+    tool_visibility: HashMap<String, bool>,
 }
 
 impl RichDocument {
@@ -128,7 +131,14 @@ impl RichDocument {
             projector: NarrativeProjector::new(),
             annotations: HashMap::new(),
             decisions: DecisionLog::new(),
+            tool_visibility: HashMap::new(),
         }
+    }
+
+    /// Set the per-tool rail visibility overrides (DEV-81). Applied to tool
+    /// calls created after this point.
+    pub fn set_tool_visibility(&mut self, overrides: HashMap<String, bool>) {
+        self.tool_visibility = overrides;
     }
 
     /// Narrative annotation for a block, if one was recorded.
@@ -390,7 +400,14 @@ impl RichDocument {
                 // Routine reads/searches/shell collapse into the rail; mutations
                 // and notable calls stay expanded (DEV-35). Classify before the
                 // name is moved into the block.
-                let collapsed = default_collapsed(classify_tool(&tool_name), false);
+                // DEV-81: a per-tool visibility override wins over the
+                // routine/mutation default (errored results still auto-expand
+                // later, in the ToolResult arm).
+                let collapsed = self
+                    .tool_visibility
+                    .get(&tool_name)
+                    .copied()
+                    .unwrap_or_else(|| default_collapsed(classify_tool(&tool_name), false));
                 let id = self.push_block(Block {
                     id: self.next_id,
                     kind: BlockKind::ToolCall {
@@ -804,6 +821,42 @@ mod rail_tests {
         assert!(
             !collapsed_of(&doc, read_id),
             "an errored routine call must auto-expand"
+        );
+    }
+
+    #[test]
+    fn tool_visibility_override_wins_over_default() {
+        let mut doc = RichDocument::new();
+        let mut prefs = HashMap::new();
+        prefs.insert("Read".to_string(), false); // force a routine read expanded
+        prefs.insert("Write".to_string(), true); // force a mutation collapsed
+        doc.set_tool_visibility(prefs);
+
+        let read_id = doc.apply_event(tool_use("t1", "Read")).unwrap();
+        let write_id = doc.apply_event(tool_use("t2", "Write")).unwrap();
+        assert!(!collapsed_of(&doc, read_id), "Read overridden to expanded");
+        assert!(
+            collapsed_of(&doc, write_id),
+            "Write overridden to collapsed"
+        );
+
+        // A tool with no override still uses the classification default.
+        let grep_id = doc.apply_event(tool_use("t3", "Grep")).unwrap();
+        assert!(
+            collapsed_of(&doc, grep_id),
+            "Grep (routine, no override) collapses"
+        );
+
+        // An error still auto-expands, even a force-collapsed tool.
+        doc.apply_event(RichEvent::ToolResult {
+            tool_use_id: "t2".into(),
+            content: "denied".into(),
+            is_error: true,
+            parent_agent_id: None,
+        });
+        assert!(
+            !collapsed_of(&doc, write_id),
+            "error overrides the force-collapse pref"
         );
     }
 }
