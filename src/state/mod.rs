@@ -40,6 +40,13 @@ pub struct PersistedSession {
     pub started_at: SystemTime,
     /// Wall-clock time we last observed activity on the session.
     pub last_active: SystemTime,
+    /// Total banked active runtime in whole seconds — the sum of time the
+    /// session spent "on" (see `SessionStatus::counts_toward_runtime`), never
+    /// its wall-clock age. Legacy state.json files predating this field load
+    /// as 0 (serde default), which resets those sessions' timers — intentional,
+    /// since their historical active runtime is unrecoverable.
+    #[serde(default)]
+    pub active_runtime_secs: u64,
     /// True if this session's work was already merged into canonical via
     /// merge-and-close. When set, discard skips creating an archive entry.
     #[serde(default)]
@@ -92,6 +99,9 @@ impl PersistedSession {
             last_known_status: session.status,
             started_at: session.started_at,
             last_active: session.last_active,
+            // Snapshot banked + in-flight runtime so a live session's progress
+            // survives a save/quit (it rehydrates Suspended with this banked).
+            active_runtime_secs: session.active_runtime().as_secs(),
             merged: session.merged,
             drawer_tab_names: if session.drawer_tabs.is_empty() {
                 // Tabs not yet materialised — preserve pending names from disk.

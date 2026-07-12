@@ -284,7 +284,7 @@ impl AppState {
             return;
         }
 
-        session.status = new_status;
+        session.set_status(new_status);
 
         // Capture the label for notifications BEFORE we drop the borrow.
         let session_label = session.label.clone();
