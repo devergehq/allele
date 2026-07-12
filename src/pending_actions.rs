@@ -547,6 +547,96 @@ impl AppState {
                 self.mark_state_dirty();
                 cx.notify();
             }
+            ArchiveAction::RestoreArchive { project_idx, archive_idx } => {
+                // Snapshot everything we need under an immutable borrow, then
+                // drop it before the heavy clone work so we hold no borrow of
+                // AppState across it.
+                let Some(project) = self.projects.get(project_idx) else {
+                    return;
+                };
+                let Some(entry) = project.archives.get(archive_idx) else {
+                    return;
+                };
+                let session_id = entry.id.clone();
+                let label = entry.label.clone();
+                let archived_at = entry.archived_at;
+                let source_path = project.source_path.clone();
+                let project_name = project.name.clone();
+                let cleanup_paths = self.user_settings.session_cleanup_paths.clone();
+
+                // Resolve the agent the same way a fresh session would — the
+                // original agent isn't recorded on the archive entry.
+                let project_override = crate::config::ProjectConfig::load(&source_path)
+                    .and_then(|c| c.agent);
+                let agent_id = crate::agents::resolve(
+                    &self.user_settings.agents,
+                    self.user_settings.default_agent.as_deref(),
+                    project_override.as_deref(),
+                    None,
+                )
+                .map(|a| a.id.clone());
+
+                // 1. APFS-clone canonical into a fresh workspace. clonefile(2)
+                //    is copy-on-write, so this is cheap even for large repos.
+                let clone_path = match crate::clone::create_session_clone(
+                    &source_path,
+                    &project_name,
+                    &session_id,
+                    &cleanup_paths,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        warn!("restore: clone failed for {session_id}: {e}");
+                        cx.notify();
+                        return;
+                    }
+                };
+
+                // 2. Check the archived work out onto a fresh branch. On
+                //    failure leave the archive entry intact so the user can
+                //    retry, and clean up the half-made clone.
+                let branch = git::restored_branch_name(&session_id, &label);
+                if let Err(e) = git::restore_archive_branch(&clone_path, &session_id, &branch) {
+                    warn!("restore: checkout failed for {session_id}: {e}");
+                    let _ = crate::clone::delete_clone(&clone_path);
+                    cx.notify();
+                    return;
+                }
+
+                // 3. Marker file for orphan cleanup; keep it out of git.
+                if let Err(e) = std::fs::write(clone_path.join(".allele-session"), &session_id) {
+                    warn!("restore: failed to write .allele-session marker: {e}");
+                }
+                git::exclude_pattern_in_clone(&clone_path, ".allele-session");
+
+                // 4. Re-add as a suspended session, then drop the archive
+                //    entry and its ref now the work lives in the clone.
+                let started_at =
+                    std::time::UNIX_EPOCH + std::time::Duration::from_secs(archived_at);
+                let now = std::time::SystemTime::now();
+                let session = Session::suspended_from_persisted(
+                    session_id.clone(),
+                    label,
+                    started_at,
+                    now,
+                    Some(clone_path),
+                    false,
+                )
+                .with_agent_id(agent_id)
+                .with_branch_name(Some(branch));
+
+                if let Some(project) = self.projects.get_mut(project_idx) {
+                    project.sessions.push(session);
+                    let _ = git::delete_ref(
+                        &project.source_path,
+                        &git::archive_ref_name(&session_id),
+                    );
+                    project.archives.remove(archive_idx);
+                    info!("Restored archived session {session_id} as a suspended session");
+                }
+                self.mark_state_dirty();
+                cx.notify();
+            }
         }
     }
 

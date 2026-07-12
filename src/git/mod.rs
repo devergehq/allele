@@ -987,6 +987,64 @@ pub fn archive_ref_name(session_id: &str) -> String {
     format!("refs/allele/archive/{session_id}")
 }
 
+/// Branch name for a restored session — a label-derived slug suffixed with
+/// the short session id, matching the shape of auto-named session branches
+/// (e.g. `debug-morph-map-4b9ab364`). Falls back to [`session_branch_name`]
+/// when the label sanitises to nothing.
+pub fn restored_branch_name(session_id: &str, label: &str) -> String {
+    let short_id: String = session_id.chars().take(8).collect();
+    let slug = sanitise_branch_name(&label.to_lowercase(), 80);
+    if slug.is_empty() {
+        session_branch_name(session_id)
+    } else {
+        format!("{slug}-{short_id}")
+    }
+}
+
+/// Reactivate an archived session inside a freshly-created clone. The clone
+/// is an APFS copy of canonical, so it already carries the
+/// `refs/allele/archive/<session-id>` ref. Checks that ref out onto
+/// `branch` (created or reset with `checkout -B`), leaving the clone's
+/// working tree holding exactly the archived work.
+///
+/// Returns an error if the archive ref is missing from the clone — the
+/// caller should then leave the archive entry in place so the user can
+/// retry rather than silently losing the reference.
+pub fn restore_archive_branch(
+    clone: &Path,
+    session_id: &str,
+    branch: &str,
+) -> crate::errors::Result<()> {
+    if !is_git_repo(clone) {
+        return Err(AlleleError::Git(format!(
+            "restore_archive_branch: not a git repo: {}",
+            clone.display()
+        )));
+    }
+
+    let archive_ref = archive_ref_name(session_id);
+    if !ref_exists(clone, &archive_ref) {
+        return Err(AlleleError::Git(format!(
+            "restore_archive_branch: archive ref {archive_ref} not found in clone {}",
+            clone.display()
+        )));
+    }
+
+    let mut cmd = git_cmd(Some(clone));
+    cmd.arg("checkout").arg("-B").arg(branch).arg(&archive_ref);
+    run_git(cmd, "checkout -B (restore archive)")
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
+
+    Ok(())
+}
+
+/// True if `ref_name` resolves in `repo` (any ref namespace).
+fn ref_exists(repo: &Path, ref_name: &str) -> bool {
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("rev-parse").arg("--verify").arg("--quiet").arg(ref_name);
+    cmd.output().map(|o| o.status.success()).unwrap_or(false)
+}
+
 
 // --- Session auto-naming ------------------------------------------------
 
@@ -1495,6 +1553,57 @@ mod tests {
         create_session_branch(&path, "testsession08").unwrap();
         let head_after = head_commit(&path);
         assert_eq!(head_before, head_after);
+    }
+
+    #[test]
+    fn restored_branch_name_derives_lowercase_slug_and_short_id() {
+        let name =
+            restored_branch_name("4b9ab364-9734-45cd-bf1c-b264b37c2d7f", "Debug Morph Map");
+        assert_eq!(name, "debug-morph-map-4b9ab364");
+    }
+
+    #[test]
+    fn restored_branch_name_falls_back_when_label_empty() {
+        let name = restored_branch_name("abcd1234-0000", "   ");
+        assert_eq!(name, session_branch_name("abcd1234-0000"));
+    }
+
+    #[test]
+    fn restore_archive_branch_checks_out_archived_work() {
+        let (_dir, path) = make_canonical("v1");
+
+        // A second commit stands in for the archived session work.
+        fs::write(path.join("file.txt"), "archived work").unwrap();
+        let mut add = git_cmd(Some(&path));
+        add.arg("add").arg("-A");
+        run_git(add, "add (test)").unwrap();
+        let mut commit = git_cmd(Some(&path));
+        commit.arg("commit").arg("-m").arg("archived work");
+        run_git(commit, "commit (test)").unwrap();
+        let archived = head_commit(&path);
+
+        // Park it under an archive ref, then rewind the working branch so the
+        // restore must actually move HEAD forward.
+        let sid = "abc12345-0000-0000-0000-000000000000";
+        let mut update = git_cmd(Some(&path));
+        update.arg("update-ref").arg(archive_ref_name(sid)).arg(&archived);
+        run_git(update, "update-ref (test)").unwrap();
+        let mut reset = git_cmd(Some(&path));
+        reset.arg("reset").arg("--hard").arg("HEAD~1");
+        run_git(reset, "reset (test)").unwrap();
+        assert_ne!(head_commit(&path).trim(), archived.trim());
+
+        restore_archive_branch(&path, sid, "restored-branch").unwrap();
+
+        assert_eq!(head_commit(&path).trim(), archived.trim());
+        assert_eq!(current_branch(&path).as_deref(), Some("restored-branch"));
+    }
+
+    #[test]
+    fn restore_archive_branch_errors_when_ref_missing() {
+        let (_dir, path) = make_canonical("v1");
+        let err = restore_archive_branch(&path, "no-such-session", "b");
+        assert!(err.is_err());
     }
 
     /// Create a named branch pointing at HEAD without switching to it.

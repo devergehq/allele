@@ -259,6 +259,13 @@ impl Session {
         self
     }
 
+    /// Attach the branch name backing this session's clone. Used when
+    /// restoring an archived session onto a freshly checked-out branch.
+    pub fn with_branch_name(mut self, branch_name: Option<String>) -> Self {
+        self.branch_name = branch_name;
+        self
+    }
+
     /// Attach persisted browser tab id and last URL during rehydration.
     /// The tab id may be stale (Chrome restart); reconciled on first sync.
     pub fn with_browser(
