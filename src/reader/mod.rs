@@ -572,18 +572,27 @@ impl AppState {
         contents: &str,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let _ = path;
         let font_size = self.user_settings.font_size.max(12.0);
         let outline = markdown_outline(contents);
 
-        let rendered = div()
+        // Split the document into sections at heading boundaries so each heading
+        // starts a fresh, directly-scrollable child. The outline scrolls to the
+        // matching section by index (see scroll_md_to_heading / DEV-65).
+        let sections = markdown_sections(contents, &outline);
+
+        let mut rendered = div()
             .id("reader-md-scroll")
+            .track_scroll(&self.reader.md_scroll)
             .flex_1()
             .min_w(px(0.0))
             .h_full()
             .overflow_scroll()
             .px(px(20.0))
-            .py(px(14.0))
-            .child(crate::rich::markdown::render(contents, false, font_size));
+            .py(px(14.0));
+        for chunk in &sections {
+            rendered = rendered.child(crate::rich::markdown::render(chunk, false, font_size));
+        }
 
         let mut row = div()
             .flex_1()
@@ -592,16 +601,35 @@ impl AppState {
             .flex_row()
             .child(rendered);
         if !outline.is_empty() {
-            row = row.child(self.render_md_outline(path, outline, cx));
+            row = row.child(self.render_md_outline(outline, cx));
         }
         row
     }
 
-    /// Right-hand heading outline. Clicking a heading emits a file deep link at
-    /// the heading's source line, which the Reader reveals (DEV-44).
+    /// Scroll the rendered-Markdown body so heading `outline_idx` is at the top.
+    /// Recomputes the section layout from the current preview so it matches what
+    /// `render_markdown_body` built.
+    fn scroll_md_to_heading(&mut self, outline_idx: usize, cx: &mut Context<Self>) {
+        let Some(Preview { kind: PreviewKind::Text(contents), .. }) = self.reader.preview.as_ref()
+        else {
+            return;
+        };
+        let outline = markdown_outline(contents);
+        // A leading preamble section (content before the first heading) shifts
+        // every heading's child index by one.
+        let has_preamble = outline
+            .first()
+            .map(|o| o.offset > 0 && !contents[..o.offset].trim().is_empty())
+            .unwrap_or(false);
+        let child = if has_preamble { outline_idx + 1 } else { outline_idx };
+        self.reader.md_scroll.scroll_to_item(child);
+        cx.notify();
+    }
+
+    /// Right-hand heading outline. Clicking a heading scrolls the rendered body
+    /// to that section (DEV-65).
     fn render_md_outline(
         &self,
-        path: &std::path::Path,
         outline: Vec<OutlineItem>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -626,13 +654,6 @@ impl AppState {
             );
         for (i, item) in outline.into_iter().enumerate() {
             let indent = 12.0 + (item.level.saturating_sub(1) as f32) * 10.0;
-            let url = deeplink::DeepLink::File {
-                project: None,
-                session: None,
-                path: path.to_path_buf(),
-                line: Some(item.line),
-            }
-            .to_url();
             rail = rail.child(
                 div()
                     .id(("md-outline-item", i))
@@ -646,8 +667,8 @@ impl AppState {
                     .child(item.text)
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this: &mut Self, _e, window, cx| {
-                            this.open_deep_link(&url, window, cx);
+                        cx.listener(move |this: &mut Self, _e, _window, cx| {
+                            this.scroll_md_to_heading(i, cx);
                         }),
                     ),
             );
@@ -910,14 +931,17 @@ fn is_markdown(path: &std::path::Path) -> bool {
     )
 }
 
-/// A heading in the outline: nesting level, text, and 1-based source line.
+/// A heading in the outline: nesting level, text, 1-based source line, and the
+/// byte offset where the heading starts (for section splitting).
 struct OutlineItem {
     level: u8,
     text: String,
+    #[allow(dead_code)]
     line: usize,
+    offset: usize,
 }
 
-/// Extract every heading (with its source line) for the outline rail.
+/// Extract every heading (with its source line and byte offset) for the outline.
 fn markdown_outline(contents: &str) -> Vec<OutlineItem> {
     use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
     let level_num = |l: HeadingLevel| match l {
@@ -932,21 +956,21 @@ fn markdown_outline(contents: &str) -> Vec<OutlineItem> {
     let parser = Parser::new_ext(contents, Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS)
         .into_offset_iter();
     let mut out = Vec::new();
-    let mut cur: Option<(u8, String, usize)> = None;
+    let mut cur: Option<(u8, String, usize, usize)> = None;
     for (ev, range) in parser {
         match ev {
             Event::Start(Tag::Heading { level, .. }) => {
-                cur = Some((level_num(level), String::new(), line_of(range.start)))
+                cur = Some((level_num(level), String::new(), line_of(range.start), range.start))
             }
             Event::Text(t) | Event::Code(t) => {
-                if let Some((_, s, _)) = cur.as_mut() {
+                if let Some((_, s, _, _)) = cur.as_mut() {
                     s.push_str(&t);
                 }
             }
             Event::End(TagEnd::Heading(_)) => {
-                if let Some((level, text, line)) = cur.take() {
+                if let Some((level, text, line, offset)) = cur.take() {
                     if !text.trim().is_empty() {
-                        out.push(OutlineItem { level, text, line });
+                        out.push(OutlineItem { level, text, line, offset });
                     }
                 }
             }
@@ -954,6 +978,25 @@ fn markdown_outline(contents: &str) -> Vec<OutlineItem> {
         }
     }
     out
+}
+
+/// Split `contents` into rendered-Markdown sections: a leading preamble (only if
+/// non-empty) followed by one chunk per heading, starting at each heading's byte
+/// offset. Boundaries are pulldown token offsets, so always char-aligned.
+fn markdown_sections(contents: &str, outline: &[OutlineItem]) -> Vec<String> {
+    if outline.is_empty() {
+        return vec![contents.to_string()];
+    }
+    let mut sections = Vec::new();
+    let first = outline[0].offset;
+    if first > 0 && !contents[..first].trim().is_empty() {
+        sections.push(contents[..first].to_string());
+    }
+    for (i, item) in outline.iter().enumerate() {
+        let end = outline.get(i + 1).map(|n| n.offset).unwrap_or(contents.len());
+        sections.push(contents[item.offset..end].to_string());
+    }
+    sections
 }
 
 /// Centered explanatory panel for a file that can't be rendered as source.

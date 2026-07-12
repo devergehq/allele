@@ -112,9 +112,9 @@ impl AppState {
         }
     }
 
-    /// Open the highlighted hit in the Reader at its file, highlighting the
-    /// query. Precise scroll-to-line lands with the DEV-44 deep-link protocol.
-    pub(crate) fn confirm_search(&mut self, cx: &mut Context<Self>) {
+    /// Open the highlighted hit in the Reader at its exact file and line, via
+    /// the DEV-44 deep-link protocol, and highlight the query there.
+    pub(crate) fn confirm_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((path, line, query)) = self.search.as_ref().and_then(|s| {
             s.results
                 .get(s.selected)
@@ -122,11 +122,21 @@ impl AppState {
         }) else {
             return;
         };
-        // Deep-link to the exact file and line (DEV-44).
-        self.reveal_file(path, (line > 0).then_some(line), cx);
+        // A search hit is a file:line deep link. Emit it as an `allele://` URL
+        // and route it through the shared entry point, so in-app and external
+        // (notification) links take exactly the same path (DEV-44).
+        let url = crate::reader::deeplink::DeepLink::File {
+            project: None,
+            session: None,
+            path,
+            line: (line > 0).then_some(line),
+        }
+        .to_url();
+        self.open_deep_link(&url, window, cx);
         if !query.is_empty() {
             self.reader.find_query = query;
             self.reader.find_active = true;
+            self.recompute_find_matches();
         }
         self.search = None;
         cx.notify();
@@ -254,11 +264,11 @@ impl AppState {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this: &mut Self, _e, _w, cx| {
+                        cx.listener(move |this: &mut Self, _e, window, cx| {
                             if let Some(s) = this.search.as_mut() {
                                 s.selected = row;
                             }
-                            this.confirm_search(cx);
+                            this.confirm_search(window, cx);
                         }),
                     ),
             );
@@ -315,10 +325,10 @@ impl AppState {
                         MouseButton::Left,
                         cx.listener(|this: &mut Self, _e, _w, cx| this.close_search(cx)),
                     )
-                    .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, _w, cx| {
+                    .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, window, cx| {
                         match event.keystroke.key.as_str() {
                             "escape" => this.close_search(cx),
-                            "enter" => this.confirm_search(cx),
+                            "enter" => this.confirm_search(window, cx),
                             "down" => this.move_search_selection(1, cx),
                             "up" => this.move_search_selection(-1, cx),
                             _ => {}

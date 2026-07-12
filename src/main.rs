@@ -2827,6 +2827,7 @@ fn main() {
                             find_matches: Vec::new(),
                             find_current: 0,
                             md_view_source: false,
+                            md_scroll: gpui::ScrollHandle::new(),
                             recent: Vec::new(),
                             reveal_line: None,
                             source_scroll: gpui::ScrollHandle::new(),

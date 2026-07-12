@@ -146,6 +146,9 @@ pub(crate) struct ReaderState {
     /// For Markdown files: show raw source instead of the rendered view.
     /// Ignored for non-Markdown files. Reset on each file selection.
     pub(crate) md_view_source: bool,
+    /// Scroll handle for the rendered-Markdown body, so the outline can scroll
+    /// a heading into view (DEV-65).
+    pub(crate) md_scroll: gpui::ScrollHandle,
     /// Recently opened files (most-recent first, deduped, capped). Feeds the
     /// Cmd+P empty-query view and biases fuzzy ranking.
     pub(crate) recent: Vec<PathBuf>,
