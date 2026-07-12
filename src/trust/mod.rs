@@ -27,8 +27,8 @@ use serde_json::{json, Map, Value};
 
 /// Resolve the path to `~/.claude.json`.
 fn claude_json_path() -> anyhow::Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     Ok(home.join(".claude.json"))
 }
 
@@ -42,9 +42,7 @@ fn load_claude_json(path: &Path) -> anyhow::Result<Value> {
                 .map_err(|e| anyhow::anyhow!("parse {}: {e}", path.display()))?;
             Ok(value)
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Ok(Value::Object(Map::new()))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Object(Map::new())),
         Err(e) => Err(anyhow::anyhow!("read {}: {e}", path.display())),
     }
 }
@@ -74,10 +72,7 @@ fn stamp_trust(root: &mut Value, key: &str) -> anyhow::Result<()> {
         .as_object_mut()
         .ok_or_else(|| anyhow::anyhow!("projects[{key}] is not an object"))?;
 
-    entry_obj.insert(
-        "hasTrustDialogAccepted".to_string(),
-        Value::Bool(true),
-    );
+    entry_obj.insert("hasTrustDialogAccepted".to_string(), Value::Bool(true));
 
     Ok(())
 }
@@ -207,10 +202,7 @@ mod tests {
             result["projects"]["/other/path"]["allowedTools"],
             json!(["Read", "Edit"])
         );
-        assert_eq!(
-            result["projects"]["/other/path"]["lastCost"],
-            json!(1.23)
-        );
+        assert_eq!(result["projects"]["/other/path"]["lastCost"], json!(1.23));
         assert_eq!(
             result["projects"]["/tmp/fake/ws"]["hasTrustDialogAccepted"],
             Value::Bool(true)

@@ -10,14 +10,16 @@
 //! UI lives here; the caller just asks for the list of elements to drop into
 //! the content column plus the optional drag overlay sibling.
 
-use gpui::*;
-use crate::theme::theme;
 use crate::icon::{icon, name as icons};
+use crate::theme::theme;
+use gpui::*;
 
 use crate::actions::{DrawerAction, SessionCursor, SettingsAction};
 use crate::app_state::{AppState, DRAWER_MIN_HEIGHT};
 use crate::session::DrawerTab;
-use crate::terminal::{clamp_font_size, ShellCommand, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
+use crate::terminal::{
+    clamp_font_size, ShellCommand, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE,
+};
 use crate::SimpleTooltip;
 
 impl AppState {
@@ -33,7 +35,8 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let working_dir = self.projects
+        let working_dir = self
+            .projects
             .get(cursor.project_idx)
             .and_then(|p| p.sessions.get(cursor.session_idx))
             .and_then(|s| s.clone_path.clone());
@@ -53,7 +56,8 @@ impl AppState {
                     }
                     TerminalEvent::PrevSession | TerminalEvent::NextSession => {
                         if let Some(cursor) = this.active {
-                            if let Some(session) = this.projects
+                            if let Some(session) = this
+                                .projects
                                 .get(cursor.project_idx)
                                 .and_then(|p| p.sessions.get(cursor.session_idx))
                             {
@@ -64,7 +68,8 @@ impl AppState {
                                         TerminalEvent::NextSession => (cur + 1) % len,
                                         _ => (cur + len - 1) % len,
                                     };
-                                    this.pending_action = Some(DrawerAction::SwitchDrawerTab(target).into());
+                                    this.pending_action =
+                                        Some(DrawerAction::SwitchDrawerTab(target).into());
                                     cx.notify();
                                 }
                             }
@@ -86,13 +91,13 @@ impl AppState {
         )
         .detach();
 
-        if let Some(session) = self.projects
+        if let Some(session) = self
+            .projects
             .get_mut(cursor.project_idx)
             .and_then(|p| p.sessions.get_mut(cursor.session_idx))
         {
-            let tab_name = name.unwrap_or_else(|| {
-                format!("Terminal {}", session.drawer_tabs.len() + 1)
-            });
+            let tab_name =
+                name.unwrap_or_else(|| format!("Terminal {}", session.drawer_tabs.len() + 1));
             session.drawer_tabs.push(DrawerTab {
                 view: drawer_tv,
                 name: tab_name,
@@ -110,7 +115,8 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let (needs_default, pending) = {
-            let session = self.projects
+            let session = self
+                .projects
                 .get(cursor.project_idx)
                 .and_then(|p| p.sessions.get(cursor.session_idx));
             match session {
@@ -132,7 +138,8 @@ impl AppState {
             for name in pending {
                 self.spawn_drawer_tab(cursor, Some(name), None, window, cx);
             }
-            if let Some(session) = self.projects
+            if let Some(session) = self
+                .projects
                 .get_mut(cursor.project_idx)
                 .and_then(|p| p.sessions.get_mut(cursor.session_idx))
             {
@@ -151,7 +158,8 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(session) = self.projects
+        if let Some(session) = self
+            .projects
             .get(cursor.project_idx)
             .and_then(|p| p.sessions.get(cursor.session_idx))
         {
@@ -188,10 +196,13 @@ pub(crate) fn build_drawer_items(
             // tint is the affordance.
             .bg(theme().bg_base)
             .hover(|s| s.bg(theme().bg_hover))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
-                this.drawer.resizing = true;
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this: &mut AppState, _event, _window, cx| {
+                    this.drawer.resizing = true;
+                    cx.notify();
+                }),
+            )
             .into_any_element(),
     );
 
@@ -243,8 +254,16 @@ pub(crate) fn build_drawer_items(
     for (idx, name) in tabs_meta {
         let is_active = idx == active_tab_idx;
         let is_renaming = renaming_idx == Some(idx);
-        let tab_bg = if is_active { theme().bg_raised } else { theme().bg_base };
-        let tab_fg = if is_active { theme().text_primary } else { theme().text_secondary };
+        let tab_bg = if is_active {
+            theme().bg_raised
+        } else {
+            theme().bg_base
+        };
+        let tab_fg = if is_active {
+            theme().text_primary
+        } else {
+            theme().text_secondary
+        };
 
         let mut tab_el = div()
             .id(("drawer-tab", idx))
@@ -277,67 +296,59 @@ pub(crate) fn build_drawer_items(
                 .text_color(theme().text_primary)
                 .child(format!("{display}▎"));
             if let Some(fh) = rename_focus.clone() {
-                label = label
-                    .track_focus(&fh)
-                    .on_key_down(cx.listener(
-                        |this: &mut AppState, event: &KeyDownEvent, _window, cx| {
-                            let key = event.keystroke.key.as_str();
-                            let mods = &event.keystroke.modifiers;
-                            match key {
-                                "enter" => {
-                                    this.pending_action =
-                                        Some(DrawerAction::CommitRenameDrawerTab.into());
+                label = label.track_focus(&fh).on_key_down(cx.listener(
+                    |this: &mut AppState, event: &KeyDownEvent, _window, cx| {
+                        let key = event.keystroke.key.as_str();
+                        let mods = &event.keystroke.modifiers;
+                        match key {
+                            "enter" => {
+                                this.pending_action =
+                                    Some(DrawerAction::CommitRenameDrawerTab.into());
+                                cx.notify();
+                            }
+                            "escape" => {
+                                this.pending_action =
+                                    Some(DrawerAction::CancelRenameDrawerTab.into());
+                                cx.notify();
+                            }
+                            "backspace" => {
+                                if let Some((_, _, buf)) = this.drawer.rename.as_mut() {
+                                    buf.pop();
                                     cx.notify();
                                 }
-                                "escape" => {
-                                    this.pending_action =
-                                        Some(DrawerAction::CancelRenameDrawerTab.into());
-                                    cx.notify();
-                                }
-                                "backspace" => {
-                                    if let Some((_, _, buf)) =
-                                        this.drawer.rename.as_mut()
-                                    {
-                                        buf.pop();
-                                        cx.notify();
-                                    }
-                                }
-                                _ => {
-                                    if let Some(ref ch) = event.keystroke.key_char {
-                                        if !mods.control && !mods.platform {
-                                            if let Some((_, _, buf)) =
-                                                this.drawer.rename.as_mut()
-                                            {
-                                                buf.push_str(ch);
-                                                cx.notify();
-                                            }
+                            }
+                            _ => {
+                                if let Some(ref ch) = event.keystroke.key_char {
+                                    if !mods.control && !mods.platform {
+                                        if let Some((_, _, buf)) = this.drawer.rename.as_mut() {
+                                            buf.push_str(ch);
+                                            cx.notify();
                                         }
                                     }
                                 }
                             }
-                        },
-                    ));
+                        }
+                    },
+                ));
             }
             tab_el = tab_el.child(label);
         } else {
             tab_el = tab_el
-                .child(
-                    div()
-                        .child(name)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
-                                if event.click_count >= 2 {
-                                    this.pending_action =
-                                        Some(DrawerAction::StartRenameDrawerTab(idx).into());
-                                } else {
-                                    this.pending_action =
-                                        Some(DrawerAction::SwitchDrawerTab(idx).into());
-                                }
-                                cx.notify();
-                            }),
-                        ),
-                )
+                .child(div().child(name).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(
+                        move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
+                            if event.click_count >= 2 {
+                                this.pending_action =
+                                    Some(DrawerAction::StartRenameDrawerTab(idx).into());
+                            } else {
+                                this.pending_action =
+                                    Some(DrawerAction::SwitchDrawerTab(idx).into());
+                            }
+                            cx.notify();
+                        },
+                    ),
+                ))
                 .child(
                     div()
                         .id(("drawer-tab-close", idx))
@@ -346,7 +357,10 @@ pub(crate) fn build_drawer_items(
                         .hover(|s| s.bg(theme().bg_active))
                         .child(icon(icons::X, 11.0, theme().text_faint))
                         .tooltip(|_window, cx| {
-                            cx.new(|_| SimpleTooltip { text: "Close tab".into() }).into()
+                            cx.new(|_| SimpleTooltip {
+                                text: "Close tab".into(),
+                            })
+                            .into()
                         })
                         .on_mouse_down(
                             MouseButton::Left,
@@ -375,7 +389,10 @@ pub(crate) fn build_drawer_items(
             .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
             .child("+")
             .tooltip(|_window, cx| {
-                cx.new(|_| SimpleTooltip { text: "New terminal tab".into() }).into()
+                cx.new(|_| SimpleTooltip {
+                    text: "New terminal tab".into(),
+                })
+                .into()
             })
             .on_mouse_down(
                 MouseButton::Left,
@@ -410,12 +427,18 @@ pub(crate) fn build_drawer_items(
                     .hover(|s| s.bg(theme().bg_raised))
                     .child(icon(icons::X, 12.0, theme().text_faint))
                     .tooltip(|_window, cx| {
-                        cx.new(|_| SimpleTooltip { text: "Close drawer".into() }).into()
+                        cx.new(|_| SimpleTooltip {
+                            text: "Close drawer".into(),
+                        })
+                        .into()
                     })
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
-                        this.pending_action = Some(DrawerAction::ToggleDrawer.into());
-                        cx.notify();
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut AppState, _event, _window, cx| {
+                            this.pending_action = Some(DrawerAction::ToggleDrawer.into());
+                            cx.notify();
+                        }),
+                    ),
             )
             .into_any_element(),
     );
@@ -481,21 +504,27 @@ pub(crate) fn build_drawer_drag_overlay(
         .right(px(0.0))
         .bottom(px(0.0))
         .cursor_row_resize()
-        .on_mouse_move(cx.listener(|this: &mut AppState, event: &MouseMoveEvent, window, cx| {
-            let viewport_h = f32::from(window.viewport_size().height);
-            let mouse_y = f32::from(event.position.y);
-            // Drawer height = distance from bottom of viewport to mouse
-            let new_height = (viewport_h - mouse_y).clamp(DRAWER_MIN_HEIGHT, viewport_h - 200.0);
-            if (new_height - this.drawer.height).abs() > 0.5 {
-                this.drawer.height = new_height;
-                window.refresh();
+        .on_mouse_move(
+            cx.listener(|this: &mut AppState, event: &MouseMoveEvent, window, cx| {
+                let viewport_h = f32::from(window.viewport_size().height);
+                let mouse_y = f32::from(event.position.y);
+                // Drawer height = distance from bottom of viewport to mouse
+                let new_height =
+                    (viewport_h - mouse_y).clamp(DRAWER_MIN_HEIGHT, viewport_h - 200.0);
+                if (new_height - this.drawer.height).abs() > 0.5 {
+                    this.drawer.height = new_height;
+                    window.refresh();
+                    cx.notify();
+                }
+            }),
+        )
+        .on_mouse_up(
+            MouseButton::Left,
+            cx.listener(|this: &mut AppState, _event: &MouseUpEvent, _window, cx| {
+                this.drawer.resizing = false;
+                this.mark_settings_dirty();
                 cx.notify();
-            }
-        }))
-        .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut AppState, _event: &MouseUpEvent, _window, cx| {
-            this.drawer.resizing = false;
-            this.mark_settings_dirty();
-            cx.notify();
-        }))
+            }),
+        )
         .into_any_element()
 }

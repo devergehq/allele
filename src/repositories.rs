@@ -61,9 +61,7 @@ impl StateRepository for JsonFileStateRepo {
     }
 
     fn save(&self, state: &PersistedState) -> Result<()> {
-        state
-            .save()
-            .map_err(|e| AlleleError::State(e.to_string()))
+        state.save().map_err(|e| AlleleError::State(e.to_string()))
     }
 }
 

@@ -7,8 +7,8 @@
 //! The `StreamParser` transforms Layer 1 → Layer 2, accumulating partial JSON
 //! for tool inputs and extracting semantic events like `EditDiff`.
 
-mod types;
 mod parser;
+mod types;
 
-pub use types::*;
 pub use parser::*;
+pub use types::*;

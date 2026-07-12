@@ -17,7 +17,9 @@ pub enum AgentKind {
 }
 
 impl Default for AgentKind {
-    fn default() -> Self { AgentKind::Generic }
+    fn default() -> Self {
+        AgentKind::Generic
+    }
 }
 
 /// One entry in the user's configured coding-agent list. Paths are
@@ -97,7 +99,6 @@ pub struct ProjectSettings {
     pub remote: Option<String>,
 
     // --- session orchestration -----------------------------------------------
-
     /// Drawer terminals spawned when a session is created. Each entry
     /// becomes a tab in the bottom drawer with the given label and
     /// command. `{{unique_port}}` and `{{folder}}` are substituted.
@@ -264,11 +265,21 @@ pub struct Settings {
     pub naming: NamingConfig,
 }
 
-fn default_sidebar_width() -> f32 { 240.0 }
-fn default_font_size() -> f32 { 13.0 }
-fn default_drawer_height() -> f32 { 200.0 }
-fn default_right_sidebar_width() -> f32 { 300.0 }
-fn default_true() -> bool { true }
+fn default_sidebar_width() -> f32 {
+    240.0
+}
+fn default_font_size() -> f32 {
+    13.0
+}
+fn default_drawer_height() -> f32 {
+    200.0
+}
+fn default_right_sidebar_width() -> f32 {
+    300.0
+}
+fn default_true() -> bool {
+    true
+}
 
 /// Default list of stale runtime files to purge from a fresh session clone.
 /// Paths deleted from each new session clone before the session starts.
@@ -299,9 +310,7 @@ fn default_session_cleanup_paths() -> Vec<String> {
 
 /// Paths that should always be in cleanup_paths. Used by
 /// `ensure_cleanup_paths_updated` to backfill existing settings.
-const RECOMMENDED_CLEANUP_PATHS: &[&str] = &[
-    ".next", ".nuxt", ".turbo", "target",
-];
+const RECOMMENDED_CLEANUP_PATHS: &[&str] = &[".next", ".nuxt", ".turbo", "target"];
 
 /// Built-in macOS sound for AwaitingInput. Used when the user hasn't set
 /// a custom path in settings.json.
@@ -437,7 +446,9 @@ impl Settings {
 
     /// Save settings to disk. Silently fails on error (not critical).
     pub fn save(&self) {
-        let Some(path) = Self::path() else { return; };
+        let Some(path) = Self::path() else {
+            return;
+        };
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -454,7 +465,10 @@ mod tests {
     #[test]
     fn default_includes_overmind_sock() {
         let s = Settings::default();
-        assert!(s.session_cleanup_paths.iter().any(|p| p == ".overmind.sock"));
+        assert!(s
+            .session_cleanup_paths
+            .iter()
+            .any(|p| p == ".overmind.sock"));
     }
 
     #[test]

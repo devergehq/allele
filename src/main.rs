@@ -1,23 +1,20 @@
 mod actions;
 mod agents;
 mod app_state;
+mod assets;
 mod base_infra;
 mod browser;
 mod changes;
-mod assets;
-mod icon;
-mod terminal;
-mod theme;
-mod sidebar;
 mod clone;
 mod config;
-mod drawer;
 mod debug_capture;
+mod drawer;
 mod editor;
 mod errors;
 mod git;
 mod hook_events;
 mod hooks;
+mod icon;
 mod keymap;
 mod memory_watchdog;
 mod naming;
@@ -33,26 +30,41 @@ mod session_ops;
 mod settings;
 mod settings_window;
 mod shell_env;
+mod sidebar;
 mod state;
 mod stream;
+mod terminal;
 mod text_input;
+mod theme;
 mod transcript;
 mod trust;
 
+use crate::icon::{icon, name as icons};
+use crate::theme::{theme, with_alpha};
 use actions::{
     BrowserAction, DrawerAction, OverlayAction, ProjectAction, SessionAction, SessionCursor,
     SettingsAction, SidebarAction,
 };
 use app_state::{
     AppState, ChangesPanelState, ConfirmationState, DrawerState, EditorState, MainTab, RichState,
-    RightPanelState,
-    SidebarState, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
+    RightPanelState, SidebarState, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
 };
 use gpui::*;
 use project::Project;
-use crate::theme::{theme, with_alpha};
-use crate::icon::{icon, name as icons};
-actions!(allele, [About, Quit, ToggleSidebarAction, ToggleDrawerAction, OpenSettings, OpenScratchPadAction, ToggleTranscriptTabAction, CycleAttentionSession, CaptureUi]);
+actions!(
+    allele,
+    [
+        About,
+        Quit,
+        ToggleSidebarAction,
+        ToggleDrawerAction,
+        OpenSettings,
+        OpenScratchPadAction,
+        ToggleTranscriptTabAction,
+        CycleAttentionSession,
+        CaptureUi
+    ]
+);
 use session::{Session, SessionStatus};
 use settings::{ProjectSave, Settings};
 use state::{ArchivedSession, PersistedSession, PersistedState};
@@ -107,10 +119,14 @@ impl Render for SimpleTooltip {
 /// Returns `false` on any IO error so the caller falls back to `--session-id`
 /// (fresh session, same UUID) rather than failing into "Session ended".
 fn claude_session_history_exists(session_id: &str) -> bool {
-    let Some(home) = dirs::home_dir() else { return false; };
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
     let projects_dir = home.join(".claude").join("projects");
     let needle = format!("{session_id}.jsonl");
-    let Ok(entries) = std::fs::read_dir(&projects_dir) else { return false; };
+    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+        return false;
+    };
     for entry in entries.flatten() {
         let sub = entry.path();
         if !sub.is_dir() {
@@ -163,22 +179,20 @@ impl AppState {
             });
             cx.subscribe(
                 &entity,
-                |this: &mut Self, _pad, event: &scratch_pad::ScratchPadEvent, cx| {
-                    match event {
-                        scratch_pad::ScratchPadEvent::Send { text, attachments } => {
-                            this.scratch_pad_send(text.clone(), attachments.clone(), cx);
-                            this.scratch_pad = None;
-                            this.pending_action = Some(SessionAction::FocusActive.into());
-                            cx.notify();
-                        }
-                        scratch_pad::ScratchPadEvent::Close => {
-                            this.scratch_pad = None;
-                            this.pending_action = Some(SessionAction::FocusActive.into());
-                            cx.notify();
-                        }
-                        scratch_pad::ScratchPadEvent::DeleteHistoryEntry { id } => {
-                            this.delete_scratch_history_entry(id.clone(), cx);
-                        }
+                |this: &mut Self, _pad, event: &scratch_pad::ScratchPadEvent, cx| match event {
+                    scratch_pad::ScratchPadEvent::Send { text, attachments } => {
+                        this.scratch_pad_send(text.clone(), attachments.clone(), cx);
+                        this.scratch_pad = None;
+                        this.pending_action = Some(SessionAction::FocusActive.into());
+                        cx.notify();
+                    }
+                    scratch_pad::ScratchPadEvent::Close => {
+                        this.scratch_pad = None;
+                        this.pending_action = Some(SessionAction::FocusActive.into());
+                        cx.notify();
+                    }
+                    scratch_pad::ScratchPadEvent::DeleteHistoryEntry { id } => {
+                        this.delete_scratch_history_entry(id.clone(), cx);
                     }
                 },
             )
@@ -205,8 +219,12 @@ impl AppState {
         attachments: Vec<std::path::PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        let Some(session) = self.active_session() else { return; };
-        let Some(tv) = session.terminal_view.clone() else { return; };
+        let Some(session) = self.active_session() else {
+            return;
+        };
+        let Some(tv) = session.terminal_view.clone() else {
+            return;
+        };
 
         // Capture this submission into per-project scratch history. Keyed
         // by the active session's project so the next Cmd+K in the same
@@ -329,8 +347,16 @@ impl AppState {
 
         let tab = |id: &'static str, label: &'static str, tab: MainTab| {
             let is_active = tab == active;
-            let bg = if is_active { theme().bg_raised } else { theme().bg_base };
-            let fg = if is_active { theme().text_primary } else { theme().text_secondary };
+            let bg = if is_active {
+                theme().bg_raised
+            } else {
+                theme().bg_base
+            };
+            let fg = if is_active {
+                theme().text_primary
+            } else {
+                theme().text_secondary
+            };
             div()
                 .id(id)
                 .px(px(12.0))
@@ -378,7 +404,11 @@ impl AppState {
             .gap(px(4.0))
             .child(tab("main-tab-claude", "Claude", MainTab::Claude))
             .child(tab("main-tab-editor", "Editor", MainTab::Editor))
-            .child(tab("main-tab-transcript", "Transcript", MainTab::Transcript));
+            .child(tab(
+                "main-tab-transcript",
+                "Transcript",
+                MainTab::Transcript,
+            ));
         if self.browser_tab_available() {
             strip = strip.child(tab("main-tab-browser", "Browser", MainTab::Browser));
         }
@@ -398,23 +428,28 @@ impl AppState {
                     continue;
                 }
                 let label = session.label.clone();
-                let (tool, summary, is_permission) = if let Some(ref ctx) = session.attention_context {
-                    let tool = ctx.tool_name.clone().unwrap_or_default();
-                    let summary = ctx.tool_input_summary.clone()
-                        .or_else(|| ctx.message.clone())
-                        .unwrap_or_else(|| "Waiting for input".into());
-                    // Permission prompts: either tool_name is set (rich payload)
-                    // or the message contains "permission" (Claude Code's
-                    // Notification hook doesn't include tool details, only the
-                    // message text like "Claude needs your permission").
-                    let is_perm = ctx.tool_name.is_some()
-                        || ctx.message.as_deref()
-                            .map(|m| m.contains("permission"))
-                            .unwrap_or(false);
-                    (tool, summary, is_perm)
-                } else {
-                    (String::new(), "Waiting for input".into(), false)
-                };
+                let (tool, summary, is_permission) =
+                    if let Some(ref ctx) = session.attention_context {
+                        let tool = ctx.tool_name.clone().unwrap_or_default();
+                        let summary = ctx
+                            .tool_input_summary
+                            .clone()
+                            .or_else(|| ctx.message.clone())
+                            .unwrap_or_else(|| "Waiting for input".into());
+                        // Permission prompts: either tool_name is set (rich payload)
+                        // or the message contains "permission" (Claude Code's
+                        // Notification hook doesn't include tool details, only the
+                        // message text like "Claude needs your permission").
+                        let is_perm = ctx.tool_name.is_some()
+                            || ctx
+                                .message
+                                .as_deref()
+                                .map(|m| m.contains("permission"))
+                                .unwrap_or(false);
+                        (tool, summary, is_perm)
+                    } else {
+                        (String::new(), "Waiting for input".into(), false)
+                    };
                 items.push((p_idx, s_idx, label, tool, summary, is_permission));
             }
         }
@@ -432,7 +467,9 @@ impl AppState {
             .border_b_1()
             .border_color(theme().border_default);
 
-        for (idx, (p_idx, s_idx, label, tool, summary, is_permission)) in items.into_iter().enumerate() {
+        for (idx, (p_idx, s_idx, label, tool, summary, is_permission)) in
+            items.into_iter().enumerate()
+        {
             let row_id = SharedString::from(format!("attention-row-{p_idx}-{s_idx}"));
 
             let tool_display = if tool.is_empty() {
@@ -441,11 +478,18 @@ impl AppState {
                 format!("{tool}: ")
             };
 
-            let is_active = self.active
+            let is_active = self
+                .active
                 .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
                 .unwrap_or(false);
 
-            let bg = if is_active { theme().bg_attention } else if idx % 2 == 0 { theme().bg_base } else { theme().bg_row_alt };
+            let bg = if is_active {
+                theme().bg_attention
+            } else if idx % 2 == 0 {
+                theme().bg_base
+            } else {
+                theme().bg_row_alt
+            };
 
             let mut row = div()
                 .id(row_id)
@@ -457,9 +501,7 @@ impl AppState {
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
-                .child(
-                    icon(icons::ALERT_TRIANGLE, 13.0, theme().attention),
-                )
+                .child(icon(icons::ALERT_TRIANGLE, 13.0, theme().attention))
                 .child(
                     div()
                         .flex_1()
@@ -470,13 +512,19 @@ impl AppState {
                         .items_center()
                         .gap(px(6.0))
                         .cursor_pointer()
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
-                            this.pending_action = Some(SessionAction::SelectSession {
-                                project_idx: p_idx,
-                                session_idx: s_idx,
-                            }.into());
-                            cx.notify();
-                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                this.pending_action = Some(
+                                    SessionAction::SelectSession {
+                                        project_idx: p_idx,
+                                        session_idx: s_idx,
+                                    }
+                                    .into(),
+                                );
+                                cx.notify();
+                            }),
+                        )
                         .child(
                             div()
                                 .text_size(px(11.0))
@@ -512,19 +560,23 @@ impl AppState {
                         .text_color(theme().success) // green
                         .hover(|s| s.bg(theme().bg_hover))
                         .child("Allow")
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
-                            if let Some(session) = this.projects
-                                .get_mut(p_idx)
-                                .and_then(|p| p.sessions.get_mut(s_idx))
-                            {
-                                if let Some(ref tv) = session.terminal_view {
-                                    tv.read(cx).send_input(b"\r");
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                if let Some(session) = this
+                                    .projects
+                                    .get_mut(p_idx)
+                                    .and_then(|p| p.sessions.get_mut(s_idx))
+                                {
+                                    if let Some(ref tv) = session.terminal_view {
+                                        tv.read(cx).send_input(b"\r");
+                                    }
+                                    session.status = session::SessionStatus::Running;
+                                    session.attention_context = None;
                                 }
-                                session.status = session::SessionStatus::Running;
-                                session.attention_context = None;
-                            }
-                            cx.notify();
-                        })),
+                                cx.notify();
+                            }),
+                        ),
                 );
             }
 
@@ -546,10 +598,16 @@ impl AppState {
     /// Called on every spinner tick. No-op when no tailer has been built
     /// yet (user hasn't opened the Transcript tab on this session).
     fn poll_transcript_tailer(&mut self, cx: &mut Context<Self>) {
-        let Some(tailer) = self.rich.transcript_tailer.as_mut() else { return };
+        let Some(tailer) = self.rich.transcript_tailer.as_mut() else {
+            return;
+        };
         let events = tailer.poll();
-        if events.is_empty() { return; }
-        let Some(view) = self.rich.view.as_ref().cloned() else { return };
+        if events.is_empty() {
+            return;
+        }
+        let Some(view) = self.rich.view.as_ref().cloned() else {
+            return;
+        };
         view.update(cx, |rv, cx| {
             for ev in events {
                 match ev {
@@ -579,7 +637,11 @@ impl AppState {
                 .unwrap_or_else(|| project.source_path.clone());
             // Attachments scope by the stable workspace id (must not move on
             // /clear); the transcript tails the *current* Claude conversation.
-            (session.id.clone(), session.claude_session_id().to_string(), cwd)
+            (
+                session.id.clone(),
+                session.claude_session_id().to_string(),
+                cwd,
+            )
         };
         // Transcript density differs from terminal density — the
         // terminal is tuned for cramming rows, whereas the Rich view is
@@ -594,16 +656,17 @@ impl AppState {
         // them into the active PTY via the same bracketed-paste path
         // the Scratch Pad uses. Nothing here spawns or talks to the
         // `claude` binary directly.
-        cx.subscribe(&view, |this: &mut Self, _v, event: &rich::RichViewEvent, cx| {
-            match event {
+        cx.subscribe(
+            &view,
+            |this: &mut Self, _v, event: &rich::RichViewEvent, cx| match event {
                 rich::RichViewEvent::Submit { text, attachments } => {
-                    let paths: Vec<PathBuf> =
-                        attachments.iter().map(|a| a.path.clone()).collect();
+                    let paths: Vec<PathBuf> = attachments.iter().map(|a| a.path.clone()).collect();
                     this.scratch_pad_send(text.clone(), paths, cx);
                 }
                 rich::RichViewEvent::AllowPermission => {
                     if let Some(cursor) = this.active {
-                        if let Some(session) = this.projects
+                        if let Some(session) = this
+                            .projects
                             .get_mut(cursor.project_idx)
                             .and_then(|p| p.sessions.get_mut(cursor.session_idx))
                         {
@@ -616,8 +679,8 @@ impl AppState {
                     }
                     cx.notify();
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         // Scope the tailer to the active session's JSONL. We point at
@@ -847,8 +910,7 @@ impl AppState {
             return;
         };
         if !browser::chrome_running() {
-            self.browser_status =
-                "Start Google Chrome and try again.".to_string();
+            self.browser_status = "Start Google Chrome and try again.".to_string();
             return;
         }
 
@@ -938,13 +1000,7 @@ impl AppState {
                 .hover(|s| s.bg(theme().bg_hover))
                 .child(label.to_string())
         };
-        let separator = || {
-            div()
-                .w_full()
-                .h(px(1.0))
-                .my(px(4.0))
-                .bg(theme().bg_raised)
-        };
+        let separator = || div().w_full().h(px(1.0)).my(px(4.0)).bg(theme().bg_raised);
 
         let menu = div()
             .flex()
@@ -961,62 +1017,98 @@ impl AppState {
                 cx.notify();
             }))
             .child(
-                menu_item("project-ctx-new-session", "New Session", theme().text_primary)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                menu_item(
+                    "project-ctx-new-session",
+                    "New Session",
+                    theme().text_primary,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.project_context_menu = None;
-                        this.pending_action = Some(SessionAction::AddSessionToProject(p_idx).into());
+                        this.pending_action =
+                            Some(SessionAction::AddSessionToProject(p_idx).into());
                         cx.notify();
-                    })),
+                    }),
+                ),
             )
             .child(
-                menu_item("project-ctx-new-session-details", "New Session with Details…", theme().text_primary)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                menu_item(
+                    "project-ctx-new-session-details",
+                    "New Session with Details…",
+                    theme().text_primary,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.project_context_menu = None;
-                        this.pending_action = Some(SessionAction::OpenNewSessionModal(p_idx).into());
+                        this.pending_action =
+                            Some(SessionAction::OpenNewSessionModal(p_idx).into());
                         cx.notify();
-                    })),
+                    }),
+                ),
             )
             .child(separator())
             .child(
-                menu_item("project-ctx-settings", "Project Settings", theme().text_primary)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                menu_item(
+                    "project-ctx-settings",
+                    "Project Settings",
+                    theme().text_primary,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.project_context_menu = None;
                         this.toggle_project_settings_panel(p_idx, cx);
-                    })),
+                    }),
+                ),
             )
             .child(
                 menu_item("project-ctx-reveal", "Open in Finder", theme().text_primary)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
-                        cx.stop_propagation();
-                        this.project_context_menu = None;
-                        this.pending_action = Some(ProjectAction::RevealProjectInFinder(p_idx).into());
-                        cx.notify();
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this: &mut Self, _event, _window, cx| {
+                            cx.stop_propagation();
+                            this.project_context_menu = None;
+                            this.pending_action =
+                                Some(ProjectAction::RevealProjectInFinder(p_idx).into());
+                            cx.notify();
+                        }),
+                    ),
             )
             .child(
                 menu_item("project-ctx-copy-path", "Copy Path", theme().text_primary)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
-                        cx.stop_propagation();
-                        this.project_context_menu = None;
-                        this.pending_action = Some(ProjectAction::CopyProjectPath(p_idx).into());
-                        cx.notify();
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this: &mut Self, _event, _window, cx| {
+                            cx.stop_propagation();
+                            this.project_context_menu = None;
+                            this.pending_action =
+                                Some(ProjectAction::CopyProjectPath(p_idx).into());
+                            cx.notify();
+                        }),
+                    ),
             )
             .child(separator())
             .child(
-                menu_item("project-ctx-remove", "Remove Project…", theme().danger)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                menu_item("project-ctx-remove", "Remove Project…", theme().danger).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.project_context_menu = None;
-                        this.pending_action = Some(ProjectAction::RequestRemoveProject(p_idx).into());
+                        this.pending_action =
+                            Some(ProjectAction::RequestRemoveProject(p_idx).into());
                         cx.notify();
-                    })),
+                    }),
+                ),
             );
 
-        root = root.child(deferred(anchored().position(position).snap_to_window().child(menu)));
+        root = root.child(deferred(
+            anchored().position(position).snap_to_window().child(menu),
+        ));
         root
     }
 
@@ -1060,13 +1152,7 @@ impl AppState {
                 .child(label.to_string())
         };
 
-        let separator = || {
-            div()
-                .w_full()
-                .h(px(1.0))
-                .my(px(4.0))
-                .bg(theme().bg_raised)
-        };
+        let separator = || div().w_full().h(px(1.0)).my(px(4.0)).bg(theme().bg_raised);
 
         let menu = div()
             .flex()
@@ -1083,17 +1169,31 @@ impl AppState {
                 cx.notify();
             }))
             .child(
-                menu_item("session-ctx-edit", "Edit Session…", theme().text_primary)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                menu_item("session-ctx-edit", "Edit Session…", theme().text_primary).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
-                        this.pending_action = Some(SessionAction::EditSession { project_idx: p_idx, session_idx: s_idx }.into());
+                        this.pending_action = Some(
+                            SessionAction::EditSession {
+                                project_idx: p_idx,
+                                session_idx: s_idx,
+                            }
+                            .into(),
+                        );
                         cx.notify();
-                    })),
+                    }),
+                ),
             )
             .child(
-                menu_item("session-ctx-merge-strategy", &merge_label, theme().text_primary)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                menu_item(
+                    "session-ctx-merge-strategy",
+                    &merge_label,
+                    theme().text_primary,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         use crate::settings::MergeStrategy as MS;
                         if let Some(session) = this
@@ -1102,7 +1202,8 @@ impl AppState {
                             .and_then(|p| p.sessions.get_mut(s_idx))
                         {
                             // Cycle: project default -> Merge -> Squash -> Rebase+merge -> default.
-                            session.merge_strategy_override = match session.merge_strategy_override {
+                            session.merge_strategy_override = match session.merge_strategy_override
+                            {
                                 None => Some(MS::Merge),
                                 Some(MS::Merge) => Some(MS::Squash),
                                 Some(MS::Squash) => Some(MS::RebaseThenMerge),
@@ -1112,58 +1213,104 @@ impl AppState {
                         }
                         // Menu stays open so the new value is visible.
                         cx.notify();
-                    })),
+                    }),
+                ),
             )
             .child(separator())
             .child(
                 menu_item("session-ctx-reveal", "Open in Finder", theme().text_primary)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
-                        cx.stop_propagation();
-                        this.session_context_menu = None;
-                        this.pending_action = Some(SessionAction::RevealSessionInFinder { project_idx: p_idx, session_idx: s_idx }.into());
-                        cx.notify();
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this: &mut Self, _event, _window, cx| {
+                            cx.stop_propagation();
+                            this.session_context_menu = None;
+                            this.pending_action = Some(
+                                SessionAction::RevealSessionInFinder {
+                                    project_idx: p_idx,
+                                    session_idx: s_idx,
+                                }
+                                .into(),
+                            );
+                            cx.notify();
+                        }),
+                    ),
             )
             .child(
                 menu_item("session-ctx-copy-path", "Copy Path", theme().text_primary)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
-                        cx.stop_propagation();
-                        this.session_context_menu = None;
-                        this.pending_action = Some(SessionAction::CopySessionPath { project_idx: p_idx, session_idx: s_idx }.into());
-                        cx.notify();
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this: &mut Self, _event, _window, cx| {
+                            cx.stop_propagation();
+                            this.session_context_menu = None;
+                            this.pending_action = Some(
+                                SessionAction::CopySessionPath {
+                                    project_idx: p_idx,
+                                    session_idx: s_idx,
+                                }
+                                .into(),
+                            );
+                            cx.notify();
+                        }),
+                    ),
             )
             .child(separator())
             .child(
-                menu_item("session-ctx-pin", pin_label, theme().text_primary)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                menu_item("session-ctx-pin", pin_label, theme().text_primary).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
-                        this.pending_action = Some(SessionAction::TogglePinSession { project_idx: p_idx, session_idx: s_idx }.into());
+                        this.pending_action = Some(
+                            SessionAction::TogglePinSession {
+                                project_idx: p_idx,
+                                session_idx: s_idx,
+                            }
+                            .into(),
+                        );
                         cx.notify();
-                    })),
+                    }),
+                ),
             )
             .child(
                 menu_item("session-ctx-comment", "Add Comment…", theme().text_primary)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
-                        cx.stop_propagation();
-                        this.session_context_menu = None;
-                        this.pending_action = Some(SessionAction::EditSession { project_idx: p_idx, session_idx: s_idx }.into());
-                        cx.notify();
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this: &mut Self, _event, _window, cx| {
+                            cx.stop_propagation();
+                            this.session_context_menu = None;
+                            this.pending_action = Some(
+                                SessionAction::EditSession {
+                                    project_idx: p_idx,
+                                    session_idx: s_idx,
+                                }
+                                .into(),
+                            );
+                            cx.notify();
+                        }),
+                    ),
             )
             .child(separator())
             .child(
-                menu_item("session-ctx-delete", "Delete", theme().danger)
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _event, _window, cx| {
+                menu_item("session-ctx-delete", "Delete", theme().danger).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
-                        this.pending_action = Some(SessionAction::RequestDiscardSession { project_idx: p_idx, session_idx: s_idx }.into());
+                        this.pending_action = Some(
+                            SessionAction::RequestDiscardSession {
+                                project_idx: p_idx,
+                                session_idx: s_idx,
+                            }
+                            .into(),
+                        );
                         cx.notify();
-                    })),
+                    }),
+                ),
             );
 
-        root = root.child(deferred(anchored().position(position).snap_to_window().child(menu)));
+        root = root.child(deferred(
+            anchored().position(position).snap_to_window().child(menu),
+        ));
         root
     }
 
@@ -1175,8 +1322,12 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(project) = self.projects.get(project_idx) else { return; };
-        let Some(session) = project.sessions.get(session_idx) else { return; };
+        let Some(project) = self.projects.get(project_idx) else {
+            return;
+        };
+        let Some(session) = project.sessions.get(session_idx) else {
+            return;
+        };
 
         // Extract the current branch name from the clone.
         // If it's a placeholder (session-<8hex> or legacy allele/session/<id>),
@@ -1222,14 +1373,17 @@ impl AppState {
                         pinned,
                     } => {
                         this.edit_session_modal = None;
-                        this.pending_action = Some(SessionAction::ApplySessionEdit {
-                            project_idx: *project_idx,
-                            session_idx: *session_idx,
-                            label: label.clone(),
-                            branch_slug: branch_slug.clone(),
-                            comment: comment.clone(),
-                            pinned: *pinned,
-                        }.into());
+                        this.pending_action = Some(
+                            SessionAction::ApplySessionEdit {
+                                project_idx: *project_idx,
+                                session_idx: *session_idx,
+                                label: label.clone(),
+                                branch_slug: branch_slug.clone(),
+                                comment: comment.clone(),
+                                pinned: *pinned,
+                            }
+                            .into(),
+                        );
                         cx.notify();
                     }
                     new_session_modal::EditSessionModalEvent::Close => {
@@ -1282,12 +1436,16 @@ impl AppState {
             window_y: None,
             window_width: None,
             window_height: None,
-            projects: self.projects.iter().map(|p| ProjectSave {
-                id: p.id.clone(),
-                name: p.name.clone(),
-                source_path: p.source_path.clone(),
-                settings: p.settings.clone(),
-            }).collect(),
+            projects: self
+                .projects
+                .iter()
+                .map(|p| ProjectSave {
+                    id: p.id.clone(),
+                    name: p.name.clone(),
+                    source_path: p.source_path.clone(),
+                    settings: p.settings.clone(),
+                })
+                .collect(),
             drawer_height: self.drawer.height,
             drawer_visible: false,
             right_sidebar_visible: self.right_panel.visible,
@@ -1452,13 +1610,16 @@ impl AppState {
                         initial_prompt,
                     } => {
                         this.new_session_modal = None;
-                        this.pending_action = Some(SessionAction::AddSessionWithDetails {
-                            project_idx: *project_idx,
-                            label: label.clone(),
-                            branch_slug: branch_slug.clone(),
-                            agent_id: agent_id.clone(),
-                            initial_prompt: initial_prompt.clone(),
-                        }.into());
+                        this.pending_action = Some(
+                            SessionAction::AddSessionWithDetails {
+                                project_idx: *project_idx,
+                                label: label.clone(),
+                                branch_slug: branch_slug.clone(),
+                                agent_id: agent_id.clone(),
+                                initial_prompt: initial_prompt.clone(),
+                            }
+                            .into(),
+                        );
                         cx.notify();
                     }
                     new_session_modal::NewSessionModalEvent::Close => {
@@ -1757,8 +1918,15 @@ impl AppState {
     }
 
     /// Remove a project and all its sessions (deleting all clones asynchronously).
-    pub(crate) fn remove_project(&mut self, project_idx: usize, _window: &mut Window, cx: &mut Context<Self>) {
-        if project_idx >= self.projects.len() { return; }
+    pub(crate) fn remove_project(
+        &mut self,
+        project_idx: usize,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if project_idx >= self.projects.len() {
+            return;
+        }
 
         // Remove the project from the list immediately. The terminal entities
         // are dropped, which kills the PTYs.
@@ -1778,18 +1946,19 @@ impl AppState {
                 // Active was in the removed project — pick any other session
                 self.projects.iter().enumerate().find_map(|(p_idx, p)| {
                     if !p.sessions.is_empty() {
-                        Some(SessionCursor { project_idx: p_idx, session_idx: 0 })
+                        Some(SessionCursor {
+                            project_idx: p_idx,
+                            session_idx: 0,
+                        })
                     } else {
                         None
                     }
                 })
             }
-            Some(active) if active.project_idx > project_idx => {
-                Some(SessionCursor {
-                    project_idx: active.project_idx - 1,
-                    session_idx: active.session_idx,
-                })
-            }
+            Some(active) if active.project_idx > project_idx => Some(SessionCursor {
+                project_idx: active.project_idx - 1,
+                session_idx: active.session_idx,
+            }),
             other => other,
         };
 
@@ -1830,7 +1999,8 @@ fn install_panic_hook() {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
 
-            let location = info.location()
+            let location = info
+                .location()
                 .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
                 .unwrap_or_else(|| "<unknown>".to_string());
 
@@ -2048,8 +2218,12 @@ fn main() {
         // regardless of what's installed on the system.
         cx.text_system()
             .add_fonts(vec![
-                std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").as_slice()),
-                std::borrow::Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf").as_slice()),
+                std::borrow::Cow::Borrowed(
+                    include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").as_slice(),
+                ),
+                std::borrow::Cow::Borrowed(
+                    include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf").as_slice(),
+                ),
             ])
             .expect("failed to load bundled fonts");
 
@@ -2064,7 +2238,10 @@ fn main() {
 
         // Load persisted session state (may be empty on first run).
         let loaded_state = PersistedState::load();
-        info!("Loaded persisted state: {} sessions", loaded_state.sessions.len());
+        info!(
+            "Loaded persisted state: {} sessions",
+            loaded_state.sessions.len()
+        );
 
         // Install the Allele hook receiver and settings file so every
         // claude spawn can route attention signals back into the UI. Failure
@@ -2180,31 +2357,42 @@ fn main() {
                             window_y: None,
                             window_width: Some(f32::from(viewport.width)),
                             window_height: Some(f32::from(viewport.height)),
-                            projects: this.projects.iter().map(|p| ProjectSave {
-                                id: p.id.clone(),
-                                name: p.name.clone(),
-                                source_path: p.source_path.clone(),
-                                settings: p.settings.clone(),
-                            }).collect(),
+                            projects: this
+                                .projects
+                                .iter()
+                                .map(|p| ProjectSave {
+                                    id: p.id.clone(),
+                                    name: p.name.clone(),
+                                    source_path: p.source_path.clone(),
+                                    settings: p.settings.clone(),
+                                })
+                                .collect(),
                             ..this.user_settings.clone()
                         };
                         if let Err(e) = this.repos.settings.save(&settings) {
                             warn!("Failed to save settings.json on window-bounds change: {e}");
                         }
-                    }).detach();
+                    })
+                    .detach();
 
                     // Rehydrate projects from settings.
-                    let mut projects: Vec<Project> = settings_for_window.projects.iter().map(|p| {
-                        let mut proj = Project::new(p.name.clone(), p.source_path.clone());
-                        proj.id = p.id.clone();
-                        proj.settings = p.settings.clone();
-                        proj
-                    }).collect();
+                    let mut projects: Vec<Project> = settings_for_window
+                        .projects
+                        .iter()
+                        .map(|p| {
+                            let mut proj = Project::new(p.name.clone(), p.source_path.clone());
+                            proj.id = p.id.clone();
+                            proj.settings = p.settings.clone();
+                            proj
+                        })
+                        .collect();
 
                     // Rehydrate archived sessions from state.json so the
                     // archive browser shows human-readable labels.
                     for archived in &loaded_state_for_window.archived_sessions {
-                        if let Some(project) = projects.iter_mut().find(|p| p.id == archived.project_id) {
+                        if let Some(project) =
+                            projects.iter_mut().find(|p| p.id == archived.project_id)
+                        {
                             project.archives.push(archived.clone());
                         }
                     }
@@ -2222,7 +2410,10 @@ fn main() {
                                     project.archives.push(ArchivedSession {
                                         id: entry.session_id.clone(),
                                         project_id: project.id.clone(),
-                                        label: format!("Session {}", &entry.session_id[..8.min(entry.session_id.len())]),
+                                        label: format!(
+                                            "Session {}",
+                                            &entry.session_id[..8.min(entry.session_id.len())]
+                                        ),
                                         archived_at: entry.timestamp,
                                     });
                                 }
@@ -2237,9 +2428,8 @@ fn main() {
                     // silently dropped — on the next save_state the entries
                     // will be removed from disk too.
                     for persisted in &loaded_state_for_window.sessions {
-                        let Some(project) = projects
-                            .iter_mut()
-                            .find(|p| p.id == persisted.project_id)
+                        let Some(project) =
+                            projects.iter_mut().find(|p| p.id == persisted.project_id)
                         else {
                             warn!(
                                 "Dropping persisted session {} — owning project {} is gone",
@@ -2261,10 +2451,7 @@ fn main() {
                             persisted.drawer_tab_names.clone(),
                             persisted.drawer_active_tab,
                         )
-                        .with_browser(
-                            persisted.browser_tab_id,
-                            persisted.browser_last_url.clone(),
-                        )
+                        .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
                         .with_agent_id(persisted.agent_id.clone())
                         .with_claude_session_id(persisted.claude_session_id.clone());
                         session.pinned = persisted.pinned;
@@ -2374,23 +2561,21 @@ fn main() {
 
                     // Agent-facing capture requests arrive through a tiny file
                     // protocol so shell agents need no Accessibility permission.
-                    cx.spawn(async move |this, cx| {
-                        loop {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_millis(250))
-                                .await;
-                            if !debug_capture::take_request() {
-                                continue;
-                            }
-                            if this
-                                .update(cx, |state: &mut AppState, cx| {
-                                    state.capture_ui_requested = true;
-                                    cx.notify();
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
+                    cx.spawn(async move |this, cx| loop {
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(250))
+                            .await;
+                        if !debug_capture::take_request() {
+                            continue;
+                        }
+                        if this
+                            .update(cx, |state: &mut AppState, cx| {
+                                state.capture_ui_requested = true;
+                                cx.notify();
+                            })
+                            .is_err()
+                        {
+                            break;
                         }
                     })
                     .detach();
@@ -2486,7 +2671,8 @@ fn main() {
                         move |_, cx| {
                             handle
                                 .update(cx, |this: &mut AppState, cx| {
-                                    this.pending_action = Some(OverlayAction::OpenScratchPad.into());
+                                    this.pending_action =
+                                        Some(OverlayAction::OpenScratchPad.into());
                                     cx.notify();
                                 })
                                 .ok();
@@ -2514,8 +2700,11 @@ fn main() {
                                     // Collect all AwaitingInput sessions.
                                     let mut attention: Vec<SessionCursor> = Vec::new();
                                     for (p_idx, project) in this.projects.iter().enumerate() {
-                                        for (s_idx, session) in project.sessions.iter().enumerate() {
-                                            if session.status == session::SessionStatus::AwaitingInput {
+                                        for (s_idx, session) in project.sessions.iter().enumerate()
+                                        {
+                                            if session.status
+                                                == session::SessionStatus::AwaitingInput
+                                            {
                                                 attention.push(SessionCursor {
                                                     project_idx: p_idx,
                                                     session_idx: s_idx,
@@ -2527,15 +2716,19 @@ fn main() {
                                         return;
                                     }
                                     // Find the next one after the current active session.
-                                    let current_pos = this.active
+                                    let current_pos = this
+                                        .active
                                         .and_then(|c| attention.iter().position(|a| *a == c))
                                         .map(|i| i + 1)
                                         .unwrap_or(0);
                                     let next = attention[current_pos % attention.len()];
-                                    this.pending_action = Some(SessionAction::SelectSession {
-                                        project_idx: next.project_idx,
-                                        session_idx: next.session_idx,
-                                    }.into());
+                                    this.pending_action = Some(
+                                        SessionAction::SelectSession {
+                                            project_idx: next.project_idx,
+                                            session_idx: next.session_idx,
+                                        }
+                                        .into(),
+                                    );
                                     cx.notify();
                                 })
                                 .ok();
@@ -2550,8 +2743,23 @@ fn main() {
                             // GPUI's element arena apart with
                             // "attempted to dereference an ArenaRef after
                             // its Arena was cleared".
-                            let Some(strong) = handle.upgrade() else { return };
-                            let (existing, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions, naming_claude_model, naming_opencode_model, base_infra_enabled) = strong.update(cx, |state: &mut AppState, _cx| {
+                            let Some(strong) = handle.upgrade() else {
+                                return;
+                            };
+                            let (
+                                existing,
+                                paths,
+                                external_editor,
+                                browser_integration,
+                                agents_list,
+                                default_agent,
+                                font_size,
+                                git_pull_before_new_session,
+                                promote_attention_sessions,
+                                naming_claude_model,
+                                naming_opencode_model,
+                                base_infra_enabled,
+                            ) = strong.update(cx, |state: &mut AppState, _cx| {
                                 (
                                     state.settings_window,
                                     state.user_settings.session_cleanup_paths.clone(),
@@ -2566,8 +2774,20 @@ fn main() {
                                     state.user_settings.font_size,
                                     state.user_settings.git_pull_before_new_session,
                                     state.user_settings.promote_attention_sessions,
-                                    state.user_settings.naming.claude.model.clone().unwrap_or_default(),
-                                    state.user_settings.naming.opencode.model.clone().unwrap_or_default(),
+                                    state
+                                        .user_settings
+                                        .naming
+                                        .claude
+                                        .model
+                                        .clone()
+                                        .unwrap_or_default(),
+                                    state
+                                        .user_settings
+                                        .naming
+                                        .opencode
+                                        .model
+                                        .clone()
+                                        .unwrap_or_default(),
                                     state.user_settings.base_infra_enabled,
                                 )
                             });
@@ -2584,12 +2804,25 @@ fn main() {
                             }
 
                             let weak = handle.clone();
-                            match settings_window::open_settings_window(cx, weak, paths, external_editor, browser_integration, agents_list, default_agent, font_size, git_pull_before_new_session, promote_attention_sessions, naming_claude_model, naming_opencode_model, base_infra_enabled) {
+                            match settings_window::open_settings_window(
+                                cx,
+                                weak,
+                                paths,
+                                external_editor,
+                                browser_integration,
+                                agents_list,
+                                default_agent,
+                                font_size,
+                                git_pull_before_new_session,
+                                promote_attention_sessions,
+                                naming_claude_model,
+                                naming_opencode_model,
+                                base_infra_enabled,
+                            ) {
                                 Ok(new_handle) => {
-                                    strong
-                                        .update(cx, |state: &mut AppState, _cx| {
-                                            state.settings_window = Some(new_handle);
-                                        });
+                                    strong.update(cx, |state: &mut AppState, _cx| {
+                                        state.settings_window = Some(new_handle);
+                                    });
                                 }
                                 Err(e) => {
                                     warn!("Failed to open settings window: {e}");
@@ -2600,10 +2833,12 @@ fn main() {
                     App::on_action::<CaptureUi>(cx, {
                         let handle = toggle_handle.clone();
                         move |_, cx| {
-                            handle.update(cx, |state: &mut AppState, cx| {
-                                state.capture_ui_requested = true;
-                                cx.notify();
-                            }).ok();
+                            handle
+                                .update(cx, |state: &mut AppState, cx| {
+                                    state.capture_ui_requested = true;
+                                    cx.notify();
+                                })
+                                .ok();
                         }
                     });
 
@@ -2638,10 +2873,13 @@ fn main() {
                                             session_idx: s_idx,
                                         };
                                         let pending = if resumable {
-                                            Some(SessionAction::ResumeSession {
-                                                project_idx: p_idx,
-                                                session_idx: s_idx,
-                                            }.into())
+                                            Some(
+                                                SessionAction::ResumeSession {
+                                                    project_idx: p_idx,
+                                                    session_idx: s_idx,
+                                                }
+                                                .into(),
+                                            )
                                         } else {
                                             None
                                         };
@@ -2653,45 +2891,54 @@ fn main() {
                         })
                         .unwrap_or((None, None));
 
-                    let sidebar_filter_input = cx.new(|cx| {
-                        text_input::TextInput::new(cx, "", "Search sessions…")
-                    });
-                    let project_branch_input = cx.new(|cx| {
-                        text_input::TextInput::new(cx, "", "auto")
-                    });
-                    cx.subscribe(&project_branch_input, |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
-                        if matches!(event, text_input::TextInputEvent::Changed) {
-                            if let Some(p_idx) = this.editing_project_settings {
-                                if let Some(project) = this.projects.get_mut(p_idx) {
-                                    let t = input.read(cx).text().trim().to_string();
-                                    project.settings.default_branch =
-                                        if t.is_empty() { None } else { Some(t) };
-                                    this.mark_settings_dirty();
+                    let sidebar_filter_input =
+                        cx.new(|cx| text_input::TextInput::new(cx, "", "Search sessions…"));
+                    let project_branch_input =
+                        cx.new(|cx| text_input::TextInput::new(cx, "", "auto"));
+                    cx.subscribe(
+                        &project_branch_input,
+                        |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
+                            if matches!(event, text_input::TextInputEvent::Changed) {
+                                if let Some(p_idx) = this.editing_project_settings {
+                                    if let Some(project) = this.projects.get_mut(p_idx) {
+                                        let t = input.read(cx).text().trim().to_string();
+                                        project.settings.default_branch =
+                                            if t.is_empty() { None } else { Some(t) };
+                                        this.mark_settings_dirty();
+                                    }
                                 }
                             }
-                        }
-                    }).detach();
-                    let project_remote_input = cx.new(|cx| {
-                        text_input::TextInput::new(cx, "", "origin")
-                    });
-                    cx.subscribe(&project_remote_input, |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
-                        if matches!(event, text_input::TextInputEvent::Changed) {
-                            if let Some(p_idx) = this.editing_project_settings {
-                                if let Some(project) = this.projects.get_mut(p_idx) {
-                                    let t = input.read(cx).text().trim().to_string();
-                                    project.settings.remote =
-                                        if t.is_empty() { None } else { Some(t) };
-                                    this.mark_settings_dirty();
+                        },
+                    )
+                    .detach();
+                    let project_remote_input =
+                        cx.new(|cx| text_input::TextInput::new(cx, "", "origin"));
+                    cx.subscribe(
+                        &project_remote_input,
+                        |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
+                            if matches!(event, text_input::TextInputEvent::Changed) {
+                                if let Some(p_idx) = this.editing_project_settings {
+                                    if let Some(project) = this.projects.get_mut(p_idx) {
+                                        let t = input.read(cx).text().trim().to_string();
+                                        project.settings.remote =
+                                            if t.is_empty() { None } else { Some(t) };
+                                        this.mark_settings_dirty();
+                                    }
                                 }
                             }
-                        }
-                    }).detach();
-                    cx.subscribe(&sidebar_filter_input, |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
-                        if matches!(event, text_input::TextInputEvent::Changed) {
-                            this.sidebar_filter = input.read(cx).text().to_lowercase();
-                            cx.notify();
-                        }
-                    }).detach();
+                        },
+                    )
+                    .detach();
+                    cx.subscribe(
+                        &sidebar_filter_input,
+                        |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
+                            if matches!(event, text_input::TextInputEvent::Changed) {
+                                this.sidebar_filter = input.read(cx).text().to_lowercase();
+                                cx.notify();
+                            }
+                        },
+                    )
+                    .detach();
 
                     // Auto-start the base infrastructure (Traefik + network)
                     // if enabled. Fire-and-forget on the background executor —
@@ -2713,20 +2960,19 @@ fn main() {
                         pending_action: initial_pending,
                         sidebar: SidebarState {
                             visible: settings_for_window.sidebar_visible,
-                            width: settings_for_window.sidebar_width
-                                .max(SIDEBAR_MIN_WIDTH),
+                            width: settings_for_window.sidebar_width.max(SIDEBAR_MIN_WIDTH),
                             resizing: false,
                         },
                         right_panel: RightPanelState {
                             visible: settings_for_window.right_sidebar_visible,
-                            width: settings_for_window.right_sidebar_width
+                            width: settings_for_window
+                                .right_sidebar_width
                                 .max(RIGHT_SIDEBAR_MIN_WIDTH),
                             resizing: false,
                         },
                         changes: ChangesPanelState::default(),
                         drawer: DrawerState {
-                            height: settings_for_window.drawer_height
-                                .max(DRAWER_MIN_HEIGHT),
+                            height: settings_for_window.drawer_height.max(DRAWER_MIN_HEIGHT),
                             resizing: false,
                             rename: None,
                             rename_focus: None,
@@ -2791,7 +3037,8 @@ impl Render for AppState {
             self.capture_ui_requested = false;
             let active = self.active;
             let active_project = active.and_then(|c| self.projects.get(c.project_idx));
-            let active_session = active_project.and_then(|p| active.and_then(|c| p.sessions.get(c.session_idx)));
+            let active_session =
+                active_project.and_then(|p| active.and_then(|c| p.sessions.get(c.session_idx)));
             let metadata = debug_capture::CaptureMetadata {
                 status: "ok",
                 timestamp_ms: std::time::SystemTime::now()
@@ -2861,7 +3108,9 @@ impl Render for AppState {
                 ) {
                     continue;
                 }
-                let Some(tv) = session.terminal_view.as_ref() else { continue; };
+                let Some(tv) = session.terminal_view.as_ref() else {
+                    continue;
+                };
                 if tv.read(cx).has_exited() {
                     // If we're still inside the resume grace window, treat
                     // this as a resume failure — revert to Suspended and
@@ -2906,25 +3155,33 @@ impl Render for AppState {
         // Status summary
         let total_projects = self.projects.len();
         let total_sessions: usize = self.projects.iter().map(|p| p.sessions.len()).sum();
-        let running: usize = self.projects.iter()
+        let running: usize = self
+            .projects
+            .iter()
             .flat_map(|p| p.sessions.iter())
             .filter(|s| s.status == SessionStatus::Running)
             .count();
-        let awaiting: usize = self.projects.iter()
+        let awaiting: usize = self
+            .projects
+            .iter()
             .flat_map(|p| p.sessions.iter())
             .filter(|s| s.status == SessionStatus::AwaitingInput)
             .count();
-        let response_ready: usize = self.projects.iter()
+        let response_ready: usize = self
+            .projects
+            .iter()
             .flat_map(|p| p.sessions.iter())
             .filter(|s| s.status == SessionStatus::ResponseReady)
             .count();
 
-        let fps = self.active_session()
+        let fps = self
+            .active_session()
             .and_then(|s| s.terminal_view.as_ref())
             .map(|tv| tv.read(cx).current_fps)
             .unwrap_or(0);
 
-        let active_is_done = self.active_session()
+        let active_is_done = self
+            .active_session()
             .map(|s| s.status == SessionStatus::Done)
             .unwrap_or(false);
 
@@ -2935,10 +3192,7 @@ impl Render for AppState {
         let active_is_resumable = self
             .active_session()
             .map(|s| {
-                s.clone_path
-                    .as_ref()
-                    .map(|p| p.exists())
-                    .unwrap_or(false)
+                s.clone_path.as_ref().map(|p| p.exists()).unwrap_or(false)
                     && claude_session_history_exists(&s.id)
             })
             .unwrap_or(false);
@@ -2952,7 +3206,8 @@ impl Render for AppState {
         let sidebar_visible = self.sidebar.visible;
         let is_resizing = self.sidebar.resizing;
         let drawer_is_resizing = self.drawer.resizing;
-        let drawer_visible = self.active_session()
+        let drawer_visible = self
+            .active_session()
             .map(|s| s.drawer_visible)
             .unwrap_or(false);
         let right_sidebar_visible = self.right_panel.visible;
@@ -3111,330 +3366,342 @@ impl Render for AppState {
                     .bg(theme().bg_base)
                     .cursor_col_resize()
                     .hover(|s| s.bg(theme().bg_hover))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                        this.sidebar.resizing = true;
-                        cx.notify();
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut Self, _event, _window, cx| {
+                            this.sidebar.resizing = true;
+                            cx.notify();
+                        }),
+                    ),
             );
         }
 
         flex_row = flex_row.child({
-                // Right-hand content column: main terminal + optional drawer
-                let mut content_col = div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .h_full()
-                    .bg(theme().bg_base)
-                    .flex()
-                    .flex_col();
+            // Right-hand content column: main terminal + optional drawer
+            let mut content_col = div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .h_full()
+                .bg(theme().bg_base)
+                .flex()
+                .flex_col();
 
-                // --- Attention bar (sessions needing input) — above tabs for visibility ---
-                if let Some(attention_bar) = self.render_attention_bar(cx) {
-                    content_col = content_col.child(attention_bar);
-                }
+            // --- Attention bar (sessions needing input) — above tabs for visibility ---
+            if let Some(attention_bar) = self.render_attention_bar(cx) {
+                content_col = content_col.child(attention_bar);
+            }
 
-                // --- Main-area tab strip: Claude / Editor ---
-                content_col = content_col.child(self.render_main_tab_strip(cx));
+            // --- Main-area tab strip: Claude / Editor ---
+            content_col = content_col.child(self.render_main_tab_strip(cx));
 
-                // --- Main terminal area (flex_1, takes remaining space) ---
-                {
-                    let mut main_area = div()
-                        .flex_1()
-                        .min_h(px(100.0))
-                        .overflow_hidden()
-                        .relative();
+            // --- Main terminal area (flex_1, takes remaining space) ---
+            {
+                let mut main_area = div().flex_1().min_h(px(100.0)).overflow_hidden().relative();
 
-                    match self.main_tab {
-                        MainTab::Claude => {
-                            main_area = main_area.pt(px(6.0));
-                            if let Some(tv) = self.active_session().and_then(|s| s.terminal_view.clone()) {
-                                // Tell the main terminal how much space the drawer
-                                // reserves below it so the PTY resize is correct.
-                                let inset = if drawer_visible {
-                                    // 6px resize handle + ~30px header + drawer panel
-                                    6.0 + 30.0 + self.drawer.height
-                                } else {
-                                    0.0
-                                };
-                                // Same for the right changes panel: its width +
-                                // 6px resize handle are unavailable to the PTY.
-                                let right_inset = if right_sidebar_visible {
-                                    6.0 + right_sidebar_w
-                                } else {
-                                    0.0
-                                };
-                                tv.update(cx, |tv, _cx| {
-                                    tv.bottom_inset = inset;
-                                    tv.right_inset = right_inset;
-                                });
-                                main_area = main_area.child(tv);
+                match self.main_tab {
+                    MainTab::Claude => {
+                        main_area = main_area.pt(px(6.0));
+                        if let Some(tv) =
+                            self.active_session().and_then(|s| s.terminal_view.clone())
+                        {
+                            // Tell the main terminal how much space the drawer
+                            // reserves below it so the PTY resize is correct.
+                            let inset = if drawer_visible {
+                                // 6px resize handle + ~30px header + drawer panel
+                                6.0 + 30.0 + self.drawer.height
                             } else {
-                                main_area = main_area.child(
-                                    div()
-                                        .size_full()
-                                        .flex()
-                                        .flex_col()
-                                        .items_center()
-                                        .justify_center()
-                                        .gap(px(16.0))
-                                        .bg(theme().bg_base)
-                                        .child(icon(
-                                            icons::HELIX,
-                                            28.0,
-                                            with_alpha(theme().ready, 0.7),
-                                        ))
-                                        .child(
-                                            div()
-                                                .text_size(px(16.0))
-                                                .text_color(theme().text_faint)
-                                                .child("No active session"),
-                                        )
-                                        .child(
-                                            div()
-                                                .w(px(56.0))
-                                                .h(px(2.0))
-                                                .rounded(px(1.0))
-                                                .bg(linear_gradient(
-                                                    90.0,
-                                                    linear_color_stop(theme().accent, 0.0),
-                                                    linear_color_stop(theme().ready, 1.0),
-                                                )),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_size(px(12.0))
-                                                .text_color(theme().text_ghost)
-                                                .child("Click + in the sidebar to open a project"),
-                                        ),
-                                );
-                            }
-                        }
-                        MainTab::Editor => {
-                            main_area = main_area.child(self.render_editor_view(cx));
-                        }
-                        MainTab::Browser => {
-                            main_area = main_area.child(self.render_browser_placeholder(cx));
-                        }
-                        MainTab::Transcript => {
-                            main_area = main_area.child(self.render_transcript_view(cx));
-                        }
-                    }
-
-                    if active_is_done {
-                        let mut buttons = div()
-                            .flex()
-                            .flex_row()
-                            .gap(px(8.0));
-
-                        if active_is_resumable {
-                            buttons = buttons.child(
+                                0.0
+                            };
+                            // Same for the right changes panel: its width +
+                            // 6px resize handle are unavailable to the PTY.
+                            let right_inset = if right_sidebar_visible {
+                                6.0 + right_sidebar_w
+                            } else {
+                                0.0
+                            };
+                            tv.update(cx, |tv, _cx| {
+                                tv.bottom_inset = inset;
+                                tv.right_inset = right_inset;
+                            });
+                            main_area = main_area.child(tv);
+                        } else {
+                            main_area = main_area.child(
                                 div()
-                                    .id("resume-btn")
-                                    .cursor_pointer()
-                                    .px(px(10.0))
-                                    .py(px(4.0))
-                                    .rounded(px(6.0))
-                                    .bg(theme().accent)
-                                    .text_size(px(11.0))
-                                    .text_color(theme().text_on_accent)
-                                    .hover(|s| s.bg(theme().info))
-                                    .child("Resume")
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                        if let Some(active) = this.active {
-                                            this.pending_action = Some(SessionAction::ResumeSession {
-                                                project_idx: active.project_idx,
-                                                session_idx: active.session_idx,
-                                            }.into());
-                                            cx.notify();
-                                        }
-                                    })),
+                                    .size_full()
+                                    .flex()
+                                    .flex_col()
+                                    .items_center()
+                                    .justify_center()
+                                    .gap(px(16.0))
+                                    .bg(theme().bg_base)
+                                    .child(icon(icons::HELIX, 28.0, with_alpha(theme().ready, 0.7)))
+                                    .child(
+                                        div()
+                                            .text_size(px(16.0))
+                                            .text_color(theme().text_faint)
+                                            .child("No active session"),
+                                    )
+                                    .child(div().w(px(56.0)).h(px(2.0)).rounded(px(1.0)).bg(
+                                        linear_gradient(
+                                            90.0,
+                                            linear_color_stop(theme().accent, 0.0),
+                                            linear_color_stop(theme().ready, 1.0),
+                                        ),
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_size(px(12.0))
+                                            .text_color(theme().text_ghost)
+                                            .child("Click + in the sidebar to open a project"),
+                                    ),
                             );
                         }
+                    }
+                    MainTab::Editor => {
+                        main_area = main_area.child(self.render_editor_view(cx));
+                    }
+                    MainTab::Browser => {
+                        main_area = main_area.child(self.render_browser_placeholder(cx));
+                    }
+                    MainTab::Transcript => {
+                        main_area = main_area.child(self.render_transcript_view(cx));
+                    }
+                }
 
+                if active_is_done {
+                    let mut buttons = div().flex().flex_row().gap(px(8.0));
+
+                    if active_is_resumable {
                         buttons = buttons.child(
                             div()
-                                .id("restart-btn")
+                                .id("resume-btn")
                                 .cursor_pointer()
                                 .px(px(10.0))
                                 .py(px(4.0))
                                 .rounded(px(6.0))
-                                .bg(theme().bg_hover)
+                                .bg(theme().accent)
                                 .text_size(px(11.0))
-                                .text_color(theme().text_primary)
-                                .hover(|s| s.bg(theme().bg_active))
-                                .child("New Session")
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                                .text_color(theme().text_on_accent)
+                                .hover(|s| s.bg(theme().info))
+                                .child("Resume")
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this: &mut Self, _event, _window, cx| {
+                                        if let Some(active) = this.active {
+                                            this.pending_action = Some(
+                                                SessionAction::ResumeSession {
+                                                    project_idx: active.project_idx,
+                                                    session_idx: active.session_idx,
+                                                }
+                                                .into(),
+                                            );
+                                            cx.notify();
+                                        }
+                                    }),
+                                ),
+                        );
+                    }
+
+                    buttons = buttons.child(
+                        div()
+                            .id("restart-btn")
+                            .cursor_pointer()
+                            .px(px(10.0))
+                            .py(px(4.0))
+                            .rounded(px(6.0))
+                            .bg(theme().bg_hover)
+                            .text_size(px(11.0))
+                            .text_color(theme().text_primary)
+                            .hover(|s| s.bg(theme().bg_active))
+                            .child("New Session")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this: &mut Self, _event, _window, cx| {
                                     if let Some(active) = this.active {
-                                        this.pending_action = Some(SessionAction::AddSessionToProject(active.project_idx).into());
+                                        this.pending_action = Some(
+                                            SessionAction::AddSessionToProject(active.project_idx)
+                                                .into(),
+                                        );
                                         cx.notify();
                                     }
-                                })),
-                        );
+                                }),
+                            ),
+                    );
 
-                        main_area = main_area.child(
-                            // "Session ended" overlay bar at bottom
-                            div()
-                                .absolute()
-                                .bottom(px(0.0))
-                                .left(px(0.0))
-                                .right(px(0.0))
-                                .px(px(16.0))
-                                .py(px(10.0))
-                                .bg(theme().bg_raised)
-                                .border_t_1()
-                                .border_color(theme().border_default)
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .text_size(px(12.0))
-                                        .text_color(theme().text_faint)
-                                        .child("Session ended"),
-                                )
-                                .child(buttons),
-                        );
-                    }
+                    main_area = main_area.child(
+                        // "Session ended" overlay bar at bottom
+                        div()
+                            .absolute()
+                            .bottom(px(0.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .px(px(16.0))
+                            .py(px(10.0))
+                            .bg(theme().bg_raised)
+                            .border_t_1()
+                            .border_color(theme().border_default)
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(12.0))
+                                    .text_color(theme().text_faint)
+                                    .child("Session ended"),
+                            )
+                            .child(buttons),
+                    );
+                }
 
-                    // --- Quit confirmation banner (absolute overlay at top) ---
-                    if self.confirming.quit {
-                        let active_count = self
-                            .projects
-                            .iter()
-                            .flat_map(|p| &p.sessions)
-                            .filter(|s| {
-                                matches!(
-                                    s.status,
-                                    SessionStatus::Running | SessionStatus::Idle
-                                )
-                            })
-                            .count();
-                        let label = if active_count == 1 {
-                            "1 session is still running — quit anyway?".to_string()
-                        } else {
-                            format!("{active_count} sessions are still running — quit anyway?")
-                        };
-                        main_area = main_area.child(
-                            div()
-                                .absolute()
-                                .top(px(0.0))
-                                .left(px(0.0))
-                                .right(px(0.0))
-                                .px(px(16.0))
-                                .py(px(10.0))
-                                .bg(theme().tint_danger_soft) // subtle red tint
-                                .border_b_1()
-                                .border_color(theme().danger)
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .text_color(theme().danger) // red
-                                        .child(label),
-                                )
-                                .child(
-                                    div()
-                                        .flex()
-                                        .flex_row()
-                                        .gap(px(8.0))
-                                        .child(
-                                            div()
-                                                .id("quit-confirm-btn")
-                                                .cursor_pointer()
-                                                .px(px(10.0))
-                                                .py(px(4.0))
-                                                .rounded(px(6.0))
-                                                .bg(theme().danger)
-                                                .text_size(px(11.0))
-                                                .text_color(theme().text_on_accent)
-                                                .hover(|s| s.bg(theme().danger_soft))
-                                                .child("Quit")
-                                                .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                                    this.confirming.quit = false;
-                                                    cx.quit();
-                                                })),
-                                        )
-                                        .child(
-                                            div()
-                                                .id("quit-cancel-btn")
-                                                .cursor_pointer()
-                                                .px(px(10.0))
-                                                .py(px(4.0))
-                                                .rounded(px(6.0))
-                                                .bg(theme().bg_hover)
-                                                .text_size(px(11.0))
-                                                .text_color(theme().text_primary)
-                                                .hover(|s| s.bg(theme().bg_active))
-                                                .child("Cancel")
-                                                .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                                    this.confirming.quit = false;
-                                                    cx.notify();
-                                                })),
-                                        ),
-                                ),
-                        );
-                    }
+                // --- Quit confirmation banner (absolute overlay at top) ---
+                if self.confirming.quit {
+                    let active_count = self
+                        .projects
+                        .iter()
+                        .flat_map(|p| &p.sessions)
+                        .filter(|s| {
+                            matches!(s.status, SessionStatus::Running | SessionStatus::Idle)
+                        })
+                        .count();
+                    let label = if active_count == 1 {
+                        "1 session is still running — quit anyway?".to_string()
+                    } else {
+                        format!("{active_count} sessions are still running — quit anyway?")
+                    };
+                    main_area = main_area.child(
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .px(px(16.0))
+                            .py(px(10.0))
+                            .bg(theme().tint_danger_soft) // subtle red tint
+                            .border_b_1()
+                            .border_color(theme().danger)
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(theme().danger) // red
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .id("quit-confirm-btn")
+                                            .cursor_pointer()
+                                            .px(px(10.0))
+                                            .py(px(4.0))
+                                            .rounded(px(6.0))
+                                            .bg(theme().danger)
+                                            .text_size(px(11.0))
+                                            .text_color(theme().text_on_accent)
+                                            .hover(|s| s.bg(theme().danger_soft))
+                                            .child("Quit")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(
+                                                    |this: &mut Self, _event, _window, cx| {
+                                                        this.confirming.quit = false;
+                                                        cx.quit();
+                                                    },
+                                                ),
+                                            ),
+                                    )
+                                    .child(
+                                        div()
+                                            .id("quit-cancel-btn")
+                                            .cursor_pointer()
+                                            .px(px(10.0))
+                                            .py(px(4.0))
+                                            .rounded(px(6.0))
+                                            .bg(theme().bg_hover)
+                                            .text_size(px(11.0))
+                                            .text_color(theme().text_primary)
+                                            .hover(|s| s.bg(theme().bg_active))
+                                            .child("Cancel")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(
+                                                    |this: &mut Self, _event, _window, cx| {
+                                                        this.confirming.quit = false;
+                                                        cx.notify();
+                                                    },
+                                                ),
+                                            ),
+                                    ),
+                            ),
+                    );
+                }
 
-                    // --- Pull warning banner (absolute overlay at top) ---
-                    if let Some(ref warning) = self.pull_warning {
-                        let label = format!("git pull failed: {warning}");
-                        main_area = main_area.child(
-                            div()
-                                .absolute()
-                                .top(px(0.0))
-                                .left(px(0.0))
-                                .right(px(0.0))
-                                .px(px(16.0))
-                                .py(px(10.0))
-                                .bg(theme().tint_warning_soft) // subtle amber tint
-                                .border_b_1()
-                                .border_color(theme().warning) // yellow
-                                .flex()
-                                .flex_row()
-                                .items_center()
-                                .justify_between()
-                                .child(
-                                    div()
-                                        .text_size(px(13.0))
-                                        .text_color(theme().warning) // yellow
-                                        .child(label),
-                                )
-                                .child(
-                                    div()
-                                        .id("pull-warning-dismiss-btn")
-                                        .cursor_pointer()
-                                        .px(px(10.0))
-                                        .py(px(4.0))
-                                        .rounded(px(6.0))
-                                        .bg(theme().bg_hover)
-                                        .text_size(px(11.0))
-                                        .text_color(theme().text_primary)
-                                        .hover(|s| s.bg(theme().bg_active))
-                                        .child("Dismiss")
-                                        .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
+                // --- Pull warning banner (absolute overlay at top) ---
+                if let Some(ref warning) = self.pull_warning {
+                    let label = format!("git pull failed: {warning}");
+                    main_area = main_area.child(
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .px(px(16.0))
+                            .py(px(10.0))
+                            .bg(theme().tint_warning_soft) // subtle amber tint
+                            .border_b_1()
+                            .border_color(theme().warning) // yellow
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(theme().warning) // yellow
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .id("pull-warning-dismiss-btn")
+                                    .cursor_pointer()
+                                    .px(px(10.0))
+                                    .py(px(4.0))
+                                    .rounded(px(6.0))
+                                    .bg(theme().bg_hover)
+                                    .text_size(px(11.0))
+                                    .text_color(theme().text_primary)
+                                    .hover(|s| s.bg(theme().bg_active))
+                                    .child("Dismiss")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this: &mut Self, _event, _window, cx| {
                                             this.pull_warning = None;
                                             cx.notify();
-                                        })),
-                                ),
-                        );
-                    }
-
-                    content_col = content_col.child(main_area);
+                                        }),
+                                    ),
+                            ),
+                    );
                 }
 
-                // --- Drawer terminal (fixed height, shown per-session) ---
-                if drawer_visible {
-                    content_col =
-                        content_col.children(crate::drawer::build_drawer_items(self, window, cx));
-                }
+                content_col = content_col.child(main_area);
+            }
 
-                content_col
-            });
+            // --- Drawer terminal (fixed height, shown per-session) ---
+            if drawer_visible {
+                content_col =
+                    content_col.children(crate::drawer::build_drawer_items(self, window, cx));
+            }
+
+            content_col
+        });
 
         // --- Right sidebar (conditional on right_sidebar_visible) ---
         if right_sidebar_visible {
@@ -3447,10 +3714,13 @@ impl Render for AppState {
                     .bg(theme().bg_base)
                     .cursor_col_resize()
                     .hover(|s| s.bg(theme().bg_hover))
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                        this.right_panel.resizing = true;
-                        cx.notify();
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut Self, _event, _window, cx| {
+                            this.right_panel.resizing = true;
+                            cx.notify();
+                        }),
+                    ),
             );
             flex_row = flex_row.child(
                 div()
@@ -3486,7 +3756,8 @@ impl Render for AppState {
                                             .child("Changes"),
                                     )
                                     .child({
-                                        let staged = self.changes.files.iter().filter(|f| f.staged).count();
+                                        let staged =
+                                            self.changes.files.iter().filter(|f| f.staged).count();
                                         let unstaged = self.changes.files.len() - staged;
                                         div()
                                             .text_size(px(10.0))
@@ -3513,15 +3784,28 @@ impl Render for AppState {
                                             .rounded(px(6.0))
                                             .text_size(px(12.0))
                                             .text_color(theme().text_faint)
-                                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
+                                            .hover(|s| {
+                                                s.bg(theme().bg_raised)
+                                                    .text_color(theme().text_primary)
+                                            })
                                             .child("↻")
                                             .tooltip(|_window, cx| {
-                                                cx.new(|_| SimpleTooltip { text: "Refresh changes".into() }).into()
+                                                cx.new(|_| SimpleTooltip {
+                                                    text: "Refresh changes".into(),
+                                                })
+                                                .into()
                                             })
-                                            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                                this.pending_action = Some(SidebarAction::RefreshChanges.into());
-                                                cx.notify();
-                                            })),
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(
+                                                    |this: &mut Self, _event, _window, cx| {
+                                                        this.pending_action = Some(
+                                                            SidebarAction::RefreshChanges.into(),
+                                                        );
+                                                        cx.notify();
+                                                    },
+                                                ),
+                                            ),
                                     )
                                     .child(
                                         div()
@@ -3532,12 +3816,23 @@ impl Render for AppState {
                                             .hover(|s| s.bg(theme().bg_raised))
                                             .child(icon(icons::X, 13.0, theme().text_faint))
                                             .tooltip(|_window, cx| {
-                                                cx.new(|_| SimpleTooltip { text: "Close changes panel".into() }).into()
+                                                cx.new(|_| SimpleTooltip {
+                                                    text: "Close changes panel".into(),
+                                                })
+                                                .into()
                                             })
-                                            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                                this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
-                                                cx.notify();
-                                            })),
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(
+                                                    |this: &mut Self, _event, _window, cx| {
+                                                        this.pending_action = Some(
+                                                            SidebarAction::ToggleRightSidebar
+                                                                .into(),
+                                                        );
+                                                        cx.notify();
+                                                    },
+                                                ),
+                                            ),
                                     ),
                             ),
                     )
@@ -3548,11 +3843,7 @@ impl Render for AppState {
 
         // Outer wrapper: non-flex, relative-positioned container hosting both
         // the flex row and the optional drag overlay as siblings.
-        let mut outer = div()
-            .id("app-outer")
-            .size_full()
-            .relative()
-            .child(flex_row);
+        let mut outer = div().id("app-outer").size_full().relative().child(flex_row);
 
         // Sidebar drag overlay
         if is_resizing {
@@ -3565,21 +3856,27 @@ impl Render for AppState {
                     .right(px(0.0))
                     .bottom(px(0.0))
                     .cursor_col_resize()
-                    .on_mouse_move(cx.listener(|this: &mut Self, event: &MouseMoveEvent, window, cx| {
-                        let viewport_w = f32::from(window.viewport_size().width);
-                        let max = (viewport_w - 100.0).max(SIDEBAR_MIN_WIDTH);
-                        let new_width = f32::from(event.position.x).clamp(SIDEBAR_MIN_WIDTH, max);
-                        if (new_width - this.sidebar.width).abs() > 0.5 {
-                            this.sidebar.width = new_width;
-                            window.refresh();
+                    .on_mouse_move(cx.listener(
+                        |this: &mut Self, event: &MouseMoveEvent, window, cx| {
+                            let viewport_w = f32::from(window.viewport_size().width);
+                            let max = (viewport_w - 100.0).max(SIDEBAR_MIN_WIDTH);
+                            let new_width =
+                                f32::from(event.position.x).clamp(SIDEBAR_MIN_WIDTH, max);
+                            if (new_width - this.sidebar.width).abs() > 0.5 {
+                                this.sidebar.width = new_width;
+                                window.refresh();
+                                cx.notify();
+                            }
+                        },
+                    ))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
+                            this.sidebar.resizing = false;
+                            this.mark_settings_dirty();
                             cx.notify();
-                        }
-                    }))
-                    .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
-                        this.sidebar.resizing = false;
-                        this.mark_settings_dirty();
-                        cx.notify();
-                    })),
+                        }),
+                    ),
             );
         }
 
@@ -3594,22 +3891,28 @@ impl Render for AppState {
                     .right(px(0.0))
                     .bottom(px(0.0))
                     .cursor_col_resize()
-                    .on_mouse_move(cx.listener(|this: &mut Self, event: &MouseMoveEvent, window, cx| {
-                        let viewport_w = f32::from(window.viewport_size().width);
-                        let mouse_x = f32::from(event.position.x);
-                        // Right sidebar width = distance from right edge to mouse
-                        let new_width = (viewport_w - mouse_x).clamp(RIGHT_SIDEBAR_MIN_WIDTH, viewport_w - 200.0);
-                        if (new_width - this.right_panel.width).abs() > 0.5 {
-                            this.right_panel.width = new_width;
-                            window.refresh();
+                    .on_mouse_move(cx.listener(
+                        |this: &mut Self, event: &MouseMoveEvent, window, cx| {
+                            let viewport_w = f32::from(window.viewport_size().width);
+                            let mouse_x = f32::from(event.position.x);
+                            // Right sidebar width = distance from right edge to mouse
+                            let new_width = (viewport_w - mouse_x)
+                                .clamp(RIGHT_SIDEBAR_MIN_WIDTH, viewport_w - 200.0);
+                            if (new_width - this.right_panel.width).abs() > 0.5 {
+                                this.right_panel.width = new_width;
+                                window.refresh();
+                                cx.notify();
+                            }
+                        },
+                    ))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
+                            this.right_panel.resizing = false;
+                            this.mark_settings_dirty();
                             cx.notify();
-                        }
-                    }))
-                    .on_mouse_up(MouseButton::Left, cx.listener(|this: &mut Self, _event: &MouseUpEvent, _window, cx| {
-                        this.right_panel.resizing = false;
-                        this.mark_settings_dirty();
-                        cx.notify();
-                    })),
+                        }),
+                    ),
             );
         }
 
@@ -3639,7 +3942,10 @@ impl Render for AppState {
 
         // If a session has naming suggestions pending and no modal is open, spawn one.
         if self.naming_modal.is_none() {
-            let pending = self.projects.iter().flat_map(|p| &p.sessions)
+            let pending = self
+                .projects
+                .iter()
+                .flat_map(|p| &p.sessions)
                 .find(|s| s.naming_suggestions.is_some())
                 .map(|s| (s.id.clone(), s.naming_suggestions.clone().unwrap()));
             if let Some((session_id, suggestions)) = pending {

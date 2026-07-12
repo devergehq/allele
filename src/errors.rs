@@ -52,8 +52,7 @@ pub type Result<T> = std::result::Result<T, AlleleError>;
 ///   ALLELE_LOG=debug               — everything above debug
 ///   ALLELE_LOG=allele=debug,warn   — allele's spans at debug, everyone else warn
 pub(crate) fn init_tracing() {
-    let filter = EnvFilter::try_from_env("ALLELE_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+    let filter = EnvFilter::try_from_env("ALLELE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
     let _ = fmt()
         .with_env_filter(filter)
         .with_target(false)

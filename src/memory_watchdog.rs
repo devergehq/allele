@@ -19,7 +19,7 @@ const LOG_INTERVAL_SECS: u64 = 300; // 5 minutes
 #[cfg(target_os = "macos")]
 #[allow(deprecated)] // mach_task_self — avoiding mach2 crate dependency
 pub fn process_rss_bytes() -> Option<u64> {
-    use libc::{mach_task_self, task_info, MACH_TASK_BASIC_INFO, mach_task_basic_info};
+    use libc::{mach_task_basic_info, mach_task_self, task_info, MACH_TASK_BASIC_INFO};
     use std::mem;
 
     unsafe {
@@ -150,10 +150,7 @@ pub fn spawn(cx: &gpui::App) {
                     } else {
                         format!("-{}", format_bytes((-delta) as u64))
                     };
-                    info!(
-                        "memory: RSS={} (delta={delta_str})",
-                        format_bytes(rss),
-                    );
+                    info!("memory: RSS={} (delta={delta_str})", format_bytes(rss),);
                     last_log_time = std::time::Instant::now();
                 }
 

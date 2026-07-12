@@ -135,9 +135,7 @@ pub fn generate(config: &NamingConfig, request: &NamingRequest) -> Result<Naming
         AgentKind::Claude | AgentKind::Generic => {
             call_claude(request.agent_binary, model_config, &full_prompt)?
         }
-        AgentKind::Opencode => {
-            call_opencode(request.agent_binary, model_config, &full_prompt)?
-        }
+        AgentKind::Opencode => call_opencode(request.agent_binary, model_config, &full_prompt)?,
     };
 
     let suggestions = parse_suggestions(&raw_response, request.suggestions_count);
@@ -231,7 +229,10 @@ fn call_claude(binary: &str, config: &NamingModelConfig, prompt: &str) -> Result
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("naming: claude exited with {}: {stderr}", output.status));
+        return Err(format!(
+            "naming: claude exited with {}: {stderr}",
+            output.status
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -258,7 +259,10 @@ fn call_opencode(binary: &str, config: &NamingModelConfig, prompt: &str) -> Resu
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("naming: opencode exited with {}: {stderr}", output.status));
+        return Err(format!(
+            "naming: opencode exited with {}: {stderr}",
+            output.status
+        ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -315,24 +319,42 @@ mod tests {
 
     #[test]
     fn validate_slug_basic() {
-        assert_eq!(validate_slug("fix-auth-redirect"), Some("fix-auth-redirect".to_string()));
+        assert_eq!(
+            validate_slug("fix-auth-redirect"),
+            Some("fix-auth-redirect".to_string())
+        );
     }
 
     #[test]
     fn validate_slug_strips_quotes() {
-        assert_eq!(validate_slug("\"fix-auth-bug\""), Some("fix-auth-bug".to_string()));
-        assert_eq!(validate_slug("`add-dark-mode`"), Some("add-dark-mode".to_string()));
+        assert_eq!(
+            validate_slug("\"fix-auth-bug\""),
+            Some("fix-auth-bug".to_string())
+        );
+        assert_eq!(
+            validate_slug("`add-dark-mode`"),
+            Some("add-dark-mode".to_string())
+        );
     }
 
     #[test]
     fn validate_slug_strips_numbering() {
-        assert_eq!(validate_slug("1. fix-auth-redirect"), Some("fix-auth-redirect".to_string()));
-        assert_eq!(validate_slug("2) add-dark-mode"), Some("add-dark-mode".to_string()));
+        assert_eq!(
+            validate_slug("1. fix-auth-redirect"),
+            Some("fix-auth-redirect".to_string())
+        );
+        assert_eq!(
+            validate_slug("2) add-dark-mode"),
+            Some("add-dark-mode".to_string())
+        );
     }
 
     #[test]
     fn validate_slug_normalizes_case() {
-        assert_eq!(validate_slug("Fix-Auth-Redirect"), Some("fix-auth-redirect".to_string()));
+        assert_eq!(
+            validate_slug("Fix-Auth-Redirect"),
+            Some("fix-auth-redirect".to_string())
+        );
     }
 
     #[test]
@@ -347,7 +369,10 @@ mod tests {
 
     #[test]
     fn validate_slug_converts_spaces() {
-        assert_eq!(validate_slug("fix auth redirect"), Some("fix-auth-redirect".to_string()));
+        assert_eq!(
+            validate_slug("fix auth redirect"),
+            Some("fix-auth-redirect".to_string())
+        );
     }
 
     #[test]
@@ -375,7 +400,10 @@ mod tests {
 
     #[test]
     fn branch_name_from_slug_format() {
-        assert_eq!(branch_name_from_slug("fix-auth", "5dc47535"), "fix-auth-5dc47535");
+        assert_eq!(
+            branch_name_from_slug("fix-auth", "5dc47535"),
+            "fix-auth-5dc47535"
+        );
     }
 
     #[test]
@@ -393,9 +421,13 @@ mod tests {
                 "api_key_env": "OPENAI_API_KEY"
             }
         }"#;
-        let config: NamingConfig = serde_json::from_str(json).expect("should deserialize legacy config");
+        let config: NamingConfig =
+            serde_json::from_str(json).expect("should deserialize legacy config");
         assert_eq!(config.mode, NamingMode::Auto);
-        assert_eq!(config.claude.model.as_deref(), Some("claude-haiku-4-5-20251001"));
+        assert_eq!(
+            config.claude.model.as_deref(),
+            Some("claude-haiku-4-5-20251001")
+        );
     }
 
     #[test]
@@ -405,7 +437,8 @@ mod tests {
             "claude": { "model": "claude-haiku-4-5-20251001" },
             "opencode": { "model": "openai/gpt-4o-mini" }
         }"#;
-        let config: NamingConfig = serde_json::from_str(json).expect("should deserialize new config");
+        let config: NamingConfig =
+            serde_json::from_str(json).expect("should deserialize new config");
         assert_eq!(config.mode, NamingMode::Interactive);
         assert_eq!(config.opencode.model.as_deref(), Some("openai/gpt-4o-mini"));
     }

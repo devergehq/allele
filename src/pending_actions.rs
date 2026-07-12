@@ -21,24 +21,36 @@ use crate::terminal::{clamp_font_size, TerminalView};
 use crate::{browser, clone, git, hooks};
 
 impl AppState {
-    pub(crate) fn dispatch_pending_action(
-        &mut self,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let Some(action) = self.pending_action.take() else { return };
+    pub(crate) fn dispatch_pending_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(action) = self.pending_action.take() else {
+            return;
+        };
         // Dismiss the session context menu on any action.
         self.session_context_menu = None;
         let mut skip_refocus = false;
         match action {
-            PendingAction::Session(a) => self.handle_session_action(a, &mut skip_refocus, window, cx),
-            PendingAction::Archive(a) => self.handle_archive_action(a, &mut skip_refocus, window, cx),
+            PendingAction::Session(a) => {
+                self.handle_session_action(a, &mut skip_refocus, window, cx)
+            }
+            PendingAction::Archive(a) => {
+                self.handle_archive_action(a, &mut skip_refocus, window, cx)
+            }
             PendingAction::Drawer(a) => self.handle_drawer_action(a, &mut skip_refocus, window, cx),
-            PendingAction::Sidebar(a) => self.handle_sidebar_action(a, &mut skip_refocus, window, cx),
-            PendingAction::Project(a) => self.handle_project_action(a, &mut skip_refocus, window, cx),
-            PendingAction::Settings(a) => self.handle_settings_action(a, &mut skip_refocus, window, cx),
-            PendingAction::Browser(a) => self.handle_browser_action(a, &mut skip_refocus, window, cx),
-            PendingAction::Overlay(a) => self.handle_overlay_action(a, &mut skip_refocus, window, cx),
+            PendingAction::Sidebar(a) => {
+                self.handle_sidebar_action(a, &mut skip_refocus, window, cx)
+            }
+            PendingAction::Project(a) => {
+                self.handle_project_action(a, &mut skip_refocus, window, cx)
+            }
+            PendingAction::Settings(a) => {
+                self.handle_settings_action(a, &mut skip_refocus, window, cx)
+            }
+            PendingAction::Browser(a) => {
+                self.handle_browser_action(a, &mut skip_refocus, window, cx)
+            }
+            PendingAction::Overlay(a) => {
+                self.handle_overlay_action(a, &mut skip_refocus, window, cx)
+            }
         }
 
         // After any sidebar-triggered action, re-focus the active
@@ -106,27 +118,45 @@ impl AppState {
                     cx,
                 );
             }
-            SessionAction::CloseSessionKeepClone { project_idx, session_idx } => {
+            SessionAction::CloseSessionKeepClone {
+                project_idx,
+                session_idx,
+            } => {
                 self.close_session_keep_clone(
-                    SessionCursor { project_idx, session_idx },
+                    SessionCursor {
+                        project_idx,
+                        session_idx,
+                    },
                     window,
                     cx,
                 );
             }
-            SessionAction::RequestDiscardSession { project_idx, session_idx } => {
+            SessionAction::RequestDiscardSession {
+                project_idx,
+                session_idx,
+            } => {
                 // Arm the inline confirmation gate. The sidebar row will
                 // render Confirm/Cancel buttons on the next frame.
-                self.confirming.discard = Some(SessionCursor { project_idx, session_idx });
+                self.confirming.discard = Some(SessionCursor {
+                    project_idx,
+                    session_idx,
+                });
                 cx.notify();
             }
             SessionAction::CancelDiscard => {
                 self.confirming.discard = None;
                 cx.notify();
             }
-            SessionAction::DiscardSession { project_idx, session_idx } => {
+            SessionAction::DiscardSession {
+                project_idx,
+                session_idx,
+            } => {
                 self.confirming.discard = None;
                 self.remove_session(
-                    SessionCursor { project_idx, session_idx },
+                    SessionCursor {
+                        project_idx,
+                        session_idx,
+                    },
                     window,
                     cx,
                 );
@@ -135,18 +165,32 @@ impl AppState {
                 self.confirming.dirty_merge = None;
                 cx.notify();
             }
-            SessionAction::ProceedDirtyMerge { project_idx, session_idx } => {
+            SessionAction::ProceedDirtyMerge {
+                project_idx,
+                session_idx,
+            } => {
                 self.confirming.dirty_merge = None;
                 self.execute_merge_and_close(
-                    SessionCursor { project_idx, session_idx },
+                    SessionCursor {
+                        project_idx,
+                        session_idx,
+                    },
                     true, // discard_uncommitted
                     window,
                     cx,
                 );
             }
-            SessionAction::MergeAndClose { project_idx, session_idx } => {
-                let cursor = SessionCursor { project_idx, session_idx };
-                let is_dirty = self.projects.get(cursor.project_idx)
+            SessionAction::MergeAndClose {
+                project_idx,
+                session_idx,
+            } => {
+                let cursor = SessionCursor {
+                    project_idx,
+                    session_idx,
+                };
+                let is_dirty = self
+                    .projects
+                    .get(cursor.project_idx)
                     .and_then(|p| p.sessions.get(cursor.session_idx))
                     .and_then(|s| s.clone_path.as_ref())
                     .map(|cp| git::is_working_tree_dirty(cp))
@@ -159,8 +203,14 @@ impl AppState {
                     self.execute_merge_and_close(cursor, false, window, cx);
                 }
             }
-            SessionAction::SelectSession { project_idx, session_idx } => {
-                let cursor = SessionCursor { project_idx, session_idx };
+            SessionAction::SelectSession {
+                project_idx,
+                session_idx,
+            } => {
+                let cursor = SessionCursor {
+                    project_idx,
+                    session_idx,
+                };
                 // Clicking a Suspended session cold-resumes it; clicking
                 // any other session just makes it the active one.
                 let is_suspended = self
@@ -193,8 +243,14 @@ impl AppState {
                 self.confirming.dirty_session = None;
                 cx.notify();
             }
-            SessionAction::ResumeSession { project_idx, session_idx } => {
-                let cursor = SessionCursor { project_idx, session_idx };
+            SessionAction::ResumeSession {
+                project_idx,
+                session_idx,
+            } => {
+                let cursor = SessionCursor {
+                    project_idx,
+                    session_idx,
+                };
                 self.resume_session(cursor, window, cx);
                 self.sync_browser_to_active();
             }
@@ -203,20 +259,34 @@ impl AppState {
                     self.spawn_terminals_and_preview(cursor, &cfg, port, &clone_path, window, cx);
                 }
             }
-            SessionAction::EditSession { project_idx, session_idx } => {
+            SessionAction::EditSession {
+                project_idx,
+                session_idx,
+            } => {
                 *skip_refocus = true;
                 self.open_edit_session_modal(project_idx, session_idx, window, cx);
             }
-            SessionAction::RevealSessionInFinder { project_idx, session_idx } => {
-                if let Some(session) = self.projects.get(project_idx)
+            SessionAction::RevealSessionInFinder {
+                project_idx,
+                session_idx,
+            } => {
+                if let Some(session) = self
+                    .projects
+                    .get(project_idx)
                     .and_then(|p| p.sessions.get(session_idx))
                 {
-                    let path = session.clone_path.as_ref()
+                    let path = session
+                        .clone_path
+                        .as_ref()
                         .unwrap_or(&self.projects[project_idx].source_path);
                     Self::reveal_in_finder(path);
                 }
             }
-            SessionAction::ReorderSession { project_idx, from, to } => {
+            SessionAction::ReorderSession {
+                project_idx,
+                from,
+                to,
+            } => {
                 if from != to {
                     if let Some(project) = self.projects.get_mut(project_idx) {
                         if from < project.sessions.len() && to < project.sessions.len() {
@@ -246,19 +316,31 @@ impl AppState {
                     }
                 }
             }
-            SessionAction::CopySessionPath { project_idx, session_idx } => {
-                if let Some(session) = self.projects.get(project_idx)
+            SessionAction::CopySessionPath {
+                project_idx,
+                session_idx,
+            } => {
+                if let Some(session) = self
+                    .projects
+                    .get(project_idx)
                     .and_then(|p| p.sessions.get(session_idx))
                 {
-                    let path = session.clone_path.as_ref()
+                    let path = session
+                        .clone_path
+                        .as_ref()
                         .unwrap_or(&self.projects[project_idx].source_path);
                     cx.write_to_clipboard(ClipboardItem::new_string(
                         path.to_string_lossy().to_string(),
                     ));
                 }
             }
-            SessionAction::TogglePinSession { project_idx, session_idx } => {
-                if let Some(session) = self.projects.get_mut(project_idx)
+            SessionAction::TogglePinSession {
+                project_idx,
+                session_idx,
+            } => {
+                if let Some(session) = self
+                    .projects
+                    .get_mut(project_idx)
                     .and_then(|p| p.sessions.get_mut(session_idx))
                 {
                     session.pinned = !session.pinned;
@@ -273,7 +355,9 @@ impl AppState {
                 comment,
                 pinned,
             } => {
-                if let Some(session) = self.projects.get_mut(project_idx)
+                if let Some(session) = self
+                    .projects
+                    .get_mut(project_idx)
                     .and_then(|p| p.sessions.get_mut(session_idx))
                 {
                     session.label = label.clone();
@@ -287,10 +371,7 @@ impl AppState {
                         if let Some(clone_path) = &session.clone_path {
                             let sanitised = git::sanitise_branch_name(name, 100);
                             if !sanitised.is_empty() {
-                                if let Err(e) = git::rename_current_branch(
-                                    clone_path,
-                                    &sanitised,
-                                ) {
+                                if let Err(e) = git::rename_current_branch(clone_path, &sanitised) {
                                     warn!("branch rename failed: {e}");
                                 }
                             }
@@ -336,8 +417,9 @@ impl AppState {
 
                     let placeholder_id = uuid::Uuid::new_v4().to_string();
                     {
-                        let project = self.projects.get_mut(cursor.project_idx)
-                            .expect("cursor produced by a sidebar click; project_idx always in bounds");
+                        let project = self.projects.get_mut(cursor.project_idx).expect(
+                            "cursor produced by a sidebar click; project_idx always in bounds",
+                        );
                         project.loading_sessions.push(project::LoadingSession {
                             id: placeholder_id.clone(),
                             label: format!("{session_label} (rebasing & merging)"),
@@ -350,17 +432,25 @@ impl AppState {
                             let project = &self.projects[cursor.project_idx];
                             self.active = if !project.sessions.is_empty() {
                                 let new_idx = cursor.session_idx.min(project.sessions.len() - 1);
-                                Some(SessionCursor { project_idx: cursor.project_idx, session_idx: new_idx })
+                                Some(SessionCursor {
+                                    project_idx: cursor.project_idx,
+                                    session_idx: new_idx,
+                                })
                             } else {
                                 self.projects.iter().enumerate().find_map(|(p_idx, p)| {
                                     if !p.sessions.is_empty() {
-                                        Some(SessionCursor { project_idx: p_idx, session_idx: 0 })
+                                        Some(SessionCursor {
+                                            project_idx: p_idx,
+                                            session_idx: 0,
+                                        })
                                     } else {
                                         None
                                     }
                                 })
                             };
-                        } else if active.project_idx == cursor.project_idx && active.session_idx > cursor.session_idx {
+                        } else if active.project_idx == cursor.project_idx
+                            && active.session_idx > cursor.session_idx
+                        {
                             self.active = Some(SessionCursor {
                                 project_idx: active.project_idx,
                                 session_idx: active.session_idx - 1,
@@ -489,7 +579,10 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         match action {
-            ArchiveAction::MergeArchive { project_idx, archive_idx } => {
+            ArchiveAction::MergeArchive {
+                project_idx,
+                archive_idx,
+            } => {
                 if let Some(project) = self.projects.get_mut(project_idx) {
                     if let Some(entry) = project.archives.get(archive_idx) {
                         let session_id = entry.id.clone();
@@ -524,9 +617,7 @@ impl AppState {
                                 );
                             }
                             Err(e) => {
-                                warn!(
-                                    "merge_archive failed for {session_id}: {e}"
-                                );
+                                warn!("merge_archive failed for {session_id}: {e}");
                             }
                         }
                     }
@@ -534,7 +625,10 @@ impl AppState {
                 self.mark_state_dirty();
                 cx.notify();
             }
-            ArchiveAction::DeleteArchive { project_idx, archive_idx } => {
+            ArchiveAction::DeleteArchive {
+                project_idx,
+                archive_idx,
+            } => {
                 if let Some(project) = self.projects.get_mut(project_idx) {
                     if let Some(entry) = project.archives.get(archive_idx) {
                         let session_id = entry.id.clone();
@@ -549,7 +643,10 @@ impl AppState {
                 self.mark_state_dirty();
                 cx.notify();
             }
-            ArchiveAction::RestoreArchive { project_idx, archive_idx } => {
+            ArchiveAction::RestoreArchive {
+                project_idx,
+                archive_idx,
+            } => {
                 // Snapshot everything we need under an immutable borrow, then
                 // drop it before the heavy clone work so we hold no borrow of
                 // AppState across it.
@@ -568,8 +665,8 @@ impl AppState {
 
                 // Resolve the agent the same way a fresh session would — the
                 // original agent isn't recorded on the archive entry.
-                let project_override = crate::config::ProjectConfig::load(&source_path)
-                    .and_then(|c| c.agent);
+                let project_override =
+                    crate::config::ProjectConfig::load(&source_path).and_then(|c| c.agent);
                 let agent_id = crate::agents::resolve(
                     &self.user_settings.agents,
                     self.user_settings.default_agent.as_deref(),
@@ -630,10 +727,8 @@ impl AppState {
 
                 if let Some(project) = self.projects.get_mut(project_idx) {
                     project.sessions.push(session);
-                    let _ = git::delete_ref(
-                        &project.source_path,
-                        &git::archive_ref_name(&session_id),
-                    );
+                    let _ =
+                        git::delete_ref(&project.source_path, &git::archive_ref_name(&session_id));
                     project.archives.remove(archive_idx);
                     info!("Restored archived session {session_id} as a suspended session");
                 }
@@ -655,7 +750,8 @@ impl AppState {
                 *skip_refocus = true;
                 if let Some(cursor) = self.active {
                     let now_visible = {
-                        let session = self.projects
+                        let session = self
+                            .projects
                             .get_mut(cursor.project_idx)
                             .and_then(|p| p.sessions.get_mut(cursor.session_idx));
                         if let Some(s) = session {
@@ -683,7 +779,8 @@ impl AppState {
                 *skip_refocus = true;
                 if let Some(cursor) = self.active {
                     self.spawn_drawer_tab(cursor, None, None, window, cx);
-                    if let Some(session) = self.projects
+                    if let Some(session) = self
+                        .projects
                         .get_mut(cursor.project_idx)
                         .and_then(|p| p.sessions.get_mut(cursor.session_idx))
                     {
@@ -697,7 +794,8 @@ impl AppState {
             DrawerAction::SwitchDrawerTab(idx) => {
                 *skip_refocus = true;
                 if let Some(cursor) = self.active {
-                    if let Some(session) = self.projects
+                    if let Some(session) = self
+                        .projects
                         .get_mut(cursor.project_idx)
                         .and_then(|p| p.sessions.get_mut(cursor.session_idx))
                     {
@@ -714,7 +812,8 @@ impl AppState {
                 *skip_refocus = true;
                 if let Some(cursor) = self.active {
                     let (remaining, hide_drawer) = {
-                        let session = self.projects
+                        let session = self
+                            .projects
                             .get_mut(cursor.project_idx)
                             .and_then(|p| p.sessions.get_mut(cursor.session_idx));
                         if let Some(s) = session {
@@ -754,14 +853,17 @@ impl AppState {
             DrawerAction::StartRenameDrawerTab(idx) => {
                 *skip_refocus = true;
                 if let Some(cursor) = self.active {
-                    let initial = self.projects
+                    let initial = self
+                        .projects
                         .get(cursor.project_idx)
                         .and_then(|p| p.sessions.get(cursor.session_idx))
                         .and_then(|s| s.drawer_tabs.get(idx))
                         .map(|t| t.name.clone());
                     if let Some(name) = initial {
                         self.drawer.rename = Some((cursor, idx, name));
-                        let fh = self.drawer.rename_focus
+                        let fh = self
+                            .drawer
+                            .rename_focus
                             .get_or_insert_with(|| cx.focus_handle())
                             .clone();
                         fh.focus(window, cx);
@@ -774,7 +876,8 @@ impl AppState {
                 if let Some((cursor, idx, buf)) = self.drawer.rename.take() {
                     let trimmed = buf.trim().to_string();
                     if !trimmed.is_empty() {
-                        if let Some(session) = self.projects
+                        if let Some(session) = self
+                            .projects
                             .get_mut(cursor.project_idx)
                             .and_then(|p| p.sessions.get_mut(cursor.session_idx))
                         {
@@ -947,12 +1050,16 @@ impl AppState {
                 // from AppState before writing, mirroring the pattern
                 // used in observe_window_bounds.
                 let snapshot = Settings {
-                    projects: self.projects.iter().map(|p| ProjectSave {
-                        id: p.id.clone(),
-                        name: p.name.clone(),
-                        source_path: p.source_path.clone(),
-                        settings: p.settings.clone(),
-                    }).collect(),
+                    projects: self
+                        .projects
+                        .iter()
+                        .map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        })
+                        .collect(),
                     ..self.user_settings.clone()
                 };
                 snapshot.save();
@@ -964,17 +1071,24 @@ impl AppState {
                     self.browser_status.clear();
                 }
                 let snapshot = Settings {
-                    projects: self.projects.iter().map(|p| ProjectSave {
-                        id: p.id.clone(),
-                        name: p.name.clone(),
-                        source_path: p.source_path.clone(),
-                        settings: p.settings.clone(),
-                    }).collect(),
+                    projects: self
+                        .projects
+                        .iter()
+                        .map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        })
+                        .collect(),
                     ..self.user_settings.clone()
                 };
                 snapshot.save();
             }
-            SettingsAction::UpdateAgents { agents, default_agent } => {
+            SettingsAction::UpdateAgents {
+                agents,
+                default_agent,
+            } => {
                 *skip_refocus = true;
                 self.user_settings.agents = agents;
                 self.user_settings.default_agent = default_agent;
@@ -983,12 +1097,16 @@ impl AppState {
                 *skip_refocus = true;
                 self.user_settings.git_pull_before_new_session = enabled;
                 let snapshot = Settings {
-                    projects: self.projects.iter().map(|p| ProjectSave {
-                        id: p.id.clone(),
-                        name: p.name.clone(),
-                        source_path: p.source_path.clone(),
-                        settings: p.settings.clone(),
-                    }).collect(),
+                    projects: self
+                        .projects
+                        .iter()
+                        .map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        })
+                        .collect(),
                     ..self.user_settings.clone()
                 };
                 snapshot.save();
@@ -997,12 +1115,16 @@ impl AppState {
                 *skip_refocus = true;
                 self.user_settings.promote_attention_sessions = enabled;
                 let snapshot = Settings {
-                    projects: self.projects.iter().map(|p| ProjectSave {
-                        id: p.id.clone(),
-                        name: p.name.clone(),
-                        source_path: p.source_path.clone(),
-                        settings: p.settings.clone(),
-                    }).collect(),
+                    projects: self
+                        .projects
+                        .iter()
+                        .map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        })
+                        .collect(),
                     ..self.user_settings.clone()
                 };
                 snapshot.save();
@@ -1033,12 +1155,16 @@ impl AppState {
                     }
                 }
                 let snapshot = Settings {
-                    projects: self.projects.iter().map(|p| ProjectSave {
-                        id: p.id.clone(),
-                        name: p.name.clone(),
-                        source_path: p.source_path.clone(),
-                        settings: p.settings.clone(),
-                    }).collect(),
+                    projects: self
+                        .projects
+                        .iter()
+                        .map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        })
+                        .collect(),
                     ..self.user_settings.clone()
                 };
                 snapshot.save();
@@ -1052,12 +1178,16 @@ impl AppState {
                     Some(trimmed.to_string())
                 };
                 let snapshot = Settings {
-                    projects: self.projects.iter().map(|p| ProjectSave {
-                        id: p.id.clone(),
-                        name: p.name.clone(),
-                        source_path: p.source_path.clone(),
-                        settings: p.settings.clone(),
-                    }).collect(),
+                    projects: self
+                        .projects
+                        .iter()
+                        .map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        })
+                        .collect(),
                     ..self.user_settings.clone()
                 };
                 snapshot.save();
@@ -1066,17 +1196,24 @@ impl AppState {
                 *skip_refocus = true;
                 self.user_settings.naming = config;
                 let snapshot = Settings {
-                    projects: self.projects.iter().map(|p| ProjectSave {
-                        id: p.id.clone(),
-                        name: p.name.clone(),
-                        source_path: p.source_path.clone(),
-                        settings: p.settings.clone(),
-                    }).collect(),
+                    projects: self
+                        .projects
+                        .iter()
+                        .map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        })
+                        .collect(),
                     ..self.user_settings.clone()
                 };
                 snapshot.save();
             }
-            SettingsAction::UpdateProjectSettings { project_idx, settings } => {
+            SettingsAction::UpdateProjectSettings {
+                project_idx,
+                settings,
+            } => {
                 *skip_refocus = true;
                 if let Some(project) = self.projects.get_mut(project_idx) {
                     project.settings = settings;
@@ -1087,8 +1224,11 @@ impl AppState {
                 *skip_refocus = true;
                 self.user_settings.base_infra_enabled = enabled;
                 self.mark_settings_dirty();
-                self.base_infra_status =
-                    Some(if enabled { "Starting…".into() } else { "Stopping…".into() });
+                self.base_infra_status = Some(if enabled {
+                    "Starting…".into()
+                } else {
+                    "Stopping…".into()
+                });
                 cx.spawn(async move |this, cx| {
                     let result = cx
                         .background_executor()
@@ -1102,7 +1242,11 @@ impl AppState {
                         .await;
                     let status = match result {
                         Ok(()) => {
-                            if enabled { "Running".to_string() } else { "Stopped".to_string() }
+                            if enabled {
+                                "Running".to_string()
+                            } else {
+                                "Stopped".to_string()
+                            }
                         }
                         Err(e) => e,
                     };
@@ -1128,9 +1272,15 @@ impl AppState {
                 *skip_refocus = true;
                 self.sync_browser_to_active();
             }
-            BrowserAction::CloseBrowserTabForSession { project_idx, session_idx } => {
+            BrowserAction::CloseBrowserTabForSession {
+                project_idx,
+                session_idx,
+            } => {
                 *skip_refocus = true;
-                let cursor = SessionCursor { project_idx, session_idx };
+                let cursor = SessionCursor {
+                    project_idx,
+                    session_idx,
+                };
                 let tab_id = self
                     .projects
                     .get(cursor.project_idx)

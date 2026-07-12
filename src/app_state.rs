@@ -14,9 +14,7 @@ use crate::actions::{PendingAction, SessionCursor};
 use crate::config;
 use crate::project::Project;
 use crate::settings::Settings;
-use crate::{
-    new_session_modal, rich, scratch_pad, settings_window, state, text_input, transcript,
-};
+use crate::{new_session_modal, rich, scratch_pad, settings_window, state, text_input, transcript};
 
 pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 160.0;
 pub(crate) const DRAWER_MIN_HEIGHT: f32 = 100.0;
@@ -195,7 +193,8 @@ pub(crate) struct AppState {
     /// Transient storage for a startup command that finished on a non-window
     /// context. The `SpawnStartupTerminals` action picks this up in the
     /// next render tick where `window` is available.
-    pub(crate) pending_startup: Option<(SessionCursor, config::ProjectConfig, Option<u16>, PathBuf)>,
+    pub(crate) pending_startup:
+        Option<(SessionCursor, config::ProjectConfig, Option<u16>, PathBuf)>,
     /// Transient status line for the base-infra (Traefik) lifecycle, shown
     /// in the Settings → Infrastructure pane. e.g. "Starting…", "Running",
     /// or an error message.

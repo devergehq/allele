@@ -134,9 +134,7 @@ pub fn registered_ports(exclude_stem: Option<&str>) -> HashSet<u16> {
         if path.extension().and_then(|e| e.to_str()) != Some("yml") {
             continue;
         }
-        if exclude_stem.is_some()
-            && path.file_stem().and_then(|s| s.to_str()) == exclude_stem
-        {
+        if exclude_stem.is_some() && path.file_stem().and_then(|s| s.to_str()) == exclude_stem {
             continue;
         }
         let Ok(contents) = std::fs::read_to_string(&path) else {

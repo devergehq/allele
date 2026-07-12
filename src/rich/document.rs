@@ -255,7 +255,10 @@ impl RichDocument {
         }
 
         match event {
-            RichEvent::TextDelta { text, parent_agent_id } => {
+            RichEvent::TextDelta {
+                text,
+                parent_agent_id,
+            } => {
                 // Append to current streaming text block, or create one
                 if let Some(block_id) = self.current_text_block {
                     if let Some(block) = self.block_mut_by_id(block_id) {
@@ -281,7 +284,10 @@ impl RichDocument {
                 Some(id)
             }
 
-            RichEvent::TextBlock { text, parent_agent_id } => {
+            RichEvent::TextBlock {
+                text,
+                parent_agent_id,
+            } => {
                 // Complete text block — close any streaming block first
                 self.close_text_stream();
                 let id = self.push_block(Block {
@@ -297,7 +303,10 @@ impl RichDocument {
                 Some(id)
             }
 
-            RichEvent::ThinkingBlock { thinking, parent_agent_id } => {
+            RichEvent::ThinkingBlock {
+                thinking,
+                parent_agent_id,
+            } => {
                 self.close_text_stream();
                 let id = self.push_block(Block {
                     id: self.next_id,
@@ -309,7 +318,12 @@ impl RichDocument {
                 Some(id)
             }
 
-            RichEvent::ToolUse { tool_use_id, tool_name, input, parent_agent_id } => {
+            RichEvent::ToolUse {
+                tool_use_id,
+                tool_name,
+                input,
+                parent_agent_id,
+            } => {
                 self.close_text_stream();
                 let summary = summarise_tool_input(&tool_name, &input);
                 let id = self.push_block(Block {
@@ -331,7 +345,13 @@ impl RichDocument {
                 Some(id)
             }
 
-            RichEvent::EditDiff { tool_use_id, file_path, old_string, new_string, parent_agent_id } => {
+            RichEvent::EditDiff {
+                tool_use_id,
+                file_path,
+                old_string,
+                new_string,
+                parent_agent_id,
+            } => {
                 self.close_text_stream();
                 let id = self.push_block(Block {
                     id: self.next_id,
@@ -354,7 +374,12 @@ impl RichDocument {
                 Some(id)
             }
 
-            RichEvent::ToolResult { tool_use_id, content, is_error, .. } => {
+            RichEvent::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+                ..
+            } => {
                 // Attach result to existing tool call block
                 if let Some(&block_id) = self.tool_use_index.get(&tool_use_id) {
                     if let Some(block) = self.block_mut_by_id(block_id) {
@@ -370,7 +395,13 @@ impl RichDocument {
                 None
             }
 
-            RichEvent::SessionResult { duration_ms, cost_usd, num_turns, is_error, result_text } => {
+            RichEvent::SessionResult {
+                duration_ms,
+                cost_usd,
+                num_turns,
+                is_error,
+                result_text,
+            } => {
                 self.close_text_stream();
                 let id = self.push_block(Block {
                     id: self.next_id,

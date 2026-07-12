@@ -147,8 +147,8 @@ fn base_sequence(key: &str) -> Option<&'static [u8]> {
 /// Option+Left should send `ESC b` (backward-word) not `ESC ESC[D`.
 fn readline_alt_override(key: &str) -> Option<&'static [u8]> {
     Some(match key {
-        "left" => b"\x1bb",        // backward-word
-        "right" => b"\x1bf",       // forward-word
+        "left" => b"\x1bb",         // backward-word
+        "right" => b"\x1bf",        // forward-word
         "backspace" => b"\x1b\x7f", // backward-kill-word
         "delete" => b"\x1bd",       // forward-kill-word
         _ => return None,
@@ -243,7 +243,13 @@ mod tests {
     use super::*;
 
     fn mods(control: bool, alt: bool, platform: bool, shift: bool) -> Modifiers {
-        Modifiers { control, alt, platform, shift, function: false }
+        Modifiers {
+            control,
+            alt,
+            platform,
+            shift,
+            function: false,
+        }
     }
 
     fn no_mods() -> Modifiers {
@@ -331,15 +337,14 @@ mod tests {
     #[test]
     fn regular_char() {
         let km = KeymapConfig::default();
-        assert_eq!(
-            km.resolve("a", &no_mods(), Some("a")),
-            Some(b"a".to_vec())
-        );
+        assert_eq!(km.resolve("a", &no_mods(), Some("a")), Some(b"a".to_vec()));
     }
 
     #[test]
     fn option_normal_mode_no_esc_prefix() {
-        let km = KeymapConfig { option_key: OptionKeyBehaviour::Normal };
+        let km = KeymapConfig {
+            option_key: OptionKeyBehaviour::Normal,
+        };
         // In Normal mode, Option+Left should just send plain left arrow
         assert_eq!(
             km.resolve("left", &mods(false, true, false, false), None),

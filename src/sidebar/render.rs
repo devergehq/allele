@@ -4,12 +4,14 @@
 //! Takes `&mut AppState` + GPUI context and returns the flat list of elements
 //! that the top-level render lays out into the left sidebar flex column.
 
-use gpui::*;
-use gpui::prelude::FluentBuilder as _;
 use crate::icon::{icon, name as icons};
 use crate::theme::{theme, with_alpha};
+use gpui::prelude::FluentBuilder as _;
+use gpui::*;
 
-use crate::actions::{ArchiveAction, DraggedProject, DraggedSession, ProjectAction, SessionAction, SessionCursor};
+use crate::actions::{
+    ArchiveAction, DraggedProject, DraggedSession, ProjectAction, SessionAction, SessionCursor,
+};
 use crate::app_state::AppState;
 use crate::session::SessionStatus;
 use crate::SimpleTooltip;
@@ -33,7 +35,11 @@ pub(crate) fn build_sidebar_items(
             let project_matches = project_name.to_lowercase().contains(filter);
             let any_session_matches = project.sessions.iter().any(|s| {
                 s.label.to_lowercase().contains(filter)
-                    || s.comment.as_deref().unwrap_or("").to_lowercase().contains(filter)
+                    || s.comment
+                        .as_deref()
+                        .unwrap_or("")
+                        .to_lowercase()
+                        .contains(filter)
             });
             if !project_matches && !any_session_matches {
                 continue;
@@ -50,25 +56,37 @@ pub(crate) fn build_sidebar_items(
             .on_drag(DraggedProject(p_idx), move |_drag, _offset, _window, cx| {
                 cx.new(|_| crate::DragPreview(header_drag_label.clone()))
             })
-            .drag_over::<DraggedProject>(|style, _, _, _| {
-                style.bg(theme().bg_hover_soft)
-            })
-            .on_drop(cx.listener(move |this: &mut AppState, dragged: &DraggedProject, _window, cx| {
-                this.pending_action = Some(ProjectAction::ReorderProject {
-                    from: dragged.0,
-                    to: p_idx,
-                }.into());
-                cx.notify();
-            }))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
-                cx.stop_propagation();
-                this.session_context_menu = None;
-                this.project_context_menu = Some((p_idx, event.position));
-                cx.notify();
-            }))
+            .drag_over::<DraggedProject>(|style, _, _, _| style.bg(theme().bg_hover_soft))
+            .on_drop(cx.listener(
+                move |this: &mut AppState, dragged: &DraggedProject, _window, cx| {
+                    this.pending_action = Some(
+                        ProjectAction::ReorderProject {
+                            from: dragged.0,
+                            to: p_idx,
+                        }
+                        .into(),
+                    );
+                    cx.notify();
+                },
+            ))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(
+                    move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
+                        cx.stop_propagation();
+                        this.session_context_menu = None;
+                        this.project_context_menu = Some((p_idx, event.position));
+                        cx.notify();
+                    },
+                ),
+            )
             .px(px(12.0))
             .py(px(6.0))
-            .bg(if is_confirming_remove { theme().tint_danger } else { theme().bg_sunken })
+            .bg(if is_confirming_remove {
+                theme().tint_danger
+            } else {
+                theme().bg_sunken
+            })
             .border_b_1()
             .border_color(theme().border_subtle)
             .flex()
@@ -83,9 +101,7 @@ pub(crate) fn build_sidebar_items(
                     .flex_row()
                     .gap(px(6.0))
                     .items_center()
-                    .child(
-                        icon(icons::CHEVRON_DOWN, 12.0, theme().text_faint),
-                    )
+                    .child(icon(icons::CHEVRON_DOWN, 12.0, theme().text_faint))
                     .child(
                         div()
                             .text_size(px(12.0))
@@ -115,11 +131,15 @@ pub(crate) fn build_sidebar_items(
                             .text_color(theme().danger)
                             .hover(|s| s.bg(theme().tint_danger_hover))
                             .child("Remove")
-                            .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                cx.stop_propagation();
-                                this.pending_action = Some(ProjectAction::RemoveProject(p_idx).into());
-                                cx.notify();
-                            })),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.pending_action =
+                                        Some(ProjectAction::RemoveProject(p_idx).into());
+                                    cx.notify();
+                                }),
+                            ),
                     )
                     .child(
                         div()
@@ -132,11 +152,15 @@ pub(crate) fn build_sidebar_items(
                             .text_color(theme().text_muted)
                             .hover(|s| s.text_color(theme().text_primary))
                             .child("Cancel")
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
-                                cx.stop_propagation();
-                                this.pending_action = Some(ProjectAction::CancelRemoveProject.into());
-                                cx.notify();
-                            })),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this: &mut AppState, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.pending_action =
+                                        Some(ProjectAction::CancelRemoveProject.into());
+                                    cx.notify();
+                                }),
+                            ),
                     ),
             );
         } else {
@@ -153,13 +177,20 @@ pub(crate) fn build_sidebar_items(
                         .hover(|s| s.bg(theme().bg_raised))
                         .child(icon(icons::PLUS, 13.0, theme().text_faint))
                         .tooltip(|_window, cx| {
-                            cx.new(|_| SimpleTooltip { text: "New session".into() }).into()
+                            cx.new(|_| SimpleTooltip {
+                                text: "New session".into(),
+                            })
+                            .into()
                         })
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                            cx.stop_propagation();
-                            this.pending_action = Some(SessionAction::AddSessionToProject(p_idx).into());
-                            cx.notify();
-                        })),
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.pending_action =
+                                    Some(SessionAction::AddSessionToProject(p_idx).into());
+                                cx.notify();
+                            }),
+                        ),
                 )
                 .child(
                     // New session with details button — revealed on header hover
@@ -173,13 +204,20 @@ pub(crate) fn build_sidebar_items(
                         .hover(|s| s.bg(theme().bg_raised))
                         .child(icon(icons::CHEVRON_RIGHT, 13.0, theme().text_faint))
                         .tooltip(|_window, cx| {
-                            cx.new(|_| SimpleTooltip { text: "New session with details".into() }).into()
+                            cx.new(|_| SimpleTooltip {
+                                text: "New session with details".into(),
+                            })
+                            .into()
                         })
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                            cx.stop_propagation();
-                            this.pending_action = Some(SessionAction::OpenNewSessionModal(p_idx).into());
-                            cx.notify();
-                        })),
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.pending_action =
+                                    Some(SessionAction::OpenNewSessionModal(p_idx).into());
+                                cx.notify();
+                            }),
+                        ),
                 )
                 .child(
                     // Project settings button — revealed on header hover,
@@ -204,12 +242,18 @@ pub(crate) fn build_sidebar_items(
                             },
                         ))
                         .tooltip(|_window, cx| {
-                            cx.new(|_| SimpleTooltip { text: "Project settings".into() }).into()
+                            cx.new(|_| SimpleTooltip {
+                                text: "Project settings".into(),
+                            })
+                            .into()
                         })
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                            cx.stop_propagation();
-                            this.toggle_project_settings_panel(p_idx, cx);
-                        })),
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.toggle_project_settings_panel(p_idx, cx);
+                            }),
+                        ),
                 )
                 .child(
                     // Remove project button — revealed on header hover
@@ -223,13 +267,20 @@ pub(crate) fn build_sidebar_items(
                         .hover(|s| s.bg(theme().bg_raised))
                         .child(icon(icons::X, 13.0, theme().text_ghost))
                         .tooltip(|_window, cx| {
-                            cx.new(|_| SimpleTooltip { text: "Remove project".into() }).into()
+                            cx.new(|_| SimpleTooltip {
+                                text: "Remove project".into(),
+                            })
+                            .into()
                         })
-                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                            cx.stop_propagation();
-                            this.pending_action = Some(ProjectAction::RequestRemoveProject(p_idx).into());
-                            cx.notify();
-                        })),
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.pending_action =
+                                    Some(ProjectAction::RequestRemoveProject(p_idx).into());
+                                cx.notify();
+                            }),
+                        ),
                 );
         }
 
@@ -267,11 +318,15 @@ pub(crate) fn build_sidebar_items(
                             .text_color(theme().text_on_accent)
                             .hover(|s| s.bg(theme().teal))
                             .child("Proceed")
-                            .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                cx.stop_propagation();
-                                this.pending_action = Some(SessionAction::ProceedDirtySession(p_idx).into());
-                                cx.notify();
-                            })),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.pending_action =
+                                        Some(SessionAction::ProceedDirtySession(p_idx).into());
+                                    cx.notify();
+                                }),
+                            ),
                     )
                     .child(
                         div()
@@ -285,11 +340,15 @@ pub(crate) fn build_sidebar_items(
                             .text_color(theme().text_primary)
                             .hover(|s| s.bg(theme().bg_active))
                             .child("Cancel")
-                            .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                cx.stop_propagation();
-                                this.pending_action = Some(SessionAction::CancelDirtySession.into());
-                                cx.notify();
-                            })),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.pending_action =
+                                        Some(SessionAction::CancelDirtySession.into());
+                                    cx.notify();
+                                }),
+                            ),
                     )
                     .into_any_element(),
             );
@@ -355,18 +414,28 @@ pub(crate) fn build_sidebar_items(
                             .text_color(theme().accent)
                             .child(SharedString::from(current_strategy.to_string())),
                     )
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                        cx.stop_propagation();
-                        if let Some(project) = this.projects.get_mut(p_idx) {
-                            project.settings.merge_strategy = match project.settings.merge_strategy {
-                                crate::settings::MergeStrategy::Merge => crate::settings::MergeStrategy::Squash,
-                                crate::settings::MergeStrategy::Squash => crate::settings::MergeStrategy::RebaseThenMerge,
-                                crate::settings::MergeStrategy::RebaseThenMerge => crate::settings::MergeStrategy::Merge,
-                            };
-                        }
-                        this.mark_settings_dirty();
-                        cx.notify();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                            cx.stop_propagation();
+                            if let Some(project) = this.projects.get_mut(p_idx) {
+                                project.settings.merge_strategy =
+                                    match project.settings.merge_strategy {
+                                        crate::settings::MergeStrategy::Merge => {
+                                            crate::settings::MergeStrategy::Squash
+                                        }
+                                        crate::settings::MergeStrategy::Squash => {
+                                            crate::settings::MergeStrategy::RebaseThenMerge
+                                        }
+                                        crate::settings::MergeStrategy::RebaseThenMerge => {
+                                            crate::settings::MergeStrategy::Merge
+                                        }
+                                    };
+                            }
+                            this.mark_settings_dirty();
+                            cx.notify();
+                        }),
+                    )
                     .into_any_element(),
             );
 
@@ -400,51 +469,54 @@ pub(crate) fn build_sidebar_items(
                             })
                             .child(SharedString::from(rebase_label.to_string())),
                     )
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                        cx.stop_propagation();
-                        if let Some(project) = this.projects.get_mut(p_idx) {
-                            project.settings.rebase_before_merge = !project.settings.rebase_before_merge;
-                        }
-                        this.mark_settings_dirty();
-                        cx.notify();
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                            cx.stop_propagation();
+                            if let Some(project) = this.projects.get_mut(p_idx) {
+                                project.settings.rebase_before_merge =
+                                    !project.settings.rebase_before_merge;
+                            }
+                            this.mark_settings_dirty();
+                            cx.notify();
+                        }),
+                    )
                     .into_any_element(),
             );
 
             // Default branch + remote — live inputs (empty = auto/origin)
-            let settings_input_row = |label: &'static str,
-                                      input: Entity<crate::text_input::TextInput>|
-             -> AnyElement {
-                div()
-                    .pl(px(24.0))
-                    .pr(px(12.0))
-                    .py(px(3.0))
-                    .bg(theme().bg_base)
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme().text_faint)
-                            .child(label),
-                    )
-                    .child(
-                        div()
-                            .w(px(140.0))
-                            .px(px(6.0))
-                            .py(px(2.0))
-                            .rounded(px(6.0))
-                            .bg(theme().bg_sunken)
-                            .text_size(px(12.0))
-                            .text_color(theme().text_primary)
-                            .overflow_hidden()
-                            .child(input),
-                    )
-                    .into_any_element()
-            };
+            let settings_input_row =
+                |label: &'static str, input: Entity<crate::text_input::TextInput>| -> AnyElement {
+                    div()
+                        .pl(px(24.0))
+                        .pr(px(12.0))
+                        .py(px(3.0))
+                        .bg(theme().bg_base)
+                        .flex()
+                        .flex_row()
+                        .justify_between()
+                        .items_center()
+                        .gap(px(8.0))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .text_color(theme().text_faint)
+                                .child(label),
+                        )
+                        .child(
+                            div()
+                                .w(px(140.0))
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded(px(6.0))
+                                .bg(theme().bg_sunken)
+                                .text_size(px(12.0))
+                                .text_color(theme().text_primary)
+                                .overflow_hidden()
+                                .child(input),
+                        )
+                        .into_any_element()
+                };
             sidebar_items.push(settings_input_row(
                 "Default branch",
                 state.project_branch_input.clone(),
@@ -469,7 +541,9 @@ pub(crate) fn build_sidebar_items(
 
         // Loading placeholders (sessions mid-clone)
         for loading in &project.loading_sessions {
-            if filtering { continue; }
+            if filtering {
+                continue;
+            }
             sidebar_items.push(
                 div()
                     .id(SharedString::from(format!("loading-{}", loading.id)))
@@ -488,15 +562,15 @@ pub(crate) fn build_sidebar_items(
                             .flex_row()
                             .gap(px(6.0))
                             .items_center()
-                            .child(
-                                icon(icons::LOADER, 12.0, theme().warning).with_animation(
-                                    SharedString::from(format!("cloning-spin-{p_idx}")),
-                                    Animation::new(std::time::Duration::from_millis(900)).repeat(),
-                                    |ic, delta| {
-                                        ic.with_transformation(Transformation::rotate(percentage(delta)))
-                                    },
-                                ),
-                            )
+                            .child(icon(icons::LOADER, 12.0, theme().warning).with_animation(
+                                SharedString::from(format!("cloning-spin-{p_idx}")),
+                                Animation::new(std::time::Duration::from_millis(900)).repeat(),
+                                |ic, delta| {
+                                    ic.with_transformation(Transformation::rotate(percentage(
+                                        delta,
+                                    )))
+                                },
+                            ))
                             .child(
                                 div()
                                     .text_size(px(12.0))
@@ -538,7 +612,12 @@ pub(crate) fn build_sidebar_items(
             // Skip sessions that don't match the filter.
             if filtering {
                 let label_matches = session.label.to_lowercase().contains(filter);
-                let comment_matches = session.comment.as_deref().unwrap_or("").to_lowercase().contains(filter);
+                let comment_matches = session
+                    .comment
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains(filter);
                 let project_matches = project.name.to_lowercase().contains(filter);
                 if !label_matches && !comment_matches && !project_matches {
                     continue;
@@ -555,8 +634,8 @@ pub(crate) fn build_sidebar_items(
             // placeholder ("Claude N" / "Shell N").  Fall back to the
             // terminal's OSC title only while waiting for auto-naming,
             // and to the raw label as a last resort.
-            let is_placeholder = session.label.starts_with("Claude ")
-                || session.label.starts_with("Shell ");
+            let is_placeholder =
+                session.label.starts_with("Claude ") || session.label.starts_with("Shell ");
             let label = if !is_placeholder {
                 session.label.clone()
             } else {
@@ -568,7 +647,10 @@ pub(crate) fn build_sidebar_items(
                     .unwrap_or_else(|| session.label.clone())
             };
             let elapsed = session.elapsed_display();
-            let session_cursor = SessionCursor { project_idx: p_idx, session_idx: s_idx };
+            let session_cursor = SessionCursor {
+                project_idx: p_idx,
+                session_idx: s_idx,
+            };
             let is_confirming_discard = state.confirming.discard == Some(session_cursor);
             let is_confirming_merge = state.confirming.dirty_merge == Some(session_cursor);
 
@@ -595,26 +677,32 @@ pub(crate) fn build_sidebar_items(
                 .id(SharedString::from(format!("session-{p_idx}-{s_idx}")))
                 .group(format!("sess-{p_idx}-{s_idx}"))
                 .on_drag(
-                    DraggedSession { project_idx: p_idx, session_idx: s_idx },
+                    DraggedSession {
+                        project_idx: p_idx,
+                        session_idx: s_idx,
+                    },
                     move |_drag, _offset, _window, cx| {
                         cx.new(|_| crate::DragPreview(row_drag_label.clone()))
                     },
                 )
-                .drag_over::<DraggedSession>(|style, _, _, _| {
-                    style.bg(theme().bg_hover_soft)
-                })
-                .on_drop(cx.listener(move |this: &mut AppState, dragged: &DraggedSession, _window, cx| {
-                    // Same-project reorder only — sessions are clones of
-                    // their project's repo and can't change parents.
-                    if dragged.project_idx == p_idx {
-                        this.pending_action = Some(SessionAction::ReorderSession {
-                            project_idx: p_idx,
-                            from: dragged.session_idx,
-                            to: s_idx,
-                        }.into());
-                        cx.notify();
-                    }
-                }))
+                .drag_over::<DraggedSession>(|style, _, _, _| style.bg(theme().bg_hover_soft))
+                .on_drop(cx.listener(
+                    move |this: &mut AppState, dragged: &DraggedSession, _window, cx| {
+                        // Same-project reorder only — sessions are clones of
+                        // their project's repo and can't change parents.
+                        if dragged.project_idx == p_idx {
+                            this.pending_action = Some(
+                                SessionAction::ReorderSession {
+                                    project_idx: p_idx,
+                                    from: dragged.session_idx,
+                                    to: s_idx,
+                                }
+                                .into(),
+                            );
+                            cx.notify();
+                        }
+                    },
+                ))
                 .pl(px(24.0))
                 .pr(px(12.0))
                 .py(px(5.0))
@@ -626,24 +714,38 @@ pub(crate) fn build_sidebar_items(
                 .gap(px(8.0))
                 .items_center()
                 .justify_between()
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                    this.session_context_menu = None;
-                    this.project_context_menu = None;
-                    this.pending_action = Some(SessionAction::SelectSession {
-                        project_idx: p_idx,
-                        session_idx: s_idx,
-                    }.into());
-                    cx.notify();
-                }))
-                .on_mouse_down(MouseButton::Right, cx.listener(move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
-                    cx.stop_propagation();
-                    this.project_context_menu = None;
-                    this.session_context_menu = Some((
-                        SessionCursor { project_idx: p_idx, session_idx: s_idx },
-                        event.position,
-                    ));
-                    cx.notify();
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                        this.session_context_menu = None;
+                        this.project_context_menu = None;
+                        this.pending_action = Some(
+                            SessionAction::SelectSession {
+                                project_idx: p_idx,
+                                session_idx: s_idx,
+                            }
+                            .into(),
+                        );
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(
+                        move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
+                            cx.stop_propagation();
+                            this.project_context_menu = None;
+                            this.session_context_menu = Some((
+                                SessionCursor {
+                                    project_idx: p_idx,
+                                    session_idx: s_idx,
+                                },
+                                event.position,
+                            ));
+                            cx.notify();
+                        },
+                    ),
+                )
                 .child({
                     let session_pinned = session.pinned;
                     let session_comment = session.comment.clone();
@@ -672,9 +774,7 @@ pub(crate) fn build_sidebar_items(
                             }
                         });
                     if session_pinned {
-                        label_row = label_row.child(
-                            icon(icons::PIN, 11.0, theme().warning),
-                        );
+                        label_row = label_row.child(icon(icons::PIN, 11.0, theme().warning));
                     }
                     label_row = label_row
                         .child(
@@ -755,7 +855,9 @@ pub(crate) fn build_sidebar_items(
                         .items_center()
                         .child(
                             div()
-                                .id(SharedString::from(format!("confirm-discard-{p_idx}-{s_idx}")))
+                                .id(SharedString::from(format!(
+                                    "confirm-discard-{p_idx}-{s_idx}"
+                                )))
                                 .cursor_pointer()
                                 .px(px(6.0))
                                 .py(px(2.0))
@@ -765,18 +867,26 @@ pub(crate) fn build_sidebar_items(
                                 .text_color(theme().danger)
                                 .hover(|s| s.bg(theme().tint_danger_hover))
                                 .child("Discard")
-                                .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.pending_action = Some(SessionAction::DiscardSession {
-                                        project_idx: p_idx,
-                                        session_idx: s_idx,
-                                    }.into());
-                                    cx.notify();
-                                })),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.pending_action = Some(
+                                            SessionAction::DiscardSession {
+                                                project_idx: p_idx,
+                                                session_idx: s_idx,
+                                            }
+                                            .into(),
+                                        );
+                                        cx.notify();
+                                    }),
+                                ),
                         )
                         .child(
                             div()
-                                .id(SharedString::from(format!("cancel-discard-{p_idx}-{s_idx}")))
+                                .id(SharedString::from(format!(
+                                    "cancel-discard-{p_idx}-{s_idx}"
+                                )))
                                 .cursor_pointer()
                                 .px(px(6.0))
                                 .py(px(2.0))
@@ -785,11 +895,15 @@ pub(crate) fn build_sidebar_items(
                                 .text_color(theme().text_muted)
                                 .hover(|s| s.text_color(theme().text_primary))
                                 .child("Cancel")
-                                .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.pending_action = Some(SessionAction::CancelDiscard.into());
-                                    cx.notify();
-                                })),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this: &mut AppState, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.pending_action =
+                                            Some(SessionAction::CancelDiscard.into());
+                                        cx.notify();
+                                    }),
+                                ),
                         ),
                 );
             } else if is_confirming_merge {
@@ -813,7 +927,9 @@ pub(crate) fn build_sidebar_items(
                                 .items_center()
                                 .child(
                                     div()
-                                        .id(SharedString::from(format!("confirm-merge-{p_idx}-{s_idx}")))
+                                        .id(SharedString::from(format!(
+                                            "confirm-merge-{p_idx}-{s_idx}"
+                                        )))
                                         .cursor_pointer()
                                         .px(px(6.0))
                                         .py(px(2.0))
@@ -823,18 +939,28 @@ pub(crate) fn build_sidebar_items(
                                         .text_color(theme().warning)
                                         .hover(|s| s.bg(theme().tint_warning_hover))
                                         .child("Merge committed")
-                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.pending_action = Some(SessionAction::ProceedDirtyMerge {
-                                                project_idx: p_idx,
-                                                session_idx: s_idx,
-                                            }.into());
-                                            cx.notify();
-                                        })),
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                move |this: &mut AppState, _event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.pending_action = Some(
+                                                        SessionAction::ProceedDirtyMerge {
+                                                            project_idx: p_idx,
+                                                            session_idx: s_idx,
+                                                        }
+                                                        .into(),
+                                                    );
+                                                    cx.notify();
+                                                },
+                                            ),
+                                        ),
                                 )
                                 .child(
                                     div()
-                                        .id(SharedString::from(format!("cancel-merge-{p_idx}-{s_idx}")))
+                                        .id(SharedString::from(format!(
+                                            "cancel-merge-{p_idx}-{s_idx}"
+                                        )))
                                         .cursor_pointer()
                                         .px(px(6.0))
                                         .py(px(2.0))
@@ -843,11 +969,18 @@ pub(crate) fn build_sidebar_items(
                                         .text_color(theme().text_muted)
                                         .hover(|s| s.text_color(theme().text_primary))
                                         .child("Cancel")
-                                        .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.pending_action = Some(SessionAction::CancelDirtyMerge.into());
-                                            cx.notify();
-                                        })),
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                |this: &mut AppState, _event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.pending_action = Some(
+                                                        SessionAction::CancelDirtyMerge.into(),
+                                                    );
+                                                    cx.notify();
+                                                },
+                                            ),
+                                        ),
                                 ),
                         ),
                 );
@@ -872,16 +1005,25 @@ pub(crate) fn build_sidebar_items(
                                 .hover(|s| s.bg(theme().bg_raised))
                                 .child(icon(icons::CHECK, 13.0, theme().text_ghost))
                                 .tooltip(|_window, cx| {
-                                    cx.new(|_| SimpleTooltip { text: "Merge and close session".into() }).into()
+                                    cx.new(|_| SimpleTooltip {
+                                        text: "Merge and close session".into(),
+                                    })
+                                    .into()
                                 })
-                                .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.pending_action = Some(SessionAction::MergeAndClose {
-                                        project_idx: p_idx,
-                                        session_idx: s_idx,
-                                    }.into());
-                                    cx.notify();
-                                })),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.pending_action = Some(
+                                            SessionAction::MergeAndClose {
+                                                project_idx: p_idx,
+                                                session_idx: s_idx,
+                                            }
+                                            .into(),
+                                        );
+                                        cx.notify();
+                                    }),
+                                ),
                         )
                         .child(
                             div()
@@ -892,16 +1034,25 @@ pub(crate) fn build_sidebar_items(
                                 .hover(|s| s.bg(theme().bg_raised))
                                 .child(icon(icons::X, 13.0, theme().text_ghost))
                                 .tooltip(|_window, cx| {
-                                    cx.new(|_| SimpleTooltip { text: "Suspend session".into() }).into()
+                                    cx.new(|_| SimpleTooltip {
+                                        text: "Suspend session".into(),
+                                    })
+                                    .into()
                                 })
-                                .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.pending_action = Some(SessionAction::CloseSessionKeepClone {
-                                        project_idx: p_idx,
-                                        session_idx: s_idx,
-                                    }.into());
-                                    cx.notify();
-                                })),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.pending_action = Some(
+                                            SessionAction::CloseSessionKeepClone {
+                                                project_idx: p_idx,
+                                                session_idx: s_idx,
+                                            }
+                                            .into(),
+                                        );
+                                        cx.notify();
+                                    }),
+                                ),
                         )
                         .child(
                             div()
@@ -912,16 +1063,25 @@ pub(crate) fn build_sidebar_items(
                                 .hover(|s| s.bg(theme().bg_raised))
                                 .child(icon(icons::TRASH, 13.0, theme().text_ghost))
                                 .tooltip(|_window, cx| {
-                                    cx.new(|_| SimpleTooltip { text: "Discard session".into() }).into()
+                                    cx.new(|_| SimpleTooltip {
+                                        text: "Discard session".into(),
+                                    })
+                                    .into()
                                 })
-                                .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                    cx.stop_propagation();
-                                    this.pending_action = Some(SessionAction::RequestDiscardSession {
-                                        project_idx: p_idx,
-                                        session_idx: s_idx,
-                                    }.into());
-                                    cx.notify();
-                                })),
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.pending_action = Some(
+                                            SessionAction::RequestDiscardSession {
+                                                project_idx: p_idx,
+                                                session_idx: s_idx,
+                                            }
+                                            .into(),
+                                        );
+                                        cx.notify();
+                                    }),
+                                ),
                         ),
                 );
             }
@@ -964,10 +1124,15 @@ pub(crate) fn build_sidebar_items(
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
                     let delta = now.saturating_sub(archive.archived_at);
-                    if delta < 60 { "just now".to_string() }
-                    else if delta < 3600 { format!("{}m ago", delta / 60) }
-                    else if delta < 86400 { format!("{}h ago", delta / 3600) }
-                    else { format!("{}d ago", delta / 86400) }
+                    if delta < 60 {
+                        "just now".to_string()
+                    } else if delta < 3600 {
+                        format!("{}m ago", delta / 60)
+                    } else if delta < 86400 {
+                        format!("{}h ago", delta / 3600)
+                    } else {
+                        format!("{}d ago", delta / 86400)
+                    }
                 };
 
                 sidebar_items.push(
@@ -993,9 +1158,7 @@ pub(crate) fn build_sidebar_items(
                                 .flex_row()
                                 .gap(px(6.0))
                                 .items_center()
-                                .child(
-                                    icon(icons::ARCHIVE, 12.0, with_alpha(theme().ready, 0.7)),
-                                )
+                                .child(icon(icons::ARCHIVE, 12.0, with_alpha(theme().ready, 0.7)))
                                 .child(
                                     div()
                                         .text_size(px(12.0))
@@ -1029,16 +1192,27 @@ pub(crate) fn build_sidebar_items(
                                         .hover(|s| s.bg(theme().bg_raised))
                                         .child("restore")
                                         .tooltip(|_window, cx| {
-                                            cx.new(|_| SimpleTooltip { text: "Restore as active session".into() }).into()
+                                            cx.new(|_| SimpleTooltip {
+                                                text: "Restore as active session".into(),
+                                            })
+                                            .into()
                                         })
-                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.pending_action = Some(ArchiveAction::RestoreArchive {
-                                                project_idx: p_idx,
-                                                archive_idx: a_idx,
-                                            }.into());
-                                            cx.notify();
-                                        })),
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                move |this: &mut AppState, _event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.pending_action = Some(
+                                                        ArchiveAction::RestoreArchive {
+                                                            project_idx: p_idx,
+                                                            archive_idx: a_idx,
+                                                        }
+                                                        .into(),
+                                                    );
+                                                    cx.notify();
+                                                },
+                                            ),
+                                        ),
                                 )
                                 .child(
                                     // Merge button
@@ -1053,37 +1227,61 @@ pub(crate) fn build_sidebar_items(
                                         .hover(|s| s.bg(theme().bg_raised))
                                         .child("merge")
                                         .tooltip(|_window, cx| {
-                                            cx.new(|_| SimpleTooltip { text: "Merge archive into project".into() }).into()
+                                            cx.new(|_| SimpleTooltip {
+                                                text: "Merge archive into project".into(),
+                                            })
+                                            .into()
                                         })
-                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.pending_action = Some(ArchiveAction::MergeArchive {
-                                                project_idx: p_idx,
-                                                archive_idx: a_idx,
-                                            }.into());
-                                            cx.notify();
-                                        })),
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                move |this: &mut AppState, _event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.pending_action = Some(
+                                                        ArchiveAction::MergeArchive {
+                                                            project_idx: p_idx,
+                                                            archive_idx: a_idx,
+                                                        }
+                                                        .into(),
+                                                    );
+                                                    cx.notify();
+                                                },
+                                            ),
+                                        ),
                                 )
                                 .child(
                                     // Delete button
                                     div()
-                                        .id(SharedString::from(format!("delarchive-{p_idx}-{a_idx}")))
+                                        .id(SharedString::from(format!(
+                                            "delarchive-{p_idx}-{a_idx}"
+                                        )))
                                         .cursor_pointer()
                                         .p(px(3.0))
                                         .rounded(px(6.0))
                                         .hover(|s| s.bg(theme().bg_raised))
                                         .child(icon(icons::X, 12.0, theme().text_ghost))
                                         .tooltip(|_window, cx| {
-                                            cx.new(|_| SimpleTooltip { text: "Delete archive".into() }).into()
+                                            cx.new(|_| SimpleTooltip {
+                                                text: "Delete archive".into(),
+                                            })
+                                            .into()
                                         })
-                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                            cx.stop_propagation();
-                                            this.pending_action = Some(ArchiveAction::DeleteArchive {
-                                                project_idx: p_idx,
-                                                archive_idx: a_idx,
-                                            }.into());
-                                            cx.notify();
-                                        })),
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(
+                                                move |this: &mut AppState, _event, _window, cx| {
+                                                    cx.stop_propagation();
+                                                    this.pending_action = Some(
+                                                        ArchiveAction::DeleteArchive {
+                                                            project_idx: p_idx,
+                                                            archive_idx: a_idx,
+                                                        }
+                                                        .into(),
+                                                    );
+                                                    cx.notify();
+                                                },
+                                            ),
+                                        ),
                                 ),
                         )
                         .into_any_element(),

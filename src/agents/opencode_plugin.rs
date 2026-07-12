@@ -161,9 +161,8 @@ fn plugin_dir() -> Option<PathBuf> {
 /// Idempotent — always rewrites so the on-disk copy tracks the shipped
 /// source. Safe to call on every startup.
 pub fn install() -> std::io::Result<()> {
-    let dir = plugin_dir().ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "no config directory")
-    })?;
+    let dir = plugin_dir()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no config directory"))?;
     std::fs::create_dir_all(&dir)?;
     std::fs::write(dir.join("allele-events.js"), PLUGIN_JS)?;
     Ok(())

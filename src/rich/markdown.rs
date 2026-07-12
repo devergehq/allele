@@ -8,25 +8,30 @@
 //! Pure function: `render(content, streaming, font_size) -> Div`. No memoisation,
 //! no `Window` parameter — fonts are constructed inline.
 
+use crate::theme::{theme, with_alpha};
 use gpui::{
-    div, px, Div, Font, FontFeatures, FontStyle, FontWeight, Hsla,
-    ParentElement as _, SharedString, StyledText, Styled as _, TextRun, UnderlineStyle,
+    div, px, Div, Font, FontFeatures, FontStyle, FontWeight, Hsla, ParentElement as _,
+    SharedString, Styled as _, StyledText, TextRun, UnderlineStyle,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use crate::theme::{theme, with_alpha};
 
 // ── Palette (Catppuccin Mocha — matches rich_view.rs) ─────────────
-
-
-
 
 const MONO_FAMILY: &str = crate::theme::FONT_MONO;
 
 fn body_font(bold: bool, italic: bool) -> Font {
     Font {
         family: "".into(),
-        weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
-        style: if italic { FontStyle::Italic } else { FontStyle::Normal },
+        weight: if bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        },
+        style: if italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        },
         features: FontFeatures::default(),
         fallbacks: None,
     }
@@ -35,8 +40,16 @@ fn body_font(bold: bool, italic: bool) -> Font {
 fn mono_font(bold: bool, italic: bool) -> Font {
     Font {
         family: MONO_FAMILY.into(),
-        weight: if bold { FontWeight::BOLD } else { FontWeight::NORMAL },
-        style: if italic { FontStyle::Italic } else { FontStyle::Normal },
+        weight: if bold {
+            FontWeight::BOLD
+        } else {
+            FontWeight::NORMAL
+        },
+        style: if italic {
+            FontStyle::Italic
+        } else {
+            FontStyle::Normal
+        },
         features: FontFeatures::disable_ligatures(),
         fallbacks: None,
     }
@@ -55,7 +68,11 @@ struct InlineStyle {
 
 impl InlineStyle {
     fn to_run(self, len: usize, base_color: Hsla) -> TextRun {
-        let color = if self.link { theme().accent } else { base_color };
+        let color = if self.link {
+            theme().accent
+        } else {
+            base_color
+        };
         let font = if self.code {
             mono_font(self.bold, self.italic)
         } else {
@@ -103,7 +120,11 @@ struct InlineBuilder {
 
 impl InlineBuilder {
     fn new() -> Self {
-        Self { text: String::new(), runs: Vec::new(), style: InlineStyle::default() }
+        Self {
+            text: String::new(),
+            runs: Vec::new(),
+            style: InlineStyle::default(),
+        }
     }
 
     fn push(&mut self, segment: &str, base_color: Hsla) {
@@ -139,7 +160,11 @@ impl InlineBuilder {
 /// re-call every frame; pulldown-cmark parses at hundreds of MB/s for the sizes
 /// involved here.
 pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
-    let base_color = if streaming { theme().text_body } else { theme().text_primary };
+    let base_color = if streaming {
+        theme().text_body
+    } else {
+        theme().text_primary
+    };
 
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
@@ -172,12 +197,16 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 // No-op: paragraph content accumulates into `inline`.
             }
             Event::End(TagEnd::Paragraph) => {
-                if let Some((text, runs)) = std::mem::replace(&mut inline, InlineBuilder::new()).finish() {
+                if let Some((text, runs)) =
+                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
+                {
                     container = container.child(paragraph_element(text, runs, font_size));
                 }
             }
             Event::Start(Tag::Heading { level, .. }) => {
-                if let Some((text, runs)) = std::mem::replace(&mut inline, InlineBuilder::new()).finish() {
+                if let Some((text, runs)) =
+                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
+                {
                     container = container.child(paragraph_element(text, runs, font_size));
                 }
                 current_heading = Some(level);
@@ -186,12 +215,16 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
             Event::End(TagEnd::Heading(_)) => {
                 let level = current_heading.take().unwrap_or(HeadingLevel::H6);
                 inline.style.bold = false;
-                if let Some((text, runs)) = std::mem::replace(&mut inline, InlineBuilder::new()).finish() {
+                if let Some((text, runs)) =
+                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
+                {
                     container = container.child(heading_element(level, text, runs, font_size));
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                if let Some((text, runs)) = std::mem::replace(&mut inline, InlineBuilder::new()).finish() {
+                if let Some((text, runs)) =
+                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
+                {
                     container = container.child(paragraph_element(text, runs, font_size));
                 }
                 in_code_block = true;
@@ -210,7 +243,9 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 ));
             }
             Event::Start(Tag::List(first_number)) => {
-                if let Some((text, runs)) = std::mem::replace(&mut inline, InlineBuilder::new()).finish() {
+                if let Some((text, runs)) =
+                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
+                {
                     container = container.child(paragraph_element(text, runs, font_size));
                 }
                 list_stack.push(first_number);
@@ -238,7 +273,9 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 if let Some(prefix) = pending_list_prefix.take() {
                     inline.push(&prefix, base_color);
                 }
-                if let Some((text, runs)) = std::mem::replace(&mut inline, InlineBuilder::new()).finish() {
+                if let Some((text, runs)) =
+                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
+                {
                     container = container.child(list_item_element(text, runs, font_size));
                 }
             }
@@ -251,7 +288,10 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 if checked {
                     inline.push(&format!("{indent}☑ "), theme().success);
                 } else {
-                    inline.push(&format!("{indent}☐ "), with_alpha(theme().text_secondary, 0.6));
+                    inline.push(
+                        &format!("{indent}☐ "),
+                        with_alpha(theme().text_secondary, 0.6),
+                    );
                 }
             }
             Event::Start(Tag::Emphasis) => inline.style.italic = true,
@@ -295,7 +335,9 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 }
             }
             Event::Rule => {
-                if let Some((text, runs)) = std::mem::replace(&mut inline, InlineBuilder::new()).finish() {
+                if let Some((text, runs)) =
+                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
+                {
                     container = container.child(paragraph_element(text, runs, font_size));
                 }
                 container = container.child(
@@ -307,7 +349,9 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
             }
             // ── Tables ────────────────────────────────────────────
             Event::Start(Tag::Table(_)) => {
-                if let Some((text, runs)) = std::mem::replace(&mut inline, InlineBuilder::new()).finish() {
+                if let Some((text, runs)) =
+                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
+                {
                     container = container.child(paragraph_element(text, runs, font_size));
                 }
                 table_header.clear();
@@ -381,7 +425,12 @@ fn paragraph_element(text: SharedString, runs: Vec<TextRun>, font_size: f32) -> 
         .child(StyledText::new(text).with_runs(runs))
 }
 
-fn heading_element(level: HeadingLevel, text: SharedString, runs: Vec<TextRun>, font_size: f32) -> Div {
+fn heading_element(
+    level: HeadingLevel,
+    text: SharedString,
+    runs: Vec<TextRun>,
+    font_size: f32,
+) -> Div {
     let (size, top, bottom) = match level {
         HeadingLevel::H1 => (font_size + 8.0, 10.0, 6.0),
         HeadingLevel::H2 => (font_size + 5.0, 8.0, 5.0),
@@ -403,17 +452,18 @@ fn heading_element(level: HeadingLevel, text: SharedString, runs: Vec<TextRun>, 
             .border_l_2()
             .border_color(with_alpha(theme().ready, 0.55))
             .child(text_div),
-        _ => div()
-            .mt(px(top))
-            .mb(px(bottom))
-            .child(text_div),
+        _ => div().mt(px(top)).mb(px(bottom)).child(text_div),
     }
 }
 
 fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
     let code_size = font_size - 1.0;
     let base_color = theme().success;
-    let trimmed = if code.ends_with('\n') { &code[..code.len() - 1] } else { &code };
+    let trimmed = if code.ends_with('\n') {
+        &code[..code.len() - 1]
+    } else {
+        &code
+    };
 
     let mut block = div()
         .my(px(10.0))
@@ -455,7 +505,12 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
         return block;
     }
 
-    let mut content = div().px(px(10.0)).pt(padding_top).pb(px(6.0)).flex().flex_col();
+    let mut content = div()
+        .px(px(10.0))
+        .pt(padding_top)
+        .pb(px(6.0))
+        .flex()
+        .flex_col();
     for line in trimmed.split('\n') {
         let run = TextRun {
             len: line.len(),
@@ -519,7 +574,11 @@ fn table_element(
     }
 
     for (i, row_cells) in rows.into_iter().enumerate() {
-        let bg = if i % 2 == 0 { with_alpha(theme().bg_raised, 0.45) } else { with_alpha(theme().bg_raised, 0.2) };
+        let bg = if i % 2 == 0 {
+            with_alpha(theme().bg_raised, 0.45)
+        } else {
+            with_alpha(theme().bg_raised, 0.2)
+        };
         let mut row = div().w_full().min_w_0().flex().bg(bg);
         for cell in row_cells {
             let content = if let Some((text, runs)) = cell {

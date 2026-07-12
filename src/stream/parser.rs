@@ -23,7 +23,10 @@ impl StreamParser {
         let parsed: StreamLine = match serde_json::from_str(line) {
             Ok(p) => p,
             Err(e) => {
-                warn!("[stream] parse error: {e} — line: {}", &line[..line.len().min(120)]);
+                warn!(
+                    "[stream] parse error: {e} — line: {}",
+                    &line[..line.len().min(120)]
+                );
                 return Vec::new();
             }
         };
@@ -84,7 +87,9 @@ impl StreamParser {
                         });
                     }
                 }
-                ContentBlock::ToolUse { id, name, input, .. } => {
+                ContentBlock::ToolUse {
+                    id, name, input, ..
+                } => {
                     // Check if this is an Edit tool — extract diff data
                     if name == "Edit" || name == "edit_file" {
                         if let Some(diff) = extract_edit_diff(&id, &input, &parent) {

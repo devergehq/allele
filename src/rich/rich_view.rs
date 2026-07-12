@@ -14,18 +14,15 @@
 //!   - Caller calls `set_busy` to lock/unlock the ComposeBar
 //!   - Render walks the document blocks and produces styled GPUI elements
 
+use crate::theme::{theme, with_alpha};
 use gpui::*;
 use similar::{ChangeTag, TextDiff};
-use crate::theme::{theme, with_alpha};
 
 use super::compose_bar::{ComposeBar, ComposeBarEvent};
 use super::document::{short_path, truncate_to_char_boundary, Block, BlockKind, RichDocument};
 use crate::stream::RichEvent;
 
 // ── Catppuccin Mocha palette (matching terminal) ──────────────────
-
-
-
 
 // ── Events emitted to parent ──────────────────────────────────────
 
@@ -69,27 +66,24 @@ impl RichView {
     /// `session_id` is used only for per-session attachment scoping
     /// (`~/.allele/attachments/<session_id>/`). The view does not start a
     /// CLI process and does not tail files itself — the caller drives both.
-    pub fn new(
-        cx: &mut Context<Self>,
-        session_id: String,
-        font_size: f32,
-    ) -> Self {
+    pub fn new(cx: &mut Context<Self>, session_id: String, font_size: f32) -> Self {
         let focus_handle = cx.focus_handle();
 
         let compose_bar = cx.new(|cx| ComposeBar::new(cx, font_size, session_id.clone()));
 
         // Re-emit compose bar submits upward so the parent can route to
         // the PTY. The view never writes to `claude`'s stdin directly.
-        cx.subscribe(&compose_bar, |_this: &mut Self, _bar, event: &ComposeBarEvent, cx| {
-            match event {
+        cx.subscribe(
+            &compose_bar,
+            |_this: &mut Self, _bar, event: &ComposeBarEvent, cx| match event {
                 ComposeBarEvent::Submit { text, attachments } => {
                     cx.emit(RichViewEvent::Submit {
                         text: text.clone(),
                         attachments: attachments.clone(),
                     });
                 }
-            }
-        })
+            },
+        )
         .detach();
 
         let list_state = ListState::new(0, ListAlignment::Bottom, px(200.0));
@@ -159,7 +153,8 @@ impl RichView {
 
     fn sync_list_state(&mut self, old_count: usize, new_count: usize) {
         if new_count > old_count {
-            self.list_state.splice(old_count..old_count, new_count - old_count);
+            self.list_state
+                .splice(old_count..old_count, new_count - old_count);
         } else if new_count < old_count {
             self.list_state.splice(new_count..old_count, 0);
         }
@@ -213,14 +208,14 @@ impl RichView {
                     .bg(with_alpha(theme().text_primary, 0.25)),
             )
     }
-
 }
 
 impl Render for RichView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let font_size = self.font_size;
         let busy = self.busy;
-        self.compose_bar.update(cx, |bar, cx| bar.set_busy(busy, cx));
+        self.compose_bar
+            .update(cx, |bar, cx| bar.set_busy(busy, cx));
 
         // Empty state — show placeholder instead of the virtual list.
         if self.document.block_count() == 0 {
@@ -237,29 +232,21 @@ impl Render for RichView {
                 .flex_col()
                 .bg(theme().bg_base)
                 .child(
-                    div()
-                        .flex_1()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_color(theme().text_secondary)
-                                .text_size(px(font_size))
-                                .child(message),
-                        ),
+                    div().flex_1().flex().items_center().justify_center().child(
+                        div()
+                            .text_color(theme().text_secondary)
+                            .text_size(px(font_size))
+                            .child(message),
+                    ),
                 )
                 .child(self.compose_bar.clone());
         }
 
         // Virtual list — only renders visible blocks + overdraw.
-        let feed_list = list(
-            self.list_state.clone(),
-            cx.processor(Self::render_block_at),
-        )
-        .with_sizing_behavior(ListSizingBehavior::Auto)
-        .p(px(12.0))
-        .size_full();
+        let feed_list = list(self.list_state.clone(), cx.processor(Self::render_block_at))
+            .with_sizing_behavior(ListSizingBehavior::Auto)
+            .p(px(12.0))
+            .size_full();
 
         let scrollbar = self.render_scrollbar();
 
@@ -443,7 +430,9 @@ fn render_thinking_block(
     cx: &mut Context<RichView>,
 ) -> Div {
     let header = div()
-        .id(ElementId::Name(format!("thinking-header-{block_id}").into()))
+        .id(ElementId::Name(
+            format!("thinking-header-{block_id}").into(),
+        ))
         .flex()
         .gap(px(6.0))
         .items_center()
@@ -523,7 +512,9 @@ fn render_tool_call(
     // Header: chevron + tool name + summary (clickable).
     card = card.child(
         div()
-            .id(ElementId::Name(format!("toolcall-header-{block_id}").into()))
+            .id(ElementId::Name(
+                format!("toolcall-header-{block_id}").into(),
+            ))
             .w_full()
             .min_w_0()
             .flex()
@@ -627,7 +618,10 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
             block.child(code)
         }
         "Read" | "read_file" => {
-            let path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("?");
+            let path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
             let offset = input.get("offset").and_then(|v| v.as_u64());
             let limit = input.get("limit").and_then(|v| v.as_u64());
             let mut detail = path.to_string();
@@ -654,7 +648,10 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
                 .child(detail)
         }
         "Write" | "write_file" => {
-            let path = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("?");
+            let path = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("?");
             let content = input.get("content").and_then(|v| v.as_str()).unwrap_or("");
             let line_count = content.lines().count();
             div()
@@ -672,7 +669,11 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
         }
         "Grep" => {
             let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("?");
-            let path = input.get("path").and_then(|v| v.as_str()).map(|p| super::document::short_path(p)).unwrap_or_default();
+            let path = input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .map(|p| super::document::short_path(p))
+                .unwrap_or_default();
             let include = input.get("include").and_then(|v| v.as_str());
             let mut detail = format!("/{pattern}/");
             if !path.is_empty() {
@@ -695,12 +696,12 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
                 .child(detail)
         }
         "Agent" => {
-            let desc = input.get("description").and_then(|v| v.as_str()).unwrap_or("subagent");
+            let desc = input
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("subagent");
             let prompt = input.get("prompt").and_then(|v| v.as_str()).unwrap_or("");
-            let mut block = div()
-                .w_full()
-                .min_w_0()
-                .mt(px(6.0));
+            let mut block = div().w_full().min_w_0().mt(px(6.0));
             block = block.child(
                 div()
                     .w_full()
@@ -733,8 +734,8 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
             block
         }
         _ => {
-            let pretty = serde_json::to_string_pretty(input)
-                .unwrap_or_else(|_| format!("{input:?}"));
+            let pretty =
+                serde_json::to_string_pretty(input).unwrap_or_else(|_| format!("{input:?}"));
             let mut json_block = div()
                 .w_full()
                 .min_w_0()
@@ -772,7 +773,11 @@ fn render_tool_result_output(content: &str, font_size: f32) -> Div {
     let cleaned = strip_ansi(content);
     let lines: Vec<&str> = cleaned.lines().collect();
     let truncated = lines.len() > MAX_RESULT_LINES;
-    let visible = if truncated { &lines[..MAX_RESULT_LINES] } else { &lines };
+    let visible = if truncated {
+        &lines[..MAX_RESULT_LINES]
+    } else {
+        &lines
+    };
 
     let mut block = div()
         .w_full()
@@ -787,12 +792,7 @@ fn render_tool_result_output(content: &str, font_size: f32) -> Div {
         .font_family(crate::theme::FONT_MONO);
 
     for line in visible {
-        block = block.child(
-            div()
-                .w_full()
-                .min_w_0()
-                .child(line.to_string()),
-        );
+        block = block.child(div().w_full().min_w_0().child(line.to_string()));
     }
 
     if truncated {
@@ -952,14 +952,20 @@ fn render_diff(
                 // Structural replacement — group reds then greens.
                 for j in del_start..del_end {
                     diff = diff.child(render_diff_line_plain(
-                        "-", &changes[j].1, code_size,
-                        with_alpha(theme().danger, 0.8), with_alpha(theme().danger, 0.1),
+                        "-",
+                        &changes[j].1,
+                        code_size,
+                        with_alpha(theme().danger, 0.8),
+                        with_alpha(theme().danger, 0.1),
                     ));
                 }
                 for j in ins_start..ins_end {
                     diff = diff.child(render_diff_line_plain(
-                        "+", &changes[j].1, code_size,
-                        with_alpha(theme().success, 0.8), with_alpha(theme().success, 0.1),
+                        "+",
+                        &changes[j].1,
+                        code_size,
+                        with_alpha(theme().success, 0.8),
+                        with_alpha(theme().success, 0.1),
                     ));
                 }
             } else {
@@ -978,25 +984,37 @@ fn render_diff(
                         ));
                     } else {
                         diff = diff.child(render_diff_line_plain(
-                            "-", del_line, code_size,
-                            with_alpha(theme().danger, 0.8), with_alpha(theme().danger, 0.1),
+                            "-",
+                            del_line,
+                            code_size,
+                            with_alpha(theme().danger, 0.8),
+                            with_alpha(theme().danger, 0.1),
                         ));
                         diff = diff.child(render_diff_line_plain(
-                            "+", ins_line, code_size,
-                            with_alpha(theme().success, 0.8), with_alpha(theme().success, 0.1),
+                            "+",
+                            ins_line,
+                            code_size,
+                            with_alpha(theme().success, 0.8),
+                            with_alpha(theme().success, 0.1),
                         ));
                     }
                 }
                 for j in paired..del_count {
                     diff = diff.child(render_diff_line_plain(
-                        "-", &changes[del_start + j].1, code_size,
-                        with_alpha(theme().danger, 0.8), with_alpha(theme().danger, 0.1),
+                        "-",
+                        &changes[del_start + j].1,
+                        code_size,
+                        with_alpha(theme().danger, 0.8),
+                        with_alpha(theme().danger, 0.1),
                     ));
                 }
                 for j in paired..ins_count {
                     diff = diff.child(render_diff_line_plain(
-                        "+", &changes[ins_start + j].1, code_size,
-                        with_alpha(theme().success, 0.8), with_alpha(theme().success, 0.1),
+                        "+",
+                        &changes[ins_start + j].1,
+                        code_size,
+                        with_alpha(theme().success, 0.8),
+                        with_alpha(theme().success, 0.1),
                     ));
                 }
             }
@@ -1006,8 +1024,11 @@ fn render_diff(
         // Equal line.
         if i < changes.len() && changes[i].0 == ChangeTag::Equal {
             diff = diff.child(render_diff_line_plain(
-                " ", &changes[i].1, code_size,
-                with_alpha(theme().text_secondary, 0.5), with_alpha(theme().bg_raised, 0.0),
+                " ",
+                &changes[i].1,
+                code_size,
+                with_alpha(theme().text_secondary, 0.5),
+                with_alpha(theme().bg_raised, 0.0),
             ));
             i += 1;
         }
@@ -1073,9 +1094,17 @@ fn render_diff_line_intraline(
     code_size: f32,
 ) -> Div {
     let (base_color, bg_color, highlight_bg) = if is_delete {
-        (with_alpha(theme().danger, 0.8), with_alpha(theme().danger, 0.1), with_alpha(theme().danger, 0.3))
+        (
+            with_alpha(theme().danger, 0.8),
+            with_alpha(theme().danger, 0.1),
+            with_alpha(theme().danger, 0.3),
+        )
     } else {
-        (with_alpha(theme().success, 0.8), with_alpha(theme().success, 0.1), with_alpha(theme().success, 0.3))
+        (
+            with_alpha(theme().success, 0.8),
+            with_alpha(theme().success, 0.1),
+            with_alpha(theme().success, 0.3),
+        )
     };
 
     let word_diff = TextDiff::from_words(other_line, this_line);
@@ -1171,7 +1200,11 @@ fn render_session_end(
     result_text: Option<&str>,
     font_size: f32,
 ) -> Div {
-    let color = if is_error { theme().danger } else { theme().teal };
+    let color = if is_error {
+        theme().danger
+    } else {
+        theme().teal
+    };
     let secs = duration_ms / 1000;
     let duration = if secs < 60 {
         format!("{secs}s")
@@ -1232,7 +1265,11 @@ fn render_session_end(
                         div()
                             .w_full()
                             .min_w_0()
-                            .text_color(if is_error { theme().danger } else { theme().text_secondary })
+                            .text_color(if is_error {
+                                theme().danger
+                            } else {
+                                theme().text_secondary
+                            })
                             .text_size(px(font_size - 1.0))
                             .child(preview),
                     ),
@@ -1314,9 +1351,11 @@ fn render_permission_request(
             .flex()
             .gap(px(8.0))
             .items_center()
-            .child(
-                crate::icon::icon(crate::icon::name::PAUSE, font_size, theme().attention),
-            )
+            .child(crate::icon::icon(
+                crate::icon::name::PAUSE,
+                font_size,
+                theme().attention,
+            ))
             .child(
                 div()
                     .flex_1()
@@ -1345,30 +1384,25 @@ fn render_permission_request(
 
     // Allow button
     card = card.child(
-        div()
-            .w_full()
-            .min_w_0()
-            .mt(px(8.0))
-            .pl(px(24.0))
-            .child(
-                div()
-                    .id("permission-allow-btn")
-                    .px(px(12.0))
-                    .py(px(4.0))
-                    .rounded(px(6.0))
-                    .bg(with_alpha(theme().success, 0.15))
-                    .text_color(theme().success)
-                    .text_size(px(font_size - 1.0))
-                    .font_weight(FontWeight::BOLD)
-                    .cursor(gpui::CursorStyle::PointingHand)
-                    .child("Allow")
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|_this, _event, _window, cx| {
-                            cx.emit(RichViewEvent::AllowPermission);
-                        }),
-                    ),
-            ),
+        div().w_full().min_w_0().mt(px(8.0)).pl(px(24.0)).child(
+            div()
+                .id("permission-allow-btn")
+                .px(px(12.0))
+                .py(px(4.0))
+                .rounded(px(6.0))
+                .bg(with_alpha(theme().success, 0.15))
+                .text_color(theme().success)
+                .text_size(px(font_size - 1.0))
+                .font_weight(FontWeight::BOLD)
+                .cursor(gpui::CursorStyle::PointingHand)
+                .child("Allow")
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|_this, _event, _window, cx| {
+                        cx.emit(RichViewEvent::AllowPermission);
+                    }),
+                ),
+        ),
     );
 
     card
@@ -1384,9 +1418,11 @@ fn render_awaiting(font_size: f32) -> Div {
         .flex()
         .gap(px(8.0))
         .items_center()
-        .child(
-            crate::icon::icon(crate::icon::name::CIRCLE_FILL, font_size - 4.0, theme().attention),
-        )
+        .child(crate::icon::icon(
+            crate::icon::name::CIRCLE_FILL,
+            font_size - 4.0,
+            theme().attention,
+        ))
         .child(
             div()
                 .text_color(theme().text_secondary)
@@ -1411,7 +1447,7 @@ fn strip_ansi(input: &str) -> String {
             match chars.clone().next() {
                 Some('[') => {
                     chars.next(); // consume '['
-                    // CSI: parameter bytes (0x30–0x3F), intermediate (0x20–0x2F), final (0x40–0x7E)
+                                  // CSI: parameter bytes (0x30–0x3F), intermediate (0x20–0x2F), final (0x40–0x7E)
                     loop {
                         match chars.next() {
                             Some(ch) if ('@'..='~').contains(&ch) => break,
@@ -1422,17 +1458,22 @@ fn strip_ansi(input: &str) -> String {
                 }
                 Some(']') => {
                     chars.next(); // consume ']'
-                    // OSC: consume until BEL or ST (ESC \)
+                                  // OSC: consume until BEL or ST (ESC \)
                     loop {
                         match chars.next() {
                             Some('\x07') => break,
-                            Some('\x1b') => { chars.next(); break; }
+                            Some('\x1b') => {
+                                chars.next();
+                                break;
+                            }
                             None => break,
                             _ => {}
                         }
                     }
                 }
-                Some(_) => { chars.next(); } // two-byte ESC sequence
+                Some(_) => {
+                    chars.next();
+                } // two-byte ESC sequence
                 None => {}
             }
         } else {
@@ -1454,7 +1495,10 @@ mod tests {
 
     #[test]
     fn strip_cursor_movement() {
-        assert_eq!(strip_ansi("\x1b[1A\x1b[90mParallel:\x1b[39m 16"), "Parallel: 16");
+        assert_eq!(
+            strip_ansi("\x1b[1A\x1b[90mParallel:\x1b[39m 16"),
+            "Parallel: 16"
+        );
     }
 
     #[test]
@@ -1469,4 +1513,3 @@ mod tests {
         assert_eq!(strip_ansi(input), "✓ passed — done");
     }
 }
-

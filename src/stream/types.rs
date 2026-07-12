@@ -142,9 +142,7 @@ pub struct StreamEventWrapper {
 #[serde(tag = "type")]
 pub enum StreamEventInner {
     #[serde(rename = "message_start")]
-    MessageStart {
-        message: Option<serde_json::Value>,
-    },
+    MessageStart { message: Option<serde_json::Value> },
     #[serde(rename = "content_block_start")]
     ContentBlockStart {
         index: u32,

@@ -17,7 +17,9 @@ pub fn read_image_png_bytes() -> Option<Vec<u8>> {
     unsafe {
         let pb_cls = class!(NSPasteboard);
         let pb: id = msg_send![pb_cls, generalPasteboard];
-        if pb == nil { return None; }
+        if pb == nil {
+            return None;
+        }
 
         let png_type: id = NSString::alloc(nil).init_str("public.png");
         let tiff_type: id = NSString::alloc(nil).init_str("public.tiff");
