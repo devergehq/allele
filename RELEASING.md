@@ -35,29 +35,30 @@ over rare, giant ones so the auto-generated notes stay readable.
 > `--version`; the workflow only stamps the `.app` bundle, so the source must be right
 > at the tagged commit.)
 
-1. **Make sure `master` is green and coherent.** All intended PRs merged.
-2. **Prepare the version.** In a short release PR (or as the final change in the last
-   feature PR):
-   - Bump `version` in [`Cargo.toml`](Cargo.toml).
-   - Bump `CFBundleShortVersionString` in [`resources/Info.plist`](resources/Info.plist)
-     to match. (The workflow also stamps this at build time, but keeping the source in
-     sync means local `./script/bundle-mac.sh` builds report the right version too.)
-   - Move the `## [Unreleased]` items in [`CHANGELOG.md`](CHANGELOG.md) into a new
+1. **Confirm `master` is releasable** — all intended PRs merged and the tree coherent.
+2. **Create a release-prep commit** (a tiny PR, or the last commit before tagging) that
+   sets the version to `X.Y.Z` in **all three** places and updates the changelog:
+   - [`Cargo.toml`](Cargo.toml) → `version = "X.Y.Z"`.
+   - [`Cargo.lock`](Cargo.lock) → the `[[package]] name = "allele"` entry's
+     `version = "X.Y.Z"` (edit it directly, or run `cargo build` once to let cargo sync
+     the lockfile). Easy to forget — the tagged commit is inconsistent without it.
+   - [`resources/Info.plist`](resources/Info.plist) → `CFBundleShortVersionString` = `X.Y.Z`.
+   - [`CHANGELOG.md`](CHANGELOG.md) → move the `## [Unreleased]` items into a new
      `## [X.Y.Z] - YYYY-MM-DD` section and refresh the compare/tag links at the bottom.
-3. **Merge to `master`.**
-4. **Tag and push** — this is what triggers the release build:
+3. **Merge the prep commit to `master`.**
+4. **Tag that commit and push** — this is the trigger:
    ```sh
    git checkout master && git pull
    git tag vX.Y.Z
    git push origin vX.Y.Z
    ```
-5. The [`release.yml`](.github/workflows/release.yml) workflow builds the macOS `.app`,
-   ad-hoc signs it, zips it as `Allele-vX.Y.Z-macos.zip`, and creates a GitHub Release
-   for the tag with **auto-generated notes** (every PR since the previous release) plus
-   the binary asset. It also prepends the macOS first-launch instructions from
-   [`.github/RELEASE_INSTALL.md`](.github/RELEASE_INSTALL.md) to the release notes.
-6. **Optionally polish the notes.** Open the release on GitHub and paste the curated
-   highlights from `CHANGELOG.md` above the auto-generated PR list.
+5. **Everything after the tag push is automatic — do not do it by hand.**
+   [`release.yml`](.github/workflows/release.yml) builds the `.app`, ad-hoc signs it,
+   zips it as `Allele-vX.Y.Z-macos.zip`, creates the GitHub **pre-release** with
+   auto-generated notes, and prepends the first-launch instructions from
+   [`.github/RELEASE_INSTALL.md`](.github/RELEASE_INSTALL.md).
+6. **Verify:** the Actions → Release run is green, the release exists, and the zip is
+   attached. Optionally paste curated `CHANGELOG.md` highlights above the auto PR list.
 
 ## Cutting a release from an arbitrary commit (manual path)
 
@@ -81,12 +82,17 @@ gh workflow run release.yml -f tag=v0.1.0 -f ref=8f7e2be -f prerelease=true
 
 ## Signing & notarization
 
-Binaries are currently shipped **unsigned and un-notarised** (pre-alpha). Users clear
-the Gatekeeper quarantine with `xattr -dr com.apple.quarantine Allele.app` or a
-right-click → Open. When the project reaches beta, add Developer ID signing +
-notarization by supplying repo secrets (signing cert `.p12` and an App Store Connect
-API key) and enabling the signing step in `release.yml`; the workflow is structured so
-this is additive and requires no restructuring.
+Release bundles are **ad-hoc signed** in the workflow (`codesign --force --deep --sign -`)
+so macOS Gatekeeper accepts the signature and no longer reports the app as "damaged".
+They are **not notarised**, so first launch still shows a one-time Gatekeeper prompt —
+the workflow prepends bypass instructions ([`.github/RELEASE_INSTALL.md`](.github/RELEASE_INSTALL.md))
+to every release's notes.
+
+Full notarization (double-click, no prompt) is tracked in **DEV-94** for the beta
+milestone: swap the ad-hoc `-` identity for a Developer ID certificate (with
+`--options runtime`), add `xcrun notarytool submit --wait` + `xcrun stapler staple`, and
+supply the signing cert `.p12` + an App Store Connect API key as repo secrets. This is
+additive and needs no restructuring of `release.yml`.
 
 ## Windows / Linux
 
