@@ -172,14 +172,23 @@ fn build_binding(
         "text_input.delete" => KeyBinding::new(keystroke, ti::Delete, ctx),
         "text_input.left" => KeyBinding::new(keystroke, ti::Left, ctx),
         "text_input.right" => KeyBinding::new(keystroke, ti::Right, ctx),
+        "text_input.word_left" => KeyBinding::new(keystroke, ti::WordLeft, ctx),
+        "text_input.word_right" => KeyBinding::new(keystroke, ti::WordRight, ctx),
         "text_input.select_left" => KeyBinding::new(keystroke, ti::SelectLeft, ctx),
         "text_input.select_right" => KeyBinding::new(keystroke, ti::SelectRight, ctx),
+        "text_input.select_word_left" => KeyBinding::new(keystroke, ti::SelectWordLeft, ctx),
+        "text_input.select_word_right" => KeyBinding::new(keystroke, ti::SelectWordRight, ctx),
         "text_input.select_all" => KeyBinding::new(keystroke, ti::SelectAll, ctx),
         "text_input.paste" => KeyBinding::new(keystroke, ti::Paste, ctx),
         "text_input.copy" => KeyBinding::new(keystroke, ti::Copy, ctx),
         "text_input.cut" => KeyBinding::new(keystroke, ti::Cut, ctx),
         "text_input.home" => KeyBinding::new(keystroke, ti::Home, ctx),
         "text_input.end" => KeyBinding::new(keystroke, ti::End, ctx),
+        "text_input.select_home" => KeyBinding::new(keystroke, ti::SelectHome, ctx),
+        "text_input.select_end" => KeyBinding::new(keystroke, ti::SelectEnd, ctx),
+        "text_input.delete_word_left" => KeyBinding::new(keystroke, ti::DeleteWordLeft, ctx),
+        "text_input.delete_word_right" => KeyBinding::new(keystroke, ti::DeleteWordRight, ctx),
+        "text_input.delete_to_home" => KeyBinding::new(keystroke, ti::DeleteToHome, ctx),
         "text_input.show_character_palette" => {
             KeyBinding::new(keystroke, ti::ShowCharacterPalette, ctx)
         }
