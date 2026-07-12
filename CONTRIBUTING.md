@@ -51,6 +51,12 @@ First build is slow because GPUI and alacritty_terminal are large. Incremental b
 - **Clear commit messages.** Explain *why*, not just *what*. The commit message is the primary documentation for future-you and future-anyone-else.
 - **No aggressive refactors in feature PRs.** If you want to refactor, do it in a separate PR with its own discussion.
 
+## Branch naming
+
+Name branches `<type>/<short-description>` — for example `feature/word-nav-in-modals` or `fix/clear-session-freeze`. If your change addresses a GitHub issue, include its number: `fix/1234-clear-session-freeze`.
+
+You may notice branches and PRs referencing IDs like `DEV-42` (e.g. "Closes DEV-42"). That's the maintainer's internal issue tracker (Linear) — you don't need access to it, and it isn't required for contributions. Use a short description or a GitHub issue number instead.
+
 ## Reporting bugs
 
 Open a GitHub issue with:

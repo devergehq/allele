@@ -1,4 +1,5 @@
 /target
 /MEMORY
 .claude/*.local.json
+CLAUDE.local.md
 .DS_Store
