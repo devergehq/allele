@@ -36,7 +36,7 @@ Requirements:
 Clone and build:
 
 ```sh
-git clone https://github.com/patrickdorival/allele.git
+git clone https://github.com/devergehq/allele.git
 cd allele
 cargo build --release
 ./target/release/allele

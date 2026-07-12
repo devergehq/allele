@@ -1,5 +1,11 @@
 # Roadmap
 
+> **This file is a historical build log, not the live roadmap.** Current scope,
+> priority, and status live in **[Linear (Deverge / DEV)](https://linear.app/deverge/team/DEV/all)**.
+> Shipped work is tracked on the **[GitHub Releases page](https://github.com/devergehq/allele/releases)**
+> and in **[CHANGELOG.md](CHANGELOG.md)**. What follows is the original phased POC
+> plan, kept for provenance.
+
 Build phases for the Allele POC. Each phase produces a runnable checkpoint.
 
 ---
