@@ -164,6 +164,12 @@ pub struct Session {
     /// The current git branch name for this session (e.g. "fix-auth-5dc47535").
     /// Persisted to state.json for orphan cleanup identification.
     pub branch_name: Option<String>,
+    /// When `true`, the user deliberately checked out (or named) a specific
+    /// branch at session creation. Auto-naming still suggests a session label,
+    /// but the git branch is never renamed to match it — the chosen branch
+    /// stays put until the user explicitly changes it. Persisted so a rehydrated
+    /// session with a placeholder label can't re-fire the rename after restart.
+    pub branch_locked: bool,
     /// Transient: LLM-generated naming suggestions awaiting user selection
     /// (only populated in Interactive naming mode).
     pub naming_suggestions: Option<Vec<String>>,
@@ -212,6 +218,7 @@ impl Session {
             merge_strategy_override: None,
             git_dirty: None,
             branch_name: None,
+            branch_locked: false,
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
@@ -257,6 +264,7 @@ impl Session {
             merge_strategy_override: None,
             git_dirty: None,
             branch_name: None,
+            branch_locked: false,
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,

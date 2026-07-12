@@ -183,13 +183,16 @@ impl AppState {
         // (An unconditional retry on `user_prompt_submit` used to live here and
         // caused a duplicate naming task — and a second modal with different
         // suggestions — on every session.)
+        //
+        // `branch_locked` rides along so the naming task knows whether the user
+        // pinned the branch — it still suggests a label but must not rename.
         let auto_name_data = if is_placeholder && !session.auto_naming_fired {
             session.auto_naming_fired = true;
             info!(
                 "auto-naming: triggered for {} label={:?} on {:?}",
                 session.id, session.label, event.kind
             );
-            Some((session.id.clone(), session.clone_path.clone()))
+            Some((session.id.clone(), session.clone_path.clone(), session.branch_locked))
         } else {
             None
         };
@@ -266,17 +269,17 @@ impl AppState {
 
         let Some(new_status) = new_status else {
             // No status change, but still trigger auto-naming if applicable.
-            if let Some((session_id, clone_path)) = auto_name_data {
+            if let Some((session_id, clone_path, branch_locked)) = auto_name_data {
                 info!("auto-naming: trigger fired for session {session_id}");
-                self.trigger_auto_naming(session_id, clone_path, cx);
+                self.trigger_auto_naming(session_id, clone_path, branch_locked, cx);
             }
             return;
         };
         if new_status == prior {
             // No status transition, but still trigger auto-naming if applicable.
-            if let Some((session_id, clone_path)) = auto_name_data {
+            if let Some((session_id, clone_path, branch_locked)) = auto_name_data {
                 info!("auto-naming: trigger fired for session {session_id}");
-                self.trigger_auto_naming(session_id, clone_path, cx);
+                self.trigger_auto_naming(session_id, clone_path, branch_locked, cx);
             }
             return;
         }
@@ -363,9 +366,9 @@ impl AppState {
         }
 
         // Trigger auto-naming after all borrows are released.
-        if let Some((session_id, clone_path)) = auto_name_data {
+        if let Some((session_id, clone_path, branch_locked)) = auto_name_data {
             info!("auto-naming: trigger fired for session {session_id}");
-            self.trigger_auto_naming(session_id, clone_path, cx);
+            self.trigger_auto_naming(session_id, clone_path, branch_locked, cx);
         }
 
         // Keep the changes panel live: tool activity in the displayed
@@ -390,6 +393,7 @@ impl AppState {
         &self,
         session_id: String,
         clone_path: Option<PathBuf>,
+        branch_locked: bool,
         cx: &mut Context<Self>,
     ) {
         let Some(events_dir) = hooks::events_dir() else { return; };
@@ -498,8 +502,9 @@ impl AppState {
                         "auto-naming: generated branch_name={branch_name:?} for {session_id}"
                     );
 
-                    // Rename git branch (also blocking I/O).
-                    if mode != NamingMode::Interactive || suggestions.is_none() {
+                    // Rename git branch (also blocking I/O). Skipped when the
+                    // user pinned a specific branch — only the label is suggested.
+                    if !branch_locked && (mode != NamingMode::Interactive || suggestions.is_none()) {
                         if let Some(ref cp) = clone_path {
                             if let Err(e) =
                                 git::rename_session_branch(cp, &session_id, &branch_name)
@@ -575,7 +580,11 @@ impl AppState {
                                 session.label, display_label
                             );
                             session.label = display_label.clone();
-                            session.branch_name = Some(branch_name.clone());
+                            // Keep the real branch when the user pinned one —
+                            // only adopt the generated branch name if we renamed.
+                            if !branch_locked {
+                                session.branch_name = Some(branch_name.clone());
+                            }
                             break;
                         }
                     }
