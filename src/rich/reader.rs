@@ -144,6 +144,30 @@ impl NarrativeIndex {
             .collect()
     }
 
+    /// The next target matching `pred` strictly after `after`, **wrapping** to
+    /// the first match when none follows (so repeated "next" clicks cycle).
+    /// `after: None` starts from the first match. Powers the clickable
+    /// navigation strip (jump to next phase / decision / error / …).
+    pub fn jump_after(
+        &self,
+        after: Option<usize>,
+        pred: impl Fn(&JumpKind) -> bool,
+    ) -> Option<JumpTarget> {
+        let all: Vec<JumpTarget> = self
+            .jump_targets()
+            .into_iter()
+            .filter(|t| pred(&t.kind))
+            .collect();
+        match after {
+            Some(s) => all
+                .iter()
+                .find(|t| t.seq > s)
+                .or_else(|| all.first())
+                .cloned(),
+            None => all.first().cloned(),
+        }
+    }
+
     /// The first jump target at or after `from_seq` matching `pred` — the
     /// primitive behind "jump to next error / next decision".
     pub fn next_target(
@@ -341,6 +365,34 @@ mod tests {
         assert_eq!(art.len(), 1);
         assert_eq!(art[0].label, "src/stream/ledger.rs");
         assert_eq!(art[0].seq, 3);
+    }
+
+    #[test]
+    fn jump_after_cycles_through_a_category() {
+        // Two phases at seq 1 and (add another) — extend the sample with a
+        // second phase to exercise wrapping.
+        let mut idx = sample_index();
+        idx.record(
+            6,
+            &ann(2, NarrativeRole::PhaseHeader(LocusPhase::Verify)),
+            "Phase 6: VERIFY",
+            None,
+        );
+        let is_phase = |k: &JumpKind| matches!(k, JumpKind::Phase(_));
+
+        // From the start → first phase (seq 1).
+        let first = idx.jump_after(None, is_phase).unwrap();
+        assert_eq!(first.seq, 1);
+        // After seq 1 → next phase (seq 6).
+        let second = idx.jump_after(Some(1), is_phase).unwrap();
+        assert_eq!(second.seq, 6);
+        // After the last → wraps back to the first.
+        let wrapped = idx.jump_after(Some(6), is_phase).unwrap();
+        assert_eq!(wrapped.seq, 1);
+        // A category with no targets → None.
+        assert!(idx
+            .jump_after(None, |k| matches!(k, JumpKind::Outcome) && false)
+            .is_none());
     }
 
     #[test]

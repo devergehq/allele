@@ -24,7 +24,7 @@ use super::document::{
 };
 use super::narrative::{Annotation, LocusPhase, NarrativeRole};
 use super::permissions::{PermissionAction, PermissionRequest, RiskLevel};
-use super::reader::{NarrativeIndex, NavCounts};
+use super::reader::{JumpKind, NarrativeIndex, NavCounts};
 use crate::stream::RichEvent;
 
 // ── Catppuccin Mocha palette (matching terminal) ──────────────────
@@ -64,6 +64,19 @@ pub struct RichView {
     /// Navigation index over the narrative (DEV-31): powers the jump strip
     /// and (later) search. Populated as blocks are added.
     index: NarrativeIndex,
+    /// Seq (BlockId) most recently jumped to, so repeated clicks on a nav
+    /// chip cycle through that category's targets (DEV-75).
+    last_jump_seq: Option<usize>,
+}
+
+/// A navigable category selected from the navigation strip (DEV-75).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JumpCategory {
+    Phase,
+    Decision,
+    Outcome,
+    Error,
+    Artifact,
 }
 
 impl EventEmitter<RichViewEvent> for RichView {}
@@ -112,6 +125,31 @@ impl RichView {
             busy: false,
             list_state,
             index: NarrativeIndex::new(),
+            last_jump_seq: None,
+        }
+    }
+
+    /// Scroll to the next navigable point of `cat`, cycling on repeat (DEV-75).
+    fn jump_next_category(&mut self, cat: JumpCategory, cx: &mut Context<Self>) {
+        let pred = |k: &JumpKind| match cat {
+            JumpCategory::Phase => matches!(k, JumpKind::Phase(_)),
+            JumpCategory::Decision => matches!(k, JumpKind::Decision),
+            JumpCategory::Outcome => matches!(k, JumpKind::Outcome),
+            JumpCategory::Error => matches!(k, JumpKind::Error),
+            JumpCategory::Artifact => matches!(k, JumpKind::Artifact),
+        };
+        if let Some(target) = self.index.jump_after(self.last_jump_seq, pred) {
+            self.last_jump_seq = Some(target.seq);
+            // JumpTarget.seq is a stable BlockId; map it to the list index.
+            if let Some(ix) = self
+                .document
+                .blocks()
+                .iter()
+                .position(|b| b.id == target.seq)
+            {
+                self.list_state.scroll_to_reveal_item(ix);
+            }
+            cx.notify();
         }
     }
 
@@ -312,7 +350,7 @@ impl Render for RichView {
             .children(
                 nav_counts
                     .any()
-                    .then(|| render_nav_strip(nav_counts, font_size)),
+                    .then(|| self.render_nav_strip(nav_counts, cx)),
             )
             .child(
                 div()
@@ -473,12 +511,99 @@ fn block_index_fields(kind: &BlockKind) -> (String, Option<String>) {
 }
 
 /// A compact tally of navigable points, shown above the feed.
-fn render_nav_strip(counts: NavCounts, font_size: f32) -> Div {
-    let chip = |n: usize, label: &str, color: Hsla| {
+impl RichView {
+    /// The navigation strip: clickable chips that jump to the next phase /
+    /// decision / outcome / error / file (DEV-31 counts + DEV-75 jump).
+    fn render_nav_strip(&self, counts: NavCounts, cx: &mut Context<Self>) -> Div {
+        let fs = self.font_size;
+        let mut row = div()
+            .w_full()
+            .flex()
+            .flex_wrap()
+            .gap(px(12.0))
+            .items_center()
+            .px(px(12.0))
+            .py(px(4.0))
+            .border_b_1()
+            .border_color(with_alpha(theme().text_faint, 0.15))
+            .bg(theme().bg_base);
+        if counts.phases > 0 {
+            row = row.child(self.nav_chip(
+                "nav-phases",
+                counts.phases,
+                "phases",
+                theme().ready,
+                JumpCategory::Phase,
+                fs,
+                cx,
+            ));
+        }
+        if counts.decisions > 0 {
+            row = row.child(self.nav_chip(
+                "nav-decisions",
+                counts.decisions,
+                "decisions",
+                theme().attention,
+                JumpCategory::Decision,
+                fs,
+                cx,
+            ));
+        }
+        if counts.outcomes > 0 {
+            row = row.child(self.nav_chip(
+                "nav-outcomes",
+                counts.outcomes,
+                "outcomes",
+                theme().success,
+                JumpCategory::Outcome,
+                fs,
+                cx,
+            ));
+        }
+        if counts.errors > 0 {
+            row = row.child(self.nav_chip(
+                "nav-errors",
+                counts.errors,
+                "errors",
+                theme().danger,
+                JumpCategory::Error,
+                fs,
+                cx,
+            ));
+        }
+        if counts.artifacts > 0 {
+            row = row.child(self.nav_chip(
+                "nav-files",
+                counts.artifacts,
+                "files",
+                theme().text_secondary,
+                JumpCategory::Artifact,
+                fs,
+                cx,
+            ));
+        }
+        row
+    }
+
+    /// A single clickable navigation chip (count + label) that jumps to the
+    /// next target of its category on click.
+    #[allow(clippy::too_many_arguments)]
+    fn nav_chip(
+        &self,
+        id: &'static str,
+        n: usize,
+        label: &'static str,
+        color: Hsla,
+        cat: JumpCategory,
+        font_size: f32,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
         div()
+            .id(id)
             .flex()
             .items_center()
             .gap(px(4.0))
+            .cursor(gpui::CursorStyle::PointingHand)
             .child(
                 div()
                     .text_color(color)
@@ -490,37 +615,15 @@ fn render_nav_strip(counts: NavCounts, font_size: f32) -> Div {
                 div()
                     .text_color(theme().text_faint)
                     .text_size(px(font_size - 3.0))
-                    .child(label.to_string()),
+                    .child(label),
             )
-    };
-
-    let mut row = div()
-        .w_full()
-        .flex()
-        .flex_wrap()
-        .gap(px(12.0))
-        .items_center()
-        .px(px(12.0))
-        .py(px(4.0))
-        .border_b_1()
-        .border_color(with_alpha(theme().text_faint, 0.15))
-        .bg(theme().bg_base);
-    if counts.phases > 0 {
-        row = row.child(chip(counts.phases, "phases", theme().ready));
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.jump_next_category(cat, cx);
+                }),
+            )
     }
-    if counts.decisions > 0 {
-        row = row.child(chip(counts.decisions, "decisions", theme().attention));
-    }
-    if counts.outcomes > 0 {
-        row = row.child(chip(counts.outcomes, "outcomes", theme().success));
-    }
-    if counts.errors > 0 {
-        row = row.child(chip(counts.errors, "errors", theme().danger));
-    }
-    if counts.artifacts > 0 {
-        row = row.child(chip(counts.artifacts, "files", theme().text_secondary));
-    }
-    row
 }
 
 // ── Narrative emphasis (DEV-29) ───────────────────────────────────
