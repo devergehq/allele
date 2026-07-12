@@ -9,6 +9,7 @@ use crate::theme::{theme, with_alpha};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 
+use crate::accessibility::DENSE_CONTROL_MIN_HEIGHT;
 use crate::actions::{
     ArchiveAction, DraggedProject, DraggedSession, ProjectAction, SessionAction, SessionCursor,
 };
@@ -1384,6 +1385,7 @@ pub(crate) fn build_sidebar_items(
                             .child(
                                 div().id(SharedString::from(format!("confirm-delarchive-{p_idx}-{a_idx}")))
                                     .cursor_pointer().px(px(6.0)).py(px(2.0)).rounded(px(6.0))
+                                    .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
                                     .bg(theme().tint_danger).text_size(px(11.0)).text_color(theme().danger)
                                     .child("Delete")
                                     .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
@@ -1395,6 +1397,7 @@ pub(crate) fn build_sidebar_items(
                             .child(
                                 div().id(SharedString::from(format!("cancel-delarchive-{p_idx}-{a_idx}")))
                                     .cursor_pointer().px(px(6.0)).py(px(2.0)).text_size(px(11.0))
+                                    .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
                                     .text_color(theme().text_muted).child("Cancel")
                                     .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
                                         cx.stop_propagation();
