@@ -2831,6 +2831,8 @@ fn main() {
                             recent: Vec::new(),
                             reveal_line: None,
                             source_scroll: gpui::ScrollHandle::new(),
+                            active_root: None,
+                            sessions: std::collections::HashMap::new(),
                         },
                         confirming: ConfirmationState {
                             discard: None,
@@ -2889,6 +2891,9 @@ impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Process pending actions — dispatcher lives in src/pending_actions.rs.
         self.dispatch_pending_action(window, cx);
+
+        // Keep Reader state scoped to the active session (DEV-66).
+        self.sync_reader_session();
 
         if self.capture_ui_requested {
             self.capture_ui_requested = false;

@@ -19,7 +19,7 @@ use gpui::prelude::FluentBuilder as _;
 use std::path::PathBuf;
 use crate::theme::theme;
 
-use crate::app_state::{AppState, FindMatch, Preview, PreviewKind};
+use crate::app_state::{AppState, FindMatch, Preview, PreviewKind, ReaderSelection};
 
 impl AppState {
     /// Root directory for the Reader tab's file tree: the active session's
@@ -872,6 +872,65 @@ impl AppState {
         self.reader.recent.insert(0, path.clone());
         self.reader.recent.truncate(50);
         self.reader.preview = Some(Preview { path, kind });
+    }
+
+    /// Keep Reader state scoped to the active session (DEV-66). Called once per
+    /// frame; only does work when the active session's workspace root changes.
+    /// Stashes the outgoing session's sticky selection and restores the
+    /// incoming one, so each session remembers its own open file.
+    pub(crate) fn sync_reader_session(&mut self) {
+        let root = self.reader_workspace_root();
+        if root == self.reader.active_root {
+            return;
+        }
+
+        // Stash the outgoing session's sticky selection under its root.
+        if let Some(old) = self.reader.active_root.take() {
+            self.reader.sessions.insert(
+                old,
+                ReaderSelection {
+                    selected_path: self.reader.selected_path.clone(),
+                    expanded_dirs: self.reader.expanded_dirs.clone(),
+                    md_view_source: self.reader.md_view_source,
+                },
+            );
+        }
+
+        // Reset transient state that must never bleed across sessions.
+        self.reader.find_query.clear();
+        self.reader.find_active = false;
+        self.reader.find_matches.clear();
+        self.reader.find_current = 0;
+        self.reader.reveal_line = None;
+        self.reader.context_menu = None;
+
+        self.reader.active_root = root.clone();
+
+        // Restore the incoming session's selection (or an empty view).
+        let restored = root.and_then(|r| self.reader.sessions.get(&r).cloned());
+        match restored {
+            Some(sel) => {
+                self.reader.expanded_dirs = sel.expanded_dirs;
+                match sel.selected_path {
+                    Some(p) if p.exists() => {
+                        self.load_preview(p);
+                        // load_preview resets md_view_source; reapply the saved mode.
+                        self.reader.md_view_source = sel.md_view_source;
+                    }
+                    _ => {
+                        self.reader.selected_path = None;
+                        self.reader.preview = None;
+                        self.reader.md_view_source = false;
+                    }
+                }
+            }
+            None => {
+                self.reader.selected_path = None;
+                self.reader.preview = None;
+                self.reader.expanded_dirs.clear();
+                self.reader.md_view_source = false;
+            }
+        }
     }
 }
 

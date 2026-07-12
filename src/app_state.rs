@@ -123,6 +123,16 @@ pub(crate) struct FindMatch {
     pub(crate) len: usize,
 }
 
+/// The sticky, per-session slice of Reader state: which file was open, which
+/// directories were expanded, and the Markdown view mode. Snapshotted per
+/// workspace root so switching sessions restores each session's own view.
+#[derive(Clone, Default)]
+pub(crate) struct ReaderSelection {
+    pub(crate) selected_path: Option<PathBuf>,
+    pub(crate) expanded_dirs: HashSet<PathBuf>,
+    pub(crate) md_view_source: bool,
+}
+
 /// Reader tab file-tree + preview state.
 pub(crate) struct ReaderState {
     /// File path currently selected in the Reader tab's file tree.
@@ -158,6 +168,11 @@ pub(crate) struct ReaderState {
     /// Scroll handle for the source body, so deep links can scroll a target
     /// line into view (DEV-44).
     pub(crate) source_scroll: gpui::ScrollHandle,
+    /// Workspace root the live Reader fields currently reflect. Compared each
+    /// frame against the active session's root to detect a session switch.
+    pub(crate) active_root: Option<PathBuf>,
+    /// Per-session sticky Reader selection, keyed by workspace root (DEV-66).
+    pub(crate) sessions: std::collections::HashMap<PathBuf, ReaderSelection>,
 }
 
 /// Cluster of confirmation-gate flags.
