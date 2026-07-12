@@ -42,6 +42,7 @@ pub struct NewSessionModal {
     /// (id, display_name) for each enabled agent.
     agents: Vec<(String, String)>,
     selected_agent_idx: usize,
+    agent_selector_open: bool,
     default_label: String,
     /// Local branch names in the project's source repo, for the live hint.
     existing_branches: Vec<String>,
@@ -98,6 +99,7 @@ impl NewSessionModal {
             prompt_input,
             agents,
             selected_agent_idx: default_agent_idx,
+            agent_selector_open: false,
             default_label,
             existing_branches,
             branch_hint: BranchHint::Empty,
@@ -172,11 +174,8 @@ impl NewSessionModal {
         cx.emit(NewSessionModalEvent::Close);
     }
 
-    fn cycle_agent(&mut self, cx: &mut Context<Self>) {
-        if self.agents.is_empty() {
-            return;
-        }
-        self.selected_agent_idx = (self.selected_agent_idx + 1) % self.agents.len();
+    fn toggle_agent_selector(&mut self, cx: &mut Context<Self>) {
+        self.agent_selector_open = !self.agent_selector_open;
         cx.notify();
     }
 
@@ -343,32 +342,54 @@ impl Render for NewSessionModal {
                     // Agent selector
                     .child(Self::render_form_row(
                         "Agent",
-                        div()
-                            .id("new-session-agent-cycle")
-                            .cursor_pointer()
-                            .w_full()
-                            .px(px(8.0))
-                            .py(px(5.0))
-                            .rounded(px(6.0))
-                            .border_1()
-                            .border_color(theme().border_default)
-                            .bg(theme().bg_sunken)
-                            .text_size(px(12.0))
-                            .text_color(theme().accent)
-                            .hover(|s| s.bg(theme().bg_surface))
-                            .child(agent_display)
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(|this: &mut Self, _ev, _w, cx| {
-                                    cx.stop_propagation();
-                                    this.cycle_agent(cx);
-                                }),
-                            ),
+                        {
+                            let mut selector = div().w_full().flex().flex_col().gap(px(3.0)).child(
+                                div().id("new-session-agent-selector").cursor_pointer().w_full()
+                                    .px(px(8.0)).py(px(5.0)).rounded(px(6.0)).border_1()
+                                    .border_color(theme().border_default).bg(theme().bg_sunken)
+                                    .flex().items_center().justify_between().text_size(px(12.0))
+                                    .text_color(theme().accent).hover(|s| s.bg(theme().bg_surface))
+                                    .child(agent_display).child(icon(icons::CHEVRON_DOWN, 11.0, theme().text_faint))
+                                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
+                                        cx.stop_propagation();
+                                        this.toggle_agent_selector(cx);
+                                    })),
+                            );
+                            if self.agent_selector_open {
+                                let mut options = div().w_full().rounded(px(6.0)).border_1()
+                                    .border_color(theme().border_default).bg(theme().bg_surface).flex().flex_col();
+                                for (idx, (_, name)) in self.agents.iter().enumerate() {
+                                    let selected = idx == self.selected_agent_idx;
+                                    options = options.child(
+                                        div().id(SharedString::from(format!("new-session-agent-{idx}")))
+                                            .cursor_pointer().px(px(8.0)).py(px(5.0)).text_size(px(12.0))
+                                            .text_color(if selected { theme().accent } else { theme().text_primary })
+                                            .hover(|s| s.bg(theme().bg_hover)).child(name.clone())
+                                            .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _ev, _w, cx| {
+                                                cx.stop_propagation();
+                                                this.selected_agent_idx = idx;
+                                                this.agent_selector_open = false;
+                                                cx.notify();
+                                            })),
+                                    );
+                                }
+                                selector = selector.child(options);
+                            }
+                            selector
+                        },
                     ))
                     // Initial prompt
                     .child(Self::render_form_row(
                         "Initial prompt",
                         Self::input_frame(self.prompt_input.clone()),
+                    ))
+                    .child(Self::render_form_row(
+                        "Outcome",
+                        div().text_size(px(11.0)).text_color(theme().text_dim).child(match self.branch_hint {
+                            BranchHint::Empty => "Creates an isolated workspace on an automatically named branch.",
+                            BranchHint::ExistingLocal => "Creates an isolated workspace and checks out the existing local branch.",
+                            BranchHint::NewOrRemote => "Creates an isolated workspace, checking out a matching remote branch or creating a new branch.",
+                        }),
                     )),
             )
             // Footer
