@@ -2944,9 +2944,19 @@ fn main() {
                     cx.subscribe(
                         &reader_find_input,
                         |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
-                            if matches!(event, text_input::TextInputEvent::Changed) {
-                                this.reader.find_query = input.read(cx).text().to_string();
-                                cx.notify();
+                            match event {
+                                text_input::TextInputEvent::Changed => {
+                                    this.reader.find_query = input.read(cx).text().to_string();
+                                    this.recompute_find_matches();
+                                    // Jump to the first hit as you type.
+                                    this.focus_current_find_match();
+                                    cx.notify();
+                                }
+                                // Enter in the find field advances to the next match.
+                                text_input::TextInputEvent::Submitted => {
+                                    this.find_step(1);
+                                    cx.notify();
+                                }
                             }
                         },
                     )
@@ -3035,6 +3045,8 @@ fn main() {
                             context_menu: None,
                             find_query: String::new(),
                             find_active: false,
+                            find_matches: Vec::new(),
+                            find_current: 0,
                             md_view_source: false,
                             recent: Vec::new(),
                             reveal_line: None,

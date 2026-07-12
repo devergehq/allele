@@ -112,6 +112,15 @@ pub(crate) struct Preview {
     pub(crate) kind: PreviewKind,
 }
 
+/// One in-file find hit: 1-based line, and the byte offset + length of the
+/// matched substring within that line's text.
+#[derive(Clone, Copy)]
+pub(crate) struct FindMatch {
+    pub(crate) line: usize,
+    pub(crate) start: usize,
+    pub(crate) len: usize,
+}
+
 /// Reader tab file-tree + preview state.
 pub(crate) struct ReaderState {
     /// File path currently selected in the Reader tab's file tree.
@@ -127,6 +136,11 @@ pub(crate) struct ReaderState {
     pub(crate) find_query: String,
     /// Whether the in-file find bar is visible.
     pub(crate) find_active: bool,
+    /// All matches of `find_query` in the current preview, in document order.
+    /// Recomputed whenever the query or file changes.
+    pub(crate) find_matches: Vec<FindMatch>,
+    /// Index into `find_matches` of the currently-focused hit.
+    pub(crate) find_current: usize,
     /// For Markdown files: show raw source instead of the rendered view.
     /// Ignored for non-Markdown files. Reset on each file selection.
     pub(crate) md_view_source: bool,
