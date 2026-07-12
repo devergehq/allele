@@ -66,6 +66,19 @@ rust-s3 = "0.37.2"
 # passphrase wrapping).
 age = "0.12.1"
 
+# Tree-sitter syntax highlighting for the source Reader (DEV-73). Core + the
+# highlight-query engine, plus a curated Tier-1 set of grammars. Unsupported
+# languages fall back to the built-in lexer in reader/highlight.rs. Long-tail /
+# dynamic grammar loading is tracked in DEV-63.
+tree-sitter = "0.26.10"
+tree-sitter-highlight = "0.26.10"
+tree-sitter-rust = "0.24.2"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-python = "0.25.0"
+tree-sitter-go = "0.25.0"
+tree-sitter-json = "0.24.8"
+tree-sitter-bash = "0.25.1"
+
 # APFS COW cloning
 # clonetree or direct libc FFI — evaluate during Phase 1
 
