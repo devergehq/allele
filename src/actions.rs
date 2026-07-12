@@ -46,40 +46,77 @@ pub enum SessionAction {
         initial_prompt: Option<String>,
     },
     /// Kill the PTY, keep the clone, mark Suspended. Next click cold-resumes.
-    CloseSessionKeepClone { project_idx: usize, session_idx: usize },
+    CloseSessionKeepClone {
+        project_idx: usize,
+        session_idx: usize,
+    },
     /// Ask for confirmation before discarding — sets `confirming_discard`.
-    RequestDiscardSession { project_idx: usize, session_idx: usize },
+    RequestDiscardSession {
+        project_idx: usize,
+        session_idx: usize,
+    },
     /// Cancel an in-flight discard confirmation.
     CancelDiscard,
     /// Permanently delete the clone and remove the session from state.
-    DiscardSession { project_idx: usize, session_idx: usize },
-    SelectSession { project_idx: usize, session_idx: usize },
+    DiscardSession {
+        project_idx: usize,
+        session_idx: usize,
+    },
+    SelectSession {
+        project_idx: usize,
+        session_idx: usize,
+    },
     /// Merge session work into canonical and close (archive + merge + delete clone).
-    MergeAndClose { project_idx: usize, session_idx: usize },
+    MergeAndClose {
+        project_idx: usize,
+        session_idx: usize,
+    },
     /// Cancel an in-flight dirty-merge confirmation.
     CancelDirtyMerge,
     /// Proceed with merge despite uncommitted changes — discards them first.
-    ProceedDirtyMerge { project_idx: usize, session_idx: usize },
+    ProceedDirtyMerge {
+        project_idx: usize,
+        session_idx: usize,
+    },
     /// Proceed with session creation despite dirty canonical.
     ProceedDirtySession(usize),
     /// Cancel dirty-state session creation.
     CancelDirtySession,
     /// Auto-resume a session after launch. Fires once from the first render
     /// tick so `resume_session` has a valid `window` / `cx`.
-    ResumeSession { project_idx: usize, session_idx: usize },
+    ResumeSession {
+        project_idx: usize,
+        session_idx: usize,
+    },
     /// Spawn drawer terminals after an async startup command completes.
     /// The config is stored transiently on `AppState.pending_startup`.
     SpawnStartupTerminals(SessionCursor),
     /// Open the edit-session modal for a given session.
-    EditSession { project_idx: usize, session_idx: usize },
+    EditSession {
+        project_idx: usize,
+        session_idx: usize,
+    },
     /// Reveal the session's clone path (or source path) in Finder.
-    RevealSessionInFinder { project_idx: usize, session_idx: usize },
+    RevealSessionInFinder {
+        project_idx: usize,
+        session_idx: usize,
+    },
     /// Copy the session's clone path to the clipboard.
-    CopySessionPath { project_idx: usize, session_idx: usize },
+    CopySessionPath {
+        project_idx: usize,
+        session_idx: usize,
+    },
     /// Move a session within its project (drag-and-drop reorder).
-    ReorderSession { project_idx: usize, from: usize, to: usize },
+    ReorderSession {
+        project_idx: usize,
+        from: usize,
+        to: usize,
+    },
     /// Toggle the pinned state of a session.
-    TogglePinSession { project_idx: usize, session_idx: usize },
+    TogglePinSession {
+        project_idx: usize,
+        session_idx: usize,
+    },
     /// Apply edits from the edit-session modal.
     ApplySessionEdit {
         project_idx: usize,
@@ -95,12 +132,21 @@ pub enum SessionAction {
 #[derive(Debug)]
 pub enum ArchiveAction {
     /// Merge an archived session ref into canonical's working tree.
-    MergeArchive { project_idx: usize, archive_idx: usize },
+    MergeArchive {
+        project_idx: usize,
+        archive_idx: usize,
+    },
     /// Delete an archive ref without merging.
-    DeleteArchive { project_idx: usize, archive_idx: usize },
+    DeleteArchive {
+        project_idx: usize,
+        archive_idx: usize,
+    },
     /// Reactivate an archived session: clone canonical, check the archived
     /// work out onto a fresh branch, and re-add it as a suspended session.
-    RestoreArchive { project_idx: usize, archive_idx: usize },
+    RestoreArchive {
+        project_idx: usize,
+        archive_idx: usize,
+    },
 }
 
 /// Bottom drawer terminal tabs — toggle, spawn, rename, close.
@@ -147,7 +193,10 @@ pub enum ProjectAction {
     /// Reveal the project's source directory in Finder.
     RevealProjectInFinder(usize),
     /// Move a project within the sidebar (drag-and-drop reorder).
-    ReorderProject { from: usize, to: usize },
+    ReorderProject {
+        from: usize,
+        to: usize,
+    },
     /// Copy the project's source path to the clipboard.
     CopyProjectPath(usize),
     /// Cancel an in-flight project removal confirmation.
@@ -215,7 +264,10 @@ pub enum BrowserAction {
     SyncBrowserToActiveSession,
     /// Close the Chrome tab linked to the given session and clear its
     /// stored tab id. User-initiated via the Browser tab's Close button.
-    CloseBrowserTabForSession { project_idx: usize, session_idx: usize },
+    CloseBrowserTabForSession {
+        project_idx: usize,
+        session_idx: usize,
+    },
 }
 
 /// Non-sidebar overlays — scratch pad, future modals.
@@ -226,35 +278,51 @@ pub enum OverlayAction {
 }
 
 impl From<SessionAction> for PendingAction {
-    fn from(a: SessionAction) -> Self { PendingAction::Session(a) }
+    fn from(a: SessionAction) -> Self {
+        PendingAction::Session(a)
+    }
 }
 
 impl From<ArchiveAction> for PendingAction {
-    fn from(a: ArchiveAction) -> Self { PendingAction::Archive(a) }
+    fn from(a: ArchiveAction) -> Self {
+        PendingAction::Archive(a)
+    }
 }
 
 impl From<DrawerAction> for PendingAction {
-    fn from(a: DrawerAction) -> Self { PendingAction::Drawer(a) }
+    fn from(a: DrawerAction) -> Self {
+        PendingAction::Drawer(a)
+    }
 }
 
 impl From<SidebarAction> for PendingAction {
-    fn from(a: SidebarAction) -> Self { PendingAction::Sidebar(a) }
+    fn from(a: SidebarAction) -> Self {
+        PendingAction::Sidebar(a)
+    }
 }
 
 impl From<ProjectAction> for PendingAction {
-    fn from(a: ProjectAction) -> Self { PendingAction::Project(a) }
+    fn from(a: ProjectAction) -> Self {
+        PendingAction::Project(a)
+    }
 }
 
 impl From<SettingsAction> for PendingAction {
-    fn from(a: SettingsAction) -> Self { PendingAction::Settings(a) }
+    fn from(a: SettingsAction) -> Self {
+        PendingAction::Settings(a)
+    }
 }
 
 impl From<BrowserAction> for PendingAction {
-    fn from(a: BrowserAction) -> Self { PendingAction::Browser(a) }
+    fn from(a: BrowserAction) -> Self {
+        PendingAction::Browser(a)
+    }
 }
 
 impl From<OverlayAction> for PendingAction {
-    fn from(a: OverlayAction) -> Self { PendingAction::Overlay(a) }
+    fn from(a: OverlayAction) -> Self {
+        PendingAction::Overlay(a)
+    }
 }
 
 /// Position of a session in the project tree.

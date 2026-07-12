@@ -89,16 +89,12 @@ impl super::BrowserIntegration for UnsupportedBrowser {
     }
 
     fn create_tab(&self, url: &str) -> Option<i64> {
-        tracing::warn!(
-            "UnsupportedBrowser::create_tab({url}): no browser adapter for this OS"
-        );
+        tracing::warn!("UnsupportedBrowser::create_tab({url}): no browser adapter for this OS");
         None
     }
 
     fn activate_tab(&self, id: i64) -> bool {
-        tracing::warn!(
-            "UnsupportedBrowser::activate_tab({id}): no browser adapter for this OS"
-        );
+        tracing::warn!("UnsupportedBrowser::activate_tab({id}): no browser adapter for this OS");
         false
     }
 
@@ -110,9 +106,7 @@ impl super::BrowserIntegration for UnsupportedBrowser {
     }
 
     fn close_tab(&self, id: i64) -> bool {
-        tracing::warn!(
-            "UnsupportedBrowser::close_tab({id}): no browser adapter for this OS"
-        );
+        tracing::warn!("UnsupportedBrowser::close_tab({id}): no browser adapter for this OS");
         false
     }
 }
@@ -143,16 +137,12 @@ impl super::SystemShell for PortableSystemShell {
     }
 
     fn play_sound(&self, sound: &str) {
-        tracing::warn!(
-            "PortableSystemShell::play_sound({sound}): no audio adapter for this OS"
-        );
+        tracing::warn!("PortableSystemShell::play_sound({sound}): no audio adapter for this OS");
     }
 
     fn show_fatal_dialog(&self, title: &str, body: &str) {
         // Last-ditch: log to stderr via tracing at ERROR level.
         // Without a GUI toolkit we can't block on user confirmation.
-        tracing::error!(
-            "FATAL ({title}): {body} — no dialog adapter for this OS, continuing"
-        );
+        tracing::error!("FATAL ({title}): {body} — no dialog adapter for this OS, continuing");
     }
 }

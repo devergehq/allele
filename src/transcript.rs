@@ -81,7 +81,13 @@ struct TailedFile {
 
 impl TailedFile {
     fn new(path: PathBuf, agent_id: Option<String>) -> Self {
-        Self { path, offset: 0, leftover: String::new(), parser: StreamParser::new(), agent_id }
+        Self {
+            path,
+            offset: 0,
+            leftover: String::new(),
+            parser: StreamParser::new(),
+            agent_id,
+        }
     }
 
     /// Read newly-appended bytes, split into lines, and return events.
@@ -102,8 +108,12 @@ impl TailedFile {
             self.leftover.clear();
             self.parser = StreamParser::new();
         }
-        if size == self.offset { return out; }
-        if file.seek(SeekFrom::Start(self.offset)).is_err() { return out; }
+        if size == self.offset {
+            return out;
+        }
+        if file.seek(SeekFrom::Start(self.offset)).is_err() {
+            return out;
+        }
         let mut reader = BufReader::new(file);
         let mut line = std::mem::take(&mut self.leftover);
         loop {
@@ -112,7 +122,9 @@ impl TailedFile {
                 Ok(n) => n,
                 Err(_) => break,
             };
-            if read == 0 { break; }
+            if read == 0 {
+                break;
+            }
             if line.ends_with('\n') {
                 let complete = line[..line.len() - 1].trim_end_matches('\r');
                 self.offset += (line.len() - prev_len) as u64;
@@ -128,7 +140,9 @@ impl TailedFile {
     }
 
     fn process_line(&mut self, line: &str, out: &mut Vec<TranscriptEvent>) {
-        if line.is_empty() { return; }
+        if line.is_empty() {
+            return;
+        }
 
         // Fast path: detect top-level `type:"user"` with a plain string
         // `message.content` before handing to StreamParser. Those are
@@ -170,7 +184,9 @@ fn try_parse_user_prompt(line: &str) -> Option<String> {
         content: serde_json::Value,
     }
     let probe: Probe = serde_json::from_str(line).ok()?;
-    if probe.ty != "user" { return None; }
+    if probe.ty != "user" {
+        return None;
+    }
     let body = probe.message?;
     body.content.as_str().map(|s| s.to_string())
 }
@@ -178,15 +194,28 @@ fn try_parse_user_prompt(line: &str) -> Option<String> {
 fn stamp_parent_agent(event: &mut RichEvent, agent: String) {
     let a = Some(agent);
     match event {
-        RichEvent::TextDelta { parent_agent_id, .. }
-        | RichEvent::TextBlock { parent_agent_id, .. }
-        | RichEvent::ThinkingBlock { parent_agent_id, .. }
-        | RichEvent::ToolUse { parent_agent_id, .. }
-        | RichEvent::ToolResult { parent_agent_id, .. }
-        | RichEvent::EditDiff { parent_agent_id, .. } => {
+        RichEvent::TextDelta {
+            parent_agent_id, ..
+        }
+        | RichEvent::TextBlock {
+            parent_agent_id, ..
+        }
+        | RichEvent::ThinkingBlock {
+            parent_agent_id, ..
+        }
+        | RichEvent::ToolUse {
+            parent_agent_id, ..
+        }
+        | RichEvent::ToolResult {
+            parent_agent_id, ..
+        }
+        | RichEvent::EditDiff {
+            parent_agent_id, ..
+        } => {
             *parent_agent_id = a;
         }
-        RichEvent::Init { .. } | RichEvent::SessionResult { .. } | RichEvent::HookStatus { .. } => {}
+        RichEvent::Init { .. } | RichEvent::SessionResult { .. } | RichEvent::HookStatus { .. } => {
+        }
     }
 }
 
@@ -230,9 +259,15 @@ impl TranscriptTailer {
             if let Ok(entries) = std::fs::read_dir(&self.subagents_dir) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if !path.is_file() { continue; }
-                    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") { continue; }
-                    if self.subagents.contains_key(&path) { continue; }
+                    if !path.is_file() {
+                        continue;
+                    }
+                    if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                        continue;
+                    }
+                    if self.subagents.contains_key(&path) {
+                        continue;
+                    }
 
                     // Skip subagent files that predate this tailer — they're
                     // from a previous agent invocation. If we can't determine
@@ -242,7 +277,9 @@ impl TranscriptTailer {
                         .and_then(|m| m.modified())
                         .map(|t| t > self.created_at)
                         .unwrap_or(true);
-                    if !is_current { continue; }
+                    if !is_current {
+                        continue;
+                    }
 
                     let agent_id = path
                         .file_stem()
@@ -250,7 +287,8 @@ impl TranscriptTailer {
                         .and_then(|stem| stem.strip_prefix("agent-"))
                         .unwrap_or("unknown")
                         .to_string();
-                    self.subagents.insert(path.clone(), TailedFile::new(path, Some(agent_id)));
+                    self.subagents
+                        .insert(path.clone(), TailedFile::new(path, Some(agent_id)));
                 }
             }
         }
@@ -276,7 +314,10 @@ mod tests {
     fn dash_cwd_matches_claude_code_convention() {
         let p = Path::new("/Users/patrickdorival/.allele/workspaces/allele/e95d96e2");
         let d = dash_cwd(p);
-        assert_eq!(d, "-Users-patrickdorival--allele-workspaces-allele-e95d96e2");
+        assert_eq!(
+            d,
+            "-Users-patrickdorival--allele-workspaces-allele-e95d96e2"
+        );
     }
 
     #[test]
@@ -311,7 +352,8 @@ mod tests {
             &path,
             r#"{"type":"user","message":{"role":"user","content":"first"}}
 "#,
-        ).unwrap();
+        )
+        .unwrap();
         let mut tailer = TranscriptTailer::new(path.clone());
         let events = tailer.poll();
         assert_eq!(events.len(), 1);
@@ -326,7 +368,10 @@ mod tests {
 
         // Append another line.
         use std::io::Write;
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         writeln!(
             f,
             r#"{{"type":"assistant","message":{{"role":"assistant","content":[{{"type":"text","text":"reply"}}]}}}}"#

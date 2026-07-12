@@ -180,7 +180,10 @@ pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
 /// full git config, we build a plain `Command` here.
 pub fn pull(repo: &Path) -> crate::errors::Result<()> {
     if !is_git_repo(repo) {
-        return Err(AlleleError::Git(format!("pull: not a git repo: {}", repo.display())));
+        return Err(AlleleError::Git(format!(
+            "pull: not a git repo: {}",
+            repo.display()
+        )));
     }
     let mut cmd = user_git_cmd(repo);
     cmd.arg("pull");
@@ -305,10 +308,7 @@ pub fn git_init(path: &Path) -> crate::errors::Result<()> {
 ///
 /// After this call, HEAD points at the new session branch and any
 /// subsequent commits in the clone extend that branch.
-pub fn create_session_branch(
-    clone: &Path,
-    session_id: &str,
-) -> crate::errors::Result<()> {
+pub fn create_session_branch(clone: &Path, session_id: &str) -> crate::errors::Result<()> {
     if !is_git_repo(clone) {
         return Err(AlleleError::Git(format!(
             "create_session_branch: not a git repo: {}",
@@ -322,10 +322,7 @@ pub fn create_session_branch(
     // checks it out. Safer than `checkout -b` because it's idempotent if
     // the branch already exists (e.g. on session resume).
     let mut cmd = git_cmd(Some(clone));
-    cmd.arg("checkout")
-        .arg("-B")
-        .arg(&branch)
-        .arg("HEAD");
+    cmd.arg("checkout").arg("-B").arg(&branch).arg("HEAD");
     run_git(cmd, "checkout -B (session)").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     Ok(())
@@ -344,7 +341,12 @@ pub fn list_local_branches(repo: &Path) -> Vec<String> {
         .arg("--format=%(refname:short)")
         .arg("refs/heads/");
     run_git_stdout(cmd, "for-each-ref (local branches)")
-        .map(|s| s.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect())
+        .map(|s| {
+            s.lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -506,8 +508,7 @@ pub fn fetch_session_branch(
 
     // Use the clone's actual current branch — after auto-naming it may be
     // `allele/session/<uuid>/<slug>` rather than the original `allele/session/<uuid>`.
-    let src = current_branch(clone)
-        .unwrap_or_else(|| session_branch_name(session_id));
+    let src = current_branch(clone).unwrap_or_else(|| session_branch_name(session_id));
     let dst = archive_ref_name(session_id);
 
     let mut cmd = git_cmd(Some(canonical));
@@ -603,7 +604,11 @@ pub fn exclude_pattern_in_clone(repo: &Path, pattern: &str) {
     if let Some(parent) = exclude.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut file = match std::fs::OpenOptions::new().append(true).create(true).open(&exclude) {
+    let mut file = match std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&exclude)
+    {
         Ok(f) => f,
         Err(e) => {
             warn!("failed to open .git/info/exclude: {e}");
@@ -617,7 +622,10 @@ pub fn exclude_pattern_in_clone(repo: &Path, pattern: &str) {
 /// Delete a ref. Equivalent to `git update-ref -d <ref>`.
 pub fn delete_ref(repo: &Path, ref_name: &str) -> crate::errors::Result<()> {
     if !is_git_repo(repo) {
-        return Err(AlleleError::Git(format!("delete_ref: not a git repo: {}", repo.display())));
+        return Err(AlleleError::Git(format!(
+            "delete_ref: not a git repo: {}",
+            repo.display()
+        )));
     }
     let mut cmd = git_cmd(Some(repo));
     cmd.arg("update-ref").arg("-d").arg(ref_name);
@@ -645,8 +653,8 @@ pub fn prune_archive_refs(canonical: &Path, ttl_days: u64) -> crate::errors::Res
     cmd.arg("for-each-ref")
         .arg("--format=%(refname)%09%(committerdate:unix)")
         .arg("refs/allele/archive/");
-    let listing = run_git_stdout(cmd, "for-each-ref (prune)")
-        .map_err(|e| AlleleError::Git(e.to_string()))?;
+    let listing =
+        run_git_stdout(cmd, "for-each-ref (prune)").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     if listing.is_empty() {
         return Ok(0);
@@ -791,7 +799,10 @@ pub fn merge_archive(canonical: &Path, session_id: &str) -> crate::errors::Resul
 /// Uses `git merge --squash` to stage all changes, then creates a single
 /// commit. Returns `MergeResult::AlreadyUpToDate` if the archive ref is
 /// already an ancestor of HEAD.
-pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> crate::errors::Result<MergeResult> {
+pub fn squash_merge_archive(
+    canonical: &Path,
+    session_id: &str,
+) -> crate::errors::Result<MergeResult> {
     if !is_git_repo(canonical) {
         return Err(AlleleError::Git(format!(
             "squash_merge_archive: not a git repo: {}",
@@ -803,15 +814,14 @@ pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> crate::errors
 
     // --squash stages the changes but does NOT create a commit.
     let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("merge")
-        .arg("--squash")
-        .arg(&ref_name);
+    cmd.arg("merge").arg("--squash").arg(&ref_name);
     run_git(cmd, "squash merge archive").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     // Check if there's anything staged to commit.
     let mut cmd = git_cmd(Some(canonical));
     cmd.arg("diff").arg("--cached").arg("--quiet");
-    let has_staged = cmd.output()
+    let has_staged = cmd
+        .output()
         .map(|o| !o.status.success()) // exit 1 = there are differences
         .unwrap_or(false);
 
@@ -840,7 +850,10 @@ pub fn squash_merge_archive(canonical: &Path, session_id: &str) -> crate::errors
 ///
 /// Returns `MergeResult::AlreadyUpToDate` if the archive ref is already
 /// an ancestor of HEAD.
-pub fn rebase_merge_archive(canonical: &Path, session_id: &str) -> crate::errors::Result<MergeResult> {
+pub fn rebase_merge_archive(
+    canonical: &Path,
+    session_id: &str,
+) -> crate::errors::Result<MergeResult> {
     if !is_git_repo(canonical) {
         return Err(AlleleError::Git(format!(
             "rebase_merge_archive: not a git repo: {}",
@@ -861,15 +874,18 @@ pub fn rebase_merge_archive(canonical: &Path, session_id: &str) -> crate::errors
     }
 
     // Record which branch we're on so we can return to it.
-    let original_branch = current_branch(canonical)
-        .ok_or_else(|| AlleleError::Git("rebase_merge_archive: cannot determine current branch".to_string()))?;
+    let original_branch = current_branch(canonical).ok_or_else(|| {
+        AlleleError::Git("rebase_merge_archive: cannot determine current branch".to_string())
+    })?;
 
     // Create a temporary branch from the archive ref for rebasing.
     let tmp_branch = format!("allele/rebase-tmp/{session_id}");
     let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("checkout").arg("-b").arg(&tmp_branch).arg(&ref_name);
-    run_git(cmd, "checkout tmp branch for rebase")
-        .map_err(|e| AlleleError::Git(e.to_string()))?;
+    cmd.arg("checkout")
+        .arg("-b")
+        .arg(&tmp_branch)
+        .arg(&ref_name);
+    run_git(cmd, "checkout tmp branch for rebase").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     // Rebase onto the original branch.
     let mut cmd = git_cmd(Some(canonical));
@@ -920,7 +936,11 @@ pub fn current_branch(repo: &Path) -> Option<String> {
     cmd.output().ok().and_then(|o| {
         if o.status.success() {
             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() { None } else { Some(s) }
+            if s.is_empty() {
+                None
+            } else {
+                Some(s)
+            }
         } else {
             None
         }
@@ -1032,8 +1052,7 @@ pub fn restore_archive_branch(
 
     let mut cmd = git_cmd(Some(clone));
     cmd.arg("checkout").arg("-B").arg(branch).arg(&archive_ref);
-    run_git(cmd, "checkout -B (restore archive)")
-        .map_err(|e| AlleleError::Git(e.to_string()))?;
+    run_git(cmd, "checkout -B (restore archive)").map_err(|e| AlleleError::Git(e.to_string()))?;
 
     Ok(())
 }
@@ -1041,10 +1060,12 @@ pub fn restore_archive_branch(
 /// True if `ref_name` resolves in `repo` (any ref namespace).
 fn ref_exists(repo: &Path, ref_name: &str) -> bool {
     let mut cmd = git_cmd(Some(repo));
-    cmd.arg("rev-parse").arg("--verify").arg("--quiet").arg(ref_name);
+    cmd.arg("rev-parse")
+        .arg("--verify")
+        .arg("--quiet")
+        .arg(ref_name);
     cmd.output().map(|o| o.status.success()).unwrap_or(false)
 }
-
 
 // --- Session auto-naming ------------------------------------------------
 
@@ -1058,41 +1079,239 @@ pub fn extract_slug_from_prompt(prompt: &str, max_words: usize) -> String {
     // Common English stop words + voice-transcription filler.
     let stop_words: HashSet<&str> = [
         // Articles, pronouns, prepositions, conjunctions
-        "a", "an", "the", "and", "or", "but", "in", "on", "at", "to", "for",
-        "of", "with", "by", "from", "as", "into", "through", "during", "before",
-        "after", "above", "below", "between", "out", "off", "over", "under",
-        "again", "further", "then", "once", "is", "are", "was", "were", "be",
-        "been", "being", "have", "has", "had", "having", "do", "does", "did",
-        "doing", "will", "would", "could", "should", "may", "might", "shall",
-        "can", "need", "must", "ought", "i", "me", "my", "myself", "we", "our",
-        "ours", "ourselves", "you", "your", "yours", "yourself", "yourselves",
-        "he", "him", "his", "himself", "she", "her", "hers", "herself", "it",
-        "its", "itself", "they", "them", "their", "theirs", "themselves",
-        "what", "which", "who", "whom", "this", "that", "these", "those",
-        "am", "not", "no", "nor", "if", "than", "too", "very", "just",
-        "about", "up", "so", "some", "such", "only", "same", "also", "how",
-        "all", "each", "every", "both", "few", "more", "most", "other",
-        "any", "here", "there", "when", "where", "why", "while",
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "in",
+        "on",
+        "at",
+        "to",
+        "for",
+        "of",
+        "with",
+        "by",
+        "from",
+        "as",
+        "into",
+        "through",
+        "during",
+        "before",
+        "after",
+        "above",
+        "below",
+        "between",
+        "out",
+        "off",
+        "over",
+        "under",
+        "again",
+        "further",
+        "then",
+        "once",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "have",
+        "has",
+        "had",
+        "having",
+        "do",
+        "does",
+        "did",
+        "doing",
+        "will",
+        "would",
+        "could",
+        "should",
+        "may",
+        "might",
+        "shall",
+        "can",
+        "need",
+        "must",
+        "ought",
+        "i",
+        "me",
+        "my",
+        "myself",
+        "we",
+        "our",
+        "ours",
+        "ourselves",
+        "you",
+        "your",
+        "yours",
+        "yourself",
+        "yourselves",
+        "he",
+        "him",
+        "his",
+        "himself",
+        "she",
+        "her",
+        "hers",
+        "herself",
+        "it",
+        "its",
+        "itself",
+        "they",
+        "them",
+        "their",
+        "theirs",
+        "themselves",
+        "what",
+        "which",
+        "who",
+        "whom",
+        "this",
+        "that",
+        "these",
+        "those",
+        "am",
+        "not",
+        "no",
+        "nor",
+        "if",
+        "than",
+        "too",
+        "very",
+        "just",
+        "about",
+        "up",
+        "so",
+        "some",
+        "such",
+        "only",
+        "same",
+        "also",
+        "how",
+        "all",
+        "each",
+        "every",
+        "both",
+        "few",
+        "more",
+        "most",
+        "other",
+        "any",
+        "here",
+        "there",
+        "when",
+        "where",
+        "why",
+        "while",
         // Voice-transcription filler
-        "alright", "right", "okay", "ok", "well", "yeah", "yep", "yes",
-        "basically", "actually", "probably", "really", "kind", "like",
-        "thing", "things", "gonna", "gotta", "wanna", "suppose", "guess",
-        "mean", "know", "think", "want", "got", "get", "let", "say",
-        "look", "see", "go", "going", "come", "coming", "make", "making",
-        "take", "taking", "give", "giving", "put", "keep", "still",
-        "now", "first", "second", "one", "two", "way", "something",
+        "alright",
+        "right",
+        "okay",
+        "ok",
+        "well",
+        "yeah",
+        "yep",
+        "yes",
+        "basically",
+        "actually",
+        "probably",
+        "really",
+        "kind",
+        "like",
+        "thing",
+        "things",
+        "gonna",
+        "gotta",
+        "wanna",
+        "suppose",
+        "guess",
+        "mean",
+        "know",
+        "think",
+        "want",
+        "got",
+        "get",
+        "let",
+        "say",
+        "look",
+        "see",
+        "go",
+        "going",
+        "come",
+        "coming",
+        "make",
+        "making",
+        "take",
+        "taking",
+        "give",
+        "giving",
+        "put",
+        "keep",
+        "still",
+        "now",
+        "first",
+        "second",
+        "one",
+        "two",
+        "way",
+        "something",
         // Common prompt preamble / filler verbs
-        "please", "help", "start", "started", "starting", "working", "need",
-        "looking", "trying", "another", "issue", "issues", "just", "new",
-        "apply", "said", "previously", "opened", "bumped", "popped",
-        "called", "set", "made", "using", "recently", "changes", "changed",
-        "exact", "easy", "enough",
+        "please",
+        "help",
+        "start",
+        "started",
+        "starting",
+        "working",
+        "need",
+        "looking",
+        "trying",
+        "another",
+        "issue",
+        "issues",
+        "just",
+        "new",
+        "apply",
+        "said",
+        "previously",
+        "opened",
+        "bumped",
+        "popped",
+        "called",
+        "set",
+        "made",
+        "using",
+        "recently",
+        "changes",
+        "changed",
+        "exact",
+        "easy",
+        "enough",
         // Positional/relational filler common in voice transcription
-        "back", "whole", "sure", "relation", "lot", "lots", "bit",
-        "much", "done", "already", "quite", "different",
+        "back",
+        "whole",
+        "sure",
+        "relation",
+        "lot",
+        "lots",
+        "bit",
+        "much",
+        "done",
+        "already",
+        "quite",
+        "different",
         // Allele-contextual noise (present in nearly every prompt)
-        "session", "branch", "allele", "claude",
-    ].iter().copied().collect();
+        "session",
+        "branch",
+        "allele",
+        "claude",
+    ]
+    .iter()
+    .copied()
+    .collect();
 
     // Skip metadata-like prefix lines (e.g. "session branch: allele/session/...")
     // before extracting keywords from the actual request.
@@ -1195,8 +1414,12 @@ pub fn legacy_rename_session_branch(
     }
 
     let mut cmd = git_cmd(Some(clone));
-    cmd.arg("branch").arg("-m").arg(&old_branch).arg(&new_branch);
-    run_git(cmd, "branch -m (legacy session rename)").map_err(|e| AlleleError::Git(e.to_string()))?;
+    cmd.arg("branch")
+        .arg("-m")
+        .arg(&old_branch)
+        .arg(&new_branch);
+    run_git(cmd, "branch -m (legacy session rename)")
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
 
     Ok(())
 }
@@ -1225,7 +1448,9 @@ pub fn sanitise_branch_name(input: &str, max_len: usize) -> String {
         .replace("..", ".")
         .replace(".lock", "-lock");
     if collapsed.len() > max_len {
-        collapsed[..max_len].trim_end_matches(|c: char| c == '-' || c == '/').to_string()
+        collapsed[..max_len]
+            .trim_end_matches(|c: char| c == '-' || c == '/')
+            .to_string()
     } else {
         collapsed
     }
@@ -1236,10 +1461,7 @@ pub fn sanitise_branch_name(input: &str, max_len: usize) -> String {
 /// Unlike `rename_session_branch` which assumes the Allele session naming
 /// convention, this function renames from whatever the current branch is
 /// to `new_branch_name` directly. Skips if already on `new_branch_name`.
-pub fn rename_current_branch(
-    clone: &Path,
-    new_branch_name: &str,
-) -> crate::errors::Result<()> {
+pub fn rename_current_branch(clone: &Path, new_branch_name: &str) -> crate::errors::Result<()> {
     if !is_git_repo(clone) {
         return Err(AlleleError::Git(format!(
             "rename_current_branch: not a git repo: {}",
@@ -1251,8 +1473,12 @@ pub fn rename_current_branch(
         return Ok(());
     }
     let mut cmd = git_cmd(Some(clone));
-    cmd.arg("branch").arg("-m").arg(&current).arg(new_branch_name);
-    run_git(cmd, "branch -m (rename current branch)").map_err(|e| AlleleError::Git(e.to_string()))?;
+    cmd.arg("branch")
+        .arg("-m")
+        .arg(&current)
+        .arg(new_branch_name);
+    run_git(cmd, "branch -m (rename current branch)")
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
     Ok(())
 }
 
@@ -1329,7 +1555,11 @@ fn parse_porcelain_z(raw: &str) -> Vec<ChangedFile> {
         // entry[2] is the separator space; path starts at byte 3.
         let path = entry[3..].to_string();
         if x == '?' && y == '?' {
-            out.push(ChangedFile { path, kind: ChangeKind::Untracked, staged: false });
+            out.push(ChangedFile {
+                path,
+                kind: ChangeKind::Untracked,
+                staged: false,
+            });
             continue;
         }
         // Rename/copy in either column carries an extra "orig path" field.
@@ -1340,14 +1570,26 @@ fn parse_porcelain_z(raw: &str) -> Vec<ChangedFile> {
         // would otherwise mislead as independent staged+unstaged changes —
         // surface them as a single unmerged entry instead.
         if x == 'U' || y == 'U' || (x == 'A' && y == 'A') || (x == 'D' && y == 'D') {
-            out.push(ChangedFile { path, kind: ChangeKind::Unmerged, staged: false });
+            out.push(ChangedFile {
+                path,
+                kind: ChangeKind::Unmerged,
+                staged: false,
+            });
             continue;
         }
         if let Some(kind) = ChangeKind::from_code(x) {
-            out.push(ChangedFile { path: path.clone(), kind, staged: true });
+            out.push(ChangedFile {
+                path: path.clone(),
+                kind,
+                staged: true,
+            });
         }
         if let Some(kind) = ChangeKind::from_code(y) {
-            out.push(ChangedFile { path, kind, staged: false });
+            out.push(ChangedFile {
+                path,
+                kind,
+                staged: false,
+            });
         }
     }
     out
@@ -1357,8 +1599,8 @@ fn parse_porcelain_z(raw: &str) -> Vec<ChangedFile> {
 pub fn status_changes(repo: &Path) -> Result<Vec<ChangedFile>, AlleleError> {
     let mut cmd = git_cmd(Some(repo));
     cmd.arg("status").arg("--porcelain").arg("-z");
-    let output = run_git(cmd, "status --porcelain -z")
-        .map_err(|e| AlleleError::Git(e.to_string()))?;
+    let output =
+        run_git(cmd, "status --porcelain -z").map_err(|e| AlleleError::Git(e.to_string()))?;
     Ok(parse_porcelain_z(&String::from_utf8_lossy(&output.stdout)))
 }
 
@@ -1377,7 +1619,12 @@ pub struct FileDiff {
 /// Produce a unified diff for one file. `staged` diffs the index against
 /// HEAD (`--cached`); otherwise the working tree against the index.
 /// Untracked files are diffed against /dev/null so they render as all-added.
-pub fn diff_file(repo: &Path, path: &str, kind: ChangeKind, staged: bool) -> Result<FileDiff, AlleleError> {
+pub fn diff_file(
+    repo: &Path,
+    path: &str,
+    kind: ChangeKind,
+    staged: bool,
+) -> Result<FileDiff, AlleleError> {
     let mut cmd = git_cmd(Some(repo));
     cmd.arg("diff").arg("--no-color");
     if kind == ChangeKind::Untracked {
@@ -1396,14 +1643,27 @@ pub fn diff_file(repo: &Path, path: &str, kind: ChangeKind, staged: bool) -> Res
     let code = output.status.code().unwrap_or(-1);
     if code != 0 && code != 1 {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AlleleError::Git(format!("git diff failed: {}", stderr.trim())));
+        return Err(AlleleError::Git(format!(
+            "git diff failed: {}",
+            stderr.trim()
+        )));
     }
     let bytes = &output.stdout;
     let truncated = bytes.len() > DIFF_BYTE_CAP;
-    let slice = if truncated { &bytes[..DIFF_BYTE_CAP] } else { &bytes[..] };
+    let slice = if truncated {
+        &bytes[..DIFF_BYTE_CAP]
+    } else {
+        &bytes[..]
+    };
     let text = String::from_utf8_lossy(slice).to_string();
-    let binary = text.lines().any(|l| l.starts_with("Binary files") || l.starts_with("GIT binary patch"));
-    Ok(FileDiff { text, truncated, binary })
+    let binary = text
+        .lines()
+        .any(|l| l.starts_with("Binary files") || l.starts_with("GIT binary patch"));
+    Ok(FileDiff {
+        text,
+        truncated,
+        binary,
+    })
 }
 
 // --- Tests --------------------------------------------------------------
@@ -1456,7 +1716,10 @@ mod tests {
     /// List the files tracked in a commit's tree.
     fn ls_tree(repo: &Path, tree_ish: &str) -> Vec<String> {
         let mut cmd = git_cmd(Some(repo));
-        cmd.arg("ls-tree").arg("-r").arg("--name-only").arg(tree_ish);
+        cmd.arg("ls-tree")
+            .arg("-r")
+            .arg("--name-only")
+            .arg(tree_ish);
         let out = run_git_stdout(cmd, "ls-tree (test)").expect("ls-tree");
         out.lines().map(|s| s.to_string()).collect()
     }
@@ -1557,8 +1820,7 @@ mod tests {
 
     #[test]
     fn restored_branch_name_derives_lowercase_slug_and_short_id() {
-        let name =
-            restored_branch_name("4b9ab364-9734-45cd-bf1c-b264b37c2d7f", "Debug Morph Map");
+        let name = restored_branch_name("4b9ab364-9734-45cd-bf1c-b264b37c2d7f", "Debug Morph Map");
         assert_eq!(name, "debug-morph-map-4b9ab364");
     }
 
@@ -1586,7 +1848,10 @@ mod tests {
         // restore must actually move HEAD forward.
         let sid = "abc12345-0000-0000-0000-000000000000";
         let mut update = git_cmd(Some(&path));
-        update.arg("update-ref").arg(archive_ref_name(sid)).arg(&archived);
+        update
+            .arg("update-ref")
+            .arg(archive_ref_name(sid))
+            .arg(&archived);
         run_git(update, "update-ref (test)").unwrap();
         let mut reset = git_cmd(Some(&path));
         reset.arg("reset").arg("--hard").arg("HEAD~1");
@@ -1642,12 +1907,9 @@ mod tests {
         let (_dir, path) = make_canonical("hello");
         make_branch(&path, "existing-feature");
 
-        let outcome = checkout_or_create_session_branch(
-            &path,
-            "sessionid01",
-            Some("existing-feature"),
-        )
-        .unwrap();
+        let outcome =
+            checkout_or_create_session_branch(&path, "sessionid01", Some("existing-feature"))
+                .unwrap();
 
         assert_eq!(outcome, SessionBranchOutcome::CheckedOutExisting);
         assert_eq!(current_branch(&path).as_deref(), Some("existing-feature"));
@@ -1657,12 +1919,9 @@ mod tests {
     fn session_branch_creates_new_when_name_unknown() {
         let (_dir, path) = make_canonical("hello");
 
-        let outcome = checkout_or_create_session_branch(
-            &path,
-            "sessionid02",
-            Some("brand-new-branch"),
-        )
-        .unwrap();
+        let outcome =
+            checkout_or_create_session_branch(&path, "sessionid02", Some("brand-new-branch"))
+                .unwrap();
 
         assert_eq!(outcome, SessionBranchOutcome::CreatedNew);
         // Falls back to creating the session branch then renaming it.
@@ -1674,8 +1933,7 @@ mod tests {
     fn session_branch_creates_session_name_when_no_custom() {
         let (_dir, path) = make_canonical("hello");
 
-        let outcome =
-            checkout_or_create_session_branch(&path, "sessionid03", None).unwrap();
+        let outcome = checkout_or_create_session_branch(&path, "sessionid03", None).unwrap();
 
         assert_eq!(outcome, SessionBranchOutcome::CreatedNew);
         assert_eq!(current_branch(&path).as_deref(), Some("session-sessioni"));
@@ -1690,7 +1948,10 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().to_path_buf();
         let mut cmd = git_cmd(None);
-        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        cmd.arg("clone")
+            .arg("--local")
+            .arg(&canonical)
+            .arg(&clone_path);
         run_git(cmd, "git clone --local (test)").unwrap();
 
         // Create session branch in the clone rooted at HEAD.
@@ -1718,8 +1979,7 @@ mod tests {
         // Fetch the session branch back into canonical.
         fetch_session_branch(&canonical, &clone_path, "roundtrip01").unwrap();
 
-        let archive_target =
-            resolve_ref(&canonical, &archive_ref_name("roundtrip01"));
+        let archive_target = resolve_ref(&canonical, &archive_ref_name("roundtrip01"));
         assert_eq!(archive_target.as_deref(), Some(session_head.as_str()));
 
         // Session work file reachable from canonical's object database.
@@ -1780,8 +2040,7 @@ mod tests {
             .arg(&head_tree)
             .arg("-m")
             .arg("backdated");
-        let backdated_commit =
-            run_git_stdout(cmd, "commit-tree backdated (test)").unwrap();
+        let backdated_commit = run_git_stdout(cmd, "commit-tree backdated (test)").unwrap();
 
         let mut cmd = git_cmd(Some(&path));
         cmd.arg("update-ref")
@@ -1854,7 +2113,10 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().to_path_buf();
         let mut cmd = git_cmd(None);
-        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        cmd.arg("clone")
+            .arg("--local")
+            .arg(&canonical)
+            .arg(&clone_path);
         run_git(cmd, "git clone --local (test)").unwrap();
 
         create_session_branch(&clone_path, "archtest01").unwrap();
@@ -1889,7 +2151,10 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().to_path_buf();
         let mut cmd = git_cmd(None);
-        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        cmd.arg("clone")
+            .arg("--local")
+            .arg(&canonical)
+            .arg(&clone_path);
         run_git(cmd, "git clone --local (test)").unwrap();
 
         // 3. Create session branch rooted at HEAD
@@ -1901,7 +2166,10 @@ mod tests {
         cmd.arg("add").arg("-A");
         run_git(cmd, "add session work (test)").unwrap();
         let mut cmd = git_cmd(Some(&clone_path));
-        cmd.arg("commit").arg("--no-verify").arg("-m").arg("session work");
+        cmd.arg("commit")
+            .arg("--no-verify")
+            .arg("-m")
+            .arg("session work");
         run_git(cmd, "commit session work (test)").unwrap();
         let session_head = head_commit(&clone_path);
 
@@ -1956,7 +2224,9 @@ mod tests {
     fn session_id_from_branch_full_uuid_with_slug() {
         // Legacy format with full UUID
         assert_eq!(
-            session_id_from_branch("allele/session/855fa03e-5cc7-477a-b1e6-4e9d127923b6/refactor-auth"),
+            session_id_from_branch(
+                "allele/session/855fa03e-5cc7-477a-b1e6-4e9d127923b6/refactor-auth"
+            ),
             Some("855fa03e-5cc7-477a-b1e6-4e9d127923b6")
         );
     }
@@ -1964,10 +2234,7 @@ mod tests {
     #[test]
     fn session_id_from_branch_new_format() {
         // New format: session-<8hex>
-        assert_eq!(
-            session_id_from_branch("session-5dc47535"),
-            Some("5dc47535")
-        );
+        assert_eq!(session_id_from_branch("session-5dc47535"), Some("5dc47535"));
     }
 
     #[test]
@@ -1995,7 +2262,10 @@ mod tests {
 
     #[test]
     fn slugify_truncates() {
-        assert_eq!(slugify("this is a very long prompt that should be truncated", 20), "this-is-a-very-long");
+        assert_eq!(
+            slugify("this is a very long prompt that should be truncated", 20),
+            "this-is-a-very-long"
+        );
     }
 
     #[test]
@@ -2040,7 +2310,10 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().to_path_buf();
         let mut cmd = git_cmd(None);
-        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        cmd.arg("clone")
+            .arg("--local")
+            .arg(&canonical)
+            .arg(&clone_path);
         run_git(cmd, "git clone --local (test)").unwrap();
 
         create_session_branch(&clone_path, "archrename01").unwrap();
@@ -2073,7 +2346,10 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().to_path_buf();
         let mut cmd = git_cmd(None);
-        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        cmd.arg("clone")
+            .arg("--local")
+            .arg(&canonical)
+            .arg(&clone_path);
         run_git(cmd, "git clone --local (test)").unwrap();
 
         create_session_branch(&clone_path, "noop01").unwrap();
@@ -2090,7 +2366,10 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().to_path_buf();
         let mut cmd = git_cmd(None);
-        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        cmd.arg("clone")
+            .arg("--local")
+            .arg(&canonical)
+            .arg(&clone_path);
         run_git(cmd, "git clone --local (test)").unwrap();
 
         create_session_branch(&clone_path, "dirty01").unwrap();
@@ -2123,7 +2402,10 @@ mod tests {
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().to_path_buf();
         let mut cmd = git_cmd(None);
-        cmd.arg("clone").arg("--local").arg(&canonical).arg(&clone_path);
+        cmd.arg("clone")
+            .arg("--local")
+            .arg(&canonical)
+            .arg(&clone_path);
         run_git(cmd, "git clone --local (test)").unwrap();
 
         create_session_branch(&clone_path, "autocommit01").unwrap();
@@ -2146,20 +2428,35 @@ mod tests {
         // `MM` = staged modification + further unstaged modification
         let entries = parse_porcelain_z("MM src/main.rs\0");
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0], ChangedFile {
-            path: "src/main.rs".into(), kind: ChangeKind::Modified, staged: true,
-        });
-        assert_eq!(entries[1], ChangedFile {
-            path: "src/main.rs".into(), kind: ChangeKind::Modified, staged: false,
-        });
+        assert_eq!(
+            entries[0],
+            ChangedFile {
+                path: "src/main.rs".into(),
+                kind: ChangeKind::Modified,
+                staged: true,
+            }
+        );
+        assert_eq!(
+            entries[1],
+            ChangedFile {
+                path: "src/main.rs".into(),
+                kind: ChangeKind::Modified,
+                staged: false,
+            }
+        );
     }
 
     #[test]
     fn porcelain_parse_untracked() {
         let entries = parse_porcelain_z("?? notes.md\0");
-        assert_eq!(entries, vec![ChangedFile {
-            path: "notes.md".into(), kind: ChangeKind::Untracked, staged: false,
-        }]);
+        assert_eq!(
+            entries,
+            vec![ChangedFile {
+                path: "notes.md".into(),
+                kind: ChangeKind::Untracked,
+                staged: false,
+            }]
+        );
     }
 
     #[test]
@@ -2167,30 +2464,56 @@ mod tests {
         // Rename: new path in entry, original path as the following field.
         let entries = parse_porcelain_z("R  new_name.rs\0old_name.rs\0?? other.txt\0");
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0], ChangedFile {
-            path: "new_name.rs".into(), kind: ChangeKind::Renamed, staged: true,
-        });
-        assert_eq!(entries[1], ChangedFile {
-            path: "other.txt".into(), kind: ChangeKind::Untracked, staged: false,
-        });
+        assert_eq!(
+            entries[0],
+            ChangedFile {
+                path: "new_name.rs".into(),
+                kind: ChangeKind::Renamed,
+                staged: true,
+            }
+        );
+        assert_eq!(
+            entries[1],
+            ChangedFile {
+                path: "other.txt".into(),
+                kind: ChangeKind::Untracked,
+                staged: false,
+            }
+        );
     }
 
     #[test]
     fn porcelain_parse_path_with_spaces() {
         let entries = parse_porcelain_z(" M dir name/file with spaces.txt\0");
-        assert_eq!(entries, vec![ChangedFile {
-            path: "dir name/file with spaces.txt".into(),
-            kind: ChangeKind::Modified, staged: false,
-        }]);
+        assert_eq!(
+            entries,
+            vec![ChangedFile {
+                path: "dir name/file with spaces.txt".into(),
+                kind: ChangeKind::Modified,
+                staged: false,
+            }]
+        );
     }
 
     #[test]
     fn porcelain_parse_conflicts_as_unmerged() {
-        for raw in ["UU both.rs\0", "AA both.rs\0", "DD both.rs\0", "AU both.rs\0", "UD both.rs\0"] {
+        for raw in [
+            "UU both.rs\0",
+            "AA both.rs\0",
+            "DD both.rs\0",
+            "AU both.rs\0",
+            "UD both.rs\0",
+        ] {
             let entries = parse_porcelain_z(raw);
-            assert_eq!(entries, vec![ChangedFile {
-                path: "both.rs".into(), kind: ChangeKind::Unmerged, staged: false,
-            }], "raw was {raw:?}");
+            assert_eq!(
+                entries,
+                vec![ChangedFile {
+                    path: "both.rs".into(),
+                    kind: ChangeKind::Unmerged,
+                    staged: false,
+                }],
+                "raw was {raw:?}"
+            );
         }
     }
 
@@ -2208,10 +2531,14 @@ mod tests {
         fs::write(canonical.join("new.txt"), "untracked\n").unwrap();
         let changes = status_changes(&canonical).unwrap();
         assert!(changes.contains(&ChangedFile {
-            path: "file.txt".into(), kind: ChangeKind::Modified, staged: false,
+            path: "file.txt".into(),
+            kind: ChangeKind::Modified,
+            staged: false,
         }));
         assert!(changes.contains(&ChangedFile {
-            path: "new.txt".into(), kind: ChangeKind::Untracked, staged: false,
+            path: "new.txt".into(),
+            kind: ChangeKind::Untracked,
+            staged: false,
         }));
     }
 

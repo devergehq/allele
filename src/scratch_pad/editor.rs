@@ -22,8 +22,8 @@ pub struct Pos {
 
 pub enum KeyOutcome {
     Handled,
-    Send,   // Cmd+Enter — caller should submit
-    Close,  // Escape — caller should close
+    Send,  // Cmd+Enter — caller should submit
+    Close, // Escape — caller should close
     Ignored,
 }
 
@@ -94,7 +94,10 @@ impl ScratchEditor {
         let last_line = lines.len() - 1;
         let last_col = lines[last_line].chars().count();
         self.lines = lines;
-        self.cursor = Pos { line: last_line, col: last_col };
+        self.cursor = Pos {
+            line: last_line,
+            col: last_col,
+        };
         self.anchor = None;
     }
 
@@ -104,7 +107,11 @@ impl ScratchEditor {
         if anchor == self.cursor {
             return None;
         }
-        let (start, end) = if anchor < self.cursor { (anchor, self.cursor) } else { (self.cursor, anchor) };
+        let (start, end) = if anchor < self.cursor {
+            (anchor, self.cursor)
+        } else {
+            (self.cursor, anchor)
+        };
         Some((start, end))
     }
 
@@ -123,7 +130,9 @@ impl ScratchEditor {
     }
 
     fn delete_selection(&mut self) -> bool {
-        let Some((start, end)) = self.selection_range() else { return false; };
+        let Some((start, end)) = self.selection_range() else {
+            return false;
+        };
         if start.line == end.line {
             let line = &mut self.lines[start.line];
             let s_byte = char_to_byte(line, start.col);
@@ -195,8 +204,12 @@ impl ScratchEditor {
         }
         let line: Vec<char> = self.lines[self.cursor.line].chars().collect();
         let mut i = self.cursor.col;
-        while i > 0 && !line[i - 1].is_alphanumeric() { i -= 1; }
-        while i > 0 && line[i - 1].is_alphanumeric() { i -= 1; }
+        while i > 0 && !line[i - 1].is_alphanumeric() {
+            i -= 1;
+        }
+        while i > 0 && line[i - 1].is_alphanumeric() {
+            i -= 1;
+        }
         self.cursor.col = i;
     }
 
@@ -207,8 +220,12 @@ impl ScratchEditor {
             return;
         }
         let mut i = self.cursor.col;
-        while i < line.len() && !line[i].is_alphanumeric() { i += 1; }
-        while i < line.len() && line[i].is_alphanumeric() { i += 1; }
+        while i < line.len() && !line[i].is_alphanumeric() {
+            i += 1;
+        }
+        while i < line.len() && line[i].is_alphanumeric() {
+            i += 1;
+        }
         self.cursor.col = i;
     }
 
@@ -255,7 +272,9 @@ impl ScratchEditor {
     }
 
     fn backspace(&mut self) {
-        if self.delete_selection() { return; }
+        if self.delete_selection() {
+            return;
+        }
         if self.cursor.col > 0 {
             let line = &mut self.lines[self.cursor.line];
             let prev_byte = char_to_byte(line, self.cursor.col - 1);
@@ -272,7 +291,9 @@ impl ScratchEditor {
     }
 
     fn delete_forward(&mut self) {
-        if self.delete_selection() { return; }
+        if self.delete_selection() {
+            return;
+        }
         let len = self.line_len(self.cursor.line);
         if self.cursor.col < len {
             let line = &mut self.lines[self.cursor.line];
@@ -288,7 +309,10 @@ impl ScratchEditor {
     fn select_all(&mut self) {
         self.anchor = Some(Pos { line: 0, col: 0 });
         let last_line = self.lines.len() - 1;
-        self.cursor = Pos { line: last_line, col: self.line_len(last_line) };
+        self.cursor = Pos {
+            line: last_line,
+            col: self.line_len(last_line),
+        };
     }
 
     fn selected_text(&self) -> Option<String> {
@@ -313,11 +337,7 @@ impl ScratchEditor {
     }
 
     // ── event entry point ─────────────────────────────────────────────
-    pub fn handle_key(
-        &mut self,
-        event: &KeyDownEvent,
-        cx: &mut App,
-    ) -> KeyOutcome {
+    pub fn handle_key(&mut self, event: &KeyDownEvent, cx: &mut App) -> KeyOutcome {
         let key = event.keystroke.key.as_str();
         let mods = &event.keystroke.modifiers;
         let shift = mods.shift;
@@ -335,7 +355,10 @@ impl ScratchEditor {
         // Clipboard (Cmd+C/X/V text only; image paste handled by parent)
         if cmd && !alt && !shift {
             match key {
-                "a" => { self.select_all(); return KeyOutcome::Handled; }
+                "a" => {
+                    self.select_all();
+                    return KeyOutcome::Handled;
+                }
                 "c" => {
                     if let Some(text) = self.selected_text() {
                         cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -365,46 +388,74 @@ impl ScratchEditor {
         match key {
             "left" => {
                 self.start_or_keep_selection(shift);
-                if cmd { self.cursor.col = 0; }
-                else if alt { self.move_word_left(); }
-                else { self.move_left(); }
-                if !shift { self.clear_selection(); }
+                if cmd {
+                    self.cursor.col = 0;
+                } else if alt {
+                    self.move_word_left();
+                } else {
+                    self.move_left();
+                }
+                if !shift {
+                    self.clear_selection();
+                }
                 return KeyOutcome::Handled;
             }
             "right" => {
                 self.start_or_keep_selection(shift);
-                if cmd { self.cursor.col = self.line_len(self.cursor.line); }
-                else if alt { self.move_word_right(); }
-                else { self.move_right(); }
-                if !shift { self.clear_selection(); }
+                if cmd {
+                    self.cursor.col = self.line_len(self.cursor.line);
+                } else if alt {
+                    self.move_word_right();
+                } else {
+                    self.move_right();
+                }
+                if !shift {
+                    self.clear_selection();
+                }
                 return KeyOutcome::Handled;
             }
             "up" => {
                 self.start_or_keep_selection(shift);
-                if cmd { self.cursor = Pos { line: 0, col: 0 }; }
-                else { self.move_up(); }
-                if !shift { self.clear_selection(); }
+                if cmd {
+                    self.cursor = Pos { line: 0, col: 0 };
+                } else {
+                    self.move_up();
+                }
+                if !shift {
+                    self.clear_selection();
+                }
                 return KeyOutcome::Handled;
             }
             "down" => {
                 self.start_or_keep_selection(shift);
                 if cmd {
                     let last = self.lines.len() - 1;
-                    self.cursor = Pos { line: last, col: self.line_len(last) };
-                } else { self.move_down(); }
-                if !shift { self.clear_selection(); }
+                    self.cursor = Pos {
+                        line: last,
+                        col: self.line_len(last),
+                    };
+                } else {
+                    self.move_down();
+                }
+                if !shift {
+                    self.clear_selection();
+                }
                 return KeyOutcome::Handled;
             }
             "home" => {
                 self.start_or_keep_selection(shift);
                 self.cursor.col = 0;
-                if !shift { self.clear_selection(); }
+                if !shift {
+                    self.clear_selection();
+                }
                 return KeyOutcome::Handled;
             }
             "end" => {
                 self.start_or_keep_selection(shift);
                 self.cursor.col = self.line_len(self.cursor.line);
-                if !shift { self.clear_selection(); }
+                if !shift {
+                    self.clear_selection();
+                }
                 return KeyOutcome::Handled;
             }
             _ => {}
@@ -412,10 +463,22 @@ impl ScratchEditor {
 
         // Editing
         match key {
-            "enter" => { self.insert_newline(); return KeyOutcome::Handled; }
-            "backspace" => { self.backspace(); return KeyOutcome::Handled; }
-            "delete" => { self.delete_forward(); return KeyOutcome::Handled; }
-            "tab" => { self.insert_text("  "); return KeyOutcome::Handled; }
+            "enter" => {
+                self.insert_newline();
+                return KeyOutcome::Handled;
+            }
+            "backspace" => {
+                self.backspace();
+                return KeyOutcome::Handled;
+            }
+            "delete" => {
+                self.delete_forward();
+                return KeyOutcome::Handled;
+            }
+            "tab" => {
+                self.insert_text("  ");
+                return KeyOutcome::Handled;
+            }
             _ => {}
         }
 
@@ -431,7 +494,6 @@ impl ScratchEditor {
 
         KeyOutcome::Ignored
     }
-
 }
 
 /// Convert a char index into a byte index within `s`.

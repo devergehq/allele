@@ -3,9 +3,9 @@
 //! Extracted from src/main.rs per docs/RE-DECOMPOSITION-PLAN.md §5 phase 7.
 //! See ARCHITECTURE.md §2 for module role.
 
+use crate::theme::theme;
 use gpui::*;
 use std::path::PathBuf;
-use crate::theme::theme;
 
 use crate::app_state::AppState;
 
@@ -87,11 +87,7 @@ impl AppState {
 
             match (&self.editor.selected_path, &self.editor.preview) {
                 (Some(sel), Some((p, contents))) if p == sel => {
-                    col = col.child(
-                        div()
-                            .whitespace_normal()
-                            .child(contents.clone()),
-                    );
+                    col = col.child(div().whitespace_normal().child(contents.clone()));
                 }
                 (Some(sel), _) => {
                     col = col.child(format!("Loading {}…", sel.display()));
@@ -180,7 +176,9 @@ impl AppState {
                 false,
             ));
 
-        root = root.child(deferred(anchored().position(position).snap_to_window().child(menu)));
+        root = root.child(deferred(
+            anchored().position(position).snap_to_window().child(menu),
+        ));
         root
     }
 
@@ -227,7 +225,11 @@ impl AppState {
                 None
             };
 
-            let row_bg = if is_selected { theme().bg_raised } else { theme().bg_surface };
+            let row_bg = if is_selected {
+                theme().bg_raised
+            } else {
+                theme().bg_surface
+            };
             let path_for_click = path.clone();
 
             let row_id = *counter;
@@ -246,8 +248,7 @@ impl AppState {
                 .hover(|s| s.bg(theme().bg_raised))
                 .gap(px(4.0))
                 .child(match tree_chevron {
-                    Some(ch) => crate::icon::icon(ch, 11.0, theme().text_faint)
-                        .into_any_element(),
+                    Some(ch) => crate::icon::icon(ch, 11.0, theme().text_faint).into_any_element(),
                     None => div().w(px(11.0)).flex_shrink_0().into_any_element(),
                 })
                 .child(name)
@@ -271,11 +272,13 @@ impl AppState {
                 )
                 .on_mouse_down(
                     MouseButton::Right,
-                    cx.listener(move |this: &mut Self, event: &MouseDownEvent, _window, cx| {
-                        this.editor.context_menu =
-                            Some((path_for_right_click.clone(), event.position));
-                        cx.notify();
-                    }),
+                    cx.listener(
+                        move |this: &mut Self, event: &MouseDownEvent, _window, cx| {
+                            this.editor.context_menu =
+                                Some((path_for_right_click.clone(), event.position));
+                            cx.notify();
+                        },
+                    ),
                 )
                 .into_any_element();
 

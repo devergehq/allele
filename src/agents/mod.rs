@@ -85,11 +85,17 @@ impl EventSignal {
     };
 
     const fn just(lifecycle: Lifecycle) -> Self {
-        Self { lifecycle, cache_op: CacheOp::Leave }
+        Self {
+            lifecycle,
+            cache_op: CacheOp::Leave,
+        }
     }
 
     const fn with_cache(lifecycle: Lifecycle, cache_op: CacheOp) -> Self {
-        Self { lifecycle, cache_op }
+        Self {
+            lifecycle,
+            cache_op,
+        }
     }
 }
 
@@ -148,9 +154,15 @@ pub trait AgentAdapter: Send + Sync {
 
 pub struct ClaudeAdapter;
 impl AgentAdapter for ClaudeAdapter {
-    fn kind(&self) -> AgentKind { AgentKind::Claude }
-    fn default_display_name(&self) -> &'static str { "Claude" }
-    fn binary_name(&self) -> &'static str { "claude" }
+    fn kind(&self) -> AgentKind {
+        AgentKind::Claude
+    }
+    fn default_display_name(&self) -> &'static str {
+        "Claude"
+    }
+    fn binary_name(&self) -> &'static str {
+        "claude"
+    }
     fn probe_paths(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
         if let Some(h) = dirs::home_dir() {
@@ -161,7 +173,9 @@ impl AgentAdapter for ClaudeAdapter {
         out.push(PathBuf::from("/usr/local/bin/claude"));
         out
     }
-    fn supports_resume(&self) -> bool { true }
+    fn supports_resume(&self) -> bool {
+        true
+    }
     fn build_new_session_args(&self, ctx: &SpawnCtx, extra: &[String]) -> Vec<String> {
         let mut args = vec![
             "--session-id".into(),
@@ -227,9 +241,15 @@ impl AgentAdapter for ClaudeAdapter {
 
 pub struct OpencodeAdapter;
 impl AgentAdapter for OpencodeAdapter {
-    fn kind(&self) -> AgentKind { AgentKind::Opencode }
-    fn default_display_name(&self) -> &'static str { "opencode" }
-    fn binary_name(&self) -> &'static str { "opencode" }
+    fn kind(&self) -> AgentKind {
+        AgentKind::Opencode
+    }
+    fn default_display_name(&self) -> &'static str {
+        "opencode"
+    }
+    fn binary_name(&self) -> &'static str {
+        "opencode"
+    }
     fn probe_paths(&self) -> Vec<PathBuf> {
         let mut out = Vec::new();
         if let Some(h) = dirs::home_dir() {
@@ -240,7 +260,9 @@ impl AgentAdapter for OpencodeAdapter {
         out.push(PathBuf::from("/usr/local/bin/opencode"));
         out
     }
-    fn supports_resume(&self) -> bool { true }
+    fn supports_resume(&self) -> bool {
+        true
+    }
     fn build_new_session_args(&self, _ctx: &SpawnCtx, extra: &[String]) -> Vec<String> {
         extra.to_vec()
     }
@@ -272,7 +294,10 @@ impl AgentAdapter for OpencodeAdapter {
                 dir.to_string_lossy().to_string(),
             ));
         }
-        EventIntegration { args: Vec::new(), env }
+        EventIntegration {
+            args: Vec::new(),
+            env,
+        }
     }
 
     /// Map the canonical `kind` strings the allele opencode plugin writes
@@ -295,10 +320,18 @@ impl AgentAdapter for OpencodeAdapter {
 
 pub struct GenericAdapter;
 impl AgentAdapter for GenericAdapter {
-    fn kind(&self) -> AgentKind { AgentKind::Generic }
-    fn default_display_name(&self) -> &'static str { "Custom" }
-    fn binary_name(&self) -> &'static str { "" }
-    fn probe_paths(&self) -> Vec<PathBuf> { Vec::new() }
+    fn kind(&self) -> AgentKind {
+        AgentKind::Generic
+    }
+    fn default_display_name(&self) -> &'static str {
+        "Custom"
+    }
+    fn binary_name(&self) -> &'static str {
+        ""
+    }
+    fn probe_paths(&self) -> Vec<PathBuf> {
+        Vec::new()
+    }
     fn build_new_session_args(&self, _ctx: &SpawnCtx, extra: &[String]) -> Vec<String> {
         extra.to_vec()
     }
@@ -357,11 +390,7 @@ pub fn seed_agents() -> Vec<AgentConfig> {
 
 /// Resolve an agent to a spawnable command. Returns `None` when the agent
 /// has no path (not installed / not overridden) or is disabled.
-pub fn build_command(
-    agent: &AgentConfig,
-    ctx: &SpawnCtx,
-    resume: bool,
-) -> Option<ShellCommand> {
+pub fn build_command(agent: &AgentConfig, ctx: &SpawnCtx, resume: bool) -> Option<ShellCommand> {
     if !agent.enabled {
         return None;
     }
@@ -404,15 +433,25 @@ pub fn resolve<'a>(
     project_override: Option<&str>,
     explicit_id: Option<&str>,
 ) -> Option<&'a AgentConfig> {
-    let find = |id: &str| agents.iter().find(|a| a.id == id && a.enabled && a.path.is_some());
+    let find = |id: &str| {
+        agents
+            .iter()
+            .find(|a| a.id == id && a.enabled && a.path.is_some())
+    };
     if let Some(id) = explicit_id {
-        if let Some(a) = find(id) { return Some(a); }
+        if let Some(a) = find(id) {
+            return Some(a);
+        }
     }
     if let Some(id) = project_override {
-        if let Some(a) = find(id) { return Some(a); }
+        if let Some(a) = find(id) {
+            return Some(a);
+        }
     }
     if let Some(id) = default_id {
-        if let Some(a) = find(id) { return Some(a); }
+        if let Some(a) = find(id) {
+            return Some(a);
+        }
     }
     agents.iter().find(|a| a.enabled && a.path.is_some())
 }
@@ -446,8 +485,12 @@ mod tests {
         assert_eq!(
             cmd.args,
             vec![
-                "--session-id", "abc", "--name", "Claude 1",
-                "--settings", "/tmp/hooks.json",
+                "--session-id",
+                "abc",
+                "--name",
+                "Claude 1",
+                "--settings",
+                "/tmp/hooks.json",
             ]
         );
     }
@@ -489,7 +532,10 @@ mod tests {
             has_history: false,
         };
         let cmd = build_command(&agent, &ctx, false).expect("agent has path");
-        assert_eq!(cmd.args.last().map(String::as_str), Some("--dangerously-skip-permissions"));
+        assert_eq!(
+            cmd.args.last().map(String::as_str),
+            Some("--dangerously-skip-permissions")
+        );
     }
 
     #[test]
@@ -510,7 +556,12 @@ mod tests {
     #[test]
     fn disabled_or_missing_path_returns_none() {
         let disabled = cfg("claude", AgentKind::Claude, Some("/bin/true"), false);
-        let ctx = SpawnCtx { session_id: "a", label: "l", hooks_settings_path: None, has_history: false };
+        let ctx = SpawnCtx {
+            session_id: "a",
+            label: "l",
+            hooks_settings_path: None,
+            has_history: false,
+        };
         assert!(build_command(&disabled, &ctx, false).is_none());
         let no_path = cfg("claude", AgentKind::Claude, None, true);
         assert!(build_command(&no_path, &ctx, false).is_none());
@@ -536,9 +587,18 @@ mod tests {
     #[test]
     fn claude_interpret_event_maps_hook_names() {
         let a = ClaudeAdapter;
-        assert_eq!(a.interpret_event("session_start").lifecycle, Lifecycle::Start);
-        assert_eq!(a.interpret_event("user_prompt_submit").lifecycle, Lifecycle::Busy);
-        assert_eq!(a.interpret_event("notification").lifecycle, Lifecycle::AwaitingInput);
+        assert_eq!(
+            a.interpret_event("session_start").lifecycle,
+            Lifecycle::Start
+        );
+        assert_eq!(
+            a.interpret_event("user_prompt_submit").lifecycle,
+            Lifecycle::Busy
+        );
+        assert_eq!(
+            a.interpret_event("notification").lifecycle,
+            Lifecycle::AwaitingInput
+        );
         assert_eq!(a.interpret_event("stop").lifecycle, Lifecycle::TurnComplete);
         assert_eq!(a.interpret_event("session_end").lifecycle, Lifecycle::End);
         // PreToolUse caches tool context; PostToolUse clears it.
@@ -555,10 +615,19 @@ mod tests {
     #[test]
     fn opencode_interpret_event_maps_canonical_names() {
         let a = OpencodeAdapter;
-        assert_eq!(a.interpret_event("session_start").lifecycle, Lifecycle::Start);
+        assert_eq!(
+            a.interpret_event("session_start").lifecycle,
+            Lifecycle::Start
+        );
         assert_eq!(a.interpret_event("busy").lifecycle, Lifecycle::Busy);
-        assert_eq!(a.interpret_event("awaiting_input").lifecycle, Lifecycle::AwaitingInput);
-        assert_eq!(a.interpret_event("turn_complete").lifecycle, Lifecycle::TurnComplete);
+        assert_eq!(
+            a.interpret_event("awaiting_input").lifecycle,
+            Lifecycle::AwaitingInput
+        );
+        assert_eq!(
+            a.interpret_event("turn_complete").lifecycle,
+            Lifecycle::TurnComplete
+        );
         assert_eq!(a.interpret_event("session_end").lifecycle, Lifecycle::End);
         // opencode never uses the tool-context cache.
         assert_eq!(a.interpret_event("busy").cache_op, CacheOp::Leave);
@@ -604,21 +673,25 @@ mod tests {
     fn generic_adapter_ignores_all_events() {
         let a = GenericAdapter;
         assert_eq!(a.interpret_event("stop").lifecycle, Lifecycle::Ignore);
-        assert_eq!(a.interpret_event("session_start").lifecycle, Lifecycle::Ignore);
-        assert!(a.event_integration(&SpawnCtx {
-            session_id: "x",
-            label: "y",
-            hooks_settings_path: None,
-            has_history: false,
-        })
-        .env
-        .is_empty());
+        assert_eq!(
+            a.interpret_event("session_start").lifecycle,
+            Lifecycle::Ignore
+        );
+        assert!(a
+            .event_integration(&SpawnCtx {
+                session_id: "x",
+                label: "y",
+                hooks_settings_path: None,
+                has_history: false,
+            })
+            .env
+            .is_empty());
     }
 
     #[test]
     fn resolve_skips_disabled_or_unpathed_entries() {
         let agents = vec![
-            cfg("claude", AgentKind::Claude, None, true),      // no path
+            cfg("claude", AgentKind::Claude, None, true), // no path
             cfg("opencode", AgentKind::Opencode, Some("/b"), false), // disabled
             cfg("mystery", AgentKind::Generic, Some("/c"), true),
         ];

@@ -176,8 +176,8 @@ pub fn install_if_missing() -> crate::errors::Result<PathBuf> {
 
     // Write (or rewrite) hooks.json. We always rewrite so the receiver path
     // is current and the version marker is up-to-date.
-    let hooks_path = hooks_settings_path()
-        .ok_or_else(|| AlleleError::Hooks("no home directory".to_string()))?;
+    let hooks_path =
+        hooks_settings_path().ok_or_else(|| AlleleError::Hooks("no home directory".to_string()))?;
     let receiver_abs = receiver_path.to_string_lossy().to_string();
     let hooks_json = build_hooks_json(&receiver_abs);
     fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_json)?)?;
@@ -267,12 +267,18 @@ impl EventWatcher {
     /// from before the app was running.
     pub fn initialize_offsets(&mut self) {
         let Some(dir) = events_dir() else { return };
-        let Ok(entries) = fs::read_dir(&dir) else { return };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return;
+        };
 
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() { continue; }
-            let Ok(meta) = entry.metadata() else { continue; };
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
             self.offsets.insert(path, meta.len());
         }
     }
@@ -284,14 +290,20 @@ impl EventWatcher {
     /// not from inside the JSON payload — the receiver script puts the ID
     /// in the path, which is cheaper than parsing it out of every line.
     pub fn poll(&mut self) -> Vec<HookEvent> {
-        let Some(dir) = events_dir() else { return Vec::new(); };
-        let Ok(entries) = fs::read_dir(&dir) else { return Vec::new(); };
+        let Some(dir) = events_dir() else {
+            return Vec::new();
+        };
+        let Ok(entries) = fs::read_dir(&dir) else {
+            return Vec::new();
+        };
 
         let mut out = Vec::new();
 
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() { continue; }
+            if !path.is_file() {
+                continue;
+            }
 
             // Only process .jsonl event files — skip .prompt sidecars and
             // any other non-JSONL files in the events directory.
@@ -300,14 +312,20 @@ impl EventWatcher {
             }
 
             // Derive session_id from the filename
-            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue; };
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
             let session_id = stem.to_string();
 
             let last_offset = self.offsets.get(&path).copied().unwrap_or(0);
 
             // Open and seek
-            let Ok(file) = fs::File::open(&path) else { continue; };
-            let Ok(meta) = file.metadata() else { continue; };
+            let Ok(file) = fs::File::open(&path) else {
+                continue;
+            };
+            let Ok(meta) = file.metadata() else {
+                continue;
+            };
             let current_len = meta.len();
 
             if current_len < last_offset {
@@ -326,10 +344,14 @@ impl EventWatcher {
 
             let mut bytes_read = last_offset;
             for line in reader.lines() {
-                let Ok(line) = line else { break; };
+                let Ok(line) = line else {
+                    break;
+                };
                 bytes_read += line.len() as u64 + 1; // +1 for newline
 
-                if line.trim().is_empty() { continue; }
+                if line.trim().is_empty() {
+                    continue;
+                }
 
                 match serde_json::from_str::<HookEventLine>(&line) {
                     Ok(parsed) => {
@@ -353,10 +375,7 @@ impl EventWatcher {
                         });
                     }
                     Err(e) => {
-                        warn!(
-                            "hooks: skipping malformed line in {}: {e}",
-                            path.display()
-                        );
+                        warn!("hooks: skipping malformed line in {}: {e}", path.display());
                     }
                 }
             }

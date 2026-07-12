@@ -16,14 +16,14 @@
 //! navigation. The settings window subscribes to each input's
 //! `Changed` / `Submitted` events to push state out.
 
-use gpui::*;
-use crate::theme::{theme, with_alpha};
 use crate::icon::{icon, name as icons};
+use crate::theme::{theme, with_alpha};
+use gpui::*;
 
-use crate::AppState;
 use crate::agents;
 use crate::settings::{AgentConfig, AgentKind};
 use crate::text_input::{TextInput, TextInputEvent};
+use crate::AppState;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -124,9 +124,8 @@ impl SettingsWindowState {
         initial_naming_opencode_model: String,
         initial_base_infra_enabled: bool,
     ) -> Self {
-        let draft_input = cx.new(|cx| {
-            TextInput::new(cx, "", "Add a path (e.g. tmp/pids/server.pid)")
-        });
+        let draft_input =
+            cx.new(|cx| TextInput::new(cx, "", "Add a path (e.g. tmp/pids/server.pid)"));
         cx.subscribe(&draft_input, |this, input, event: &TextInputEvent, cx| {
             if matches!(event, TextInputEvent::Submitted) {
                 let value = input.read(cx).text().to_string();
@@ -154,9 +153,8 @@ impl SettingsWindowState {
         )
         .detach();
 
-        let naming_claude_model_input = cx.new(|cx| {
-            TextInput::new(cx, initial_naming_claude_model, "claude-haiku-4-5-20251001")
-        });
+        let naming_claude_model_input = cx
+            .new(|cx| TextInput::new(cx, initial_naming_claude_model, "claude-haiku-4-5-20251001"));
         cx.subscribe(
             &naming_claude_model_input,
             |this, input, event: &TextInputEvent, cx| {
@@ -168,9 +166,8 @@ impl SettingsWindowState {
         )
         .detach();
 
-        let naming_opencode_model_input = cx.new(|cx| {
-            TextInput::new(cx, initial_naming_opencode_model, "openai/gpt-4o-mini")
-        });
+        let naming_opencode_model_input =
+            cx.new(|cx| TextInput::new(cx, initial_naming_opencode_model, "openai/gpt-4o-mini"));
         cx.subscribe(
             &naming_opencode_model_input,
             |this, input, event: &TextInputEvent, cx| {
@@ -182,32 +179,34 @@ impl SettingsWindowState {
         )
         .detach();
 
-        let project_startup_input = cx.new(|cx| {
-            TextInput::new(cx, "", "e.g. session-start.sh {{unique_port}} {{folder}}")
-        });
-        cx.subscribe(&project_startup_input, |this, input, event: &TextInputEvent, cx| {
-            if matches!(event, TextInputEvent::Changed | TextInputEvent::Submitted) {
-                let value = input.read(cx).text().to_string();
-                this.push_project_startup(value, cx);
-            }
-        }).detach();
+        let project_startup_input =
+            cx.new(|cx| TextInput::new(cx, "", "e.g. session-start.sh {{unique_port}} {{folder}}"));
+        cx.subscribe(
+            &project_startup_input,
+            |this, input, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Changed | TextInputEvent::Submitted) {
+                    let value = input.read(cx).text().to_string();
+                    this.push_project_startup(value, cx);
+                }
+            },
+        )
+        .detach();
 
-        let project_shutdown_input = cx.new(|cx| {
-            TextInput::new(cx, "", "e.g. session-stop.sh {{folder}}")
-        });
-        cx.subscribe(&project_shutdown_input, |this, input, event: &TextInputEvent, cx| {
-            if matches!(event, TextInputEvent::Changed | TextInputEvent::Submitted) {
-                let value = input.read(cx).text().to_string();
-                this.push_project_shutdown(value, cx);
-            }
-        }).detach();
+        let project_shutdown_input =
+            cx.new(|cx| TextInput::new(cx, "", "e.g. session-stop.sh {{folder}}"));
+        cx.subscribe(
+            &project_shutdown_input,
+            |this, input, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Changed | TextInputEvent::Submitted) {
+                    let value = input.read(cx).text().to_string();
+                    this.push_project_shutdown(value, cx);
+                }
+            },
+        )
+        .detach();
 
-        let project_terminal_label_input = cx.new(|cx| {
-            TextInput::new(cx, "", "Label")
-        });
-        let project_terminal_command_input = cx.new(|cx| {
-            TextInput::new(cx, "", "Command")
-        });
+        let project_terminal_label_input = cx.new(|cx| TextInput::new(cx, "", "Label"));
+        let project_terminal_command_input = cx.new(|cx| TextInput::new(cx, "", "Command"));
 
         let mut s = Self {
             app,
@@ -240,8 +239,7 @@ impl SettingsWindowState {
     fn push_base_infra(&self, enabled: bool, cx: &mut Context<Self>) {
         self.app
             .update(cx, |state: &mut AppState, cx| {
-                state.pending_action =
-                    Some(crate::SettingsAction::UpdateBaseInfra(enabled).into());
+                state.pending_action = Some(crate::SettingsAction::UpdateBaseInfra(enabled).into());
                 cx.notify();
             })
             .ok();
@@ -250,16 +248,26 @@ impl SettingsWindowState {
     // --- project orchestration ------------------------------------------
 
     fn push_project_settings(&self, cx: &mut Context<Self>) {
-        let Some(project_idx) = self.projects_selected else { return };
-        let Some(app) = self.app.upgrade() else { return };
-        let settings = app.read(cx).projects
+        let Some(project_idx) = self.projects_selected else {
+            return;
+        };
+        let Some(app) = self.app.upgrade() else {
+            return;
+        };
+        let settings = app
+            .read(cx)
+            .projects
             .get(project_idx)
             .map(|p| p.settings.clone());
         if let Some(settings) = settings {
             self.app
                 .update(cx, |state: &mut AppState, cx| {
                     state.pending_action = Some(
-                        crate::SettingsAction::UpdateProjectSettings { project_idx, settings }.into(),
+                        crate::SettingsAction::UpdateProjectSettings {
+                            project_idx,
+                            settings,
+                        }
+                        .into(),
                     );
                     cx.notify();
                 })
@@ -268,8 +276,14 @@ impl SettingsWindowState {
     }
 
     fn push_project_startup(&self, value: String, cx: &mut Context<Self>) {
-        let Some(project_idx) = self.projects_selected else { return };
-        let startup = if value.trim().is_empty() { None } else { Some(value) };
+        let Some(project_idx) = self.projects_selected else {
+            return;
+        };
+        let startup = if value.trim().is_empty() {
+            None
+        } else {
+            Some(value)
+        };
         self.app
             .update(cx, |state: &mut AppState, cx| {
                 if let Some(project) = state.projects.get_mut(project_idx) {
@@ -278,7 +292,9 @@ impl SettingsWindowState {
                 state.pending_action = Some(
                     crate::SettingsAction::UpdateProjectSettings {
                         project_idx,
-                        settings: state.projects.get(project_idx)
+                        settings: state
+                            .projects
+                            .get(project_idx)
                             .map(|p| p.settings.clone())
                             .unwrap_or_default(),
                     }
@@ -290,8 +306,14 @@ impl SettingsWindowState {
     }
 
     fn push_project_shutdown(&self, value: String, cx: &mut Context<Self>) {
-        let Some(project_idx) = self.projects_selected else { return };
-        let shutdown = if value.trim().is_empty() { None } else { Some(value) };
+        let Some(project_idx) = self.projects_selected else {
+            return;
+        };
+        let shutdown = if value.trim().is_empty() {
+            None
+        } else {
+            Some(value)
+        };
         self.app
             .update(cx, |state: &mut AppState, cx| {
                 if let Some(project) = state.projects.get_mut(project_idx) {
@@ -300,7 +322,9 @@ impl SettingsWindowState {
                 state.pending_action = Some(
                     crate::SettingsAction::UpdateProjectSettings {
                         project_idx,
-                        settings: state.projects.get(project_idx)
+                        settings: state
+                            .projects
+                            .get(project_idx)
                             .map(|p| p.settings.clone())
                             .unwrap_or_default(),
                     }
@@ -471,8 +495,13 @@ impl SettingsWindowState {
         let default_agent = self.default_agent.clone();
         self.app
             .update(cx, |state: &mut AppState, cx| {
-                state.pending_action =
-                    Some(crate::SettingsAction::UpdateAgents { agents, default_agent }.into());
+                state.pending_action = Some(
+                    crate::SettingsAction::UpdateAgents {
+                        agents,
+                        default_agent,
+                    }
+                    .into(),
+                );
                 cx.notify();
             })
             .ok();
@@ -529,7 +558,8 @@ impl SettingsWindowState {
                 next.push(existing);
             } else {
                 let agent_id = agent.id.clone();
-                let name = cx.new(|cx| TextInput::new(cx, agent.display_name.clone(), "Display name"));
+                let name =
+                    cx.new(|cx| TextInput::new(cx, agent.display_name.clone(), "Display name"));
                 let path = cx.new(|cx| {
                     TextInput::new(
                         cx,
@@ -577,7 +607,12 @@ impl SettingsWindowState {
                     }
                 })
                 .detach();
-                next.push(AgentInputs { id: agent_id, name, path, args });
+                next.push(AgentInputs {
+                    id: agent_id,
+                    name,
+                    path,
+                    args,
+                });
             }
         }
         self.agent_inputs = next;
@@ -628,8 +663,16 @@ fn render_sidebar(selected: Section, cx: &mut Context<SettingsWindowState>) -> i
             .py(px(6.0))
             .text_size(px(12.0))
             .cursor_pointer()
-            .text_color(if is_selected { theme().text_primary } else { theme().text_secondary })
-            .bg(if is_selected { theme().bg_raised } else { theme().bg_surface })
+            .text_color(if is_selected {
+                theme().text_primary
+            } else {
+                theme().text_secondary
+            })
+            .bg(if is_selected {
+                theme().bg_raised
+            } else {
+                theme().bg_surface
+            })
             .hover(|s| s.bg(theme().bg_raised))
             .child(section.label())
             .on_mouse_down(
@@ -733,7 +776,11 @@ fn toggle_switch(id: &'static str, enabled: bool) -> impl IntoElement {
         .h(px(20.0))
         .flex_shrink_0()
         .rounded_full()
-        .bg(if enabled { theme().accent } else { theme().bg_hover })
+        .bg(if enabled {
+            theme().accent
+        } else {
+            theme().bg_hover
+        })
         .flex()
         .items_center()
         .px(px(2.0))
@@ -761,7 +808,9 @@ fn render_naming_pane(
 ) -> impl IntoElement {
     use crate::naming::NamingMode;
 
-    let naming = this.app.upgrade()
+    let naming = this
+        .app
+        .upgrade()
         .map(|app| app.read(cx).user_settings.naming.clone())
         .unwrap_or_default();
 
@@ -777,81 +826,79 @@ fn render_naming_pane(
         .overflow_hidden()
         .p(px(20.0))
         .gap(px(12.0))
-        .child(
-            section_title("Branch Naming"),
-        )
-        .child(
-            section_note(
-                    "Uses the coding agent to generate meaningful branch names \
+        .child(section_title("Branch Naming"))
+        .child(section_note(
+            "Uses the coding agent to generate meaningful branch names \
                      from your first prompt. Falls back to keyword extraction \
                      when the agent binary is unavailable.",
-                ),
-        )
+        ))
         .child(
             card()
                 // Mode toggle (clickable to cycle)
                 .child(
-            div()
-                .id("naming-mode-toggle")
-                .cursor_pointer()
-                .flex()
-                .flex_row()
-                .items_center()
-                .gap(px(8.0))
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this, _event, _window, cx| {
-                        let next_mode = match mode {
-                            NamingMode::Auto => NamingMode::Interactive,
-                            NamingMode::Interactive => NamingMode::Legacy,
-                            NamingMode::Legacy => NamingMode::Auto,
-                        };
-                        if let Some(app) = this.app.upgrade() {
-                            let mut new_config = app.read(cx).user_settings.naming.clone();
-                            new_config.mode = next_mode;
-                            app.update(cx, |state: &mut crate::AppState, cx| {
-                                state.pending_action =
-                                    Some(crate::SettingsAction::UpdateNamingConfig(new_config).into());
+                    div()
+                        .id("naming-mode-toggle")
+                        .cursor_pointer()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, _window, cx| {
+                                let next_mode = match mode {
+                                    NamingMode::Auto => NamingMode::Interactive,
+                                    NamingMode::Interactive => NamingMode::Legacy,
+                                    NamingMode::Legacy => NamingMode::Auto,
+                                };
+                                if let Some(app) = this.app.upgrade() {
+                                    let mut new_config = app.read(cx).user_settings.naming.clone();
+                                    new_config.mode = next_mode;
+                                    app.update(cx, |state: &mut crate::AppState, cx| {
+                                        state.pending_action = Some(
+                                            crate::SettingsAction::UpdateNamingConfig(new_config)
+                                                .into(),
+                                        );
+                                        cx.notify();
+                                    });
+                                }
                                 cx.notify();
-                            });
-                        }
-                        cx.notify();
-                    }),
+                            }),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme().text_faint)
+                                .min_w(px(50.0))
+                                .child("Mode"),
+                        )
+                        .child(
+                            div()
+                                .px(px(8.0))
+                                .py(px(2.0))
+                                .rounded(px(6.0))
+                                .bg(theme().bg_raised)
+                                .text_size(px(12.0))
+                                .text_color(theme().accent)
+                                .child(SharedString::from(mode_label.to_string())),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme().text_faint)
+                                .child(SharedString::from(mode_desc.to_string())),
+                        ),
                 )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme().text_faint)
-                        .min_w(px(50.0))
-                        .child("Mode"),
-                )
-                .child(
-                    div()
-                        .px(px(8.0))
-                        .py(px(2.0))
-                        .rounded(px(6.0))
-                        .bg(theme().bg_raised)
-                        .text_size(px(12.0))
-                        .text_color(theme().accent)
-                        .child(SharedString::from(mode_label.to_string())),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.0))
-                        .text_color(theme().text_faint)
-                        .child(SharedString::from(mode_desc.to_string())),
-                ),
-        )
-        // Claude model
-        .child(labeled_row(
-            "Claude",
-            input_frame(this.naming_claude_model_input.clone()),
-        ))
-        // OpenCode model
-        .child(labeled_row(
-            "OpenCode",
-            input_frame(this.naming_opencode_model_input.clone()),
-        )),
+                // Claude model
+                .child(labeled_row(
+                    "Claude",
+                    input_frame(this.naming_claude_model_input.clone()),
+                ))
+                // OpenCode model
+                .child(labeled_row(
+                    "OpenCode",
+                    input_frame(this.naming_opencode_model_input.clone()),
+                )),
         )
 }
 
@@ -880,7 +927,11 @@ fn render_appearance_pane(
             .border_color(theme().border_default)
             .bg(theme().bg_sunken)
             .text_size(px(14.0))
-            .text_color(if enabled { theme().text_primary } else { theme().text_dim })
+            .text_color(if enabled {
+                theme().text_primary
+            } else {
+                theme().text_dim
+            })
             .child(label);
         if enabled {
             base.cursor_pointer().hover(|s| s.bg(theme().bg_raised))
@@ -927,18 +978,24 @@ fn render_appearance_pane(
             .border_color(theme().border_default)
             .bg(theme().bg_sunken)
             .text_size(px(11.0))
-            .text_color(if at_default { theme().text_dim } else { theme().text_primary })
+            .text_color(if at_default {
+                theme().text_dim
+            } else {
+                theme().text_primary
+            })
             .child("Reset");
         if at_default {
             base
         } else {
-            base.cursor_pointer().hover(|s| s.bg(theme().bg_raised)).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _event, _window, cx| {
-                    cx.stop_propagation();
-                    this.reset_font_size(cx);
-                }),
-            )
+            base.cursor_pointer()
+                .hover(|s| s.bg(theme().bg_raised))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.reset_font_size(cx);
+                    }),
+                )
         }
     };
 
@@ -960,16 +1017,12 @@ fn render_appearance_pane(
         .overflow_hidden()
         .p(px(20.0))
         .gap(px(12.0))
-        .child(
-            section_title("Appearance"),
-        )
-        .child(
-            section_note(
-                    "Terminal font size — applies to every terminal (sessions \
+        .child(section_title("Appearance"))
+        .child(section_note(
+            "Terminal font size — applies to every terminal (sessions \
                      and drawer tabs) live. Cmd+= / Cmd+- / Cmd+0 change this \
                      same value from inside a terminal.",
-                ),
-        )
+        ))
         .child(card().child(controls))
 }
 
@@ -1009,20 +1062,16 @@ fn render_browser_pane(
         .overflow_hidden()
         .p(px(20.0))
         .gap(px(12.0))
-        .child(
-            section_title("Browser"),
-        )
-        .child(
-            section_note(
-                    "Link each Allele session to a tab in your running \
+        .child(section_title("Browser"))
+        .child(section_note(
+            "Link each Allele session to a tab in your running \
                      Google Chrome. Switching sessions activates the \
                      matching tab; new sessions open a tab at the project's \
                      allele.json preview URL. Uses AppleScript against your \
                      real Chrome (first use prompts for Automation \
                      permission). When disabled, preview URLs fall back to \
                      your system default browser.",
-                ),
-        )
+        ))
         .child(card().child(toggle))
 }
 
@@ -1040,17 +1089,13 @@ fn render_editor_pane(
         .overflow_hidden()
         .p(px(20.0))
         .gap(px(12.0))
-        .child(
-            section_title("Editor"),
-        )
-        .child(
-            section_note(
-                    "External editor command — used by \"Open in External Editor\" \
+        .child(section_title("Editor"))
+        .child(section_note(
+            "External editor command — used by \"Open in External Editor\" \
                      in the file tree's right-click menu. Bare binary name (e.g. \
                      `subl`, `code`, `mate`) if on PATH, or an absolute path. \
                      Leave blank to use the default (Sublime Text's `subl`).",
-                ),
-        )
+        ))
         .child(card().child(input))
 }
 
@@ -1135,16 +1180,12 @@ fn render_infrastructure_pane(
         .flex_col()
         .gap(px(14.0))
         .overflow_y_scroll()
-        .child(
-            section_title("Infrastructure"),
-        )
-        .child(
-            section_note(
-                    "A single Traefik reverse proxy + shared 'allele' Docker network that all \
+        .child(section_title("Infrastructure"))
+        .child(section_note(
+            "A single Traefik reverse proxy + shared 'allele' Docker network that all \
                      sessions register HTTPS routes against. Requires Docker. Allele manages \
                      only the proxy and network — project services stay in your startup scripts.",
-            ),
-        )
+        ))
         .child(card().child(toggle));
 
     if let Some(line) = status_line {
@@ -1153,7 +1194,10 @@ fn render_infrastructure_pane(
 
     pane = pane.child(section_header("Paths")).child(
         card()
-            .child(path_row("Dynamic routes (session-start writes here)", &dynamic_path))
+            .child(path_row(
+                "Dynamic routes (session-start writes here)",
+                &dynamic_path,
+            ))
             .child(path_row("TLS certificates (drop *.pem here)", &certs_path))
             .child(
                 div()
@@ -1200,10 +1244,18 @@ fn render_projects_pane(
                 .px(px(10.0))
                 .py(px(5.0))
                 .rounded(px(6.0))
-                .bg(if is_selected { theme().bg_raised } else { theme().bg_surface })
+                .bg(if is_selected {
+                    theme().bg_raised
+                } else {
+                    theme().bg_surface
+                })
                 .hover(|s| s.bg(theme().bg_raised))
                 .text_size(px(12.0))
-                .text_color(if is_selected { theme().text_primary } else { theme().text_secondary })
+                .text_color(if is_selected {
+                    theme().text_primary
+                } else {
+                    theme().text_secondary
+                })
                 .child(name.clone())
                 .on_mouse_down(
                     MouseButton::Left,
@@ -1275,7 +1327,9 @@ fn render_projects_pane(
                                 MouseButton::Left,
                                 cx.listener(move |this, _event, _window, cx| {
                                     cx.stop_propagation();
-                                    let Some(sel) = this.projects_selected else { return };
+                                    let Some(sel) = this.projects_selected else {
+                                        return;
+                                    };
                                     this.app
                                         .update(cx, |state: &mut AppState, _cx| {
                                             if let Some(project) = state.projects.get_mut(sel) {
@@ -1326,22 +1380,38 @@ fn render_projects_pane(
                         MouseButton::Left,
                         cx.listener(move |this, _event, _window, cx| {
                             cx.stop_propagation();
-                            let label = this.project_terminal_label_input.read(cx).text().to_string();
-                            let command = this.project_terminal_command_input.read(cx).text().to_string();
-                            if label.trim().is_empty() { return; }
-                            let Some(sel) = this.projects_selected else { return };
+                            let label = this
+                                .project_terminal_label_input
+                                .read(cx)
+                                .text()
+                                .to_string();
+                            let command = this
+                                .project_terminal_command_input
+                                .read(cx)
+                                .text()
+                                .to_string();
+                            if label.trim().is_empty() {
+                                return;
+                            }
+                            let Some(sel) = this.projects_selected else {
+                                return;
+                            };
                             this.app
                                 .update(cx, |state: &mut AppState, _cx| {
                                     if let Some(project) = state.projects.get_mut(sel) {
-                                        project.settings.terminals.push(crate::config::TerminalCfg {
-                                            label: label.trim().to_string(),
-                                            command: command.trim().to_string(),
-                                        });
+                                        project.settings.terminals.push(
+                                            crate::config::TerminalCfg {
+                                                label: label.trim().to_string(),
+                                                command: command.trim().to_string(),
+                                            },
+                                        );
                                     }
                                 })
                                 .ok();
-                            this.project_terminal_label_input.update(cx, |i, cx| i.set_text_silent("", cx));
-                            this.project_terminal_command_input.update(cx, |i, cx| i.set_text_silent("", cx));
+                            this.project_terminal_label_input
+                                .update(cx, |i, cx| i.set_text_silent("", cx));
+                            this.project_terminal_command_input
+                                .update(cx, |i, cx| i.set_text_silent("", cx));
                             this.push_project_settings(cx);
                             cx.notify();
                         }),
@@ -1353,17 +1423,11 @@ fn render_projects_pane(
             .flex()
             .flex_col()
             .gap(px(16.0))
-            .child(
-                section_header("Startup command")
-            )
+            .child(section_header("Startup command"))
             .child(input_frame(this.project_startup_input.clone()))
-            .child(
-                section_header("Shutdown command")
-            )
+            .child(section_header("Shutdown command"))
             .child(input_frame(this.project_shutdown_input.clone()))
-            .child(
-                section_header("Drawer terminals")
-            )
+            .child(section_header("Drawer terminals"))
             .child(terminal_list)
             .child(add_row)
             .into_any_element()
@@ -1390,12 +1454,10 @@ fn render_projects_pane(
         .flex_col()
         .gap(px(12.0))
         .overflow_y_scroll()
-        .child(
-            section_title("Projects"),
-        )
-        .child(
-            section_note("Configure per-session orchestration: startup/shutdown lifecycle and drawer terminals."),
-        )
+        .child(section_title("Projects"))
+        .child(section_note(
+            "Configure per-session orchestration: startup/shutdown lifecycle and drawer terminals.",
+        ))
         .child(
             div()
                 .flex()
@@ -1535,7 +1597,8 @@ fn render_sessions_pane(
                 cx.stop_propagation();
                 let value = this.draft_input.read(cx).text().to_string();
                 this.commit_draft(value, cx);
-                this.draft_input.update(cx, |i, cx| i.set_text_silent("", cx));
+                this.draft_input
+                    .update(cx, |i, cx| i.set_text_silent("", cx));
             }),
         );
 
@@ -1547,32 +1610,26 @@ fn render_sessions_pane(
         .overflow_hidden()
         .p(px(20.0))
         .gap(px(12.0))
-        .child(
-            section_title("Sessions"),
-        )
+        .child(section_title("Sessions"))
         .child(card().child(pull_toggle).child(promote_toggle))
-        .child(
-            section_note(
-                    "Cleanup paths — deleted from each new session clone. \
+        .child(section_note(
+            "Cleanup paths — deleted from each new session clone. \
                      Useful for stale runtime files that the parent working \
                      tree left behind (e.g. .overmind.sock, \
                      tmp/pids/server.pid).",
-                ),
-        )
+        ))
         .child(
-            card()
-                .child(list.w_full())
-                .child(
-                    div()
-                        .flex()
-                        .flex_row()
-                        .w_full()
-                        .min_w(px(0.0))
-                        .gap(px(8.0))
-                        .items_center()
-                        .child(input)
-                        .child(add_button),
-                ),
+            card().child(list.w_full()).child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .w_full()
+                    .min_w(px(0.0))
+                    .gap(px(8.0))
+                    .items_center()
+                    .child(input)
+                    .child(add_button),
+            ),
         )
 }
 
@@ -1589,7 +1646,9 @@ fn render_agents_pane(
             .iter()
             .find(|i| i.id == agent.id)
             .map(|i| (i.name.clone(), i.path.clone(), i.args.clone()));
-        let Some((name_input, path_input, args_input)) = inputs else { continue };
+        let Some((name_input, path_input, args_input)) = inputs else {
+            continue;
+        };
         let is_default = default_id.as_deref() == Some(agent.id.as_str());
         rows = rows.child(render_agent_row(
             agent, idx, is_default, name_input, path_input, args_input, cx,
@@ -1612,9 +1671,11 @@ fn render_agents_pane(
             cx.listener(move |this, _event, _window, cx| {
                 cx.stop_propagation();
                 for agent in this.agents.iter_mut() {
-                    if matches!(agent.kind, AgentKind::Generic) { continue; }
-                    let detected = agents::detect_path(agent.kind)
-                        .map(|p| p.to_string_lossy().to_string());
+                    if matches!(agent.kind, AgentKind::Generic) {
+                        continue;
+                    }
+                    let detected =
+                        agents::detect_path(agent.kind).map(|p| p.to_string_lossy().to_string());
                     if agent.path.is_none() || agent.path.as_deref() == Some("") {
                         agent.path = detected;
                     } else if let Some(d) = detected {
@@ -1647,11 +1708,21 @@ fn render_agents_pane(
                 let base = "custom";
                 let mut n = 1;
                 let id = loop {
-                    let candidate = if n == 1 { base.to_string() } else { format!("{base}-{n}") };
-                    if !this.agents.iter().any(|a| a.id == candidate) { break candidate; }
+                    let candidate = if n == 1 {
+                        base.to_string()
+                    } else {
+                        format!("{base}-{n}")
+                    };
+                    if !this.agents.iter().any(|a| a.id == candidate) {
+                        break candidate;
+                    }
                     n += 1;
                 };
-                let display = if n == 1 { "Custom".to_string() } else { format!("Custom {n}") };
+                let display = if n == 1 {
+                    "Custom".to_string()
+                } else {
+                    format!("Custom {n}")
+                };
                 this.agents.push(AgentConfig {
                     id,
                     kind: AgentKind::Generic,
@@ -1666,7 +1737,12 @@ fn render_agents_pane(
             }),
         );
 
-    let toolbar = div().flex().flex_row().gap(px(8.0)).child(redetect).child(add_custom);
+    let toolbar = div()
+        .flex()
+        .flex_row()
+        .gap(px(8.0))
+        .child(redetect)
+        .child(add_custom);
 
     div()
         .id("agents-pane-scroll")
@@ -1677,19 +1753,15 @@ fn render_agents_pane(
         .overflow_y_scroll()
         .p(px(20.0))
         .gap(px(12.0))
-        .child(
-            section_title("Coding Agents"),
-        )
-        .child(
-            section_note(
-                    "Configure which coding agents Allele can launch in a \
+        .child(section_title("Coding Agents"))
+        .child(section_note(
+            "Configure which coding agents Allele can launch in a \
                      session. The default is used for every new session; \
                      a project can override it by adding an \"agent\" key \
                      to its allele.json. Extra args are appended to the \
                      built-in args the adapter generates (useful for \
                      flags like --dangerously-skip-permissions).",
-                ),
-        )
+        ))
         .child(toolbar)
         .child(rows)
 }
@@ -1734,7 +1806,11 @@ fn render_agent_row(
                 .w(px(30.0))
                 .h(px(16.0))
                 .rounded(px(8.0))
-                .bg(if enabled { theme().accent } else { theme().bg_hover })
+                .bg(if enabled {
+                    theme().accent
+                } else {
+                    theme().bg_hover
+                })
                 .flex()
                 .items_center()
                 .px(px(2.0))
@@ -1755,8 +1831,16 @@ fn render_agent_row(
         .py(px(2.0))
         .rounded(px(6.0))
         .text_size(px(11.0))
-        .bg(if is_default { theme().accent } else { theme().bg_raised })
-        .text_color(if is_default { theme().bg_base } else { theme().text_secondary })
+        .bg(if is_default {
+            theme().accent
+        } else {
+            theme().bg_raised
+        })
+        .text_color(if is_default {
+            theme().bg_base
+        } else {
+            theme().text_secondary
+        })
         .hover(|s| s.bg(theme().bg_active))
         .child(if is_default { "Default" } else { "Set default" })
         .on_mouse_down(

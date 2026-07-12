@@ -6,9 +6,9 @@
 //! background executor; results carry a generation number so a stale
 //! load can never clobber a newer one.
 
-use gpui::*;
-use crate::theme::theme;
 use crate::icon::{icon, name as icons};
+use crate::theme::theme;
+use gpui::*;
 
 use crate::actions::SidebarAction;
 use crate::app_state::AppState;
@@ -171,11 +171,7 @@ impl AppState {
     /// selected file's diff below. Assumes the caller renders the panel
     /// chrome (header, close button) around it.
     pub(crate) fn render_changes_panel_body(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut body = div()
-            .flex_1()
-            .min_h(px(0.0))
-            .flex()
-            .flex_col();
+        let mut body = div().flex_1().min_h(px(0.0)).flex().flex_col();
 
         // Empty / fallback states first.
         if self.changes.repo_dir.is_none() {
@@ -185,14 +181,28 @@ impl AppState {
             return body.child(centered_note("Not a git repository"));
         }
         if self.changes.files.is_empty() {
-            let note = if self.changes.loading { "Loading…" } else { "No changes — working tree clean" };
+            let note = if self.changes.loading {
+                "Loading…"
+            } else {
+                "No changes — working tree clean"
+            };
             return body.child(centered_note(note));
         }
 
-        let staged: Vec<ChangedFile> =
-            self.changes.files.iter().filter(|f| f.staged).cloned().collect();
-        let unstaged: Vec<ChangedFile> =
-            self.changes.files.iter().filter(|f| !f.staged).cloned().collect();
+        let staged: Vec<ChangedFile> = self
+            .changes
+            .files
+            .iter()
+            .filter(|f| f.staged)
+            .cloned()
+            .collect();
+        let unstaged: Vec<ChangedFile> = self
+            .changes
+            .files
+            .iter()
+            .filter(|f| !f.staged)
+            .cloned()
+            .collect();
 
         let mut list = div()
             .id("changes-file-list")
@@ -237,8 +247,7 @@ impl AppState {
         row_ix: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selected =
-            self.changes.selected.as_ref() == Some(&(file.path.clone(), file.staged));
+        let selected = self.changes.selected.as_ref() == Some(&(file.path.clone(), file.staged));
         let badge_color = match file.kind {
             ChangeKind::Modified => theme().warning,
             ChangeKind::Added => theme().success,
@@ -331,11 +340,7 @@ impl AppState {
                         .text_size(px(11.0))
                         .font_weight(FontWeight::BOLD)
                         .text_color(theme().text_primary)
-                        .child(format!(
-                            "{} {}",
-                            path,
-                            if staged { "(staged)" } else { "" }
-                        )),
+                        .child(format!("{} {}", path, if staged { "(staged)" } else { "" })),
                 )
                 .child(
                     div()

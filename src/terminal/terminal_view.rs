@@ -1,6 +1,7 @@
 use super::grid_element::TerminalGridElement;
 use super::keymap::{self, AppAction, KeymapConfig};
 use super::pty_terminal::{PtyTerminal, ShellCommand, TermSize};
+use crate::theme::theme;
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::index::{Column, Line, Point as AlacPoint};
 use alacritty_terminal::term::TermMode;
@@ -8,7 +9,6 @@ use gpui::*;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
-use crate::theme::theme;
 
 const FONT_FAMILY: &str = crate::theme::FONT_MONO;
 pub const DEFAULT_FONT_SIZE: f32 = 13.0;
@@ -393,7 +393,6 @@ impl TerminalView {
         // origin values, causing spurious resize oscillation that made CC
         // re-render its entire TUI and duplicate scrollback content.
 
-
         Self {
             terminal,
             error: None,
@@ -515,8 +514,12 @@ impl TerminalView {
     /// with `row >= screen_lines`, which trips alacritty's
     /// `compute_index` debug_assert and aborts the app.
     fn pixel_to_cell(&self, x: f32, y: f32) -> Option<(usize, usize)> {
-        let origin_x = self.element_origin_x.load(std::sync::atomic::Ordering::Relaxed) as f32;
-        let origin_y = self.element_origin_y.load(std::sync::atomic::Ordering::Relaxed) as f32;
+        let origin_x = self
+            .element_origin_x
+            .load(std::sync::atomic::Ordering::Relaxed) as f32;
+        let origin_y = self
+            .element_origin_y
+            .load(std::sync::atomic::Ordering::Relaxed) as f32;
         let local_x = (x - origin_x).max(0.0);
         let local_y = (y - origin_y).max(0.0);
         let raw_col = (local_x / self.cell_width).floor() as usize;
@@ -601,11 +604,14 @@ impl TerminalView {
         position: Point<Pixels>,
         modifiers: Modifiers,
     ) -> bool {
-        let Some(mode) = self.terminal_mode() else { return false };
+        let Some(mode) = self.terminal_mode() else {
+            return false;
+        };
         if !mode.intersects(TermMode::MOUSE_MODE) {
             return false;
         }
-        let Some(point) = self.pixel_to_term_point(f32::from(position.x), f32::from(position.y)) else {
+        let Some(point) = self.pixel_to_term_point(f32::from(position.x), f32::from(position.y))
+        else {
             return false;
         };
         let Some(report) = mouse_report_bytes(
@@ -617,13 +623,17 @@ impl TerminalView {
         ) else {
             return false;
         };
-        let Some(terminal) = self.terminal.as_ref() else { return false };
+        let Some(terminal) = self.terminal.as_ref() else {
+            return false;
+        };
         terminal.write(&report);
         true
     }
 
     fn forward_mouse_move(&self, event: &MouseMoveEvent) -> bool {
-        let Some(mode) = self.terminal_mode() else { return false };
+        let Some(mode) = self.terminal_mode() else {
+            return false;
+        };
         if !mode.intersects(TermMode::MOUSE_MOTION | TermMode::MOUSE_DRAG) {
             return false;
         }
@@ -631,10 +641,9 @@ impl TerminalView {
         if mode.contains(TermMode::MOUSE_DRAG) && matches!(button, AlacMouseButton::NoneMove) {
             return false;
         }
-        let Some(point) = self.pixel_to_term_point(
-            f32::from(event.position.x),
-            f32::from(event.position.y),
-        ) else {
+        let Some(point) =
+            self.pixel_to_term_point(f32::from(event.position.x), f32::from(event.position.y))
+        else {
             return false;
         };
         let Some(report) = mouse_report_bytes(
@@ -646,7 +655,9 @@ impl TerminalView {
         ) else {
             return false;
         };
-        let Some(terminal) = self.terminal.as_ref() else { return false };
+        let Some(terminal) = self.terminal.as_ref() else {
+            return false;
+        };
         terminal.write(&report);
         true
     }
@@ -655,14 +666,17 @@ impl TerminalView {
         if lines == 0 {
             return false;
         }
-        let Some(mode) = self.terminal_mode() else { return false };
-        let Some(terminal) = self.terminal.as_ref() else { return false };
+        let Some(mode) = self.terminal_mode() else {
+            return false;
+        };
+        let Some(terminal) = self.terminal.as_ref() else {
+            return false;
+        };
 
         if mode.intersects(TermMode::MOUSE_MODE) {
-            let Some(point) = self.pixel_to_term_point(
-                f32::from(event.position.x),
-                f32::from(event.position.y),
-            ) else {
+            let Some(point) =
+                self.pixel_to_term_point(f32::from(event.position.x), f32::from(event.position.y))
+            else {
                 return false;
             };
             let Some(button) = AlacMouseButton::from_scroll_lines(lines) else {
@@ -719,13 +733,12 @@ impl TerminalView {
         let max_line = num_lines as i32 - 1;
 
         // Normalise: start <= end
-        let (start_line, start_col, end_line, end_col) = if anchor.0 < extent.0
-            || (anchor.0 == extent.0 && anchor.1 <= extent.1)
-        {
-            (anchor.0, anchor.1, extent.0, extent.1)
-        } else {
-            (extent.0, extent.1, anchor.0, anchor.1)
-        };
+        let (start_line, start_col, end_line, end_col) =
+            if anchor.0 < extent.0 || (anchor.0 == extent.0 && anchor.1 <= extent.1) {
+                (anchor.0, anchor.1, extent.0, extent.1)
+            } else {
+                (extent.0, extent.1, anchor.0, anchor.1)
+            };
 
         // Clamp to the current grid's visible range — if the selection was
         // entirely outside the current grid, give up.
@@ -739,11 +752,18 @@ impl TerminalView {
         for line in start_line..=end_line {
             let grid_line = Line(line);
             let c_start = if line == start_line { start_col } else { 0 };
-            let c_end = if line == end_line { end_col + 1 } else { num_cols };
+            let c_end = if line == end_line {
+                end_col + 1
+            } else {
+                num_cols
+            };
 
             for col in c_start..c_end.min(num_cols) {
                 let cell = &grid[grid_line][Column(col)];
-                if !cell.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
+                if !cell
+                    .flags
+                    .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+                {
                     let ch = if cell.c == '\0' { ' ' } else { cell.c };
                     text.push(ch);
                 }
@@ -799,7 +819,9 @@ impl TerminalView {
         let mut line_cols: Vec<usize> = Vec::with_capacity(num_cols);
         for col in 0..num_cols {
             let c = &grid[grid_line][Column(col)];
-            if c.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
+            if c.flags
+                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+            {
                 continue;
             }
             let ch = if c.c == '\0' { ' ' } else { c.c };
@@ -836,13 +858,19 @@ impl TerminalView {
                 }
                 end_idx += 1;
             }
-            if end_idx == start_idx { continue; }
+            if end_idx == start_idx {
+                continue;
+            }
 
             // Trim trailing punctuation
-            while end_idx > start_idx && matches!(line_chars[end_idx - 1], '.' | ',' | ';' | ':' | '!' | '?') {
+            while end_idx > start_idx
+                && matches!(line_chars[end_idx - 1], '.' | ',' | ';' | ':' | '!' | '?')
+            {
                 end_idx -= 1;
             }
-            if end_idx == start_idx { continue; }
+            if end_idx == start_idx {
+                continue;
+            }
 
             let col_start = line_cols[start_idx];
             let col_end = line_cols[end_idx - 1];
@@ -860,7 +888,9 @@ impl TerminalView {
     /// Build (chars, columns) parallel arrays for a visible row, skipping
     /// WIDE_CHAR_SPACER cells. Returns empty vecs if row is out of range.
     fn line_chars_cols(&self, row: usize) -> (Vec<char>, Vec<usize>) {
-        let Some(terminal) = self.terminal.as_ref() else { return (vec![], vec![]) };
+        let Some(terminal) = self.terminal.as_ref() else {
+            return (vec![], vec![]);
+        };
         let term = terminal.term.lock();
         let grid = term.grid();
         let num_cols = grid.columns();
@@ -874,7 +904,9 @@ impl TerminalView {
         let mut cols = Vec::with_capacity(num_cols);
         for col in 0..num_cols {
             let c = &grid[grid_line][Column(col)];
-            if c.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
+            if c.flags
+                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+            {
                 continue;
             }
             let ch = if c.c == '\0' { ' ' } else { c.c };
@@ -890,10 +922,7 @@ impl TerminalView {
     /// Accepts: absolute paths (`/...`, `~/...`), explicit relative
     /// (`./...`, `../...`), and bare relative forms that must exist
     /// under `working_dir`. Parses an optional `:line[:col]` suffix.
-    fn classify_path_token(
-        &self,
-        token: &str,
-    ) -> Option<(PathBuf, Option<(u32, Option<u32>)>)> {
+    fn classify_path_token(&self, token: &str) -> Option<(PathBuf, Option<(u32, Option<u32>)>)> {
         if token.is_empty() {
             return None;
         }
@@ -955,9 +984,7 @@ impl TerminalView {
         if let Some(dot) = path_part.rfind('.') {
             let ext = &path_part[dot + 1..];
             // Extensions: 1-8 alphanumeric chars.
-            if (1..=8).contains(&ext.len())
-                && ext.chars().all(|c| c.is_ascii_alphanumeric())
-            {
+            if (1..=8).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
                 return true;
             }
         }
@@ -1002,7 +1029,10 @@ impl TerminalView {
             tok_start += 1;
         }
         while tok_end > tok_start
-            && matches!(chars[tok_end], ')' | ']' | '}' | '>' | '"' | '\'' | '`' | ',' | ';' | '.' | '!' | '?')
+            && matches!(
+                chars[tok_end],
+                ')' | ']' | '}' | '>' | '"' | '\'' | '`' | ',' | ';' | '.' | '!' | '?'
+            )
         {
             tok_end -= 1;
         }
@@ -1029,7 +1059,9 @@ impl TerminalView {
         self.visible_url_spans.clear();
         self.visible_path_spans.clear();
 
-        let Some(terminal) = self.terminal.as_ref() else { return };
+        let Some(terminal) = self.terminal.as_ref() else {
+            return;
+        };
         let num_lines = {
             let term = terminal.term.lock();
             term.grid().screen_lines()
@@ -1043,7 +1075,10 @@ impl TerminalView {
 
             // URLs: http(s):// scan (same as url_at).
             let text: String = chars.iter().collect();
-            for (scheme_start, _) in text.match_indices("http://").chain(text.match_indices("https://")) {
+            for (scheme_start, _) in text
+                .match_indices("http://")
+                .chain(text.match_indices("https://"))
+            {
                 // Convert byte offset → char offset in `chars`.
                 let prefix = &text[..scheme_start];
                 let char_start = prefix.chars().count();
@@ -1082,13 +1117,15 @@ impl TerminalView {
 
                 // Trim matched brackets/quotes.
                 let mut ts = tok_start;
-                while ts < tok_end
-                    && matches!(chars[ts], '(' | '[' | '{' | '<' | '"' | '\'' | '`')
+                while ts < tok_end && matches!(chars[ts], '(' | '[' | '{' | '<' | '"' | '\'' | '`')
                 {
                     ts += 1;
                 }
                 while tok_end > ts
-                    && matches!(chars[tok_end], ')' | ']' | '}' | '>' | '"' | '\'' | '`' | ',' | ';' | '.' | '!' | '?')
+                    && matches!(
+                        chars[tok_end],
+                        ')' | ']' | '}' | '>' | '"' | '\'' | '`' | ',' | ';' | '.' | '!' | '?'
+                    )
                 {
                     tok_end -= 1;
                 }
@@ -1114,9 +1151,13 @@ impl TerminalView {
         self.search_matches.clear();
         self.search_current_idx = 0;
 
-        if self.search_query.is_empty() { return; }
+        if self.search_query.is_empty() {
+            return;
+        }
 
-        let Some(ref terminal) = self.terminal else { return };
+        let Some(ref terminal) = self.terminal else {
+            return;
+        };
         let term = terminal.term.lock();
         let grid = term.grid();
         let num_lines = grid.screen_lines();
@@ -1124,7 +1165,9 @@ impl TerminalView {
         let history_size = grid.total_lines().saturating_sub(num_lines);
 
         let query_chars: Vec<char> = self.search_query.to_lowercase().chars().collect();
-        if query_chars.is_empty() { return; }
+        if query_chars.is_empty() {
+            return;
+        }
 
         let min_line = -(history_size as i32);
         let max_line = num_lines as i32 - 1;
@@ -1139,7 +1182,10 @@ impl TerminalView {
 
             for col in 0..num_cols {
                 let cell = &grid[grid_line][Column(col)];
-                if cell.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
+                if cell
+                    .flags
+                    .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+                {
                     continue;
                 }
                 let ch = if cell.c == '\0' { ' ' } else { cell.c };
@@ -1181,7 +1227,9 @@ impl TerminalView {
             c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/'
         };
 
-        if cell.1 >= num_cols { return None; }
+        if cell.1 >= num_cols {
+            return None;
+        }
         let ch = grid[grid_line][Column(cell.1)].c;
         if !is_word_char(ch) {
             return None;
@@ -1190,22 +1238,35 @@ impl TerminalView {
         let mut start_col = cell.1;
         while start_col > 0 {
             let prev_cell = &grid[grid_line][Column(start_col - 1)];
-            if prev_cell.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
-                if start_col >= 2 { start_col -= 1; continue; }
+            if prev_cell
+                .flags
+                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+            {
+                if start_col >= 2 {
+                    start_col -= 1;
+                    continue;
+                }
                 break;
             }
-            if !is_word_char(prev_cell.c) { break; }
+            if !is_word_char(prev_cell.c) {
+                break;
+            }
             start_col -= 1;
         }
 
         let mut end_col = cell.1;
         while end_col + 1 < num_cols {
             let next_cell = &grid[grid_line][Column(end_col + 1)];
-            if next_cell.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
+            if next_cell
+                .flags
+                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+            {
                 end_col += 1;
                 continue;
             }
-            if !is_word_char(next_cell.c) { break; }
+            if !is_word_char(next_cell.c) {
+                break;
+            }
             end_col += 1;
         }
 
@@ -1226,7 +1287,9 @@ impl TerminalView {
             c.is_alphanumeric() || c == '_' || c == '-' || c == '.' || c == '/'
         };
 
-        if cell.1 >= num_cols { return None; }
+        if cell.1 >= num_cols {
+            return None;
+        }
         let ch = grid[grid_line][Column(cell.1)].c;
         if !is_word_char(ch) {
             return None;
@@ -1236,14 +1299,19 @@ impl TerminalView {
         let mut start_col = cell.1;
         while start_col > 0 {
             let prev_cell = &grid[grid_line][Column(start_col - 1)];
-            if prev_cell.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
+            if prev_cell
+                .flags
+                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+            {
                 if start_col >= 2 {
                     start_col -= 1;
                     continue;
                 }
                 break;
             }
-            if !is_word_char(prev_cell.c) { break; }
+            if !is_word_char(prev_cell.c) {
+                break;
+            }
             start_col -= 1;
         }
 
@@ -1251,11 +1319,16 @@ impl TerminalView {
         let mut end_col = cell.1;
         while end_col + 1 < num_cols {
             let next_cell = &grid[grid_line][Column(end_col + 1)];
-            if next_cell.flags.contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER) {
+            if next_cell
+                .flags
+                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
+            {
                 end_col += 1;
                 continue;
             }
-            if !is_word_char(next_cell.c) { break; }
+            if !is_word_char(next_cell.c) {
+                break;
+            }
             end_col += 1;
         }
 
@@ -1276,10 +1349,7 @@ impl TerminalView {
 
     /// Render the floating right-click context menu for a detected file
     /// path. Returns an empty vec when no menu is active.
-    fn render_terminal_context_menu(
-        &self,
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
+    fn render_terminal_context_menu(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let Some(menu) = self.terminal_context_menu.as_ref() else {
             return Vec::new();
         };
@@ -1334,23 +1404,27 @@ impl TerminalView {
             .child(item(
                 "term-ctx-open-editor",
                 label_open,
-                Box::new(move |this: &mut TerminalView, cx: &mut Context<TerminalView>| {
-                    cx.emit(TerminalEvent::OpenExternalEditor {
-                        path: path_for_open.clone(),
-                        line_col,
-                    });
-                    let _ = this;
-                }),
+                Box::new(
+                    move |this: &mut TerminalView, cx: &mut Context<TerminalView>| {
+                        cx.emit(TerminalEvent::OpenExternalEditor {
+                            path: path_for_open.clone(),
+                            line_col,
+                        });
+                        let _ = this;
+                    },
+                ),
             ))
             .child(item(
                 "term-ctx-reveal",
                 "Reveal in Finder".to_string(),
-                Box::new(move |_this: &mut TerminalView, _cx: &mut Context<TerminalView>| {
-                    let _ = std::process::Command::new("open")
-                        .arg("-R")
-                        .arg(&path_for_reveal)
-                        .spawn();
-                }),
+                Box::new(
+                    move |_this: &mut TerminalView, _cx: &mut Context<TerminalView>| {
+                        let _ = std::process::Command::new("open")
+                            .arg("-R")
+                            .arg(&path_for_reveal)
+                            .spawn();
+                    },
+                ),
             ));
 
         vec![deferred(
@@ -1371,18 +1445,23 @@ impl Render for TerminalView {
         // the size has been stable for RESIZE_DEBOUNCE_MS.
         {
             let viewport = window.viewport_size();
-            let origin_x = self.element_origin_x.load(std::sync::atomic::Ordering::Relaxed) as f32;
-            let origin_y = self.element_origin_y.load(std::sync::atomic::Ordering::Relaxed) as f32;
+            let origin_x = self
+                .element_origin_x
+                .load(std::sync::atomic::Ordering::Relaxed) as f32;
+            let origin_y = self
+                .element_origin_y
+                .load(std::sync::atomic::Ordering::Relaxed) as f32;
             // origin == -1 means the grid hasn't painted yet; origin 0 is a
             // legitimate position (left sidebar hidden) and must resize.
             if origin_x >= 0.0 && origin_y >= 0.0 {
-                let available_width =
-                    f32::from(viewport.width) - origin_x - self.right_inset;
+                let available_width = f32::from(viewport.width) - origin_x - self.right_inset;
                 let available_height = f32::from(viewport.height) - origin_y - self.bottom_inset;
                 if available_width > 100.0 && available_height > 100.0 {
                     let new_size = Self::compute_size(
-                        available_width, available_height,
-                        self.cell_width, self.cell_height,
+                        available_width,
+                        available_height,
+                        self.cell_width,
+                        self.cell_height,
                     );
                     if new_size.cols != self.last_cols || new_size.rows != self.last_rows {
                         // Check if the pending resize already matches — only
@@ -1455,7 +1534,10 @@ impl Render for TerminalView {
         };
 
         let selection = match (self.selection_anchor, self.selection_extent) {
-            (Some(a), Some(e)) => Some(super::grid_element::GridSelection { anchor: a, extent: e }),
+            (Some(a), Some(e)) => Some(super::grid_element::GridSelection {
+                anchor: a,
+                extent: e,
+            }),
             _ => None,
         };
 
@@ -1470,14 +1552,26 @@ impl Render for TerminalView {
         .scrollbar_opacity(self.scrollbar_opacity)
         .selection(selection)
         .search_matches(self.search_matches.clone(), self.search_current_idx)
-        .hovered_url(self.hovered_url.as_ref().map(|(r, cs, ce, _)| (*r, *cs, *ce)))
-        .hovered_path(self.hovered_path.as_ref().map(|(r, cs, ce, _, _)| (*r, *cs, *ce)))
+        .hovered_url(
+            self.hovered_url
+                .as_ref()
+                .map(|(r, cs, ce, _)| (*r, *cs, *ce)),
+        )
+        .hovered_path(
+            self.hovered_path
+                .as_ref()
+                .map(|(r, cs, ce, _, _)| (*r, *cs, *ce)),
+        )
         .url_spans(self.visible_url_spans.clone())
         .path_spans(self.visible_path_spans.clone())
         .origin_out(self.element_origin_x.clone(), self.element_origin_y.clone());
 
         let bell_active = self.bell_flash_start.is_some();
-        let bg_color = if bell_active { theme().bg_bell } else { theme().bg_base };
+        let bg_color = if bell_active {
+            theme().bg_bell
+        } else {
+            theme().bg_base
+        };
         let clickable_hover = self.hovered_url.is_some() || self.hovered_path.is_some();
 
         let terminal = div()
@@ -1494,183 +1588,197 @@ impl Render for TerminalView {
         };
 
         terminal
-            .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
-                this.last_keypress = Instant::now();
-                this.cursor_visible = true;
+            .on_key_down(
+                cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
+                    this.last_keypress = Instant::now();
+                    this.cursor_visible = true;
 
-                let key = event.keystroke.key.as_str();
-                let mods = &event.keystroke.modifiers;
+                    let key = event.keystroke.key.as_str();
+                    let mods = &event.keystroke.modifiers;
 
-                // Escape dismisses an open terminal context menu first.
-                if key == "escape" && this.terminal_context_menu.is_some() {
-                    this.terminal_context_menu = None;
-                    cx.notify();
-                    return;
-                }
+                    // Escape dismisses an open terminal context menu first.
+                    if key == "escape" && this.terminal_context_menu.is_some() {
+                        this.terminal_context_menu = None;
+                        cx.notify();
+                        return;
+                    }
 
-                // Handle search mode input
-                if this.search_active {
-                    match key {
-                        "escape" => {
-                            this.search_active = false;
-                            this.search_query.clear();
-                            this.search_matches.clear();
-                            cx.notify();
-                            return;
-                        }
-                        "enter" => {
-                            // Next match
-                            if !this.search_matches.is_empty() {
-                                this.search_current_idx =
-                                    (this.search_current_idx + 1) % this.search_matches.len();
+                    // Handle search mode input
+                    if this.search_active {
+                        match key {
+                            "escape" => {
+                                this.search_active = false;
+                                this.search_query.clear();
+                                this.search_matches.clear();
                                 cx.notify();
+                                return;
                             }
-                            return;
-                        }
-                        "backspace" => {
-                            this.search_query.pop();
-                            this.update_search_matches();
-                            cx.notify();
-                            return;
-                        }
-                        _ => {
-                            if let Some(ref key_char) = event.keystroke.key_char {
-                                if !mods.control && !mods.platform {
-                                    this.search_query.push_str(key_char);
-                                    this.update_search_matches();
+                            "enter" => {
+                                // Next match
+                                if !this.search_matches.is_empty() {
+                                    this.search_current_idx =
+                                        (this.search_current_idx + 1) % this.search_matches.len();
+                                    cx.notify();
+                                }
+                                return;
+                            }
+                            "backspace" => {
+                                this.search_query.pop();
+                                this.update_search_matches();
+                                cx.notify();
+                                return;
+                            }
+                            _ => {
+                                if let Some(ref key_char) = event.keystroke.key_char {
+                                    if !mods.control && !mods.platform {
+                                        this.search_query.push_str(key_char);
+                                        this.update_search_matches();
+                                        cx.notify();
+                                        return;
+                                    }
+                                }
+                                // Shift+Enter = previous match
+                                if key == "enter" && mods.shift && !this.search_matches.is_empty() {
+                                    this.search_current_idx = if this.search_current_idx == 0 {
+                                        this.search_matches.len() - 1
+                                    } else {
+                                        this.search_current_idx - 1
+                                    };
                                     cx.notify();
                                     return;
                                 }
                             }
-                            // Shift+Enter = previous match
-                            if key == "enter" && mods.shift && !this.search_matches.is_empty() {
-                                this.search_current_idx = if this.search_current_idx == 0 {
-                                    this.search_matches.len() - 1
-                                } else {
-                                    this.search_current_idx - 1
-                                };
-                                cx.notify();
-                                return;
-                            }
                         }
-                    }
-                    return;
-                }
-
-                // ── App-level shortcuts (Cmd key) ─────────────────────
-                if mods.platform {
-                    let Some(action) = keymap::app_action(key, mods) else {
-                        // Cmd+key combo not recognised by Allele — consume
-                        // silently so raw characters don't leak to the PTY.
                         return;
-                    };
-                    match action {
-                        AppAction::Paste => {
-                            if let Some(ref terminal) = this.terminal {
-                                if let Some(item) = cx.read_from_clipboard() {
-                                    if let Some(text) = item.text() {
-                                        let use_bracketed = terminal.term.lock().mode()
-                                            .contains(alacritty_terminal::term::TermMode::BRACKETED_PASTE);
-                                        if use_bracketed {
-                                            terminal.write(b"\x1b[200~");
-                                            terminal.write(text.as_bytes());
-                                            terminal.write(b"\x1b[201~");
-                                        } else {
-                                            terminal.write(text.as_bytes());
+                    }
+
+                    // ── App-level shortcuts (Cmd key) ─────────────────────
+                    if mods.platform {
+                        let Some(action) = keymap::app_action(key, mods) else {
+                            // Cmd+key combo not recognised by Allele — consume
+                            // silently so raw characters don't leak to the PTY.
+                            return;
+                        };
+                        match action {
+                            AppAction::Paste => {
+                                if let Some(ref terminal) = this.terminal {
+                                    if let Some(item) = cx.read_from_clipboard() {
+                                        if let Some(text) = item.text() {
+                                            let use_bracketed = terminal
+                                                .term
+                                                .lock()
+                                                .mode()
+                                                .contains(
+                                                alacritty_terminal::term::TermMode::BRACKETED_PASTE,
+                                            );
+                                            if use_bracketed {
+                                                terminal.write(b"\x1b[200~");
+                                                terminal.write(text.as_bytes());
+                                                terminal.write(b"\x1b[201~");
+                                            } else {
+                                                terminal.write(text.as_bytes());
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
-                        AppAction::Copy => {
-                            if let Some(text) = this.get_selected_text() {
-                                if !text.is_empty() {
-                                    cx.write_to_clipboard(ClipboardItem::new_string(text));
-                                    this.selection_anchor = None;
-                                    this.selection_extent = None;
-                                    cx.notify();
-                                    return;
+                            AppAction::Copy => {
+                                if let Some(text) = this.get_selected_text() {
+                                    if !text.is_empty() {
+                                        cx.write_to_clipboard(ClipboardItem::new_string(text));
+                                        this.selection_anchor = None;
+                                        this.selection_extent = None;
+                                        cx.notify();
+                                        return;
+                                    }
+                                }
+                                // No selection — send Ctrl+C to terminal
+                                if let Some(ref terminal) = this.terminal {
+                                    terminal.write(&[0x03]);
                                 }
                             }
-                            // No selection — send Ctrl+C to terminal
-                            if let Some(ref terminal) = this.terminal {
-                                terminal.write(&[0x03]);
-                            }
-                        }
-                        AppAction::OpenSearch => {
-                            this.search_active = true;
-                            this.search_query.clear();
-                            this.search_matches.clear();
-                            this.search_current_idx = 0;
-                            cx.notify();
-                        }
-                        AppAction::FindNext => {
-                            if !this.search_matches.is_empty() {
-                                this.search_current_idx =
-                                    (this.search_current_idx + 1) % this.search_matches.len();
+                            AppAction::OpenSearch => {
+                                this.search_active = true;
+                                this.search_query.clear();
+                                this.search_matches.clear();
+                                this.search_current_idx = 0;
                                 cx.notify();
                             }
-                        }
-                        AppAction::FindPrevious => {
-                            if !this.search_matches.is_empty() {
-                                this.search_current_idx = if this.search_current_idx == 0 {
-                                    this.search_matches.len() - 1
-                                } else {
-                                    this.search_current_idx - 1
-                                };
-                                cx.notify();
+                            AppAction::FindNext => {
+                                if !this.search_matches.is_empty() {
+                                    this.search_current_idx =
+                                        (this.search_current_idx + 1) % this.search_matches.len();
+                                    cx.notify();
+                                }
+                            }
+                            AppAction::FindPrevious => {
+                                if !this.search_matches.is_empty() {
+                                    this.search_current_idx = if this.search_current_idx == 0 {
+                                        this.search_matches.len() - 1
+                                    } else {
+                                        this.search_current_idx - 1
+                                    };
+                                    cx.notify();
+                                }
+                            }
+                            AppAction::ZoomIn => cx.emit(TerminalEvent::AdjustFontSize(1.0)),
+                            AppAction::ZoomOut => cx.emit(TerminalEvent::AdjustFontSize(-1.0)),
+                            AppAction::ZoomReset => cx.emit(TerminalEvent::ResetFontSize),
+                            AppAction::NewSession => cx.emit(TerminalEvent::NewSession),
+                            AppAction::CloseSession => cx.emit(TerminalEvent::CloseSession),
+                            AppAction::PrevSession => cx.emit(TerminalEvent::PrevSession),
+                            AppAction::NextSession => cx.emit(TerminalEvent::NextSession),
+                            AppAction::SwitchSession(idx) => {
+                                cx.emit(TerminalEvent::SwitchSession(idx))
+                            }
+                            AppAction::ToggleDrawer => cx.emit(TerminalEvent::ToggleDrawer),
+                            AppAction::ToggleSidebar => cx.emit(TerminalEvent::ToggleSidebar),
+                            AppAction::ToggleRightSidebar => {
+                                cx.emit(TerminalEvent::ToggleRightSidebar)
+                            }
+                            AppAction::OpenScratchPad => cx.emit(TerminalEvent::OpenScratchPad),
+                            AppAction::SendBytes(bytes) => {
+                                if let Some(ref terminal) = this.terminal {
+                                    terminal.write(bytes);
+                                }
                             }
                         }
-                        AppAction::ZoomIn => cx.emit(TerminalEvent::AdjustFontSize(1.0)),
-                        AppAction::ZoomOut => cx.emit(TerminalEvent::AdjustFontSize(-1.0)),
-                        AppAction::ZoomReset => cx.emit(TerminalEvent::ResetFontSize),
-                        AppAction::NewSession => cx.emit(TerminalEvent::NewSession),
-                        AppAction::CloseSession => cx.emit(TerminalEvent::CloseSession),
-                        AppAction::PrevSession => cx.emit(TerminalEvent::PrevSession),
-                        AppAction::NextSession => cx.emit(TerminalEvent::NextSession),
-                        AppAction::SwitchSession(idx) => cx.emit(TerminalEvent::SwitchSession(idx)),
-                        AppAction::ToggleDrawer => cx.emit(TerminalEvent::ToggleDrawer),
-                        AppAction::ToggleSidebar => cx.emit(TerminalEvent::ToggleSidebar),
-                        AppAction::ToggleRightSidebar => cx.emit(TerminalEvent::ToggleRightSidebar),
-                        AppAction::OpenScratchPad => cx.emit(TerminalEvent::OpenScratchPad),
-                        AppAction::SendBytes(bytes) => {
-                            if let Some(ref terminal) = this.terminal {
-                                terminal.write(bytes);
-                            }
+                        return;
+                    }
+
+                    // ── Terminal input (policy-based) ─────────────────────
+                    let Some(ref terminal) = this.terminal else {
+                        return;
+                    };
+
+                    // Clear selection on any input to terminal
+                    if this.selection_anchor.is_some() {
+                        this.selection_anchor = None;
+                        this.selection_extent = None;
+                    }
+
+                    // Snap to bottom when scrolled back
+                    {
+                        let t = terminal.term.lock();
+                        let offset = t.grid().display_offset();
+                        drop(t);
+                        if offset > 0 {
+                            terminal.term.lock().scroll_display(Scroll::Bottom);
+                            this.scroll_dirty
+                                .store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
-                    return;
-                }
 
-                // ── Terminal input (policy-based) ─────────────────────
-                let Some(ref terminal) = this.terminal else { return };
-
-                // Clear selection on any input to terminal
-                if this.selection_anchor.is_some() {
-                    this.selection_anchor = None;
-                    this.selection_extent = None;
-                }
-
-                // Snap to bottom when scrolled back
-                {
-                    let t = terminal.term.lock();
-                    let offset = t.grid().display_offset();
-                    drop(t);
-                    if offset > 0 {
-                        terminal.term.lock().scroll_display(Scroll::Bottom);
-                        this.scroll_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+                    // Resolve keystroke → bytes via keymap policy engine
+                    let key_char = event.keystroke.key_char.as_deref();
+                    if let Some(bytes) = this.keymap.resolve(key, mods, key_char) {
+                        terminal.write(&bytes);
+                        if key == "enter" {
+                            cx.emit(TerminalEvent::EnterPressed);
+                        }
                     }
-                }
-
-                // Resolve keystroke → bytes via keymap policy engine
-                let key_char = event.keystroke.key_char.as_deref();
-                if let Some(bytes) = this.keymap.resolve(key, mods, key_char) {
-                    terminal.write(&bytes);
-                    if key == "enter" {
-                        cx.emit(TerminalEvent::EnterPressed);
-                    }
-                }
-            }))
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, event: &MouseDownEvent, window, cx| {
@@ -1683,7 +1791,10 @@ impl Render for TerminalView {
                     let click_x = f32::from(event.position.x);
                     let click_y = f32::from(event.position.y);
                     // Scrollbar is at the right edge of the terminal element
-                    let origin_x = this.element_origin_x.load(std::sync::atomic::Ordering::Relaxed) as f32;
+                    let origin_x = this
+                        .element_origin_x
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        as f32;
                     let term_width = f32::from(viewport.width) - origin_x;
                     let scrollbar_zone = origin_x + term_width - 12.0;
 
@@ -1718,7 +1829,9 @@ impl Render for TerminalView {
 
                     if click_x >= scrollbar_zone {
                         // Scrollbar interaction
-                        let Some(ref terminal) = this.terminal else { return };
+                        let Some(ref terminal) = this.terminal else {
+                            return;
+                        };
                         let t = terminal.term.lock();
                         let grid = t.grid();
                         let total = grid.total_lines();
@@ -1729,7 +1842,10 @@ impl Render for TerminalView {
                         if history > 0 {
                             this.scrollbar_dragging = true;
                             // Set scroll position from click y relative to terminal element
-                            let origin_y = this.element_origin_y.load(std::sync::atomic::Ordering::Relaxed) as f32;
+                            let origin_y = this
+                                .element_origin_y
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                                as f32;
                             let term_h = f32::from(viewport.height) - origin_y;
                             let local_y = (click_y - origin_y).max(0.0);
                             let fraction = (local_y / term_h).clamp(0.0, 1.0);
@@ -1739,7 +1855,8 @@ impl Render for TerminalView {
                             let delta = new_offset - current;
                             if delta != 0 {
                                 terminal.term.lock().scroll_display(Scroll::Delta(delta));
-                                this.scroll_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+                                this.scroll_dirty
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
                                 cx.notify();
                             }
                         }
@@ -1770,11 +1887,14 @@ impl Render for TerminalView {
                             }
                             3 => {
                                 // Triple-click: select entire line
-                                let num_cols = this.terminal.as_ref()
+                                let num_cols = this
+                                    .terminal
+                                    .as_ref()
                                     .map(|t| t.term.lock().grid().columns())
                                     .unwrap_or(80);
                                 this.selection_anchor = Some((line_cell.0, 0));
-                                this.selection_extent = Some((line_cell.0, num_cols.saturating_sub(1)));
+                                this.selection_extent =
+                                    Some((line_cell.0, num_cols.saturating_sub(1)));
                                 this.selecting = false;
                             }
                             _ => {
@@ -1788,99 +1908,118 @@ impl Render for TerminalView {
                     }
                 }),
             )
-            .on_mouse_move(cx.listener(|this: &mut Self, event: &MouseMoveEvent, window, cx| {
-                if this.mouse_reporting_active() && !event.modifiers.platform {
-                    this.forward_mouse_move(event);
-                    if this.hovered_url.is_some() || this.hovered_path.is_some() {
+            .on_mouse_move(
+                cx.listener(|this: &mut Self, event: &MouseMoveEvent, window, cx| {
+                    if this.mouse_reporting_active() && !event.modifiers.platform {
+                        this.forward_mouse_move(event);
+                        if this.hovered_url.is_some() || this.hovered_path.is_some() {
+                            this.hovered_url = None;
+                            this.hovered_path = None;
+                            cx.notify();
+                        }
+                        return;
+                    }
+
+                    // Handle selection drag
+                    if this.selecting {
+                        let x = f32::from(event.position.x);
+                        let y = f32::from(event.position.y);
+
+                        // Auto-scroll when drag goes past top/bottom edges
+                        let origin_y = this
+                            .element_origin_y
+                            .load(std::sync::atomic::Ordering::Relaxed)
+                            as f32;
+                        let viewport_h = f32::from(window.viewport_size().height);
+                        let term_h = viewport_h - origin_y;
+                        let local_y = y - origin_y;
+                        let scroll_delta = if local_y < 0.0 {
+                            // Above terminal area — scroll up
+                            1
+                        } else if local_y > term_h {
+                            // Below terminal area — scroll down
+                            -1
+                        } else {
+                            0
+                        };
+                        if scroll_delta != 0 {
+                            if let Some(ref terminal) = this.terminal {
+                                terminal
+                                    .term
+                                    .lock()
+                                    .scroll_display(Scroll::Delta(scroll_delta));
+                                this.scroll_dirty
+                                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
+
+                        // Update the drag selection only if the mouse is still
+                        // inside the grid area. Outside positions are swallowed —
+                        // the selection continues to reflect the last in-bounds cell.
+                        if let Some(line_cell) = this.pixel_to_line_cell(x, y) {
+                            this.selection_extent = Some(line_cell);
+                        }
+                        cx.notify();
+                        return;
+                    }
+
+                    // URL / path detection on Cmd hover
+                    if event.modifiers.platform {
+                        let x = f32::from(event.position.x);
+                        let y = f32::from(event.position.y);
+                        // If the hover is out of grid bounds (padding, etc.)
+                        // clear any existing hovered URL. Prevents calling
+                        // url_at with an OOB cell.
+                        let cell = this.pixel_to_cell(x, y);
+                        this.hovered_url = cell.and_then(|c| this.url_at(c));
+                        this.hovered_path = if this.hovered_url.is_some() {
+                            None
+                        } else {
+                            cell.and_then(|c| this.path_at(c))
+                        };
+                        cx.notify();
+                    } else if this.hovered_url.is_some() || this.hovered_path.is_some() {
                         this.hovered_url = None;
                         this.hovered_path = None;
                         cx.notify();
                     }
-                    return;
-                }
 
-                // Handle selection drag
-                if this.selecting {
-                    let x = f32::from(event.position.x);
-                    let y = f32::from(event.position.y);
+                    if !this.scrollbar_dragging {
+                        return;
+                    }
+                    let Some(ref terminal) = this.terminal else {
+                        return;
+                    };
+                    let t = terminal.term.lock();
+                    let total = t.grid().total_lines();
+                    let screen = t.grid().screen_lines();
+                    let history = total.saturating_sub(screen);
+                    let current_offset = t.grid().display_offset() as i32;
+                    drop(t);
 
-                    // Auto-scroll when drag goes past top/bottom edges
-                    let origin_y = this.element_origin_y.load(std::sync::atomic::Ordering::Relaxed) as f32;
+                    if history == 0 {
+                        return;
+                    }
+
+                    let origin_y = this
+                        .element_origin_y
+                        .load(std::sync::atomic::Ordering::Relaxed)
+                        as f32;
                     let viewport_h = f32::from(window.viewport_size().height);
                     let term_h = viewport_h - origin_y;
-                    let local_y = y - origin_y;
-                    let scroll_delta = if local_y < 0.0 {
-                        // Above terminal area — scroll up
-                        1
-                    } else if local_y > term_h {
-                        // Below terminal area — scroll down
-                        -1
-                    } else {
-                        0
-                    };
-                    if scroll_delta != 0 {
-                        if let Some(ref terminal) = this.terminal {
-                            terminal.term.lock().scroll_display(Scroll::Delta(scroll_delta));
-                            this.scroll_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                        }
+                    let mouse_y = f32::from(event.position.y);
+                    let local_y = (mouse_y - origin_y).max(0.0);
+                    let fraction = (local_y / term_h).clamp(0.0, 1.0);
+                    let new_offset = ((1.0 - fraction) * history as f32).round() as i32;
+                    let delta = new_offset - current_offset;
+                    if delta != 0 {
+                        terminal.term.lock().scroll_display(Scroll::Delta(delta));
+                        this.scroll_dirty
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        cx.notify();
                     }
-
-                    // Update the drag selection only if the mouse is still
-                    // inside the grid area. Outside positions are swallowed —
-                    // the selection continues to reflect the last in-bounds cell.
-                    if let Some(line_cell) = this.pixel_to_line_cell(x, y) {
-                        this.selection_extent = Some(line_cell);
-                    }
-                    cx.notify();
-                    return;
-                }
-
-                // URL / path detection on Cmd hover
-                if event.modifiers.platform {
-                    let x = f32::from(event.position.x);
-                    let y = f32::from(event.position.y);
-                    // If the hover is out of grid bounds (padding, etc.)
-                    // clear any existing hovered URL. Prevents calling
-                    // url_at with an OOB cell.
-                    let cell = this.pixel_to_cell(x, y);
-                    this.hovered_url = cell.and_then(|c| this.url_at(c));
-                    this.hovered_path = if this.hovered_url.is_some() {
-                        None
-                    } else {
-                        cell.and_then(|c| this.path_at(c))
-                    };
-                    cx.notify();
-                } else if this.hovered_url.is_some() || this.hovered_path.is_some() {
-                    this.hovered_url = None;
-                    this.hovered_path = None;
-                    cx.notify();
-                }
-
-                if !this.scrollbar_dragging { return; }
-                let Some(ref terminal) = this.terminal else { return };
-                let t = terminal.term.lock();
-                let total = t.grid().total_lines();
-                let screen = t.grid().screen_lines();
-                let history = total.saturating_sub(screen);
-                let current_offset = t.grid().display_offset() as i32;
-                drop(t);
-
-                if history == 0 { return; }
-
-                let origin_y = this.element_origin_y.load(std::sync::atomic::Ordering::Relaxed) as f32;
-                let viewport_h = f32::from(window.viewport_size().height);
-                let term_h = viewport_h - origin_y;
-                let mouse_y = f32::from(event.position.y);
-                let local_y = (mouse_y - origin_y).max(0.0);
-                let fraction = (local_y / term_h).clamp(0.0, 1.0);
-                let new_offset = ((1.0 - fraction) * history as f32).round() as i32;
-                let delta = new_offset - current_offset;
-                if delta != 0 {
-                    terminal.term.lock().scroll_display(Scroll::Delta(delta));
-                    this.scroll_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-                    cx.notify();
-                }
-            }))
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(|this: &mut Self, event: &MouseDownEvent, _window, cx| {
@@ -1895,7 +2034,9 @@ impl Render for TerminalView {
 
                     let x = f32::from(event.position.x);
                     let y = f32::from(event.position.y);
-                    let Some(cell) = this.pixel_to_cell(x, y) else { return };
+                    let Some(cell) = this.pixel_to_cell(x, y) else {
+                        return;
+                    };
 
                     // URL: open immediately in default browser, no menu.
                     if let Some((_, _, _, url)) = this.url_at(cell) {
@@ -2011,23 +2152,32 @@ impl Render for TerminalView {
                     }
                 }),
             )
-            .on_scroll_wheel(cx.listener(|this: &mut Self, event: &ScrollWheelEvent, _window, _cx| {
-                let lines = this.scroll_lines_from_event(event);
-                if lines == 0 {
-                    return;
-                }
-                if this.forward_scroll_input(event, lines) {
-                    return;
-                }
-                let Some(ref terminal) = this.terminal else { return };
-                terminal.term.lock().scroll_display(Scroll::Delta(lines));
-                this.scroll_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
-            }))
+            .on_scroll_wheel(cx.listener(
+                |this: &mut Self, event: &ScrollWheelEvent, _window, _cx| {
+                    let lines = this.scroll_lines_from_event(event);
+                    if lines == 0 {
+                        return;
+                    }
+                    if this.forward_scroll_input(event, lines) {
+                        return;
+                    }
+                    let Some(ref terminal) = this.terminal else {
+                        return;
+                    };
+                    terminal.term.lock().scroll_display(Scroll::Delta(lines));
+                    this.scroll_dirty
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                },
+            ))
             .child(grid_element)
             .children(self.render_terminal_context_menu(cx))
             .children(if self.search_active {
                 let match_count = self.search_matches.len();
-                let current = if match_count > 0 { self.search_current_idx + 1 } else { 0 };
+                let current = if match_count > 0 {
+                    self.search_current_idx + 1
+                } else {
+                    0
+                };
                 let label = if self.search_query.is_empty() {
                     "Find...".to_string()
                 } else if match_count > 0 {
@@ -2146,7 +2296,9 @@ fn mouse_report_bytes(
     }
 
     match format {
-        MouseFormat::Sgr => Some(sgr_mouse_report(point, button as u8 + mods, pressed).into_bytes()),
+        MouseFormat::Sgr => {
+            Some(sgr_mouse_report(point, button as u8 + mods, pressed).into_bytes())
+        }
         MouseFormat::Normal(utf8) => {
             if pressed {
                 normal_mouse_report(point, button as u8 + mods, utf8)

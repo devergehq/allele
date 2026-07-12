@@ -250,7 +250,6 @@ impl Element for TerminalGridElement {
         window: &mut Window,
         _cx: &mut App,
     ) -> Self::PrepaintState {
-
         let hitbox = window.insert_hitbox(_bounds, HitboxBehavior::Normal);
 
         let term = self.term.lock();
@@ -296,9 +295,8 @@ impl Element for TerminalGridElement {
                     cursor_pos = Some((line_idx, col_idx));
                 }
                 // Only invert cell bg for block cursor shape (when visible)
-                let is_block_cursor = at_cursor
-                    && self.cursor_visible
-                    && cursor_shape == CursorShape::Block;
+                let is_block_cursor =
+                    at_cursor && self.cursor_visible && cursor_shape == CursorShape::Block;
 
                 let cell_bg = if is_block_cursor {
                     ansi_to_hsla(&AnsiColor::Named(NamedColor::Foreground))
@@ -360,8 +358,7 @@ impl Element for TerminalGridElement {
                 let italic = cell.flags.contains(CellFlags::ITALIC);
 
                 // Style changed — flush current span
-                if col_idx > 0
-                    && (cell_fg != span_fg || bold != span_bold || italic != span_italic)
+                if col_idx > 0 && (cell_fg != span_fg || bold != span_bold || italic != span_italic)
                 {
                     if !text_buf.is_empty() {
                         let text: SharedString = std::mem::take(&mut text_buf).into();
@@ -465,8 +462,14 @@ impl Element for TerminalGridElement {
 
         // Publish origin so mouse handlers can translate window coordinates.
         if let (Some(ox), Some(oy)) = (&self.origin_x_out, &self.origin_y_out) {
-            ox.store(f32::from(origin.x) as i32, std::sync::atomic::Ordering::Relaxed);
-            oy.store(f32::from(origin.y) as i32, std::sync::atomic::Ordering::Relaxed);
+            ox.store(
+                f32::from(origin.x) as i32,
+                std::sync::atomic::Ordering::Relaxed,
+            );
+            oy.store(
+                f32::from(origin.y) as i32,
+                std::sync::atomic::Ordering::Relaxed,
+            );
         }
 
         // Paint backgrounds
@@ -476,10 +479,7 @@ impl Element for TerminalGridElement {
             for span in &row.bg_spans {
                 let x = origin.x + cell_w * span.col_start as f32;
                 let w = cell_w * (span.col_end - span.col_start) as f32;
-                window.paint_quad(fill(
-                    Bounds::new(point(x, y), size(w, cell_h)),
-                    span.color,
-                ));
+                window.paint_quad(fill(Bounds::new(point(x, y), size(w, cell_h)), span.color));
             }
         }
 
@@ -487,9 +487,8 @@ impl Element for TerminalGridElement {
         // Selection is stored in alacritty line coordinates, so it scrolls
         // with the content — not with the screen.
         if let Some(sel) = &self.selection {
-            let (start_line, start_col, end_line, end_col) = normalise_selection(
-                sel.anchor, sel.extent,
-            );
+            let (start_line, start_col, end_line, end_col) =
+                normalise_selection(sel.anchor, sel.extent);
             let sel_bg = hsla(210.0 / 360.0, 0.6, 0.4, 0.5);
             let display_offset = prepaint_state.display_offset as i32;
             let num_rows = prepaint_state.rows.len() as i32;
@@ -498,17 +497,20 @@ impl Element for TerminalGridElement {
             // Iterate over the line range, translating each to visible row.
             for line in start_line..=end_line {
                 let visible_row = line + display_offset;
-                if visible_row < 0 || visible_row >= num_rows { continue; }
+                if visible_row < 0 || visible_row >= num_rows {
+                    continue;
+                }
                 let row_idx = visible_row as usize;
                 let y = origin.y + cell_h * row_idx as f32;
                 let col_start = if line == start_line { start_col } else { 0 };
-                let col_end = if line == end_line { end_col + 1 } else { num_cols };
+                let col_end = if line == end_line {
+                    end_col + 1
+                } else {
+                    num_cols
+                };
                 let x = origin.x + cell_w * col_start as f32;
                 let w = cell_w * (col_end - col_start) as f32;
-                window.paint_quad(fill(
-                    Bounds::new(point(x, y), size(w, cell_h)),
-                    sel_bg,
-                ));
+                window.paint_quad(fill(Bounds::new(point(x, y), size(w, cell_h)), sel_bg));
             }
         }
 
@@ -530,10 +532,7 @@ impl Element for TerminalGridElement {
                 } else {
                     hsla(50.0 / 360.0, 0.7, 0.5, 0.3) // other matches: yellow
                 };
-                window.paint_quad(fill(
-                    Bounds::new(point(x, y), size(w, cell_h)),
-                    bg,
-                ));
+                window.paint_quad(fill(Bounds::new(point(x, y), size(w, cell_h)), bg));
             }
         }
 
@@ -543,14 +542,9 @@ impl Element for TerminalGridElement {
 
             for span in &row.text_spans {
                 let x = origin.x + cell_w * span.col_start as f32;
-                let _ = span.shaped.paint(
-                    point(x, y),
-                    cell_h,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
+                let _ = span
+                    .shaped
+                    .paint(point(x, y), cell_h, TextAlign::Left, None, window, cx);
             }
         }
 
@@ -613,7 +607,9 @@ impl Element for TerminalGridElement {
         // as "clickable" without Cmd-hover probing.
         let num_rows_visible = prepaint_state.rows.len();
         for &(row, col_start, col_end) in &self.url_spans {
-            if row >= num_rows_visible { continue; }
+            if row >= num_rows_visible {
+                continue;
+            }
             let y = origin.y + cell_h * (row as f32 + 1.0) - px(1.5);
             let x = origin.x + cell_w * col_start as f32;
             let w = cell_w * (col_end - col_start + 1) as f32;
@@ -626,7 +622,9 @@ impl Element for TerminalGridElement {
         // Paint passive path underlines. Same visual weight as URLs —
         // slightly different hue so the two categories are distinguishable.
         for &(row, col_start, col_end) in &self.path_spans {
-            if row >= num_rows_visible { continue; }
+            if row >= num_rows_visible {
+                continue;
+            }
             let y = origin.y + cell_h * (row as f32 + 1.0) - px(1.5);
             let x = origin.x + cell_w * col_start as f32;
             let w = cell_w * (col_end - col_start + 1) as f32;
@@ -680,40 +678,32 @@ impl Element for TerminalGridElement {
             // display_offset=history means at top (oldest)
             let scroll_fraction = prepaint_state.display_offset as f32 / history as f32;
             // Invert: offset=0 → thumb at bottom, offset=max → thumb at top
-            let thumb_y = origin.y
-                + (viewport_height - thumb_height) * (1.0 - scroll_fraction);
+            let thumb_y = origin.y + (viewport_height - thumb_height) * (1.0 - scroll_fraction);
 
             let track_x = origin.x + bounds.size.width - scrollbar_width - scrollbar_margin;
 
             // Track (subtle background)
-            window.paint_quad(
-                quad(
-                    Bounds::new(
-                        point(track_x, origin.y),
-                        size(scrollbar_width, viewport_height),
-                    ),
-                    px(3.0), // corner radius
-                    hsla(0.0, 0.0, 1.0, 0.05 * self.scrollbar_opacity), // very subtle track
-                    px(0.0),
-                    hsla(0.0, 0.0, 0.0, 0.0),
-                    BorderStyle::default(),
+            window.paint_quad(quad(
+                Bounds::new(
+                    point(track_x, origin.y),
+                    size(scrollbar_width, viewport_height),
                 ),
-            );
+                px(3.0),                                            // corner radius
+                hsla(0.0, 0.0, 1.0, 0.05 * self.scrollbar_opacity), // very subtle track
+                px(0.0),
+                hsla(0.0, 0.0, 0.0, 0.0),
+                BorderStyle::default(),
+            ));
 
             // Thumb
-            window.paint_quad(
-                quad(
-                    Bounds::new(
-                        point(track_x, thumb_y),
-                        size(scrollbar_width, thumb_height),
-                    ),
-                    px(3.0), // corner radius
-                    hsla(0.0, 0.0, 1.0, 0.3 * self.scrollbar_opacity), // visible but not distracting
-                    px(0.0),
-                    hsla(0.0, 0.0, 0.0, 0.0),
-                    BorderStyle::default(),
-                ),
-            );
+            window.paint_quad(quad(
+                Bounds::new(point(track_x, thumb_y), size(scrollbar_width, thumb_height)),
+                px(3.0),                                           // corner radius
+                hsla(0.0, 0.0, 1.0, 0.3 * self.scrollbar_opacity), // visible but not distracting
+                px(0.0),
+                hsla(0.0, 0.0, 0.0, 0.0),
+                BorderStyle::default(),
+            ));
         }
     }
 }
@@ -770,47 +760,45 @@ fn ansi_to_hsla(color: &AnsiColor) -> Hsla {
                 a: 1.0,
             });
         }
-        AnsiColor::Indexed(idx) => {
-            match *idx {
-                0 => 0x45475a,
-                1 => 0xf38ba8,
-                2 => 0xa6e3a1,
-                3 => 0xf9e2af,
-                4 => 0x89b4fa,
-                5 => 0xcba6f7,
-                6 => 0x94e2d5,
-                7 => 0xbac2de,
-                8 => 0x585b70,
-                9 => 0xf38ba8,
-                10 => 0xa6e3a1,
-                11 => 0xf9e2af,
-                12 => 0x89b4fa,
-                13 => 0xcba6f7,
-                14 => 0x94e2d5,
-                15 => 0xffffff,
-                16..=231 => {
-                    let i = idx - 16;
-                    let r = (i / 36) * 51;
-                    let g = ((i / 6) % 6) * 51;
-                    let b = (i % 6) * 51;
-                    return Hsla::from(Rgba {
-                        r: r as f32 / 255.0,
-                        g: g as f32 / 255.0,
-                        b: b as f32 / 255.0,
-                        a: 1.0,
-                    });
-                }
-                _ => {
-                    let v = (idx - 232) * 10 + 8;
-                    return Hsla::from(Rgba {
-                        r: v as f32 / 255.0,
-                        g: v as f32 / 255.0,
-                        b: v as f32 / 255.0,
-                        a: 1.0,
-                    });
-                }
+        AnsiColor::Indexed(idx) => match *idx {
+            0 => 0x45475a,
+            1 => 0xf38ba8,
+            2 => 0xa6e3a1,
+            3 => 0xf9e2af,
+            4 => 0x89b4fa,
+            5 => 0xcba6f7,
+            6 => 0x94e2d5,
+            7 => 0xbac2de,
+            8 => 0x585b70,
+            9 => 0xf38ba8,
+            10 => 0xa6e3a1,
+            11 => 0xf9e2af,
+            12 => 0x89b4fa,
+            13 => 0xcba6f7,
+            14 => 0x94e2d5,
+            15 => 0xffffff,
+            16..=231 => {
+                let i = idx - 16;
+                let r = (i / 36) * 51;
+                let g = ((i / 6) % 6) * 51;
+                let b = (i % 6) * 51;
+                return Hsla::from(Rgba {
+                    r: r as f32 / 255.0,
+                    g: g as f32 / 255.0,
+                    b: b as f32 / 255.0,
+                    a: 1.0,
+                });
             }
-        }
+            _ => {
+                let v = (idx - 232) * 10 + 8;
+                return Hsla::from(Rgba {
+                    r: v as f32 / 255.0,
+                    g: v as f32 / 255.0,
+                    b: v as f32 / 255.0,
+                    a: 1.0,
+                });
+            }
+        },
     };
     let r = ((rgba_val >> 16) & 0xFF) as f32 / 255.0;
     let g = ((rgba_val >> 8) & 0xFF) as f32 / 255.0;
@@ -819,10 +807,7 @@ fn ansi_to_hsla(color: &AnsiColor) -> Hsla {
 }
 
 /// Normalise selection so start <= end (top-left to bottom-right).
-fn normalise_selection(
-    anchor: (i32, usize),
-    extent: (i32, usize),
-) -> (i32, usize, i32, usize) {
+fn normalise_selection(anchor: (i32, usize), extent: (i32, usize)) -> (i32, usize, i32, usize) {
     if anchor.0 < extent.0 || (anchor.0 == extent.0 && anchor.1 <= extent.1) {
         (anchor.0, anchor.1, extent.0, extent.1)
     } else {

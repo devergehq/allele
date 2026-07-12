@@ -224,8 +224,7 @@ impl PersistedState {
     /// renames over `state.json` — either the new state is fully on disk or
     /// the old state is untouched. Never leaves a half-written file.
     pub fn save(&self) -> anyhow::Result<()> {
-        let path = Self::path()
-            .ok_or_else(|| anyhow::anyhow!("no home directory"))?;
+        let path = Self::path().ok_or_else(|| anyhow::anyhow!("no home directory"))?;
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;

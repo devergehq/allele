@@ -335,11 +335,7 @@ impl Session {
 
     /// Attach persisted browser tab id and last URL during rehydration.
     /// The tab id may be stale (Chrome restart); reconciled on first sync.
-    pub fn with_browser(
-        mut self,
-        tab_id: Option<i64>,
-        last_url: Option<String>,
-    ) -> Self {
+    pub fn with_browser(mut self, tab_id: Option<i64>, last_url: Option<String>) -> Self {
         self.browser_tab_id = tab_id;
         self.browser_last_url = last_url;
         self

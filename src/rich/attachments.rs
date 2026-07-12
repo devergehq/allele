@@ -57,13 +57,60 @@ impl Attachment {
 /// Extensions Claude's Read tool can ingest (text, images, PDF).
 const READABLE_EXTS: &[&str] = &[
     // Text
-    "txt", "md", "markdown", "json", "yaml", "yml", "toml", "xml", "html",
-    "css", "scss", "js", "ts", "tsx", "jsx", "py", "rb", "rs", "go", "c",
-    "cpp", "h", "hpp", "cc", "java", "kt", "swift", "sh", "bash", "zsh",
-    "fish", "ps1", "bat", "ini", "cfg", "conf", "log", "csv", "tsv", "sql",
-    "env", "properties", "gitignore", "dockerfile",
+    "txt",
+    "md",
+    "markdown",
+    "json",
+    "yaml",
+    "yml",
+    "toml",
+    "xml",
+    "html",
+    "css",
+    "scss",
+    "js",
+    "ts",
+    "tsx",
+    "jsx",
+    "py",
+    "rb",
+    "rs",
+    "go",
+    "c",
+    "cpp",
+    "h",
+    "hpp",
+    "cc",
+    "java",
+    "kt",
+    "swift",
+    "sh",
+    "bash",
+    "zsh",
+    "fish",
+    "ps1",
+    "bat",
+    "ini",
+    "cfg",
+    "conf",
+    "log",
+    "csv",
+    "tsv",
+    "sql",
+    "env",
+    "properties",
+    "gitignore",
+    "dockerfile",
     // Image (multimodal)
-    "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "tiff", "tif",
+    "png",
+    "jpg",
+    "jpeg",
+    "gif",
+    "webp",
+    "svg",
+    "bmp",
+    "tiff",
+    "tif",
     // Structured doc
     "pdf",
 ];
@@ -82,9 +129,8 @@ pub fn attachments_dir(session_id: &str) -> Option<PathBuf> {
 }
 
 fn ensure_session_dir(session_id: &str) -> std::io::Result<PathBuf> {
-    let dir = attachments_dir(session_id).ok_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory")
-    })?;
+    let dir = attachments_dir(session_id)
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "no home directory"))?;
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }
@@ -141,9 +187,7 @@ pub fn cleanup_session(session_id: &str) {
     if let Some(dir) = attachments_dir(session_id) {
         if dir.exists() {
             if let Err(e) = fs::remove_dir_all(&dir) {
-                warn!(
-                    "allele: attachments cleanup failed for session {session_id}: {e}"
-                );
+                warn!("allele: attachments cleanup failed for session {session_id}: {e}");
             }
         }
     }
@@ -153,8 +197,12 @@ pub fn cleanup_session(session_id: &str) {
 /// `active_session_ids`. Catches force-quit leftovers.
 #[allow(dead_code)]
 pub fn sweep_orphans(active_session_ids: &[String]) {
-    let Some(root) = attachments_root() else { return; };
-    let Ok(entries) = fs::read_dir(&root) else { return; };
+    let Some(root) = attachments_root() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&root) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if !path.is_dir() {
@@ -260,14 +308,17 @@ mod tests {
     #[test]
     fn filesystem_pipeline_roundtrip_and_sweep() {
         // Part 1 — copy_file + cleanup_session round-trip.
-        let tmp_src = std::env::temp_dir()
-            .join(format!("allele-attach-test-{}.txt", Uuid::new_v4()));
+        let tmp_src =
+            std::env::temp_dir().join(format!("allele-attach-test-{}.txt", Uuid::new_v4()));
         fs::write(&tmp_src, b"hello world").unwrap();
 
         let session_a = format!("test-a-{}", Uuid::new_v4());
         let attachment = copy_file(&tmp_src, &session_a).expect("copy_file");
         assert!(attachment.path.exists());
-        assert_eq!(attachment.original_name, tmp_src.file_name().unwrap().to_str().unwrap());
+        assert_eq!(
+            attachment.original_name,
+            tmp_src.file_name().unwrap().to_str().unwrap()
+        );
         assert_eq!(fs::read_to_string(&attachment.path).unwrap(), "hello world");
 
         cleanup_session(&session_a);
@@ -276,7 +327,9 @@ mod tests {
         let _ = fs::remove_file(&tmp_src);
 
         // Part 2 — sweep_orphans removes dirs not in the active set.
-        let Some(root) = attachments_root() else { return; };
+        let Some(root) = attachments_root() else {
+            return;
+        };
         let orphan_id = format!("orphan-{}", Uuid::new_v4());
         let orphan_dir = root.join(&orphan_id);
         fs::create_dir_all(&orphan_dir).unwrap();

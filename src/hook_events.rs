@@ -34,8 +34,8 @@ impl AppState {
     ) -> Option<crate::actions::SessionCursor> {
         // No cwd (jq unavailable on the receiver) → nothing to anchor on.
         let raw_cwd = event.cwd.as_ref()?;
-        let target = std::fs::canonicalize(raw_cwd)
-            .unwrap_or_else(|_| std::path::PathBuf::from(raw_cwd));
+        let target =
+            std::fs::canonicalize(raw_cwd).unwrap_or_else(|_| std::path::PathBuf::from(raw_cwd));
 
         // Resolve each session's working directory and compare to the event's.
         let same_dir = |dir: &std::path::Path| -> bool {
@@ -71,7 +71,11 @@ impl AppState {
         let old_id = session.claude_session_id().to_string();
         tracing::info!(
             "hook-event: re-keying session {} claude id {} -> {} (cwd {:?}, kind {:?})",
-            session.id, old_id, event.session_id, raw_cwd, event.kind
+            session.id,
+            old_id,
+            event.session_id,
+            raw_cwd,
+            event.kind
         );
         session.claude_session_id = Some(event.session_id.clone());
         self.mark_state_dirty();
@@ -79,7 +83,10 @@ impl AppState {
         // If the re-keyed session is the one on screen, drop the cached rich
         // cursor so `ensure_rich_view` rebuilds the transcript tailer against
         // the new conversation's `.jsonl` on the next render.
-        let cursor = crate::actions::SessionCursor { project_idx: p_idx, session_idx: s_idx };
+        let cursor = crate::actions::SessionCursor {
+            project_idx: p_idx,
+            session_idx: s_idx,
+        };
         if self.rich.cursor == Some(cursor) {
             self.rich.cursor = None;
         }
@@ -192,7 +199,11 @@ impl AppState {
                 "auto-naming: triggered for {} label={:?} on {:?}",
                 session.id, session.label, event.kind
             );
-            Some((session.id.clone(), session.clone_path.clone(), session.branch_locked))
+            Some((
+                session.id.clone(),
+                session.clone_path.clone(),
+                session.branch_locked,
+            ))
         } else {
             None
         };
@@ -250,7 +261,10 @@ impl AppState {
         // (an Ignore event isn't a transition, and re-entering AwaitingInput
         // keeps the freshly-set context above).
         if prior == SessionStatus::AwaitingInput
-            && !matches!(signal.lifecycle, Lifecycle::AwaitingInput | Lifecycle::Ignore)
+            && !matches!(
+                signal.lifecycle,
+                Lifecycle::AwaitingInput | Lifecycle::Ignore
+            )
         {
             session.attention_context = None;
         }
@@ -350,7 +364,10 @@ impl AppState {
 
         // Update the RichView permission block if this session is the one
         // currently being displayed in the transcript tab.
-        let cursor = crate::actions::SessionCursor { project_idx: p_idx, session_idx: s_idx };
+        let cursor = crate::actions::SessionCursor {
+            project_idx: p_idx,
+            session_idx: s_idx,
+        };
         if self.rich.cursor == Some(cursor) {
             if let Some(view) = self.rich.view.as_ref().cloned() {
                 if let Some((tool_name, summary)) = attention_for_rich {
@@ -396,7 +413,9 @@ impl AppState {
         branch_locked: bool,
         cx: &mut Context<Self>,
     ) {
-        let Some(events_dir) = hooks::events_dir() else { return; };
+        let Some(events_dir) = hooks::events_dir() else {
+            return;
+        };
 
         // Snapshot the naming config and resolve the agent kind + binary for this session.
         let naming_config = self.user_settings.naming.clone();
@@ -634,26 +653,36 @@ fn summarise_tool_input(tool_name: &str, input: Option<&serde_json::Value>) -> O
             .and_then(|v| v.as_str())
             .map(String::from)
             .or_else(|| {
-                obj.get("command").and_then(|v| v.as_str()).map(String::from)
+                obj.get("command")
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
             }),
-        "Read" => obj.get("file_path").and_then(|v| v.as_str()).map(|p| short_path(p)),
-        "Edit" => obj.get("file_path").and_then(|v| v.as_str()).map(|p| short_path(p)),
-        "Write" => obj.get("file_path").and_then(|v| v.as_str()).map(|p| short_path(p)),
+        "Read" => obj
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|p| short_path(p)),
+        "Edit" => obj
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|p| short_path(p)),
+        "Write" => obj
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .map(|p| short_path(p)),
         _ => {
             // MCP tools and others — try description, then first string field
             obj.get("description")
                 .and_then(|v| v.as_str())
                 .map(String::from)
-                .or_else(|| {
-                    obj.values()
-                        .find_map(|v| v.as_str())
-                        .map(String::from)
-                })
+                .or_else(|| obj.values().find_map(|v| v.as_str()).map(String::from))
         }
     }?;
 
     if raw.len() > 80 {
-        Some(format!("{}…", crate::rich::truncate_to_char_boundary(&raw, 77)))
+        Some(format!(
+            "{}…",
+            crate::rich::truncate_to_char_boundary(&raw, 77)
+        ))
     } else {
         Some(raw)
     }

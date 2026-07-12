@@ -12,15 +12,15 @@
 //! context and loaded by `src/keymap.rs` — this file only declares the
 //! action types and the `on_action` listener wiring.
 
-use std::ops::Range;
 use crate::theme::theme;
+use std::ops::Range;
 
 use gpui::{
-    actions, fill, point, prelude::*, px, relative, size, App, Bounds,
-    ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, EntityInputHandler,
-    EventEmitter, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, ShapedLine, SharedString,
-    Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    actions, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardItem, Context,
+    CursorStyle, ElementId, ElementInputHandler, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, GlobalElementId, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, PaintQuad, Pixels, ShapedLine, SharedString, Style, TextRun, UTF16Selection,
+    UnderlineStyle, Window,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -196,7 +196,12 @@ impl TextInput {
         self.replace_text_in_range(None, "", window, cx);
     }
 
-    fn delete_word_left(&mut self, _: &DeleteWordLeft, window: &mut Window, cx: &mut Context<Self>) {
+    fn delete_word_left(
+        &mut self,
+        _: &DeleteWordLeft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.selected_range.is_empty() {
             self.select_to(self.previous_word_boundary(self.cursor_offset()), cx);
         }
@@ -556,15 +561,21 @@ struct PrepaintState {
 
 impl IntoElement for TextElement {
     type Element = Self;
-    fn into_element(self) -> Self::Element { self }
+    fn into_element(self) -> Self::Element {
+        self
+    }
 }
 
 impl Element for TextElement {
     type RequestLayoutState = ();
     type PrepaintState = PrepaintState;
 
-    fn id(&self) -> Option<ElementId> { None }
-    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> { None }
+    fn id(&self) -> Option<ElementId> {
+        None
+    }
+    fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+        None
+    }
 
     fn request_layout(
         &mut self,
@@ -611,7 +622,10 @@ impl Element for TextElement {
         };
         let runs = if let Some(marked_range) = input.marked_range.as_ref() {
             vec![
-                TextRun { len: marked_range.start, ..run.clone() },
+                TextRun {
+                    len: marked_range.start,
+                    ..run.clone()
+                },
                 TextRun {
                     len: marked_range.end - marked_range.start,
                     underline: Some(UnderlineStyle {
@@ -621,7 +635,10 @@ impl Element for TextElement {
                     }),
                     ..run.clone()
                 },
-                TextRun { len: display_text.len() - marked_range.end, ..run },
+                TextRun {
+                    len: display_text.len() - marked_range.end,
+                    ..run
+                },
             ]
             .into_iter()
             .filter(|r| r.len > 0)
@@ -688,7 +705,12 @@ impl Element for TextElement {
                 None,
             )
         };
-        PrepaintState { line: Some(line), cursor: cursor_quad, selection, scroll_x }
+        PrepaintState {
+            line: Some(line),
+            cursor: cursor_quad,
+            selection,
+            scroll_x,
+        }
     }
 
     fn paint(

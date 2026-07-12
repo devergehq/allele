@@ -1,10 +1,10 @@
 //! "New Session with Details" modal — lets the user customise session name,
 //! branch slug, agent, and initial prompt before creating a session.
 
-use gpui::*;
+use crate::icon::{icon, name as icons};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::theme;
-use crate::icon::{icon, name as icons};
+use gpui::*;
 
 /// Events emitted by the modal that AppState listens for.
 #[derive(Debug, Clone)]
@@ -58,33 +58,38 @@ impl NewSessionModal {
         default_label: String,
         existing_branches: Vec<String>,
     ) -> Self {
-        let name_input = cx.new(|cx| {
-            TextInput::new(cx, "", format!("{default_label}"))
-        });
-        let branch_input = cx.new(|cx| {
-            TextInput::new(cx, "", "auto-generated, or type an existing branch")
-        });
-        let prompt_input = cx.new(|cx| {
-            TextInput::new(cx, "", "optional")
-        });
+        let name_input = cx.new(|cx| TextInput::new(cx, "", format!("{default_label}")));
+        let branch_input =
+            cx.new(|cx| TextInput::new(cx, "", "auto-generated, or type an existing branch"));
+        let prompt_input = cx.new(|cx| TextInput::new(cx, "", "optional"));
 
         // When name input is submitted (Enter), treat as form submit.
-        cx.subscribe(&name_input, |this: &mut Self, _input, event: &TextInputEvent, cx| {
-            if matches!(event, TextInputEvent::Submitted) {
-                this.submit(cx);
-            }
-        }).detach();
-        cx.subscribe(&branch_input, |this: &mut Self, _input, event: &TextInputEvent, cx| {
-            match event {
+        cx.subscribe(
+            &name_input,
+            |this: &mut Self, _input, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Submitted) {
+                    this.submit(cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &branch_input,
+            |this: &mut Self, _input, event: &TextInputEvent, cx| match event {
                 TextInputEvent::Submitted => this.submit(cx),
                 TextInputEvent::Changed => this.recompute_branch_hint(cx),
-            }
-        }).detach();
-        cx.subscribe(&prompt_input, |this: &mut Self, _input, event: &TextInputEvent, cx| {
-            if matches!(event, TextInputEvent::Submitted) {
-                this.submit(cx);
-            }
-        }).detach();
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &prompt_input,
+            |this: &mut Self, _input, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Submitted) {
+                    this.submit(cx);
+                }
+            },
+        )
+        .detach();
 
         Self {
             project_idx,
@@ -132,15 +137,26 @@ impl NewSessionModal {
         let branch_slug = {
             let text = self.branch_input.read(cx).text().to_string();
             let trimmed = text.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         };
 
-        let agent_id = self.agents.get(self.selected_agent_idx).map(|(id, _)| id.clone());
+        let agent_id = self
+            .agents
+            .get(self.selected_agent_idx)
+            .map(|(id, _)| id.clone());
 
         let initial_prompt = {
             let text = self.prompt_input.read(cx).text().to_string();
             let trimmed = text.trim().to_string();
-            if trimmed.is_empty() { None } else { Some(trimmed) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed)
+            }
         };
 
         cx.emit(NewSessionModalEvent::Create {
@@ -157,15 +173,14 @@ impl NewSessionModal {
     }
 
     fn cycle_agent(&mut self, cx: &mut Context<Self>) {
-        if self.agents.is_empty() { return; }
+        if self.agents.is_empty() {
+            return;
+        }
         self.selected_agent_idx = (self.selected_agent_idx + 1) % self.agents.len();
         cx.notify();
     }
 
-    fn render_form_row(
-        label_text: &str,
-        content: impl IntoElement,
-    ) -> Div {
+    fn render_form_row(label_text: &str, content: impl IntoElement) -> Div {
         div()
             .w_full()
             .px(px(20.0))
@@ -182,12 +197,7 @@ impl NewSessionModal {
                     .text_color(theme().text_faint)
                     .child(label_text.to_string()),
             )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .child(content),
-            )
+            .child(div().flex_1().min_w(px(0.0)).child(content))
     }
 
     fn input_frame(child: Entity<TextInput>) -> Div {
@@ -236,15 +246,17 @@ impl Render for NewSessionModal {
         let card = div()
             .id("new-session-card")
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
-                let key = event.keystroke.key.as_str();
-                let mods = &event.keystroke.modifiers;
-                if key == "escape" {
-                    this.close(cx);
-                } else if key == "enter" && mods.platform {
-                    this.submit(cx);
-                }
-            }))
+            .on_key_down(
+                cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
+                    let key = event.keystroke.key.as_str();
+                    let mods = &event.keystroke.modifiers;
+                    if key == "escape" {
+                        this.close(cx);
+                    } else if key == "enter" && mods.platform {
+                        this.submit(cx);
+                    }
+                }),
+            )
             .w(px(480.0))
             .flex()
             .flex_col()
@@ -468,31 +480,37 @@ impl EditSessionModal {
         let label_owned: SharedString = current_label.to_string().into();
         let branch_owned: SharedString = current_branch_slug.to_string().into();
         let comment_owned: SharedString = current_comment.to_string().into();
-        let name_input = cx.new(|cx| {
-            TextInput::new(cx, label_owned, "Session name")
-        });
-        let branch_input = cx.new(|cx| {
-            TextInput::new(cx, branch_owned, "Branch name")
-        });
-        let comment_input = cx.new(|cx| {
-            TextInput::new(cx, comment_owned, "Add a comment…")
-        });
+        let name_input = cx.new(|cx| TextInput::new(cx, label_owned, "Session name"));
+        let branch_input = cx.new(|cx| TextInput::new(cx, branch_owned, "Branch name"));
+        let comment_input = cx.new(|cx| TextInput::new(cx, comment_owned, "Add a comment…"));
 
-        cx.subscribe(&name_input, |this: &mut Self, _input, event: &TextInputEvent, cx| {
-            if matches!(event, TextInputEvent::Submitted) {
-                this.submit(cx);
-            }
-        }).detach();
-        cx.subscribe(&branch_input, |this: &mut Self, _input, event: &TextInputEvent, cx| {
-            if matches!(event, TextInputEvent::Submitted) {
-                this.submit(cx);
-            }
-        }).detach();
-        cx.subscribe(&comment_input, |this: &mut Self, _input, event: &TextInputEvent, cx| {
-            if matches!(event, TextInputEvent::Submitted) {
-                this.submit(cx);
-            }
-        }).detach();
+        cx.subscribe(
+            &name_input,
+            |this: &mut Self, _input, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Submitted) {
+                    this.submit(cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &branch_input,
+            |this: &mut Self, _input, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Submitted) {
+                    this.submit(cx);
+                }
+            },
+        )
+        .detach();
+        cx.subscribe(
+            &comment_input,
+            |this: &mut Self, _input, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Submitted) {
+                    this.submit(cx);
+                }
+            },
+        )
+        .detach();
 
         Self {
             project_idx,
@@ -511,16 +529,26 @@ impl EditSessionModal {
 
     fn submit(&mut self, cx: &mut Context<Self>) {
         let label = self.name_input.read(cx).text().trim().to_string();
-        if label.is_empty() { return; }
+        if label.is_empty() {
+            return;
+        }
 
         let branch_slug = {
             let text = self.branch_input.read(cx).text().trim().to_string();
-            if text.is_empty() { None } else { Some(text) }
+            if text.is_empty() {
+                None
+            } else {
+                Some(text)
+            }
         };
 
         let comment = {
             let text = self.comment_input.read(cx).text().trim().to_string();
-            if text.is_empty() { None } else { Some(text) }
+            if text.is_empty() {
+                None
+            } else {
+                Some(text)
+            }
         };
 
         cx.emit(EditSessionModalEvent::Apply {
@@ -563,21 +591,31 @@ impl Render for EditSessionModal {
                 }),
             );
 
-        let pin_label = if self.pinned { "Pinned ✓" } else { "Not pinned" };
-        let pin_color = if self.pinned { theme().warning } else { theme().text_faint };
+        let pin_label = if self.pinned {
+            "Pinned ✓"
+        } else {
+            "Not pinned"
+        };
+        let pin_color = if self.pinned {
+            theme().warning
+        } else {
+            theme().text_faint
+        };
 
         let card = div()
             .id("edit-session-card")
             .track_focus(&self.focus_handle)
-            .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
-                let key = event.keystroke.key.as_str();
-                let mods = &event.keystroke.modifiers;
-                if key == "escape" {
-                    this.close(cx);
-                } else if key == "enter" && mods.platform {
-                    this.submit(cx);
-                }
-            }))
+            .on_key_down(
+                cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
+                    let key = event.keystroke.key.as_str();
+                    let mods = &event.keystroke.modifiers;
+                    if key == "escape" {
+                        this.close(cx);
+                    } else if key == "enter" && mods.platform {
+                        this.submit(cx);
+                    }
+                }),
+            )
             .w(px(480.0))
             .flex()
             .flex_col()
@@ -759,16 +797,28 @@ pub struct NamingModal {
 impl NamingModal {
     pub fn new(cx: &mut Context<Self>, session_id: String, suggestions: Vec<String>) -> Self {
         let custom_input = cx.new(|cx| TextInput::new(cx, "", "or type your own..."));
-        cx.subscribe(&custom_input, |this: &mut Self, _input, event: &TextInputEvent, cx| {
-            if matches!(event, TextInputEvent::Submitted) {
-                this.submit_custom(cx);
-            }
-        }).detach();
-        Self { session_id, suggestions, custom_input, focus_handle: cx.focus_handle() }
+        cx.subscribe(
+            &custom_input,
+            |this: &mut Self, _input, event: &TextInputEvent, cx| {
+                if matches!(event, TextInputEvent::Submitted) {
+                    this.submit_custom(cx);
+                }
+            },
+        )
+        .detach();
+        Self {
+            session_id,
+            suggestions,
+            custom_input,
+            focus_handle: cx.focus_handle(),
+        }
     }
 
     fn pick(&mut self, slug: String, cx: &mut Context<Self>) {
-        cx.emit(NamingModalEvent::Pick { session_id: self.session_id.clone(), slug });
+        cx.emit(NamingModalEvent::Pick {
+            session_id: self.session_id.clone(),
+            slug,
+        });
     }
 
     fn submit_custom(&mut self, cx: &mut Context<Self>) {
@@ -811,9 +861,12 @@ impl Render for NamingModal {
             .items_center()
             .justify_center()
             .bg(gpui::black().opacity(0.5))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _e, _w, cx| {
-                this.dismiss(cx);
-            }));
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _e, _w, cx| {
+                    this.dismiss(cx);
+                }),
+            );
 
         let mut card = div()
             .id("naming-modal-card")
@@ -826,10 +879,14 @@ impl Render for NamingModal {
             .flex()
             .flex_col()
             .gap(px(12.0))
-            .on_mouse_down(MouseButton::Left, |_e, _w, cx| { cx.stop_propagation(); })
+            .on_mouse_down(MouseButton::Left, |_e, _w, cx| {
+                cx.stop_propagation();
+            })
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _w, cx| {
-                if event.keystroke.key == "escape" { this.dismiss(cx); }
+                if event.keystroke.key == "escape" {
+                    this.dismiss(cx);
+                }
             }))
             .child(
                 div()
@@ -854,16 +911,23 @@ impl Render for NamingModal {
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
-                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _e, _w, cx| {
-                        cx.stop_propagation();
-                        this.pick(slug.clone(), cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _e, _w, cx| {
+                            cx.stop_propagation();
+                            this.pick(slug.clone(), cx);
+                        }),
+                    )
                     .child(
-                        div().text_size(px(13.0)).text_color(theme().text_primary)
+                        div()
+                            .text_size(px(13.0))
+                            .text_color(theme().text_primary)
                             .child(SharedString::from(display)),
                     )
                     .child(
-                        div().text_size(px(10.0)).text_color(theme().text_faint)
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(theme().text_faint)
                             .child(SharedString::from(suggestion.clone())),
                     ),
             );
@@ -871,20 +935,34 @@ impl Render for NamingModal {
 
         card = card.child(
             div()
-                .flex().flex_row().items_center().gap(px(8.0))
-                .child(div().flex_1().min_w(px(0.0)).child(self.custom_input.clone()))
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(8.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(self.custom_input.clone()),
+                )
                 .child(
                     div()
                         .id("naming-skip-btn")
                         .cursor_pointer()
-                        .px(px(8.0)).py(px(4.0)).rounded(px(6.0))
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
                         .bg(theme().bg_hover)
                         .hover(|s| s.bg(theme().bg_active))
-                        .text_size(px(11.0)).text_color(theme().text_secondary)
-                        .on_mouse_down(MouseButton::Left, cx.listener(|this, _e, _w, cx| {
-                            cx.stop_propagation();
-                            this.dismiss(cx);
-                        }))
+                        .text_size(px(11.0))
+                        .text_color(theme().text_secondary)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this, _e, _w, cx| {
+                                cx.stop_propagation();
+                                this.dismiss(cx);
+                            }),
+                        )
                         .child("Skip"),
                 ),
         );

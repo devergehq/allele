@@ -8,13 +8,13 @@
 mod clipboard_image;
 mod editor;
 
+use crate::icon::{icon, name as icons};
+use crate::theme::theme;
 use editor::{KeyOutcome, Pos, ScratchEditor};
 use gpui::*;
 use std::path::PathBuf;
 use std::time::SystemTime;
 use tracing::warn;
-use crate::theme::theme;
-use crate::icon::{icon, name as icons};
 
 /// One saved Scratch Pad submission shown in the history panel. Mirrors
 /// the shape of `state::ScratchPadEntry` so the caller (AppState) can
@@ -33,12 +33,17 @@ pub struct HistoryEntry {
 /// the actual PTY write and modal dismissal.
 #[derive(Debug, Clone)]
 pub enum ScratchPadEvent {
-    Send { text: String, attachments: Vec<PathBuf> },
+    Send {
+        text: String,
+        attachments: Vec<PathBuf>,
+    },
     Close,
     /// User clicked the × on a history row. Parent (AppState) owns the
     /// persisted list and is responsible for removing the entry and
     /// refreshing the pad's history.
-    DeleteHistoryEntry { id: String },
+    DeleteHistoryEntry {
+        id: String,
+    },
 }
 
 impl EventEmitter<ScratchPadEvent> for ScratchPad {}
@@ -109,7 +114,9 @@ impl ScratchPad {
     }
 
     fn try_paste_image(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(bytes) = clipboard_image::read_image_png_bytes() else { return false; };
+        let Some(bytes) = clipboard_image::read_image_png_bytes() else {
+            return false;
+        };
         match clipboard_image::save_clipboard_png(&bytes) {
             Ok(path) => {
                 self.attachments.push(path);
@@ -168,7 +175,13 @@ impl ScratchPad {
                 cx.listener(move |this: &mut Self, event: &MouseDownEvent, _w, cx| {
                     let extend = event.modifiers.shift;
                     let line_end = this.editor.line_char_count(line_idx);
-                    this.editor.set_cursor(Pos { line: line_idx, col: line_end }, extend);
+                    this.editor.set_cursor(
+                        Pos {
+                            line: line_idx,
+                            col: line_end,
+                        },
+                        extend,
+                    );
                     this.editor.focus.focus(_w, cx);
                     cx.notify();
                 }),
@@ -186,21 +199,15 @@ impl ScratchPad {
         for i in 0..=len {
             // Cursor bar at column i (before char i)
             if is_cursor_line && cursor.col == i {
-                row = row.child(
-                    div()
-                        .w(px(2.0))
-                        .min_w(px(2.0))
-                        .bg(cursor_color)
-                        .h(px(17.0)),
-                );
+                row = row.child(div().w(px(2.0)).min_w(px(2.0)).bg(cursor_color).h(px(17.0)));
             }
-            if i == len { break; }
+            if i == len {
+                break;
+            }
 
             let ch = chars[i];
             let ch_str: String = ch.to_string();
-            let in_sel = sel_range
-                .map(|(s, e)| i >= s && i < e)
-                .unwrap_or(false);
+            let in_sel = sel_range.map(|(s, e)| i >= s && i < e).unwrap_or(false);
             // Each char cell is its own click target → cursor lands
             // before that char. stop_propagation prevents the row's
             // end-of-line handler from also firing.
@@ -216,7 +223,13 @@ impl ScratchPad {
                     cx.listener(move |this: &mut Self, event: &MouseDownEvent, _w, cx| {
                         cx.stop_propagation();
                         let extend = event.modifiers.shift;
-                        this.editor.set_cursor(Pos { line: line_idx, col: i }, extend);
+                        this.editor.set_cursor(
+                            Pos {
+                                line: line_idx,
+                                col: i,
+                            },
+                            extend,
+                        );
                         this.editor.focus.focus(_w, cx);
                         cx.notify();
                     }),
@@ -235,12 +248,7 @@ impl ScratchPad {
         if len == 0 {
             if let Some((s, e)) = sel_range {
                 if s == 0 && e > 0 {
-                    row = row.child(
-                        div()
-                            .w(px(6.0))
-                            .bg(theme().bg_hover)
-                            .h(px(17.0)),
-                    );
+                    row = row.child(div().w(px(6.0)).bg(theme().bg_hover).h(px(17.0)));
                 }
             }
         }
@@ -255,7 +263,11 @@ impl ScratchPad {
         } else {
             "History".to_string()
         };
-        let history_toggle_bg = if self.history_open { theme().bg_hover } else { theme().bg_base };
+        let history_toggle_bg = if self.history_open {
+            theme().bg_hover
+        } else {
+            theme().bg_base
+        };
 
         div()
             .flex()
@@ -293,10 +305,13 @@ impl ScratchPad {
                             .text_color(theme().text_secondary)
                             .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
                             .child(history_label)
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
-                                this.history_open = !this.history_open;
-                                cx.notify();
-                            })),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this: &mut Self, _ev, _w, cx| {
+                                    this.history_open = !this.history_open;
+                                    cx.notify();
+                                }),
+                            ),
                     )
                     .child(
                         div()
@@ -307,9 +322,12 @@ impl ScratchPad {
                             .rounded(px(6.0))
                             .hover(|s| s.bg(theme().bg_raised))
                             .child(icon(icons::X, 13.0, theme().text_faint))
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
-                                this.close(cx);
-                            })),
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this: &mut Self, _ev, _w, cx| {
+                                    this.close(cx);
+                                }),
+                            ),
                     ),
             )
     }
@@ -484,9 +502,12 @@ impl ScratchPad {
                 .text_color(theme().text_secondary)
                 .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
                 .child("+ Attach file")
-                .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
-                    this.pick_files(cx);
-                })),
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this: &mut Self, _ev, _w, cx| {
+                        this.pick_files(cx);
+                    }),
+                ),
         );
 
         row
@@ -521,9 +542,12 @@ impl ScratchPad {
                     .font_weight(FontWeight::BOLD)
                     .hover(|s| s.bg(theme().info))
                     .child("Send")
-                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
-                        this.submit(cx);
-                    })),
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this: &mut Self, _ev, _w, cx| {
+                            this.submit(cx);
+                        }),
+                    ),
             )
     }
 }
@@ -579,24 +603,26 @@ impl Render for ScratchPad {
                     .px(px(14.0))
                     .py(px(10.0))
                     .track_focus(&editor_focus)
-                    .on_key_down(cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
-                        // Intercept Cmd+V first so we can check for image
-                        // data before GPUI's text-only clipboard is read.
-                        let key = event.keystroke.key.as_str();
-                        let mods = &event.keystroke.modifiers;
-                        if key == "v" && mods.platform && !mods.alt && !mods.shift {
-                            if this.try_paste_image(cx) {
-                                return;
+                    .on_key_down(cx.listener(
+                        |this: &mut Self, event: &KeyDownEvent, _window, cx| {
+                            // Intercept Cmd+V first so we can check for image
+                            // data before GPUI's text-only clipboard is read.
+                            let key = event.keystroke.key.as_str();
+                            let mods = &event.keystroke.modifiers;
+                            if key == "v" && mods.platform && !mods.alt && !mods.shift {
+                                if this.try_paste_image(cx) {
+                                    return;
+                                }
+                                // Fall through to editor for text paste.
                             }
-                            // Fall through to editor for text paste.
-                        }
-                        match this.editor.handle_key(event, cx) {
-                            KeyOutcome::Handled => cx.notify(),
-                            KeyOutcome::Send => this.submit(cx),
-                            KeyOutcome::Close => this.close(cx),
-                            KeyOutcome::Ignored => {}
-                        }
-                    }))
+                            match this.editor.handle_key(event, cx) {
+                                KeyOutcome::Handled => cx.notify(),
+                                KeyOutcome::Send => this.submit(cx),
+                                KeyOutcome::Close => this.close(cx),
+                                KeyOutcome::Ignored => {}
+                            }
+                        },
+                    ))
                     // Click in the empty space below the text → cursor
                     // jumps to end of document. Child line / cell handlers
                     // stop_propagation so this only fires for the padding
@@ -607,7 +633,13 @@ impl Render for ScratchPad {
                             let extend = event.modifiers.shift;
                             let last_line = this.editor.lines().len().saturating_sub(1);
                             let end_col = this.editor.line_char_count(last_line);
-                            this.editor.set_cursor(Pos { line: last_line, col: end_col }, extend);
+                            this.editor.set_cursor(
+                                Pos {
+                                    line: last_line,
+                                    col: end_col,
+                                },
+                                extend,
+                            );
                             this.editor.focus.focus(window, cx);
                             cx.notify();
                         }),

@@ -82,15 +82,16 @@ fn selective_clone(source: &Path, dest: &Path, exclude: &[String]) -> crate::err
     }
 
     // Create dest with same permissions as source.
-    let src_meta = fs::metadata(source).map_err(|e| {
-        AlleleError::Clone(format!("cannot stat source {}: {e}", source.display()))
-    })?;
+    let src_meta = fs::metadata(source)
+        .map_err(|e| AlleleError::Clone(format!("cannot stat source {}: {e}", source.display())))?;
     fs::create_dir(dest)?;
-    fs::set_permissions(dest, fs::Permissions::from_mode(src_meta.permissions().mode()))?;
+    fs::set_permissions(
+        dest,
+        fs::Permissions::from_mode(src_meta.permissions().mode()),
+    )?;
 
-    let entries = fs::read_dir(source).map_err(|e| {
-        AlleleError::Clone(format!("cannot read source {}: {e}", source.display()))
-    })?;
+    let entries = fs::read_dir(source)
+        .map_err(|e| AlleleError::Clone(format!("cannot read source {}: {e}", source.display())))?;
 
     let mut skipped = 0usize;
     for entry in entries {
@@ -103,7 +104,10 @@ fn selective_clone(source: &Path, dest: &Path, exclude: &[String]) -> crate::err
         }
 
         if let Err(e) = clonefile_path(&entry.path(), &dest.join(&name)) {
-            warn!("selective_clone: cleaning up partial clone at {}", dest.display());
+            warn!(
+                "selective_clone: cleaning up partial clone at {}",
+                dest.display()
+            );
             let _ = fs::remove_dir_all(dest);
             return Err(e);
         }
@@ -168,7 +172,11 @@ pub fn cleanup_stale_runtime(clone_path: &Path, paths: &[String]) {
         }
 
         let rel = Path::new(trimmed);
-        if rel.is_absolute() || rel.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        if rel.is_absolute()
+            || rel
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             warn!(
                 "cleanup_stale_runtime: refusing entry '{trimmed}' — must be a \
                  relative path with no '..' segments"
@@ -181,7 +189,10 @@ pub fn cleanup_stale_runtime(clone_path: &Path, paths: &[String]) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                warn!("cleanup_stale_runtime: stat {} failed: {e}", target.display());
+                warn!(
+                    "cleanup_stale_runtime: stat {} failed: {e}",
+                    target.display()
+                );
                 continue;
             }
         };
@@ -197,7 +208,10 @@ pub fn cleanup_stale_runtime(clone_path: &Path, paths: &[String]) {
         };
 
         if let Err(e) = result {
-            warn!("cleanup_stale_runtime: remove {} failed: {e}", target.display());
+            warn!(
+                "cleanup_stale_runtime: remove {} failed: {e}",
+                target.display()
+            );
         }
     }
 }
@@ -319,11 +333,17 @@ pub fn purge_trash_older_than_days(ttl_days: u64) -> crate::errors::Result<usize
     let mut purged = 0usize;
 
     for entry in fs::read_dir(&trash_dir)? {
-        let Ok(entry) = entry else { continue; };
+        let Ok(entry) = entry else {
+            continue;
+        };
         let path = entry.path();
 
-        let Ok(meta) = entry.metadata() else { continue; };
-        let Ok(modified) = meta.modified() else { continue; };
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
 
         let age = now.duration_since(modified).unwrap_or(Duration::ZERO);
         if age < ttl {
@@ -401,23 +421,30 @@ pub fn sweep_orphans(
     let mut trashed = 0usize;
 
     for proj_entry in fs::read_dir(&workspace_base)? {
-        let Ok(proj_entry) = proj_entry else { continue; };
-        let Ok(ft) = proj_entry.file_type() else { continue; };
+        let Ok(proj_entry) = proj_entry else {
+            continue;
+        };
+        let Ok(ft) = proj_entry.file_type() else {
+            continue;
+        };
         if !ft.is_dir() {
             continue;
         }
 
         let proj_dir = proj_entry.path();
-        let proj_name = proj_entry
-            .file_name()
-            .to_string_lossy()
-            .to_string();
+        let proj_name = proj_entry.file_name().to_string_lossy().to_string();
 
-        let Ok(iter) = fs::read_dir(&proj_dir) else { continue; };
+        let Ok(iter) = fs::read_dir(&proj_dir) else {
+            continue;
+        };
 
         for clone_entry in iter {
-            let Ok(clone_entry) = clone_entry else { continue; };
-            let Ok(ft) = clone_entry.file_type() else { continue; };
+            let Ok(clone_entry) = clone_entry else {
+                continue;
+            };
+            let Ok(ft) = clone_entry.file_type() else {
+                continue;
+            };
             if !ft.is_dir() {
                 continue;
             }
@@ -436,9 +463,7 @@ pub fn sweep_orphans(
                 let session_id = resolve_session_id_for_orphan(&clone_path);
                 if let Some(session_id) = session_id.as_deref() {
                     if let Err(e) = git::archive_session(source_path, &clone_path, session_id) {
-                        warn!(
-                            "Orphan sweep: archive_session failed for {session_id}: {e}"
-                        );
+                        warn!("Orphan sweep: archive_session failed for {session_id}: {e}");
                     }
                 }
             }
@@ -511,7 +536,10 @@ mod tests {
         let rel = format!("../{}", sibling.file_name().unwrap().to_string_lossy());
         cleanup_stale_runtime(&clone, &[rel]);
 
-        assert!(sibling.exists(), "parent-dir escape must not delete sibling files");
+        assert!(
+            sibling.exists(),
+            "parent-dir escape must not delete sibling files"
+        );
 
         fs::remove_file(&sibling).ok();
         fs::remove_dir_all(&clone).ok();

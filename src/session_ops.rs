@@ -16,7 +16,9 @@ use crate::app_state::AppState;
 use crate::session::{Session, SessionStatus};
 use crate::state::ArchivedSession;
 use crate::terminal::{clamp_font_size, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
-use crate::{agents, browser, claude_session_history_exists, clone, config, git, project, settings};
+use crate::{
+    agents, browser, claude_session_history_exists, clone, config, git, project, settings,
+};
 
 impl AppState {
     /// Create a new session inside a project. Runs the APFS clone on a
@@ -28,7 +30,9 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(project) = self.projects.get_mut(project_idx) else { return; };
+        let Some(project) = self.projects.get_mut(project_idx) else {
+            return;
+        };
 
         // Guard: if the source directory no longer exists (e.g. repo was
         // moved), prompt the user to relocate rather than failing mid-clone.
@@ -45,7 +49,9 @@ impl AppState {
         // If the working tree has uncommitted changes, prompt the user
         // before creating a session. The user can choose to proceed (the
         // dirty state will be present in the clone) or cancel to clean up.
-        if git::is_working_tree_dirty(&project.source_path) && self.confirming.dirty_session.is_none() {
+        if git::is_working_tree_dirty(&project.source_path)
+            && self.confirming.dirty_session.is_none()
+        {
             self.confirming.dirty_session = Some(project_idx);
             cx.notify();
             return;
@@ -61,8 +67,8 @@ impl AppState {
         // then the global default. Falls through to the first enabled
         // agent with a resolved path. `None` here means "no agent
         // available" — the PTY drops into the user's default shell.
-        let project_override = config::ProjectConfig::load(&project.source_path)
-            .and_then(|c| c.agent);
+        let project_override =
+            config::ProjectConfig::load(&project.source_path).and_then(|c| c.agent);
         let agent = agents::resolve(
             &self.user_settings.agents,
             self.user_settings.default_agent.as_deref(),
@@ -187,13 +193,9 @@ impl AppState {
                 // Only do this when clonefile succeeded — when we fell back
                 // to source_path we must NOT mutate canonical's HEAD.
                 if clone_succeeded {
-                    if let Err(e) = git::create_session_branch(
-                        &clone_path,
-                        &session_id_for_session,
-                    ) {
-                        warn!(
-                            "create_session_branch failed for {session_id_for_session}: {e}"
-                        );
+                    if let Err(e) = git::create_session_branch(&clone_path, &session_id_for_session)
+                    {
+                        warn!("create_session_branch failed for {session_id_for_session}: {e}");
                     }
 
                     // Write marker file for orphan cleanup identification.
@@ -210,80 +212,102 @@ impl AppState {
                 // Create the terminal view with the clone as PWD
                 let initial_font_size = this.user_settings.font_size;
                 let terminal_view = cx.new(|cx| {
-                    TerminalView::new(window, cx, command, Some(clone_path.clone()), initial_font_size)
+                    TerminalView::new(
+                        window,
+                        cx,
+                        command,
+                        Some(clone_path.clone()),
+                        initial_font_size,
+                    )
                 });
 
                 // Subscribe to terminal events
-                cx.subscribe(&terminal_view, |this: &mut Self, _tv: Entity<TerminalView>, event: &TerminalEvent, cx: &mut Context<Self>| {
-                    match event {
-                        TerminalEvent::NewSession => {
-                            this.pending_action = Some(SessionAction::NewSessionInActiveProject.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::CloseSession => {
-                            this.pending_action = Some(SessionAction::CloseActiveSession.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::SwitchSession(target) => {
-                            let target = *target;
-                            let mut flat_idx = 0;
-                            'outer: for (p_idx, project) in this.projects.iter().enumerate() {
-                                for (s_idx, _) in project.sessions.iter().enumerate() {
-                                    if flat_idx == target {
-                                        this.active = Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
-                                        this.pending_action = Some(SessionAction::FocusActive.into());
-                                        cx.notify();
-                                        break 'outer;
+                cx.subscribe(
+                    &terminal_view,
+                    |this: &mut Self,
+                     _tv: Entity<TerminalView>,
+                     event: &TerminalEvent,
+                     cx: &mut Context<Self>| {
+                        match event {
+                            TerminalEvent::NewSession => {
+                                this.pending_action =
+                                    Some(SessionAction::NewSessionInActiveProject.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::CloseSession => {
+                                this.pending_action =
+                                    Some(SessionAction::CloseActiveSession.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::SwitchSession(target) => {
+                                let target = *target;
+                                let mut flat_idx = 0;
+                                'outer: for (p_idx, project) in this.projects.iter().enumerate() {
+                                    for (s_idx, _) in project.sessions.iter().enumerate() {
+                                        if flat_idx == target {
+                                            this.active = Some(SessionCursor {
+                                                project_idx: p_idx,
+                                                session_idx: s_idx,
+                                            });
+                                            this.pending_action =
+                                                Some(SessionAction::FocusActive.into());
+                                            cx.notify();
+                                            break 'outer;
+                                        }
+                                        flat_idx += 1;
                                     }
-                                    flat_idx += 1;
                                 }
                             }
+                            TerminalEvent::PrevSession => {
+                                this.navigate_session(-1, cx);
+                            }
+                            TerminalEvent::NextSession => {
+                                this.navigate_session(1, cx);
+                            }
+                            TerminalEvent::ToggleDrawer => {
+                                this.pending_action = Some(DrawerAction::ToggleDrawer.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::ToggleSidebar => {
+                                this.pending_action = Some(SidebarAction::ToggleSidebar.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::ToggleRightSidebar => {
+                                this.pending_action =
+                                    Some(SidebarAction::ToggleRightSidebar.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::OpenScratchPad => {
+                                this.pending_action = Some(OverlayAction::OpenScratchPad.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::AdjustFontSize(delta) => {
+                                let new_size =
+                                    clamp_font_size(this.user_settings.font_size + delta);
+                                this.pending_action =
+                                    Some(SettingsAction::UpdateFontSize(new_size).into());
+                                cx.notify();
+                            }
+                            TerminalEvent::ResetFontSize => {
+                                this.pending_action =
+                                    Some(SettingsAction::UpdateFontSize(DEFAULT_FONT_SIZE).into());
+                                cx.notify();
+                            }
+                            TerminalEvent::OpenExternalEditor { path, line_col } => {
+                                let cmd = this
+                                    .user_settings
+                                    .external_editor_command
+                                    .as_deref()
+                                    .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
+                                settings::spawn_external_editor(cmd, path, *line_col);
+                            }
+                            TerminalEvent::EnterPressed => {
+                                this.handle_terminal_enter(&_tv, cx);
+                            }
                         }
-                        TerminalEvent::PrevSession => {
-                            this.navigate_session(-1, cx);
-                        }
-                        TerminalEvent::NextSession => {
-                            this.navigate_session(1, cx);
-                        }
-                        TerminalEvent::ToggleDrawer => {
-                            this.pending_action = Some(DrawerAction::ToggleDrawer.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::ToggleSidebar => {
-                            this.pending_action = Some(SidebarAction::ToggleSidebar.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::ToggleRightSidebar => {
-                            this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::OpenScratchPad => {
-                            this.pending_action = Some(OverlayAction::OpenScratchPad.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::AdjustFontSize(delta) => {
-                            let new_size = clamp_font_size(this.user_settings.font_size + delta);
-                            this.pending_action = Some(SettingsAction::UpdateFontSize(new_size).into());
-                            cx.notify();
-                        }
-                        TerminalEvent::ResetFontSize => {
-                            this.pending_action =
-                                Some(SettingsAction::UpdateFontSize(DEFAULT_FONT_SIZE).into());
-                            cx.notify();
-                        }
-                        TerminalEvent::OpenExternalEditor { path, line_col } => {
-                            let cmd = this
-                                .user_settings
-                                .external_editor_command
-                                .as_deref()
-                                .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
-                            settings::spawn_external_editor(cmd, path, *line_col);
-                        }
-                        TerminalEvent::EnterPressed => {
-                            this.handle_terminal_enter(&_tv, cx);
-                        }
-                    }
-                }).detach();
+                    },
+                )
+                .detach();
 
                 let session = Session::new_with_id(
                     session_id_for_session,
@@ -292,10 +316,15 @@ impl AppState {
                 )
                 .with_clone(clone_path)
                 .with_agent_id(agent_id_for_task.clone());
-                let Some(project) = this.projects.get_mut(project_idx) else { return; };
+                let Some(project) = this.projects.get_mut(project_idx) else {
+                    return;
+                };
                 project.sessions.push(session);
                 let session_idx = project.sessions.len() - 1;
-                let cursor = SessionCursor { project_idx, session_idx };
+                let cursor = SessionCursor {
+                    project_idx,
+                    session_idx,
+                };
                 this.active = Some(cursor);
                 this.apply_project_config(cursor, window, cx);
                 this.mark_state_dirty();
@@ -303,7 +332,10 @@ impl AppState {
             });
 
             // Auto-dismiss the pull warning banner after 8 seconds.
-            if this.read_with(cx, |this, _cx| this.pull_warning.is_some()).unwrap_or(false) {
+            if this
+                .read_with(cx, |this, _cx| this.pull_warning.is_some())
+                .unwrap_or(false)
+            {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(8))
                     .await;
@@ -331,7 +363,9 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(project) = self.projects.get_mut(project_idx) else { return; };
+        let Some(project) = self.projects.get_mut(project_idx) else {
+            return;
+        };
 
         if !project.source_path.exists() {
             self.pending_action = Some(ProjectAction::RelocateProject(project_idx).into());
@@ -343,8 +377,8 @@ impl AppState {
         let project_name = project.name.clone();
         let session_count = project.sessions.len() + project.loading_sessions.len() + 1;
 
-        let project_override = config::ProjectConfig::load(&project.source_path)
-            .and_then(|c| c.agent);
+        let project_override =
+            config::ProjectConfig::load(&project.source_path).and_then(|c| c.agent);
         let agent = agents::resolve(
             &self.user_settings.agents,
             self.user_settings.default_agent.as_deref(),
@@ -502,79 +536,101 @@ impl AppState {
 
                 let initial_font_size = this.user_settings.font_size;
                 let terminal_view = cx.new(|cx| {
-                    TerminalView::new(window, cx, command, Some(clone_path.clone()), initial_font_size)
+                    TerminalView::new(
+                        window,
+                        cx,
+                        command,
+                        Some(clone_path.clone()),
+                        initial_font_size,
+                    )
                 });
 
-                cx.subscribe(&terminal_view, |this: &mut Self, _tv: Entity<TerminalView>, event: &TerminalEvent, cx: &mut Context<Self>| {
-                    match event {
-                        TerminalEvent::NewSession => {
-                            this.pending_action = Some(SessionAction::NewSessionInActiveProject.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::CloseSession => {
-                            this.pending_action = Some(SessionAction::CloseActiveSession.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::SwitchSession(target) => {
-                            let target = *target;
-                            let mut flat_idx = 0;
-                            'outer: for (p_idx, project) in this.projects.iter().enumerate() {
-                                for (s_idx, _) in project.sessions.iter().enumerate() {
-                                    if flat_idx == target {
-                                        this.active = Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
-                                        this.pending_action = Some(SessionAction::FocusActive.into());
-                                        cx.notify();
-                                        break 'outer;
+                cx.subscribe(
+                    &terminal_view,
+                    |this: &mut Self,
+                     _tv: Entity<TerminalView>,
+                     event: &TerminalEvent,
+                     cx: &mut Context<Self>| {
+                        match event {
+                            TerminalEvent::NewSession => {
+                                this.pending_action =
+                                    Some(SessionAction::NewSessionInActiveProject.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::CloseSession => {
+                                this.pending_action =
+                                    Some(SessionAction::CloseActiveSession.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::SwitchSession(target) => {
+                                let target = *target;
+                                let mut flat_idx = 0;
+                                'outer: for (p_idx, project) in this.projects.iter().enumerate() {
+                                    for (s_idx, _) in project.sessions.iter().enumerate() {
+                                        if flat_idx == target {
+                                            this.active = Some(SessionCursor {
+                                                project_idx: p_idx,
+                                                session_idx: s_idx,
+                                            });
+                                            this.pending_action =
+                                                Some(SessionAction::FocusActive.into());
+                                            cx.notify();
+                                            break 'outer;
+                                        }
+                                        flat_idx += 1;
                                     }
-                                    flat_idx += 1;
                                 }
                             }
+                            TerminalEvent::PrevSession => {
+                                this.navigate_session(-1, cx);
+                            }
+                            TerminalEvent::NextSession => {
+                                this.navigate_session(1, cx);
+                            }
+                            TerminalEvent::ToggleDrawer => {
+                                this.pending_action = Some(DrawerAction::ToggleDrawer.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::ToggleSidebar => {
+                                this.pending_action = Some(SidebarAction::ToggleSidebar.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::ToggleRightSidebar => {
+                                this.pending_action =
+                                    Some(SidebarAction::ToggleRightSidebar.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::OpenScratchPad => {
+                                this.pending_action = Some(OverlayAction::OpenScratchPad.into());
+                                cx.notify();
+                            }
+                            TerminalEvent::AdjustFontSize(delta) => {
+                                let new_size =
+                                    clamp_font_size(this.user_settings.font_size + delta);
+                                this.pending_action =
+                                    Some(SettingsAction::UpdateFontSize(new_size).into());
+                                cx.notify();
+                            }
+                            TerminalEvent::ResetFontSize => {
+                                this.pending_action =
+                                    Some(SettingsAction::UpdateFontSize(DEFAULT_FONT_SIZE).into());
+                                cx.notify();
+                            }
+                            TerminalEvent::OpenExternalEditor { path, line_col } => {
+                                let cmd = this
+                                    .user_settings
+                                    .external_editor_command
+                                    .as_deref()
+                                    .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
+                                settings::spawn_external_editor(cmd, path, *line_col);
+                            }
+                            TerminalEvent::EnterPressed => {
+                                this.handle_terminal_enter(&_tv, cx);
+                            }
                         }
-                        TerminalEvent::PrevSession => {
-                            this.navigate_session(-1, cx);
-                        }
-                        TerminalEvent::NextSession => {
-                            this.navigate_session(1, cx);
-                        }
-                        TerminalEvent::ToggleDrawer => {
-                            this.pending_action = Some(DrawerAction::ToggleDrawer.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::ToggleSidebar => {
-                            this.pending_action = Some(SidebarAction::ToggleSidebar.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::ToggleRightSidebar => {
-                            this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::OpenScratchPad => {
-                            this.pending_action = Some(OverlayAction::OpenScratchPad.into());
-                            cx.notify();
-                        }
-                        TerminalEvent::AdjustFontSize(delta) => {
-                            let new_size = clamp_font_size(this.user_settings.font_size + delta);
-                            this.pending_action = Some(SettingsAction::UpdateFontSize(new_size).into());
-                            cx.notify();
-                        }
-                        TerminalEvent::ResetFontSize => {
-                            this.pending_action =
-                                Some(SettingsAction::UpdateFontSize(DEFAULT_FONT_SIZE).into());
-                            cx.notify();
-                        }
-                        TerminalEvent::OpenExternalEditor { path, line_col } => {
-                            let cmd = this
-                                .user_settings
-                                .external_editor_command
-                                .as_deref()
-                                .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
-                            settings::spawn_external_editor(cmd, path, *line_col);
-                        }
-                        TerminalEvent::EnterPressed => {
-                            this.handle_terminal_enter(&_tv, cx);
-                        }
-                    }
-                }).detach();
+                    },
+                )
+                .detach();
 
                 let mut session = Session::new_with_id(
                     session_id_for_session,
@@ -589,10 +645,15 @@ impl AppState {
                 }
                 session.branch_locked = branch_locked;
 
-                let Some(project) = this.projects.get_mut(project_idx) else { return; };
+                let Some(project) = this.projects.get_mut(project_idx) else {
+                    return;
+                };
                 project.sessions.push(session);
                 let session_idx = project.sessions.len() - 1;
-                let cursor = SessionCursor { project_idx, session_idx };
+                let cursor = SessionCursor {
+                    project_idx,
+                    session_idx,
+                };
                 this.active = Some(cursor);
                 this.apply_project_config(cursor, window, cx);
                 this.mark_state_dirty();
@@ -624,7 +685,10 @@ impl AppState {
             });
 
             // Auto-dismiss the pull warning banner after 8 seconds.
-            if this.read_with(cx, |this, _cx| this.pull_warning.is_some()).unwrap_or(false) {
+            if this
+                .read_with(cx, |this, _cx| this.pull_warning.is_some())
+                .unwrap_or(false)
+            {
                 cx.background_executor()
                     .timer(std::time::Duration::from_secs(8))
                     .await;
@@ -654,11 +718,16 @@ impl AppState {
                 {
                     session.set_status(SessionStatus::Running);
                     session.attention_context = None;
-                    matched_cursor = Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
+                    matched_cursor = Some(SessionCursor {
+                        project_idx: p_idx,
+                        session_idx: s_idx,
+                    });
                     break;
                 }
             }
-            if matched_cursor.is_some() { break; }
+            if matched_cursor.is_some() {
+                break;
+            }
         }
 
         if let Some(cursor) = matched_cursor {
@@ -686,8 +755,12 @@ impl AppState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(project) = self.projects.get_mut(cursor.project_idx) else { return; };
-        let Some(session) = project.sessions.get_mut(cursor.session_idx) else { return; };
+        let Some(project) = self.projects.get_mut(cursor.project_idx) else {
+            return;
+        };
+        let Some(session) = project.sessions.get_mut(cursor.session_idx) else {
+            return;
+        };
 
         // Drop the terminal_view and drawer — Drop impl on PtyTerminal sends
         // Msg::Shutdown, killing the subprocesses. The clone on disk is untouched.
@@ -772,8 +845,12 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(project) = self.projects.get(cursor.project_idx) else { return; };
-        let Some(session) = project.sessions.get(cursor.session_idx) else { return; };
+        let Some(project) = self.projects.get(cursor.project_idx) else {
+            return;
+        };
+        let Some(session) = project.sessions.get(cursor.session_idx) else {
+            return;
+        };
         let Some(clone_path) = session.clone_path.clone() else {
             warn!(
                 "Cannot resume session {} — no clone_path on record",
@@ -803,8 +880,8 @@ impl AppState {
         // resume always uses whatever spawned the session originally,
         // even if the user has since changed the global default.
         // Falls back to allele.json → global default → first enabled.
-        let project_override = config::ProjectConfig::load(&project.source_path)
-            .and_then(|c| c.agent);
+        let project_override =
+            config::ProjectConfig::load(&project.source_path).and_then(|c| c.agent);
         let agent = agents::resolve(
             &self.user_settings.agents,
             self.user_settings.default_agent.as_deref(),
@@ -833,83 +910,100 @@ impl AppState {
         // Build the new TerminalView on the main thread with window access.
         let initial_font_size = self.user_settings.font_size;
         let terminal_view = cx.new(|cx| {
-            TerminalView::new(window, cx, command, Some(clone_path.clone()), initial_font_size)
+            TerminalView::new(
+                window,
+                cx,
+                command,
+                Some(clone_path.clone()),
+                initial_font_size,
+            )
         });
 
         // Subscribe to terminal events so the resumed session wires up the
         // same shortcut actions (NewSession, CloseSession, SwitchSession)
         // as freshly-created ones.
-        cx.subscribe(&terminal_view, |this: &mut Self, _tv: Entity<TerminalView>, event: &TerminalEvent, cx: &mut Context<Self>| {
-            match event {
-                TerminalEvent::NewSession => {
-                    this.pending_action = Some(SessionAction::NewSessionInActiveProject.into());
-                    cx.notify();
-                }
-                TerminalEvent::CloseSession => {
-                    this.pending_action = Some(SessionAction::CloseActiveSession.into());
-                    cx.notify();
-                }
-                TerminalEvent::SwitchSession(target) => {
-                    // Mirror the fresh-spawn handler so Cmd+1..9 also works
-                    // from resumed sessions.
-                    let target = *target;
-                    let mut flat_idx = 0;
-                    'outer: for (p_idx, project) in this.projects.iter().enumerate() {
-                        for (s_idx, _) in project.sessions.iter().enumerate() {
-                            if flat_idx == target {
-                                this.active = Some(SessionCursor { project_idx: p_idx, session_idx: s_idx });
-                                this.pending_action = Some(SessionAction::FocusActive.into());
-                                cx.notify();
-                                break 'outer;
+        cx.subscribe(
+            &terminal_view,
+            |this: &mut Self,
+             _tv: Entity<TerminalView>,
+             event: &TerminalEvent,
+             cx: &mut Context<Self>| {
+                match event {
+                    TerminalEvent::NewSession => {
+                        this.pending_action = Some(SessionAction::NewSessionInActiveProject.into());
+                        cx.notify();
+                    }
+                    TerminalEvent::CloseSession => {
+                        this.pending_action = Some(SessionAction::CloseActiveSession.into());
+                        cx.notify();
+                    }
+                    TerminalEvent::SwitchSession(target) => {
+                        // Mirror the fresh-spawn handler so Cmd+1..9 also works
+                        // from resumed sessions.
+                        let target = *target;
+                        let mut flat_idx = 0;
+                        'outer: for (p_idx, project) in this.projects.iter().enumerate() {
+                            for (s_idx, _) in project.sessions.iter().enumerate() {
+                                if flat_idx == target {
+                                    this.active = Some(SessionCursor {
+                                        project_idx: p_idx,
+                                        session_idx: s_idx,
+                                    });
+                                    this.pending_action = Some(SessionAction::FocusActive.into());
+                                    cx.notify();
+                                    break 'outer;
+                                }
+                                flat_idx += 1;
                             }
-                            flat_idx += 1;
                         }
                     }
+                    TerminalEvent::PrevSession => {
+                        this.navigate_session(-1, cx);
+                    }
+                    TerminalEvent::NextSession => {
+                        this.navigate_session(1, cx);
+                    }
+                    TerminalEvent::ToggleDrawer => {
+                        this.pending_action = Some(DrawerAction::ToggleDrawer.into());
+                        cx.notify();
+                    }
+                    TerminalEvent::ToggleSidebar => {
+                        this.pending_action = Some(SidebarAction::ToggleSidebar.into());
+                        cx.notify();
+                    }
+                    TerminalEvent::ToggleRightSidebar => {
+                        this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
+                        cx.notify();
+                    }
+                    TerminalEvent::OpenScratchPad => {
+                        this.pending_action = Some(OverlayAction::OpenScratchPad.into());
+                        cx.notify();
+                    }
+                    TerminalEvent::AdjustFontSize(delta) => {
+                        let new_size = clamp_font_size(this.user_settings.font_size + delta);
+                        this.pending_action = Some(SettingsAction::UpdateFontSize(new_size).into());
+                        cx.notify();
+                    }
+                    TerminalEvent::ResetFontSize => {
+                        this.pending_action =
+                            Some(SettingsAction::UpdateFontSize(DEFAULT_FONT_SIZE).into());
+                        cx.notify();
+                    }
+                    TerminalEvent::OpenExternalEditor { path, line_col } => {
+                        let cmd = this
+                            .user_settings
+                            .external_editor_command
+                            .as_deref()
+                            .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
+                        settings::spawn_external_editor(cmd, path, *line_col);
+                    }
+                    TerminalEvent::EnterPressed => {
+                        this.handle_terminal_enter(&_tv, cx);
+                    }
                 }
-                TerminalEvent::PrevSession => {
-                    this.navigate_session(-1, cx);
-                }
-                TerminalEvent::NextSession => {
-                    this.navigate_session(1, cx);
-                }
-                TerminalEvent::ToggleDrawer => {
-                    this.pending_action = Some(DrawerAction::ToggleDrawer.into());
-                    cx.notify();
-                }
-                TerminalEvent::ToggleSidebar => {
-                    this.pending_action = Some(SidebarAction::ToggleSidebar.into());
-                    cx.notify();
-                }
-                TerminalEvent::ToggleRightSidebar => {
-                    this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
-                    cx.notify();
-                }
-                TerminalEvent::OpenScratchPad => {
-                    this.pending_action = Some(OverlayAction::OpenScratchPad.into());
-                    cx.notify();
-                }
-                TerminalEvent::AdjustFontSize(delta) => {
-                    let new_size = clamp_font_size(this.user_settings.font_size + delta);
-                    this.pending_action = Some(SettingsAction::UpdateFontSize(new_size).into());
-                    cx.notify();
-                }
-                TerminalEvent::ResetFontSize => {
-                    this.pending_action = Some(SettingsAction::UpdateFontSize(DEFAULT_FONT_SIZE).into());
-                    cx.notify();
-                }
-                TerminalEvent::OpenExternalEditor { path, line_col } => {
-                    let cmd = this
-                        .user_settings
-                        .external_editor_command
-                        .as_deref()
-                        .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
-                    settings::spawn_external_editor(cmd, path, *line_col);
-                }
-                TerminalEvent::EnterPressed => {
-                    this.handle_terminal_enter(&_tv, cx);
-                }
-            }
-        }).detach();
+            },
+        )
+        .detach();
 
         let resolved_agent_id = agent.as_ref().map(|a| a.id.clone());
 
@@ -954,8 +1048,12 @@ impl AppState {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(project) = self.projects.get_mut(cursor.project_idx) else { return; };
-        if cursor.session_idx >= project.sessions.len() { return; }
+        let Some(project) = self.projects.get_mut(cursor.project_idx) else {
+            return;
+        };
+        if cursor.session_idx >= project.sessions.len() {
+            return;
+        }
 
         // Pull the session out of the list immediately
         let removed = project.sessions.remove(cursor.session_idx);
@@ -989,15 +1087,21 @@ impl AppState {
         // teardown sequence (alongside SIGTERM to any dev servers).
         // Suspended sessions have no terminal_view, so fall back to the
         // direct call. Integration-disabled case: still no-op.
-        let close_tab = self.user_settings.browser_integration_enabled
+        let close_tab = self
+            .user_settings
+            .browser_integration_enabled
             .then_some(removed_browser_tab_id)
             .flatten();
         if let Some(id) = close_tab {
             match removed.terminal_view.as_ref() {
                 Some(tv) => tv.update(cx, |view, _| {
-                    view.on_close(move || { let _ = browser::close_tab(id); });
+                    view.on_close(move || {
+                        let _ = browser::close_tab(id);
+                    });
                 }),
-                None => { let _ = browser::close_tab(id); }
+                None => {
+                    let _ = browser::close_tab(id);
+                }
             }
         }
 
@@ -1044,18 +1148,26 @@ impl AppState {
                 let project = &self.projects[cursor.project_idx];
                 self.active = if !project.sessions.is_empty() {
                     let new_session_idx = cursor.session_idx.min(project.sessions.len() - 1);
-                    Some(SessionCursor { project_idx: cursor.project_idx, session_idx: new_session_idx })
+                    Some(SessionCursor {
+                        project_idx: cursor.project_idx,
+                        session_idx: new_session_idx,
+                    })
                 } else {
                     // Fall back to any session in any project
                     self.projects.iter().enumerate().find_map(|(p_idx, p)| {
                         if !p.sessions.is_empty() {
-                            Some(SessionCursor { project_idx: p_idx, session_idx: 0 })
+                            Some(SessionCursor {
+                                project_idx: p_idx,
+                                session_idx: 0,
+                            })
                         } else {
                             None
                         }
                     })
                 };
-            } else if active.project_idx == cursor.project_idx && active.session_idx > cursor.session_idx {
+            } else if active.project_idx == cursor.project_idx
+                && active.session_idx > cursor.session_idx
+            {
                 // Active session in same project shifted down by one
                 self.active = Some(SessionCursor {
                     project_idx: active.project_idx,
@@ -1094,7 +1206,9 @@ impl AppState {
                                     warn!("allele: shutdown command exited with {s} — continuing");
                                 }
                                 Err(e) => {
-                                    warn!("allele: failed to run shutdown command: {e} — continuing");
+                                    warn!(
+                                        "allele: failed to run shutdown command: {e} — continuing"
+                                    );
                                 }
                                 _ => {}
                             }
@@ -1118,9 +1232,7 @@ impl AppState {
                             &clone_path,
                             &session_id_for_task,
                         ) {
-                            warn!(
-                                "archive_session failed for {session_id_for_task}: {e}"
-                            );
+                            warn!("archive_session failed for {session_id_for_task}: {e}");
                         }
                         clone::trash_clone(&clone_path).map(|_| ())
                     })
@@ -1133,7 +1245,9 @@ impl AppState {
                 // Remove the placeholder on the main thread
                 let _ = this.update(cx, |this: &mut Self, cx| {
                     if let Some(project) = this.projects.get_mut(project_idx) {
-                        project.loading_sessions.retain(|l| l.id != placeholder_id_for_task);
+                        project
+                            .loading_sessions
+                            .retain(|l| l.id != placeholder_id_for_task);
                     }
                     cx.notify();
                 });

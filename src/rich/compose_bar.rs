@@ -20,17 +20,17 @@
 //! keymap — the dispatch table in `keymap.rs` maps those strings to the
 //! concrete action structs declared here.
 
+use crate::icon::{icon, name as icons};
+use crate::theme::{theme, with_alpha};
 use std::ops::Range;
 use std::path::PathBuf;
-use crate::theme::{theme, with_alpha};
-use crate::icon::{icon, name as icons};
 
 use gpui::{
     actions, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry,
     ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, EntityInputHandler,
-    EventEmitter, ExternalPaths, FocusHandle, Focusable, GlobalElementId, LayoutId,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, PathPromptOptions,
-    Pixels, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
+    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, PathPromptOptions, Pixels, ShapedLine,
+    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
@@ -82,9 +82,6 @@ actions!(
 const KEY_CONTEXT: &str = "ComposeBar";
 
 // ── Colours (Catppuccin Mocha) ────────────────────────────────────
-
-
-
 
 // ── Events ────────────────────────────────────────────────────────
 
@@ -269,7 +266,10 @@ impl ComposeBar {
     // ── Line boundary helpers ─────────────────────────────────────
 
     fn line_start(&self, offset: usize) -> usize {
-        self.content[..offset].rfind('\n').map(|i| i + 1).unwrap_or(0)
+        self.content[..offset]
+            .rfind('\n')
+            .map(|i| i + 1)
+            .unwrap_or(0)
     }
 
     fn line_end(&self, offset: usize) -> usize {
@@ -480,7 +480,9 @@ impl ComposeBar {
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
-        let Some(item) = cx.read_from_clipboard() else { return; };
+        let Some(item) = cx.read_from_clipboard() else {
+            return;
+        };
 
         // Prefer image payload when present — treat as an attachment instead
         // of as text. Fall back to text paste for non-image clipboards so the
@@ -590,10 +592,7 @@ impl ComposeBar {
                     self.attachments.push(a);
                     any_added = true;
                 }
-                Err(e) => warn!(
-                    "allele: failed to attach {}: {e}",
-                    src.display()
-                ),
+                Err(e) => warn!("allele: failed to attach {}: {e}", src.display()),
             }
         }
         if any_added {
@@ -630,8 +629,7 @@ impl ComposeBar {
         }
         // Which line does y fall into?
         let y_in = position.y - bounds.top();
-        let mut line_index =
-            (f32::from(y_in) / f32::from(layout.line_height)).floor() as usize;
+        let mut line_index = (f32::from(y_in) / f32::from(layout.line_height)).floor() as usize;
         if line_index >= layout.lines.len() {
             line_index = layout.lines.len().saturating_sub(1);
         }
@@ -813,10 +811,7 @@ impl EntityInputHandler for ComposeBar {
         let y = layout.line_height * (line_index as f32);
         Some(Bounds::from_corners(
             point(bounds.left() + x, bounds.top() + y),
-            point(
-                bounds.left() + x,
-                bounds.top() + y + layout.line_height,
-            ),
+            point(bounds.left() + x, bounds.top() + y + layout.line_height),
         ))
     }
 
@@ -895,10 +890,7 @@ impl Element for TextElement {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
         style.size.height = total.into();
-        (
-            window.request_layout(style, [], cx),
-            f32::from(line_h),
-        )
+        (window.request_layout(style, [], cx), f32::from(line_h))
     }
 
     fn prepaint(
@@ -954,9 +946,10 @@ impl Element for TextElement {
             } else {
                 vec![run]
             };
-            let shaped = window
-                .text_system()
-                .shape_line(line.to_string().into(), font_size, &runs, None);
+            let shaped =
+                window
+                    .text_system()
+                    .shape_line(line.to_string().into(), font_size, &runs, None);
             shaped_lines.push(shaped);
         }
 
@@ -1027,10 +1020,7 @@ impl Element for TextElement {
                 selection_rects.push(fill(
                     Bounds::from_corners(
                         point(bounds.left() + sel_start_x, bounds.top() + y),
-                        point(
-                            bounds.left() + sel_end_x,
-                            bounds.top() + y + line_height,
-                        ),
+                        point(bounds.left() + sel_end_x, bounds.top() + y + line_height),
                     ),
                     theme().selection,
                 ));
@@ -1168,9 +1158,7 @@ impl Render for ComposeBar {
             .px(px(12.0))
             .cursor(CursorStyle::IBeam)
             .flex()
-            .child(TextElement {
-                input: cx.entity(),
-            });
+            .child(TextElement { input: cx.entity() });
 
         let send_button = gpui::div()
             .id("compose-send-btn")
@@ -1210,9 +1198,11 @@ impl Render for ComposeBar {
             .rounded(px(6.0))
             .bg(with_alpha(theme().bg_hover, 0.4))
             .cursor(CursorStyle::PointingHand)
-            .child(
-                icon(icons::PAPERCLIP, font_size + 1.0, theme().text_secondary),
-            )
+            .child(icon(
+                icons::PAPERCLIP,
+                font_size + 1.0,
+                theme().text_secondary,
+            ))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, _event, window, cx| {
@@ -1267,7 +1257,11 @@ impl Render for ComposeBar {
                     .child(
                         gpui::div()
                             .text_size(px(font_size - 2.0))
-                            .text_color(if warn { with_alpha(theme().text_primary, 0.9) } else { theme().text_primary })
+                            .text_color(if warn {
+                                with_alpha(theme().text_primary, 0.9)
+                            } else {
+                                theme().text_primary
+                            })
                             .child(label.clone()),
                     )
                     .child(
@@ -1429,8 +1423,14 @@ mod tests {
     #[test]
     fn expansion_handles_multiple_tokens() {
         let chunks = vec![
-            PastedChunk { id: 0, full_text: "FIRST".into() },
-            PastedChunk { id: 1, full_text: "SECOND".into() },
+            PastedChunk {
+                id: 0,
+                full_text: "FIRST".into(),
+            },
+            PastedChunk {
+                id: 1,
+                full_text: "SECOND".into(),
+            },
         ];
         let input = "A ⟪paste-0-1⟫ B ⟪paste-1-1⟫ C";
         assert_eq!(expand_paste_tokens(input, &chunks), "A FIRST B SECOND C");
@@ -1443,15 +1443,24 @@ mod tests {
             full_text: "KNOWN".into(),
         }];
         let input = "X ⟪paste-0-1⟫ Y ⟪paste-99-1⟫ Z";
-        assert_eq!(expand_paste_tokens(input, &chunks), "X KNOWN Y ⟪paste-99-1⟫ Z");
+        assert_eq!(
+            expand_paste_tokens(input, &chunks),
+            "X KNOWN Y ⟪paste-99-1⟫ Z"
+        );
     }
 
     #[test]
     fn expansion_tolerates_malformed_token() {
-        let chunks = vec![PastedChunk { id: 0, full_text: "OK".into() }];
+        let chunks = vec![PastedChunk {
+            id: 0,
+            full_text: "OK".into(),
+        }];
         // Missing close bracket — we emit what we have and return.
         let input = "before ⟪paste-0-1 tail";
-        assert_eq!(expand_paste_tokens(input, &chunks), "before ⟪paste-0-1 tail");
+        assert_eq!(
+            expand_paste_tokens(input, &chunks),
+            "before ⟪paste-0-1 tail"
+        );
     }
 
     #[test]

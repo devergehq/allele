@@ -67,7 +67,10 @@ pub(crate) fn request_capture_and_wait() -> anyhow::Result<PathBuf> {
             }
             anyhow::bail!(
                 "capture failed: {}",
-                value.get("error").and_then(|v| v.as_str()).unwrap_or("unknown error")
+                value
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error")
             );
         }
         std::thread::sleep(Duration::from_millis(100));
