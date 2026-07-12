@@ -10,6 +10,7 @@
 pub(crate) mod command;
 pub(crate) mod deeplink;
 pub(crate) mod highlight;
+pub(crate) mod ts_highlight;
 pub(crate) mod index;
 pub(crate) mod palette;
 pub(crate) mod search;
@@ -464,6 +465,13 @@ impl AppState {
             string: theme().success,
             keyword: theme().lavender,
             number: theme().warning,
+            function: theme().info,
+            type_: theme().accent,
+            constant: theme().warning,
+            property: theme().text_body,
+            operator: theme().text_secondary,
+            punctuation: theme().text_muted,
+            variable: theme().text_primary,
         };
         let lines = highlight::highlight(contents, &ext, colors);
         let total = lines.len();

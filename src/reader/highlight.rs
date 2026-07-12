@@ -9,7 +9,9 @@
 use gpui::{Font, FontFeatures, FontStyle, FontWeight, Hsla, SharedString, TextRun};
 
 /// Theme colors a token class maps onto. Filled from `theme()` by the caller
-/// so highlighting tracks light/dark automatically.
+/// so highlighting tracks light/dark automatically. The first five fields back
+/// the built-in lexer; the rest give the tree-sitter path (DEV-73) finer
+/// classes. Kept theme-agnostic so both paths stay unit-testable.
 #[derive(Clone, Copy)]
 pub(crate) struct TokenColors {
     pub text: Hsla,
@@ -17,6 +19,13 @@ pub(crate) struct TokenColors {
     pub string: Hsla,
     pub keyword: Hsla,
     pub number: Hsla,
+    pub function: Hsla,
+    pub type_: Hsla,
+    pub constant: Hsla,
+    pub property: Hsla,
+    pub operator: Hsla,
+    pub punctuation: Hsla,
+    pub variable: Hsla,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -110,7 +119,18 @@ pub(crate) struct HlLine {
 /// Tokenize `contents` into per-line styled runs. Block-comment state is
 /// carried across line boundaries so multi-line `/* … */` comments highlight
 /// correctly. Never panics on any input.
+/// Highlight `contents`. Uses the tree-sitter backend (DEV-73) when a grammar
+/// is bundled for `ext`, and falls back to the built-in lexer otherwise — so
+/// unsupported languages still get reasonable coloring, never flat text.
 pub(crate) fn highlight(contents: &str, ext: &str, colors: TokenColors) -> Vec<HlLine> {
+    if let Some(lines) = super::ts_highlight::highlight(contents, ext, &colors) {
+        return lines;
+    }
+    lexer_highlight(contents, ext, colors)
+}
+
+/// The dependency-free fallback lexer (see module docs).
+fn lexer_highlight(contents: &str, ext: &str, colors: TokenColors) -> Vec<HlLine> {
     let syntax = syntax_for(ext);
     let font = mono_font();
     let mut in_block = false;
@@ -278,13 +298,16 @@ mod tests {
 
     fn colors() -> TokenColors {
         let z = gpui::hsla(0., 0., 0., 1.);
-        TokenColors { text: z, comment: z, string: z, keyword: z, number: z }
+        TokenColors {
+            text: z, comment: z, string: z, keyword: z, number: z, function: z, type_: z,
+            constant: z, property: z, operator: z, punctuation: z, variable: z,
+        }
     }
 
     #[test]
     fn does_not_panic_on_unicode_and_unterminated() {
         let src = "let s = \"héllo\nfn café() {} // λ\n/* unclosed\nmore";
-        let lines = highlight(src, "rs", colors());
+        let lines = lexer_highlight(src, "rs", colors());
         assert_eq!(lines.len(), 4);
         // Every run length must sum to the line's byte length (no drift).
         for l in &lines {
@@ -295,7 +318,7 @@ mod tests {
 
     #[test]
     fn empty_input_yields_one_empty_line() {
-        let lines = highlight("", "rs", colors());
+        let lines = lexer_highlight("", "rs", colors());
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0].text.len(), 0);
     }
@@ -313,7 +336,7 @@ mod tests {
             "let a = \"\\",                // string then lone backslash
         ];
         for src in cases {
-            for l in highlight(src, "rs", colors()) {
+            for l in lexer_highlight(src, "rs", colors()) {
                 let sum: usize = l.runs.iter().map(|r| r.len).sum();
                 assert_eq!(sum, l.text.len(), "run-length mismatch for {src:?}");
             }
