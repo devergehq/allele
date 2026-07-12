@@ -52,6 +52,14 @@ cp "$PROJECT_DIR/resources/Allele.icns" "$RESOURCES_DIR/Allele.icns"
 # Copy binary
 cp "$BINARY" "$MACOS_DIR/Allele"
 
+# Ad-hoc code-sign the assembled bundle. Copying the binary in and then adding
+# Info.plist + Resources invalidates the linker's ad-hoc signature, so re-sign
+# the whole bundle. Without this a downloaded (quarantined) build is reported by
+# Gatekeeper as "damaged". No Apple Developer ID is required for ad-hoc signing.
+echo "==> Code-signing (ad-hoc)..."
+codesign --force --deep --sign - "$APP_DIR"
+codesign --verify --deep --strict "$APP_DIR"
+
 echo "==> Done: $APP_DIR"
 
 # Nudge Launch Services so the Dock picks up the (possibly new) icon.

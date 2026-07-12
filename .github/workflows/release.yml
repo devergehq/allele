@@ -99,6 +99,19 @@ jobs:
           PLIST="target/release/Allele.app/Contents/Info.plist"
           /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.vars.outputs.version }}" "$PLIST"
 
+      - name: Ad-hoc code-sign the bundle
+        run: |
+          set -euo pipefail
+          # Bundling copies a linker-signed binary and then adds Info.plist +
+          # Resources, which invalidates that signature. Re-sign the assembled
+          # bundle (ad-hoc — no Apple Developer ID required) so Gatekeeper sees a
+          # valid signature and does not report the app as "damaged". This must be
+          # the last mutation before packaging. Full notarization (the no-prompt
+          # experience) is a later, additive step that swaps `-` for a Developer ID.
+          APP="target/release/Allele.app"
+          codesign --force --deep --sign - "$APP"
+          codesign --verify --deep --strict "$APP"
+
       - name: Package .app into a zip
         id: package
         run: |
