@@ -28,9 +28,9 @@ use std::path::PathBuf;
 use gpui::{
     actions, fill, point, prelude::*, px, relative, size, App, Bounds, ClipboardEntry,
     ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, EntityInputHandler,
-    EventEmitter, ExternalPaths, FocusHandle, Focusable, GlobalElementId, LayoutId, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, PathPromptOptions, Pixels, ShapedLine,
-    SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
+    EventEmitter, ExternalPaths, FocusHandle, Focusable, GlobalElementId, KeyDownEvent, LayoutId,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, PathPromptOptions,
+    Pixels, ShapedLine, SharedString, Style, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use tracing::warn;
 use unicode_segmentation::UnicodeSegmentation;
@@ -1382,6 +1382,22 @@ impl Render for ComposeBar {
         gpui::div()
             .key_context(KEY_CONTEXT)
             .track_focus(&self.focus_handle)
+            // ⌘Enter → send. The multi-line input registers an OS text-input
+            // handler (`window.handle_input`) which claims the Return keystroke
+            // for newline insertion before the `cmd-enter → compose.submit`
+            // keybinding can dispatch — so we intercept ⌘Enter here at the
+            // key-down level (ahead of the input handler) and submit directly,
+            // stopping propagation so no stray newline is inserted. Plain Enter
+            // is left alone and still inserts a newline (DEV-74).
+            .on_key_down(
+                cx.listener(|this: &mut Self, event: &KeyDownEvent, window, cx| {
+                    let mods = &event.keystroke.modifiers;
+                    if event.keystroke.key.as_str() == "enter" && mods.platform {
+                        this.submit(&Submit, window, cx);
+                        cx.stop_propagation();
+                    }
+                }),
+            )
             // Cursor movement
             .on_action(cx.listener(Self::cursor_left))
             .on_action(cx.listener(Self::cursor_right))
