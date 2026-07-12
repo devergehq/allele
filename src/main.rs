@@ -1111,8 +1111,14 @@ impl AppState {
                 ),
             );
 
-        root = root.child(deferred(
-            anchored().position(position).snap_to_window().child(menu),
+        root = root.child(self.dismissable_popover(
+            position,
+            menu,
+            |this: &mut Self, cx| {
+                this.project_context_menu = None;
+                cx.notify();
+            },
+            cx,
         ));
         root
     }
@@ -1313,10 +1319,56 @@ impl AppState {
                 ),
             );
 
-        root = root.child(deferred(
-            anchored().position(position).snap_to_window().child(menu),
+        root = root.child(self.dismissable_popover(
+            position,
+            menu,
+            |this: &mut Self, cx| {
+                this.session_context_menu = None;
+                cx.notify();
+            },
+            cx,
         ));
         root
+    }
+
+    /// Wrap a floating `menu` (anchored at `position`) in a full-screen
+    /// transparent backdrop, so clicking anywhere outside it — or right-clicking
+    /// — dismisses it. `dismiss` clears whatever state hides the popover. This is
+    /// the shared dismiss affordance for Allele's floating menus (DEV-67); menu
+    /// items `stop_propagation`, so clicks on them never reach the backdrop.
+    pub(crate) fn dismissable_popover(
+        &self,
+        position: Point<Pixels>,
+        menu: impl IntoElement,
+        dismiss: impl Fn(&mut Self, &mut Context<Self>) + Clone + 'static,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let on_left = dismiss.clone();
+        let on_right = dismiss;
+        deferred(
+            div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .child(
+                    div()
+                        .occlude()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full()
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this: &mut Self, _e, _w, cx| on_left(this, cx)),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this: &mut Self, _e, _w, cx| on_right(this, cx)),
+                        ),
+                )
+                .child(anchored().position(position).snap_to_window().child(menu)),
+        )
     }
 
     /// Open the edit-session modal for an existing session.
