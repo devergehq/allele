@@ -19,8 +19,11 @@ use gpui::*;
 use similar::{ChangeTag, TextDiff};
 
 use super::compose_bar::{ComposeBar, ComposeBarEvent};
-use super::document::{short_path, truncate_to_char_boundary, Block, BlockKind, RichDocument};
+use super::document::{
+    short_path, truncate_to_char_boundary, Block, BlockId, BlockKind, RichDocument,
+};
 use super::narrative::{Annotation, LocusPhase, NarrativeRole};
+use super::reader::{NarrativeIndex, NavCounts};
 use crate::stream::RichEvent;
 
 // ── Catppuccin Mocha palette (matching terminal) ──────────────────
@@ -57,6 +60,9 @@ pub struct RichView {
     /// GPUI virtual list state — only renders visible blocks + overdraw,
     /// giving O(visible) render cost instead of O(total).
     list_state: ListState,
+    /// Navigation index over the narrative (DEV-31): powers the jump strip
+    /// and (later) search. Populated as blocks are added.
+    index: NarrativeIndex,
 }
 
 impl EventEmitter<RichViewEvent> for RichView {}
@@ -96,7 +102,30 @@ impl RichView {
             font_size,
             busy: false,
             list_state,
+            index: NarrativeIndex::new(),
         }
+    }
+
+    /// Record a freshly-created block into the navigation index (DEV-31).
+    fn index_block(&mut self, id: BlockId) {
+        let Some((text, artifact, annotation)) =
+            self.document.blocks().iter().find(|b| b.id == id).map(|b| {
+                let (text, artifact) = block_index_fields(&b.kind);
+                (text, artifact, self.document.annotation(id).cloned())
+            })
+        else {
+            return;
+        };
+        if let Some(annotation) = annotation {
+            self.index
+                .record(id, &annotation, &text, artifact.as_deref());
+        }
+    }
+
+    /// Counts of navigable points, for the navigation strip.
+    #[allow(dead_code)]
+    pub fn nav_counts(&self) -> NavCounts {
+        self.index.counts()
     }
 
     /// Apply one event from the transcript tailer. The caller is
@@ -104,7 +133,10 @@ impl RichView {
     /// (+ `subagents/*.jsonl`) and feeding each parsed event in order.
     pub fn apply_event(&mut self, event: RichEvent, cx: &mut Context<Self>) {
         let old_count = self.document.block_count();
-        self.document.apply_event(event);
+        let created = self.document.apply_event(event);
+        if let Some(id) = created {
+            self.index_block(id);
+        }
         let new_count = self.document.block_count();
         self.sync_list_state(old_count, new_count);
         cx.notify();
@@ -116,7 +148,8 @@ impl RichView {
     /// write it to the transcript.
     pub fn push_user_prompt(&mut self, text: String, cx: &mut Context<Self>) {
         let old_count = self.document.block_count();
-        self.document.push_user_prompt(text);
+        let prompt_id = self.document.push_user_prompt(text);
+        self.index_block(prompt_id);
         self.document.push_awaiting_indicator();
         let new_count = self.document.block_count();
         self.sync_list_state(old_count, new_count);
@@ -251,6 +284,7 @@ impl Render for RichView {
             .size_full();
 
         let scrollbar = self.render_scrollbar();
+        let nav_counts = self.index.counts();
 
         // `size_full()` is critical — see comment in previous version.
         // The internal flex-col distributes height between the feed
@@ -262,6 +296,13 @@ impl Render for RichView {
             .flex()
             .flex_col()
             .bg(theme().bg_base)
+            // DEV-31 navigation strip: a compact tally of navigable points
+            // (phases / decisions / errors / files) once any exist.
+            .children(
+                nav_counts
+                    .any()
+                    .then(|| render_nav_strip(nav_counts, font_size)),
+            )
             .child(
                 div()
                     .relative()
@@ -394,6 +435,76 @@ fn render_block(
     }
 
     wrapper
+}
+
+// ── Navigation strip (DEV-31) ─────────────────────────────────────
+
+/// Extract (searchable text, artifact path) for the nav index from a block.
+fn block_index_fields(kind: &BlockKind) -> (String, Option<String>) {
+    match kind {
+        BlockKind::Text { content, .. } => (content.clone(), None),
+        BlockKind::Thinking { content } => (content.clone(), None),
+        BlockKind::ToolCall {
+            tool_name,
+            input_summary,
+            ..
+        } => (format!("{tool_name} {input_summary}"), None),
+        BlockKind::Diff { file_path, .. } => (file_path.clone(), Some(file_path.clone())),
+        BlockKind::UserPrompt { content } => (content.clone(), None),
+        BlockKind::SessionEnd { .. } => ("session complete".to_string(), None),
+        _ => (String::new(), None),
+    }
+}
+
+/// A compact tally of navigable points, shown above the feed.
+fn render_nav_strip(counts: NavCounts, font_size: f32) -> Div {
+    let chip = |n: usize, label: &str, color: Hsla| {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(4.0))
+            .child(
+                div()
+                    .text_color(color)
+                    .text_size(px(font_size - 3.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child(format!("{n}")),
+            )
+            .child(
+                div()
+                    .text_color(theme().text_faint)
+                    .text_size(px(font_size - 3.0))
+                    .child(label.to_string()),
+            )
+    };
+
+    let mut row = div()
+        .w_full()
+        .flex()
+        .flex_wrap()
+        .gap(px(12.0))
+        .items_center()
+        .px(px(12.0))
+        .py(px(4.0))
+        .border_b_1()
+        .border_color(with_alpha(theme().text_faint, 0.15))
+        .bg(theme().bg_base);
+    if counts.phases > 0 {
+        row = row.child(chip(counts.phases, "phases", theme().ready));
+    }
+    if counts.decisions > 0 {
+        row = row.child(chip(counts.decisions, "decisions", theme().attention));
+    }
+    if counts.outcomes > 0 {
+        row = row.child(chip(counts.outcomes, "outcomes", theme().success));
+    }
+    if counts.errors > 0 {
+        row = row.child(chip(counts.errors, "errors", theme().danger));
+    }
+    if counts.artifacts > 0 {
+        row = row.child(chip(counts.artifacts, "files", theme().text_secondary));
+    }
+    row
 }
 
 // ── Narrative emphasis (DEV-29) ───────────────────────────────────

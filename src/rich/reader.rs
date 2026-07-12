@@ -26,6 +26,23 @@ pub struct JumpTarget {
     pub label: String,
 }
 
+/// Tally of navigable points by kind (for the navigation strip).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NavCounts {
+    pub phases: usize,
+    pub decisions: usize,
+    pub outcomes: usize,
+    pub errors: usize,
+    pub artifacts: usize,
+}
+
+impl NavCounts {
+    /// Whether there is anything worth showing a navigation strip for.
+    pub fn any(&self) -> bool {
+        self.phases + self.decisions + self.outcomes + self.errors + self.artifacts > 0
+    }
+}
+
 /// The categories a reader can jump between.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JumpKind {
@@ -98,17 +115,42 @@ impl NarrativeIndex {
 
     /// All jump targets in document order.
     pub fn jump_targets(&self) -> Vec<JumpTarget> {
-        self.entries.iter().filter_map(|e| self.target_for(e)).collect()
+        self.entries
+            .iter()
+            .filter_map(|e| self.target_for(e))
+            .collect()
+    }
+
+    /// Tally of navigable points by kind, for a compact navigation strip.
+    pub fn counts(&self) -> NavCounts {
+        let mut c = NavCounts::default();
+        for t in self.jump_targets() {
+            match t.kind {
+                JumpKind::Phase(_) => c.phases += 1,
+                JumpKind::Decision => c.decisions += 1,
+                JumpKind::Outcome => c.outcomes += 1,
+                JumpKind::Error => c.errors += 1,
+                JumpKind::Artifact => c.artifacts += 1,
+            }
+        }
+        c
     }
 
     /// Jump targets of a single kind — for "next phase", "next decision", etc.
     pub fn jump_targets_of(&self, kind: JumpKind) -> Vec<JumpTarget> {
-        self.jump_targets().into_iter().filter(|t| t.kind == kind).collect()
+        self.jump_targets()
+            .into_iter()
+            .filter(|t| t.kind == kind)
+            .collect()
     }
 
     /// The first jump target at or after `from_seq` matching `pred` — the
     /// primitive behind "jump to next error / next decision".
-    pub fn next_target(&self, from_seq: usize, pred: impl Fn(&JumpKind) -> bool) -> Option<JumpTarget> {
+    pub fn next_target(
+        &self,
+        from_seq: usize,
+        pred: impl Fn(&JumpKind) -> bool,
+    ) -> Option<JumpTarget> {
         self.jump_targets()
             .into_iter()
             .find(|t| t.seq > from_seq && pred(&t.kind))
@@ -130,7 +172,12 @@ impl NarrativeIndex {
             (JumpKind::Phase(p), _) => p.label().to_string(),
             _ => first_line_preview(&e.text, 60),
         };
-        Some(JumpTarget { seq: e.seq, turn: e.turn, kind, label })
+        Some(JumpTarget {
+            seq: e.seq,
+            turn: e.turn,
+            kind,
+            label,
+        })
     }
 }
 
@@ -210,17 +257,47 @@ mod tests {
     use super::*;
 
     fn ann(turn: usize, role: NarrativeRole) -> Annotation {
-        Annotation { turn, phase: None, role, agent: None }
+        Annotation {
+            turn,
+            phase: None,
+            role,
+            agent: None,
+        }
     }
 
     fn sample_index() -> NarrativeIndex {
         let mut idx = NarrativeIndex::new();
-        idx.record(0, &ann(1, NarrativeRole::Prompt), "fix the parser bug", None);
-        idx.record(1, &ann(1, NarrativeRole::PhaseHeader(LocusPhase::Observe)), "Phase 1: OBSERVE", None);
-        idx.record(2, &ann(1, NarrativeRole::Decision), "Decision: add a ledger", None);
-        idx.record(3, &ann(1, NarrativeRole::Activity), "wrote file", Some("src/stream/ledger.rs"));
-        idx.record(4, &ann(1, NarrativeRole::Unsupported, ), "{unknown}", None);
-        idx.record(5, &ann(1, NarrativeRole::Outcome), "Summary: shipped it", None);
+        idx.record(
+            0,
+            &ann(1, NarrativeRole::Prompt),
+            "fix the parser bug",
+            None,
+        );
+        idx.record(
+            1,
+            &ann(1, NarrativeRole::PhaseHeader(LocusPhase::Observe)),
+            "Phase 1: OBSERVE",
+            None,
+        );
+        idx.record(
+            2,
+            &ann(1, NarrativeRole::Decision),
+            "Decision: add a ledger",
+            None,
+        );
+        idx.record(
+            3,
+            &ann(1, NarrativeRole::Activity),
+            "wrote file",
+            Some("src/stream/ledger.rs"),
+        );
+        idx.record(4, &ann(1, NarrativeRole::Unsupported), "{unknown}", None);
+        idx.record(
+            5,
+            &ann(1, NarrativeRole::Outcome),
+            "Summary: shipped it",
+            None,
+        );
         idx
     }
 
@@ -245,6 +322,19 @@ mod tests {
     }
 
     #[test]
+    fn counts_tally_navigable_kinds() {
+        let idx = sample_index();
+        let c = idx.counts();
+        assert_eq!(c.phases, 1);
+        assert_eq!(c.decisions, 1);
+        assert_eq!(c.outcomes, 1);
+        assert_eq!(c.errors, 1);
+        assert_eq!(c.artifacts, 1);
+        assert!(c.any());
+        assert!(!NavCounts::default().any());
+    }
+
+    #[test]
     fn artifact_target_labels_with_path() {
         let idx = sample_index();
         let art = idx.jump_targets_of(JumpKind::Artifact);
@@ -256,10 +346,14 @@ mod tests {
     #[test]
     fn next_target_finds_following_error() {
         let idx = sample_index();
-        let t = idx.next_target(0, |k| matches!(k, JumpKind::Error)).unwrap();
+        let t = idx
+            .next_target(0, |k| matches!(k, JumpKind::Error))
+            .unwrap();
         assert_eq!(t.seq, 4);
         // Nothing after the error is another error.
-        assert!(idx.next_target(4, |k| matches!(k, JumpKind::Error)).is_none());
+        assert!(idx
+            .next_target(4, |k| matches!(k, JumpKind::Error))
+            .is_none());
     }
 
     #[test]
