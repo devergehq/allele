@@ -1,10 +1,10 @@
 # Contributor Licence Agreement
 
 **Project:** Allele
-**Version:** 1.0
-**Effective date:** 2026-04-11
+**Version:** 1.1
+**Effective date:** 2026-04-11 (amended 2026-07-12)
 
-Thank you for your interest in contributing to Allele (the "Project"), maintained by Patrick D'Orival ("the Maintainer"). This Contributor Licence Agreement ("Agreement") sets out the terms under which You contribute code, documentation, or other materials to the Project. It is designed to be lightweight, to protect both You and the Project, and to preserve flexibility in how the Project may be licensed in the future.
+Thank you for your interest in contributing to Allele (the "Project"), maintained by **Deverge Consulting Pty Ltd**, an Australian company ("the Maintainer"). Contributions to the Project are administered on the Maintainer's behalf by Patrick D'Orival. This Contributor Licence Agreement ("Agreement") sets out the terms under which You contribute code, documentation, or other materials to the Project. It is designed to be lightweight, to protect both You and the Project, and to preserve flexibility in how the Project may be licensed in the future.
 
 By signing this Agreement (via the CLA Assistant bot on a pull request, or by any other means the Maintainer accepts), You accept and agree to the following terms for Your present and future Contributions submitted to the Project.
 

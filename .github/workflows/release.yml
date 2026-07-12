@@ -1,0 +1,130 @@
+name: Release
+
+# Builds an unsigned macOS .app bundle and publishes it as a GitHub Release.
+#
+# Triggers:
+#   * push of a `v*` tag        — the normal release path.
+#   * manual "Run workflow"     — builds an arbitrary `ref` (used to release a
+#                                 commit older than this workflow file, e.g. v0.1.0).
+#
+# See RELEASING.md for the full process.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create/publish (e.g. v0.1.0)'
+        required: true
+        type: string
+      ref:
+        description: 'Git ref to build (commit SHA, branch, or tag). Defaults to the tag.'
+        required: false
+        type: string
+      prerelease:
+        description: 'Mark the GitHub Release as a pre-release'
+        required: false
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - name: Resolve tag, ref, and version
+        id: vars
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+            REF="${{ github.event.inputs.ref }}"
+            [ -z "$REF" ] && REF="$TAG"
+            PRERELEASE="${{ github.event.inputs.prerelease }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+            REF="${GITHUB_SHA}"
+            # 0.x tags and any pre-release-style tag (with a hyphen) are pre-releases.
+            case "$TAG" in
+              v0.*|*-*) PRERELEASE=true ;;
+              *)        PRERELEASE=false ;;
+            esac
+          fi
+          VERSION="${TAG#v}"
+          {
+            echo "tag=$TAG"
+            echo "ref=$REF"
+            echo "version=$VERSION"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building $TAG from $REF (version $VERSION, prerelease=$PRERELEASE)"
+
+      - name: Checkout ${{ steps.vars.outputs.ref }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.vars.outputs.ref }}
+          fetch-depth: 0
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-
+
+      - name: Build and bundle Allele.app
+        run: |
+          set -euo pipefail
+          chmod +x script/bundle-mac.sh
+          ./script/bundle-mac.sh --release
+
+      - name: Stamp release version into Info.plist
+        run: |
+          set -euo pipefail
+          PLIST="target/release/Allele.app/Contents/Info.plist"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString ${{ steps.vars.outputs.version }}" "$PLIST"
+
+      - name: Package .app into a zip
+        id: package
+        run: |
+          set -euo pipefail
+          ASSET="Allele-${{ steps.vars.outputs.tag }}-macos.zip"
+          ditto -c -k --sequesterRsrc --keepParent "target/release/Allele.app" "$ASSET"
+          echo "asset=$ASSET" >> "$GITHUB_OUTPUT"
+          shasum -a 256 "$ASSET"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.vars.outputs.tag }}"
+          REF="${{ steps.vars.outputs.ref }}"
+          ASSET="${{ steps.package.outputs.asset }}"
+          PRERELEASE_FLAG=""
+          [ "${{ steps.vars.outputs.prerelease }}" = "true" ] && PRERELEASE_FLAG="--prerelease"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists — uploading/replacing asset."
+            gh release upload "$TAG" "$ASSET" --clobber
+          else
+            gh release create "$TAG" "$ASSET" \
+              --target "$REF" \
+              --title "$TAG" \
+              --generate-notes \
+              $PRERELEASE_FLAG
+          fi

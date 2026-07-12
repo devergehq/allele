@@ -150,7 +150,7 @@ symlinked into `~/.allele` for cross-machine parity.
 - **Settings:** `~/.config/allele/settings.json` for user preferences.
 - **Async runtime:** tokio.
 
-See `docs/architecture.md` for the full technical deep-dive and `ROADMAP.md` for the phased build plan.
+See `docs/architecture.md` for the full technical deep-dive.
 
 ## Agent UI capture
 
@@ -188,20 +188,23 @@ Build and run:
 git clone https://github.com/devergehq/allele.git
 cd allele
 cargo build --release
-./target/release/allele
+./target/release/Allele
 ```
 
 First build is slow (~5-10 minutes) because GPUI and alacritty_terminal are large crates. Incremental builds are fast.
 
-## Distribution
+## Releases & downloads
 
-Currently source-only. Pre-built binaries are not provided, and the project is not signed or notarised. If you build it yourself, macOS Gatekeeper will treat it as an unsigned local binary (which is fine for local use). If you receive a build from someone else, you may need to clear the quarantine attribute:
+Tagged releases are published on the **[GitHub Releases page](https://github.com/devergehq/allele/releases)**, each carrying an auto-generated changelog and a pre-built macOS app bundle (`Allele-<version>-macos.zip`). See [CHANGELOG.md](CHANGELOG.md) for curated highlights and [RELEASING.md](RELEASING.md) for how releases are cut and versioned.
+
+**Binaries are currently unsigned and un-notarised** (pre-alpha). After downloading and unzipping, clear the Gatekeeper quarantine attribute before the first launch:
 
 ```sh
-xattr -d com.apple.quarantine ./allele
+xattr -dr com.apple.quarantine Allele.app
+open Allele.app
 ```
 
-A macOS `.app` bundle target exists for clipboard history app compatibility — see the build output.
+Alternatively, right-click the app in Finder and choose **Open** the first time. Signed and notarised builds are planned for the beta milestone. If you'd rather build it yourself, see [Building from source](#building-from-source) above.
 
 ## Project status
 
@@ -220,7 +223,9 @@ All core phases complete. Working:
 - Per-session drawer terminal panel
 - Auto-naming sessions from first prompt
 
-See `ROADMAP.md` for the full phase breakdown and remaining work.
+## Roadmap
+
+The live roadmap is tracked in **[Linear (Deverge / DEV)](https://linear.app/deverge/team/DEV/all)** — the source of truth for scope, priority, and status. Shipped work lands on the **[Releases page](https://github.com/devergehq/allele/releases)** and is summarised in **[CHANGELOG.md](CHANGELOG.md)**. A published, always-current roadmap page (derived from Linear) is planned.
 
 ## Contributing
 
@@ -234,11 +239,11 @@ Response times are side-project pace (days to weeks). If you need faster, please
 
 ## Licensing
 
-Allele is licensed under the **[Apache License 2.0](LICENSE)**. You are free to use, modify, distribute, and (if you wish) commercialise it, subject to the terms of that licence.
+Allele is copyright © 2026 **Deverge Consulting Pty Ltd** and contributors, and is licensed under the **[Apache License 2.0](LICENSE)**. You are free to use, modify, distribute, and (if you wish) commercialise it, subject to the terms of that licence.
 
-Contributors grant an additional broad licence via the [CLA](CLA.md) that preserves the maintainer's right to dual-licence the project in the future. Contributors retain copyright to their contributions and can continue to use them in other projects under any licence they choose.
+Contributors grant an additional broad licence via the [CLA](CLA.md) that preserves Deverge Consulting Pty Ltd's right to dual-licence the project in the future. Contributors retain copyright to their contributions and can continue to use them in other projects under any licence they choose.
 
-The maintainer currently has no plans to dual-licence or monetise Allele. The CLA exists solely to keep that option open if circumstances change.
+There are currently no plans to dual-licence or monetise Allele. The CLA exists solely to keep that option open if circumstances change.
 
 ## Acknowledgements
 
