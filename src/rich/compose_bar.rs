@@ -37,6 +37,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use uuid::Uuid;
 
 use super::attachments::{self, Attachment};
+use super::composer_model::{AttachmentChip, AttachmentKind, AttachmentState};
 
 // ── Actions ───────────────────────────────────────────────────────
 
@@ -132,6 +133,10 @@ pub struct ComposeBar {
     /// No `Arc<Mutex<...>>` needed. If this field ever gets touched from a
     /// background thread, that invariant breaks.
     attachments: Vec<Attachment>,
+    /// Attachments that failed to prepare, surfaced inline as dismissable
+    /// error chips instead of vanishing silently (DEV-30/79). These are never
+    /// submitted — they only inform the user.
+    attachment_failures: Vec<AttachmentChip>,
     /// Chunks from large clipboard pastes, referenced by sentinel tokens
     /// (`⟪paste-N-K⟫`) embedded in `content`. Expanded back into the
     /// submitted prompt by `expand_paste_tokens`.
@@ -170,6 +175,7 @@ impl ComposeBar {
             font_size,
             session_id,
             attachments: Vec::new(),
+            attachment_failures: Vec::new(),
             pasted_chunks: Vec::new(),
             next_paste_id: 0,
         }
@@ -538,6 +544,7 @@ impl ComposeBar {
         }
         let attachments = std::mem::take(&mut self.attachments);
         self.pasted_chunks.clear();
+        self.attachment_failures.clear();
         cx.emit(ComposeBarEvent::Submit { text, attachments });
         self.content.clear();
         self.selected_range = 0..0;
@@ -585,17 +592,39 @@ impl ComposeBar {
     /// abort the remaining files — the user sees cards for what
     /// succeeded rather than an all-or-nothing failure dialog.
     fn add_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
-        let mut any_added = false;
+        let mut changed = false;
         for src in paths {
             match attachments::copy_file(src, &self.session_id) {
                 Ok(a) => {
                     self.attachments.push(a);
-                    any_added = true;
+                    changed = true;
                 }
-                Err(e) => warn!("allele: failed to attach {}: {e}", src.display()),
+                Err(e) => {
+                    // Surface the failure inline instead of dropping it (DEV-79).
+                    let name = src
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("file")
+                        .to_string();
+                    self.attachment_failures.push(AttachmentChip {
+                        name,
+                        kind: attachment_kind_for(src),
+                        state: AttachmentState::Failed(e.to_string()),
+                    });
+                    changed = true;
+                    warn!("allele: failed to attach {}: {e}", src.display());
+                }
             }
         }
-        if any_added {
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// Dismiss one inline attachment-failure chip (DEV-79).
+    fn dismiss_failure(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.attachment_failures.len() {
+            self.attachment_failures.remove(index);
             cx.notify();
         }
     }
@@ -1221,7 +1250,9 @@ impl Render for ComposeBar {
         // Attachment cards — one row, wraps. Rendered above the text input when
         // there are attachments. Each card shows filename + ✕ remove button,
         // and a ⚠ warning icon for binary-unreadable formats (PRD D7).
-        let attachments_row = if self.attachments.is_empty() {
+        // Failed attachments (DEV-79) render as dismissable red error chips.
+        let attachments_row = if self.attachments.is_empty() && self.attachment_failures.is_empty()
+        {
             None
         } else {
             let mut row = gpui::div()
@@ -1277,6 +1308,39 @@ impl Render for ComposeBar {
                             ),
                     );
                 row = row.child(card);
+            }
+            // DEV-79: inline failure chips (⚠ name — reason  ✕).
+            for (index, chip) in self.attachment_failures.iter().enumerate() {
+                let reason = chip.failure().unwrap_or("failed to attach").to_string();
+                let fail_card = gpui::div()
+                    .id(ElementId::Name(format!("attachment-fail-{index}").into()))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.0))
+                    .px(px(8.0))
+                    .py(px(4.0))
+                    .rounded(px(6.0))
+                    .bg(with_alpha(theme().danger, 0.12))
+                    .child(icon(icons::ALERT_TRIANGLE, font_size - 2.0, theme().danger))
+                    .child(
+                        gpui::div()
+                            .text_size(px(font_size - 2.0))
+                            .text_color(theme().danger)
+                            .child(format!("{} — {reason}", chip.name)),
+                    )
+                    .child(
+                        gpui::div()
+                            .id(ElementId::Name(format!("attachment-fail-x-{index}").into()))
+                            .cursor(CursorStyle::PointingHand)
+                            .child(icon(icons::X, font_size - 2.0, theme().danger))
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                    this.dismiss_failure(index, cx);
+                                }),
+                            ),
+                    );
+                row = row.child(fail_card);
             }
             Some(row)
         };
@@ -1364,6 +1428,25 @@ impl Render for ComposeBar {
 /// chunk was already consumed) are left as-is.
 ///
 /// Pure function — no GPUI. Tested directly.
+/// Classify a path as image vs file by extension, for a failure chip's icon.
+fn attachment_kind_for(path: &std::path::Path) -> AttachmentKind {
+    let is_image = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            matches!(
+                e.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "tiff" | "heic"
+            )
+        })
+        .unwrap_or(false);
+    if is_image {
+        AttachmentKind::Image
+    } else {
+        AttachmentKind::File
+    }
+}
+
 fn expand_paste_tokens(content: &str, chunks: &[PastedChunk]) -> String {
     // Fast path: no chunks tracked → no substitution possible.
     if chunks.is_empty() {
@@ -1407,6 +1490,27 @@ mod tests {
         let chunks: Vec<PastedChunk> = vec![];
         assert_eq!(expand_paste_tokens("hello world", &chunks), "hello world");
         assert_eq!(expand_paste_tokens("", &chunks), "");
+    }
+
+    #[test]
+    fn attachment_kind_classifies_images_by_extension() {
+        use std::path::Path;
+        assert_eq!(
+            attachment_kind_for(Path::new("/tmp/shot.PNG")),
+            AttachmentKind::Image
+        );
+        assert_eq!(
+            attachment_kind_for(Path::new("a/b/pic.jpeg")),
+            AttachmentKind::Image
+        );
+        assert_eq!(
+            attachment_kind_for(Path::new("notes.md")),
+            AttachmentKind::File
+        );
+        assert_eq!(
+            attachment_kind_for(Path::new("no_ext")),
+            AttachmentKind::File
+        );
     }
 
     #[test]
