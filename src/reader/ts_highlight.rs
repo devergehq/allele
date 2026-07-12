@@ -61,6 +61,7 @@ fn lang_for_ext(ext: &str) -> Option<&'static str> {
         "go" => "go",
         "json" => "json",
         "sh" | "bash" | "zsh" => "bash",
+        "php" | "phtml" | "php3" | "php4" | "php5" | "phps" => "php",
         _ => return None,
     })
 }
@@ -109,6 +110,13 @@ fn build_config(lang: &str) -> Option<HighlightConfiguration> {
                 tree_sitter_bash::LANGUAGE.into(),
                 tree_sitter_bash::HIGHLIGHT_QUERY,
                 "",
+                "",
+            ),
+            // LANGUAGE_PHP parses `.php` with its embedded HTML/text regions.
+            "php" => (
+                tree_sitter_php::LANGUAGE_PHP.into(),
+                tree_sitter_php::HIGHLIGHTS_QUERY,
+                tree_sitter_php::INJECTIONS_QUERY,
                 "",
             ),
             _ => return None,
