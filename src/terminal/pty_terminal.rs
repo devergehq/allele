@@ -24,13 +24,22 @@ pub type CleanupHook = Box<dyn FnOnce() + Send + 'static>;
 pub struct ShellCommand {
     pub program: String,
     pub args: Vec<String>,
+    /// Extra environment variables applied on top of the inherited env when
+    /// the PTY is spawned. Used by agent adapters to pass session context to
+    /// their event integration (e.g. opencode's `ALLELE_SESSION_ID`).
+    pub env: Vec<(String, String)>,
 }
 
 impl ShellCommand {
-    pub fn with_args(program: impl Into<String>, args: Vec<String>) -> Self {
+    pub fn with_args_env(
+        program: impl Into<String>,
+        args: Vec<String>,
+        env: Vec<(String, String)>,
+    ) -> Self {
         Self {
             program: program.into(),
             args,
+            env,
         }
     }
 }
@@ -153,8 +162,13 @@ impl PtyTerminal {
         // Harmless for non-CC processes that ignore the variable.
         env.insert("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string());
 
-        // Build the shell configuration
+        // Build the shell configuration. Adapter-supplied env vars are
+        // merged into the PTY environment here so agent event integrations
+        // (e.g. opencode's ALLELE_SESSION_ID) reach the child process.
         let shell = command.map(|cmd| {
+            for (k, v) in cmd.env {
+                env.insert(k, v);
+            }
             Shell::new(cmd.program, cmd.args)
         });
 

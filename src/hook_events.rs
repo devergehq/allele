@@ -17,24 +17,23 @@ use crate::settings::AgentKind;
 use crate::{git, hooks, session, settings};
 
 impl AppState {
-    /// Apply a single hook event to the matching session.
+    /// Apply a single agent event to the matching session.
     ///
-    /// Transition rules:
-    /// - `Notification` → `AwaitingInput` (permission prompt / idle wait)
-    /// - `Stop` → `ResponseReady` (Claude finished a response turn)
-    /// - `PreToolUse` / `PostToolUse` → `Running` (Claude is actively executing
-    ///   a tool, which means any prior permission prompt has been resolved)
-    /// - `UserPromptSubmit` → `Running` (user submitted new input)
-    /// - `SessionStart` → `Running`
-    /// - `SessionEnd` → `Idle` (PTY watcher handles actual process exit → Done)
+    /// Interpretation is delegated to the session's [`AgentAdapter`]: the raw
+    /// native `kind` string is translated into a canonical
+    /// [`agents::Lifecycle`] (plus a cache directive), and this method maps
+    /// that onto [`SessionStatus`]. The mapping is agent-agnostic — Claude,
+    /// opencode, and any future agent share this code path and differ only in
+    /// their adapter's `interpret_event`.
     ///
-    /// Note: `Stop` no longer has special handling for `AwaitingInput`.
-    /// In practice Claude doesn't emit `Stop` while still blocked on a
-    /// prompt — `Stop` means the response turn completed, which implies
-    /// any prompt was resolved. The earlier "don't stomp" rule was
-    /// overly defensive and caused stuck AwaitingInput states in the wild.
+    /// Canonical transitions:
+    /// - `Start`         → `Idle`          (session started / context reset)
+    /// - `Busy`          → `Running`       (tool ran / user submitted / streaming)
+    /// - `AwaitingInput` → `AwaitingInput` (blocked on a permission / idle wait)
+    /// - `TurnComplete`  → `ResponseReady` (finished a response turn)
+    /// - `End`           → `Idle`          (PTY watcher handles real exit → Done)
     pub(crate) fn apply_hook_event(&mut self, event: hooks::HookEvent, cx: &mut Context<Self>) {
-        // Find the matching session by its internal ID (= Claude session ID).
+        // Find the matching session by its internal ID (= agent session ID).
         let Some((p_idx, s_idx)) = self.projects.iter().enumerate().find_map(|(p_idx, p)| {
             p.sessions
                 .iter()
@@ -49,6 +48,20 @@ impl AppState {
             return;
         };
 
+        // Resolve the adapter for this session's agent BEFORE taking a mutable
+        // borrow of the session. Sessions with no recorded agent (legacy)
+        // default to Claude, preserving prior behaviour.
+        let agent_kind = self
+            .projects
+            .get(p_idx)
+            .and_then(|p| p.sessions.get(s_idx))
+            .and_then(|s| s.agent_id.as_ref())
+            .and_then(|aid| self.user_settings.agents.iter().find(|a| &a.id == aid))
+            .map(|a| a.kind)
+            .unwrap_or(AgentKind::Claude);
+        let adapter = crate::agents::adapter_for(agent_kind);
+        let signal = adapter.interpret_event(&event.kind);
+
         let Some(session) = self
             .projects
             .get_mut(p_idx)
@@ -61,15 +74,17 @@ impl AppState {
         let now = std::time::SystemTime::now();
         session.last_active = now;
 
-        use hooks::HookKind;
+        use crate::agents::{CacheOp, Lifecycle};
         use session::SessionStatus;
 
         // --- Auto-naming: trigger on any event while label is a placeholder ---
-        // Fires on the first hook event (usually SessionStart) to start polling
-        // for the .prompt file. If that attempt times out (user hadn't typed yet),
-        // a retry fires on UserPromptSubmit when the .prompt file is guaranteed
-        // to exist.
+        // Fires on the first event (usually session start) to start polling
+        // for the .prompt file. If that attempt times out (user hadn't typed
+        // yet), a retry fires on the user-prompt-submit event when the .prompt
+        // file is guaranteed to exist. Placeholder prefixes cover every
+        // built-in agent's default label plus the bare shell.
         let is_placeholder = session.label.starts_with("Claude ")
+            || session.label.starts_with("opencode ")
             || session.label.starts_with("Shell ");
         let auto_name_data = if is_placeholder {
             if !session.auto_naming_fired {
@@ -80,11 +95,11 @@ impl AppState {
                     session.id, session.label, event.kind
                 );
                 Some((session.id.clone(), session.clone_path.clone()))
-            } else if matches!(event.kind, HookKind::UserPromptSubmit) {
+            } else if event.kind == "user_prompt_submit" {
                 // Retry — first attempt likely timed out before user typed.
                 // The .prompt file is guaranteed to exist now.
                 info!(
-                    "auto-naming: retrying for {} on UserPromptSubmit (label still {:?})",
+                    "auto-naming: retrying for {} on user_prompt_submit (label still {:?})",
                     session.id, session.label
                 );
                 Some((session.id.clone(), session.clone_path.clone()))
@@ -95,36 +110,42 @@ impl AppState {
             None
         };
 
-        // Cache PreToolUse context — it fires before the permission
-        // Notification and carries the tool name + input we need.
-        if matches!(event.kind, HookKind::PreToolUse) {
-            if let Some(ref payload) = event.payload {
-                if let Some(ref name) = payload.tool_name {
-                    session.last_pre_tool_use = Some(PreToolUseContext {
-                        tool_name: name.clone(),
-                        tool_input: payload.tool_input.clone(),
-                    });
+        // Apply the adapter's tool-context cache directive. Claude caches on
+        // PreToolUse (to enrich a later Notification that lacks the tool name)
+        // and clears on PostToolUse; opencode carries the tool inline so it
+        // always leaves the cache untouched.
+        match signal.cache_op {
+            CacheOp::Set => {
+                if let Some(ref payload) = event.payload {
+                    if let Some(ref name) = payload.tool_name {
+                        session.last_pre_tool_use = Some(PreToolUseContext {
+                            tool_name: name.clone(),
+                            tool_input: payload.tool_input.clone(),
+                        });
+                    }
                 }
             }
+            CacheOp::Clear => {
+                session.last_pre_tool_use = None;
+            }
+            CacheOp::Leave => {}
         }
 
-        // Clear stale PreToolUse cache on PostToolUse — the tool completed
-        // (auto-accepted or user-accepted), so any cached data is resolved.
-        // Without this, a later Notification wrongly inherits the tool context
-        // and renders as a permission prompt instead of a generic waiting state.
-        if matches!(event.kind, HookKind::PostToolUse) {
-            session.last_pre_tool_use = None;
-        }
+        // Populate attention context whenever we enter AwaitingInput. Prefer
+        // tool details carried inline on the event (opencode); otherwise fall
+        // back to the cached PreToolUse context (Claude, whose Notification
+        // hook doesn't carry the tool name itself).
+        if signal.lifecycle == Lifecycle::AwaitingInput {
+            let message = event.payload.as_ref().and_then(|p| p.message.clone());
+            let inline_tool = event.payload.as_ref().and_then(|p| p.tool_name.clone());
 
-        // Populate attention context on Notification by pulling tool details
-        // from the cached PreToolUse rather than scraping the terminal buffer.
-        if matches!(event.kind, HookKind::Notification) {
-            let message = event
-                .payload
-                .as_ref()
-                .and_then(|p| p.message.clone());
-
-            let (tool_name, tool_summary) = if let Some(ctx) = session.last_pre_tool_use.take() {
+            let (tool_name, tool_summary) = if let Some(name) = inline_tool {
+                let summary = summarise_tool_input(
+                    &name,
+                    event.payload.as_ref().and_then(|p| p.tool_input.as_ref()),
+                );
+                (Some(name), summary)
+            } else if let Some(ctx) = session.last_pre_tool_use.take() {
                 let summary = summarise_tool_input(&ctx.tool_name, ctx.tool_input.as_ref());
                 (Some(ctx.tool_name), summary)
             } else {
@@ -138,35 +159,25 @@ impl AppState {
             });
         }
 
-        // Clear attention context on any transition OUT of AwaitingInput.
+        // Clear attention context on any real transition OUT of AwaitingInput
+        // (an Ignore event isn't a transition, and re-entering AwaitingInput
+        // keeps the freshly-set context above).
         if prior == SessionStatus::AwaitingInput
-            && !matches!(event.kind, HookKind::Notification)
+            && !matches!(signal.lifecycle, Lifecycle::AwaitingInput | Lifecycle::Ignore)
         {
             session.attention_context = None;
         }
 
-        let new_status = match event.kind {
-            HookKind::Notification => Some(SessionStatus::AwaitingInput),
-            HookKind::Stop => Some(SessionStatus::ResponseReady),
-            HookKind::PreToolUse | HookKind::PostToolUse => {
-                // Tool execution is the key clearing signal. If Claude is
-                // running a tool, any prior permission prompt has been
-                // resolved and we should be back in Running. If we were
-                // already Running, this is a no-op (the prior==new guard
-                // below drops it).
-                Some(SessionStatus::Running)
-            }
-            HookKind::UserPromptSubmit => Some(SessionStatus::Running),
-            HookKind::SessionStart => Some(SessionStatus::Idle),
-            HookKind::SessionEnd => {
-                // /clear and real exits both fire SessionEnd, but only real
-                // exits kill the PTY process. The PTY watcher in the render
-                // loop catches actual process death via has_exited() — so we
-                // never mark Done here. Transition to Idle (context was reset,
-                // session is alive and waiting for new input).
-                Some(SessionStatus::Idle)
-            }
-            HookKind::Other => None,
+        let new_status = match signal.lifecycle {
+            Lifecycle::Start => Some(SessionStatus::Idle),
+            Lifecycle::Busy => Some(SessionStatus::Running),
+            Lifecycle::AwaitingInput => Some(SessionStatus::AwaitingInput),
+            Lifecycle::TurnComplete => Some(SessionStatus::ResponseReady),
+            // Real process exits are caught by the PTY watcher (→ Done); an
+            // End signal (e.g. /clear) just means the context was reset and
+            // the session is alive and waiting for new input.
+            Lifecycle::End => Some(SessionStatus::Idle),
+            Lifecycle::Ignore => None,
         };
 
         let Some(new_status) = new_status else {
@@ -277,9 +288,12 @@ impl AppState {
         // session likely touched the working tree. The refresh runs on the
         // background executor and newer generations supersede older ones,
         // so firing per-event is safe.
+        // Refresh when a tool completed (Claude PostToolUse) or the turn
+        // finished (any agent's TurnComplete → ResponseReady) — both imply the
+        // working tree may have changed. `new_status` is set by this point.
         if self.right_panel.visible
             && self.active == Some(cursor)
-            && matches!(event.kind, HookKind::PostToolUse | HookKind::Stop)
+            && (event.kind == "post_tool_use" || new_status == SessionStatus::ResponseReady)
         {
             self.refresh_changes(cx);
         }

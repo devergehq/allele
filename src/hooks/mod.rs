@@ -202,46 +202,19 @@ pub struct HookEventLine {
     pub title: Option<String>,
 }
 
-/// The kinds of events we route into status transitions. Unknown kinds are
-/// tolerated and logged, not an error (forward compatibility).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HookKind {
-    Notification,
-    Stop,
-    UserPromptSubmit,
-    SessionStart,
-    SessionEnd,
-    /// Fires right before Claude runs a tool. Critical clearing signal:
-    /// once PreToolUse fires we know the permission prompt (if any) was
-    /// resolved and Claude is actively executing.
-    PreToolUse,
-    /// Fires after a tool completes. Belt-and-suspenders clearing signal.
-    PostToolUse,
-    Other,
-}
-
-impl HookKind {
-    pub fn parse(s: &str) -> Self {
-        match s {
-            "notification" => HookKind::Notification,
-            "stop" => HookKind::Stop,
-            "user_prompt_submit" => HookKind::UserPromptSubmit,
-            "session_start" => HookKind::SessionStart,
-            "session_end" => HookKind::SessionEnd,
-            "pre_tool_use" => HookKind::PreToolUse,
-            "post_tool_use" => HookKind::PostToolUse,
-            _ => HookKind::Other,
-        }
-    }
-}
-
-/// A fully-resolved hook event ready for the main thread to consume.
+/// A fully-resolved agent event ready for the main thread to consume.
+///
+/// `kind` is the raw native event name as written to the events file
+/// (Claude hook name, or a canonical name emitted by the opencode plugin).
+/// Interpretation into a status transition is the responsibility of the
+/// session's agent adapter (`AgentAdapter::interpret_event`) — this struct
+/// is a dumb transport carrier and knows nothing about any specific agent.
 #[derive(Debug, Clone)]
 pub struct HookEvent {
     pub session_id: String,
-    pub kind: HookKind,
-    /// Rich payload data from the hook receiver — populated when jq is
-    /// available and the hook carries tool/notification context.
+    pub kind: String,
+    /// Rich payload data from the event producer — populated when the event
+    /// carries tool/notification context.
     pub payload: Option<HookPayload>,
 }
 
@@ -360,7 +333,7 @@ impl EventWatcher {
                         };
                         out.push(HookEvent {
                             session_id: session_id.clone(),
-                            kind: HookKind::parse(&parsed.kind),
+                            kind: parsed.kind,
                             payload,
                         });
                     }

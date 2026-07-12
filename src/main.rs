@@ -2078,6 +2078,11 @@ fn main() {
             }
         };
 
+        // Install each agent adapter's on-disk event integration (e.g. the
+        // opencode events plugin). Idempotent; failures are logged and
+        // swallowed so a broken integration never blocks launch.
+        agents::install_integrations();
+
         // Memory watchdog — monitors RSS and force-quits at 8 GB to
         // prevent runaway leaks from bricking the system.
         memory_watchdog::spawn(cx);
