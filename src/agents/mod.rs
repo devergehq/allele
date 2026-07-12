@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use crate::settings::{AgentConfig, AgentKind};
 use crate::terminal::ShellCommand;
 
+mod opencode_plugin;
+
 /// Inputs needed to build a spawn command.
 pub struct SpawnCtx<'a> {
     pub session_id: &'a str,
@@ -25,6 +27,78 @@ pub struct SpawnCtx<'a> {
     /// and the caller wants a resume. Ignored by adapters that don't
     /// distinguish between fresh and resumed sessions.
     pub has_history: bool,
+}
+
+// ── Canonical event vocabulary ───────────────────────────────────────────
+//
+// This is the contract boundary between allele core and the agent adapters.
+// Allele core speaks `Lifecycle`; each adapter translates its agent's native
+// event vocabulary (Claude hook names, opencode plugin event types, …) into
+// these canonical signals. `apply_hook_event` maps `Lifecycle` onto
+// `SessionStatus`. Adding a new agent means implementing an adapter — never
+// touching the core transition logic.
+
+/// Canonical, agent-independent lifecycle signal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Lifecycle {
+    /// Session started or its context was reset — becomes `Idle`.
+    Start,
+    /// Agent is actively working (a tool ran, the user submitted, the model
+    /// is streaming) — becomes `Running` and clears any attention state.
+    Busy,
+    /// Agent is blocked on a permission prompt or an idle wait and needs the
+    /// user to act — becomes `AwaitingInput`.
+    AwaitingInput,
+    /// Agent finished a response turn — becomes `ResponseReady`.
+    TurnComplete,
+    /// Session ended / context reset (real PTY exit is handled separately by
+    /// the exit watcher) — becomes `Idle`.
+    End,
+    /// No status change.
+    Ignore,
+}
+
+/// Directive for the per-session tool-context cache. Claude's `Notification`
+/// hook doesn't carry the tool it wants to run (the preceding `PreToolUse`
+/// does), so Claude caches on `PreToolUse` (`Set`) and clears on
+/// `PostToolUse` (`Clear`). opencode carries the tool inline on its
+/// permission event, so it never needs the cache (`Leave`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheOp {
+    Set,
+    Clear,
+    Leave,
+}
+
+/// An interpreted event: the canonical transition plus a cache directive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EventSignal {
+    pub lifecycle: Lifecycle,
+    pub cache_op: CacheOp,
+}
+
+impl EventSignal {
+    /// A no-op signal — unknown / uninteresting events resolve to this.
+    pub const IGNORE: Self = Self {
+        lifecycle: Lifecycle::Ignore,
+        cache_op: CacheOp::Leave,
+    };
+
+    const fn just(lifecycle: Lifecycle) -> Self {
+        Self { lifecycle, cache_op: CacheOp::Leave }
+    }
+
+    const fn with_cache(lifecycle: Lifecycle, cache_op: CacheOp) -> Self {
+        Self { lifecycle, cache_op }
+    }
+}
+
+/// Spawn-time event wiring for an agent: extra CLI args and env vars that
+/// activate event emission into allele's shared events directory.
+#[derive(Debug, Clone, Default)]
+pub struct EventIntegration {
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
 }
 
 /// Per-kind command-building behaviour.
@@ -46,6 +120,29 @@ pub trait AgentAdapter: Send + Sync {
     /// Whether this adapter knows how to resume a session from an id.
     fn supports_resume(&self) -> bool {
         false
+    }
+
+    // ── Event integration ────────────────────────────────────────────────
+
+    /// One-time, idempotent install of any on-disk assets this agent needs
+    /// to emit lifecycle events into allele's shared events directory
+    /// (Claude's `hooks.json`, opencode's plugin file, …). Called once at
+    /// app startup. Default: nothing to install.
+    fn install_integration(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Spawn-time wiring that activates event emission: extra CLI args
+    /// and/or env vars applied to the session's PTY. Default: none.
+    fn event_integration(&self, _ctx: &SpawnCtx) -> EventIntegration {
+        EventIntegration::default()
+    }
+
+    /// Translate one native event `kind` string (as written to the shared
+    /// events file) into a canonical [`EventSignal`]. Default: `Ignore`,
+    /// so agents with no event integration never move a session's status.
+    fn interpret_event(&self, _kind: &str) -> EventSignal {
+        EventSignal::IGNORE
     }
 }
 
@@ -72,10 +169,6 @@ impl AgentAdapter for ClaudeAdapter {
             "--name".into(),
             ctx.label.into(),
         ];
-        if let Some(hooks) = ctx.hooks_settings_path {
-            args.push("--settings".into());
-            args.push(hooks.into());
-        }
         args.extend(extra.iter().cloned());
         args
     }
@@ -87,12 +180,48 @@ impl AgentAdapter for ClaudeAdapter {
         };
         args.push("--name".into());
         args.push(ctx.label.into());
-        if let Some(hooks) = ctx.hooks_settings_path {
-            args.push("--settings".into());
-            args.push(hooks.into());
-        }
         args.extend(extra.iter().cloned());
         args
+    }
+
+    /// Claude's hook receiver + `hooks.json` are installed by
+    /// [`crate::hooks::install_if_missing`], driven from the startup path
+    /// (it also returns the settings path the caller threads into
+    /// [`SpawnCtx`]). Nothing extra to do here.
+    fn install_integration(&self) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    /// Event emission is activated by pointing `claude --settings` at the
+    /// installed hooks file. The path is threaded in via `SpawnCtx` so tests
+    /// (and callers) stay in control of it.
+    fn event_integration(&self, ctx: &SpawnCtx) -> EventIntegration {
+        let mut integ = EventIntegration::default();
+        if let Some(hooks) = ctx.hooks_settings_path {
+            integ.args = vec!["--settings".into(), hooks.into()];
+        }
+        integ
+    }
+
+    /// Map Claude Code hook names onto canonical lifecycle signals. This is
+    /// the single source of truth for Claude's status transitions.
+    fn interpret_event(&self, kind: &str) -> EventSignal {
+        match kind {
+            "session_start" => EventSignal::just(Lifecycle::Start),
+            "user_prompt_submit" => EventSignal::just(Lifecycle::Busy),
+            // PreToolUse: Claude is executing a tool, which clears any prior
+            // permission prompt. Cache the tool context to enrich a later
+            // Notification (which doesn't carry the tool name itself).
+            "pre_tool_use" => EventSignal::with_cache(Lifecycle::Busy, CacheOp::Set),
+            // PostToolUse: tool finished — belt-and-suspenders clearing signal.
+            // Drop the cached context so a later Notification doesn't inherit
+            // a resolved tool.
+            "post_tool_use" => EventSignal::with_cache(Lifecycle::Busy, CacheOp::Clear),
+            "notification" => EventSignal::just(Lifecycle::AwaitingInput),
+            "stop" => EventSignal::just(Lifecycle::TurnComplete),
+            "session_end" => EventSignal::just(Lifecycle::End),
+            _ => EventSignal::IGNORE,
+        }
     }
 }
 
@@ -122,6 +251,45 @@ impl AgentAdapter for OpencodeAdapter {
         let mut args = vec!["--continue".into()];
         args.extend(extra.iter().cloned());
         args
+    }
+
+    /// Install the allele events plugin into opencode's global plugin dir.
+    /// Opencode auto-loads every file there at startup, so no per-spawn arg
+    /// is needed — only the env bridge below.
+    fn install_integration(&self) -> std::io::Result<()> {
+        opencode_plugin::install()
+    }
+
+    /// opencode has no `--settings`-style hook flag; instead its plugin runs
+    /// inside the opencode process and reads these env vars to know which
+    /// allele session it belongs to and where to write events. Each session
+    /// runs in its own clone/process, so the id is unambiguous per PTY.
+    fn event_integration(&self, ctx: &SpawnCtx) -> EventIntegration {
+        let mut env = vec![("ALLELE_SESSION_ID".to_string(), ctx.session_id.to_string())];
+        if let Some(dir) = crate::hooks::events_dir() {
+            env.push((
+                "ALLELE_EVENTS_DIR".to_string(),
+                dir.to_string_lossy().to_string(),
+            ));
+        }
+        EventIntegration { args: Vec::new(), env }
+    }
+
+    /// Map the canonical `kind` strings the allele opencode plugin writes
+    /// onto lifecycle signals. The plugin already normalises opencode's
+    /// native event types (`session.idle`, `permission.asked`, …) to these
+    /// names, so this mapping is deliberately thin. opencode carries tool
+    /// context inline on its permission event, so no cache dance is needed.
+    fn interpret_event(&self, kind: &str) -> EventSignal {
+        match kind {
+            "session_start" => EventSignal::just(Lifecycle::Start),
+            "user_prompt_submit" => EventSignal::just(Lifecycle::Busy),
+            "busy" => EventSignal::just(Lifecycle::Busy),
+            "awaiting_input" => EventSignal::just(Lifecycle::AwaitingInput),
+            "turn_complete" => EventSignal::just(Lifecycle::TurnComplete),
+            "session_end" => EventSignal::just(Lifecycle::End),
+            _ => EventSignal::IGNORE,
+        }
     }
 }
 
@@ -202,12 +370,28 @@ pub fn build_command(
         return None;
     }
     let adapter = adapter_for(agent.kind);
-    let args = if resume && adapter.supports_resume() {
+    let mut args = if resume && adapter.supports_resume() {
         adapter.build_resume_args(ctx, &agent.extra_args)
     } else {
         adapter.build_new_session_args(ctx, &agent.extra_args)
     };
-    Some(ShellCommand::with_args(path, args))
+    // Layer in the adapter's event-integration wiring (Claude's --settings,
+    // opencode's ALLELE_SESSION_ID env, …) so status reporting works.
+    let integration = adapter.event_integration(ctx);
+    args.extend(integration.args);
+    Some(ShellCommand::with_args_env(path, args, integration.env))
+}
+
+/// Install every built-in adapter's on-disk event integration. Idempotent;
+/// called once at app startup alongside [`crate::hooks::install_if_missing`].
+/// Failures are logged and swallowed — a missing integration degrades status
+/// reporting for that agent but must never block the app from launching.
+pub fn install_integrations() {
+    for kind in [AgentKind::Claude, AgentKind::Opencode, AgentKind::Generic] {
+        if let Err(e) = adapter_for(kind).install_integration() {
+            tracing::warn!("agent integration install failed for {kind:?}: {e}");
+        }
+    }
 }
 
 /// Pick the agent that should run for a given project, respecting the
@@ -347,6 +531,88 @@ mod tests {
         // Explicit (stored on session) wins over project override.
         let a = resolve(&agents, Some("claude"), Some("opencode"), Some("claude")).unwrap();
         assert_eq!(a.id, "claude");
+    }
+
+    #[test]
+    fn claude_interpret_event_maps_hook_names() {
+        let a = ClaudeAdapter;
+        assert_eq!(a.interpret_event("session_start").lifecycle, Lifecycle::Start);
+        assert_eq!(a.interpret_event("user_prompt_submit").lifecycle, Lifecycle::Busy);
+        assert_eq!(a.interpret_event("notification").lifecycle, Lifecycle::AwaitingInput);
+        assert_eq!(a.interpret_event("stop").lifecycle, Lifecycle::TurnComplete);
+        assert_eq!(a.interpret_event("session_end").lifecycle, Lifecycle::End);
+        // PreToolUse caches tool context; PostToolUse clears it.
+        let pre = a.interpret_event("pre_tool_use");
+        assert_eq!(pre.lifecycle, Lifecycle::Busy);
+        assert_eq!(pre.cache_op, CacheOp::Set);
+        let post = a.interpret_event("post_tool_use");
+        assert_eq!(post.lifecycle, Lifecycle::Busy);
+        assert_eq!(post.cache_op, CacheOp::Clear);
+        // Unknown kinds are ignored.
+        assert_eq!(a.interpret_event("wat").lifecycle, Lifecycle::Ignore);
+    }
+
+    #[test]
+    fn opencode_interpret_event_maps_canonical_names() {
+        let a = OpencodeAdapter;
+        assert_eq!(a.interpret_event("session_start").lifecycle, Lifecycle::Start);
+        assert_eq!(a.interpret_event("busy").lifecycle, Lifecycle::Busy);
+        assert_eq!(a.interpret_event("awaiting_input").lifecycle, Lifecycle::AwaitingInput);
+        assert_eq!(a.interpret_event("turn_complete").lifecycle, Lifecycle::TurnComplete);
+        assert_eq!(a.interpret_event("session_end").lifecycle, Lifecycle::End);
+        // opencode never uses the tool-context cache.
+        assert_eq!(a.interpret_event("busy").cache_op, CacheOp::Leave);
+        assert_eq!(a.interpret_event("nope").lifecycle, Lifecycle::Ignore);
+    }
+
+    #[test]
+    fn opencode_event_integration_sets_session_env() {
+        let a = OpencodeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "opencode 1",
+            hooks_settings_path: None,
+            has_history: false,
+        };
+        let integ = a.event_integration(&ctx);
+        assert!(integ.args.is_empty(), "opencode needs no extra CLI args");
+        let sid = integ
+            .env
+            .iter()
+            .find(|(k, _)| k == "ALLELE_SESSION_ID")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(sid, Some("sid-123"));
+    }
+
+    #[test]
+    fn opencode_command_carries_session_env() {
+        let agent = cfg("opencode", AgentKind::Opencode, Some("/bin/true"), true);
+        let ctx = SpawnCtx {
+            session_id: "sid-xyz",
+            label: "opencode 1",
+            hooks_settings_path: None,
+            has_history: false,
+        };
+        let cmd = build_command(&agent, &ctx, false).expect("agent has path");
+        assert!(cmd
+            .env
+            .iter()
+            .any(|(k, v)| k == "ALLELE_SESSION_ID" && v == "sid-xyz"));
+    }
+
+    #[test]
+    fn generic_adapter_ignores_all_events() {
+        let a = GenericAdapter;
+        assert_eq!(a.interpret_event("stop").lifecycle, Lifecycle::Ignore);
+        assert_eq!(a.interpret_event("session_start").lifecycle, Lifecycle::Ignore);
+        assert!(a.event_integration(&SpawnCtx {
+            session_id: "x",
+            label: "y",
+            hooks_settings_path: None,
+            has_history: false,
+        })
+        .env
+        .is_empty());
     }
 
     #[test]
