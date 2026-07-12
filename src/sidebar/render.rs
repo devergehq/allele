@@ -935,6 +935,10 @@ pub(crate) fn build_sidebar_items(
             sidebar_items.push(
                 div()
                     .id(SharedString::from(format!("archives-header-{p_idx}")))
+                    // Opaque recessed fill: without it the row shows only the
+                    // sidebar's 85%-translucent surface and washes out (bright
+                    // window content blooms through, text becomes illegible).
+                    .bg(theme().bg_sunken)
                     // Lineage rail — archives are variants of the trunk.
                     .border_l_2()
                     .border_color(with_alpha(theme().ready, 0.3))
@@ -970,6 +974,9 @@ pub(crate) fn build_sidebar_items(
                     div()
                         .id(SharedString::from(format!("archive-{p_idx}-{a_idx}")))
                         .group(format!("arch-{p_idx}-{a_idx}"))
+                        // Opaque recessed fill so the archive row stays legible
+                        // over the translucent sidebar (see header note above).
+                        .bg(theme().bg_sunken)
                         .border_l_2()
                         .border_color(with_alpha(theme().ready, 0.3))
                         .pl(px(24.0))
