@@ -180,7 +180,15 @@ impl AppState {
                 false,
             ));
 
-        root = root.child(deferred(anchored().position(position).snap_to_window().child(menu)));
+        root = root.child(self.dismissable_popover(
+            position,
+            menu,
+            |this: &mut Self, cx| {
+                this.editor.context_menu = None;
+                cx.notify();
+            },
+            cx,
+        ));
         root
     }
 
