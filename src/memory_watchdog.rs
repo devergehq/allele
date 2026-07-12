@@ -5,6 +5,7 @@
 //! the hard limit (8 GB). The crash report is written to
 //! `~/.allele/crash/` so the user can inspect it after restart.
 
+use std::collections::VecDeque;
 use std::fs;
 use std::path::PathBuf;
 use tracing::{error, info, warn};
@@ -13,6 +14,38 @@ const SOFT_LIMIT_BYTES: u64 = 4 * 1024 * 1024 * 1024; // 4 GB
 const HARD_LIMIT_BYTES: u64 = 8 * 1024 * 1024 * 1024; // 8 GB
 const CHECK_INTERVAL_SECS: u64 = 30;
 const LOG_INTERVAL_SECS: u64 = 300; // 5 minutes
+const GROWTH_WINDOW_SAMPLES: usize = 10; // five minutes at the check interval
+const SUSTAINED_GROWTH_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Default)]
+struct GrowthTracker {
+    samples: VecDeque<u64>,
+}
+
+impl GrowthTracker {
+    fn observe(&mut self, rss: u64) -> bool {
+        self.samples.push_back(rss);
+        if self.samples.len() > GROWTH_WINDOW_SAMPLES {
+            self.samples.pop_front();
+        }
+        if self.samples.len() < GROWTH_WINDOW_SAMPLES {
+            return false;
+        }
+        let growth = self
+            .samples
+            .back()
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(self.samples.front().copied().unwrap_or(0));
+        let rising_intervals = self
+            .samples
+            .iter()
+            .zip(self.samples.iter().skip(1))
+            .filter(|(before, after)| after >= before)
+            .count();
+        growth >= SUSTAINED_GROWTH_BYTES && rising_intervals >= GROWTH_WINDOW_SAMPLES - 2
+    }
+}
 
 /// Read the current process's resident set size in bytes (macOS only).
 /// Returns `None` on non-macOS or if the syscall fails.
@@ -47,6 +80,34 @@ pub fn process_rss_bytes() -> Option<u64> {
 
 fn crash_dir() -> Option<PathBuf> {
     Some(dirs::home_dir()?.join(".allele").join("crash"))
+}
+
+fn diagnostic_dir() -> Option<PathBuf> {
+    Some(dirs::home_dir()?.join(".allele").join("diagnostics"))
+}
+
+fn write_growth_report(samples: &VecDeque<u64>) {
+    let Some(dir) = diagnostic_dir() else { return };
+    if fs::create_dir_all(&dir).is_err() {
+        return;
+    }
+    let path = dir.join(format!("memory-growth-{}.txt", chrono_timestamp()));
+    let values = samples
+        .iter()
+        .enumerate()
+        .map(|(index, rss)| format!("sample {index}: {}", format_bytes(*rss)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let report = format!(
+        "Allele sustained memory growth diagnostic\n\n{values}\n\nNo telemetry was sent. Attach this local file when reporting a long-session stability issue.\n"
+    );
+    match fs::write(&path, report) {
+        Ok(()) => warn!(
+            "Sustained memory growth detected; diagnostic written to {}",
+            path.display()
+        ),
+        Err(e) => warn!("Failed to write memory growth diagnostic: {e}"),
+    }
 }
 
 fn format_bytes(bytes: u64) -> String {
@@ -127,6 +188,8 @@ pub fn spawn(cx: &gpui::App) {
             let mut last_rss: u64 = 0;
             let mut last_log_time = std::time::Instant::now();
             let mut soft_warned = false;
+            let mut growth_reported = false;
+            let mut growth = GrowthTracker::default();
 
             loop {
                 timer_executor
@@ -155,6 +218,11 @@ pub fn spawn(cx: &gpui::App) {
                 }
 
                 last_rss = rss;
+
+                if growth.observe(rss) && !growth_reported {
+                    write_growth_report(&growth.samples);
+                    growth_reported = true;
+                }
 
                 // Soft limit warning
                 if rss >= SOFT_LIMIT_BYTES && !soft_warned {
@@ -195,4 +263,43 @@ pub fn spawn(cx: &gpui::App) {
             }
         })
         .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn growth_tracker_ignores_stable_memory() {
+        let mut tracker = GrowthTracker::default();
+        for _ in 0..GROWTH_WINDOW_SAMPLES {
+            assert!(!tracker.observe(256 * 1024 * 1024));
+        }
+    }
+
+    #[test]
+    fn growth_tracker_detects_sustained_growth() {
+        let mut tracker = GrowthTracker::default();
+        let intervals = GROWTH_WINDOW_SAMPLES as u64 - 1;
+        let step = (SUSTAINED_GROWTH_BYTES + intervals - 1) / intervals;
+        let mut detected = false;
+        for index in 0..GROWTH_WINDOW_SAMPLES {
+            detected = tracker.observe(256 * 1024 * 1024 + step * index as u64);
+        }
+        assert!(detected);
+    }
+
+    #[test]
+    fn growth_tracker_ignores_single_spike() {
+        let mut tracker = GrowthTracker::default();
+        for index in 0..GROWTH_WINDOW_SAMPLES {
+            let rss = if index == GROWTH_WINDOW_SAMPLES - 1 {
+                1024 * 1024 * 1024
+            } else {
+                256 * 1024 * 1024
+            };
+            tracker.observe(rss);
+        }
+        assert!(!tracker.observe(256 * 1024 * 1024));
+    }
 }
