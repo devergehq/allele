@@ -698,6 +698,31 @@ impl AppState {
                     }
                     cx.notify();
                 }
+                rich::RichViewEvent::RejectPermission => {
+                    // Decline the tool call by sending Escape to the PTY —
+                    // Claude Code's permission prompt treats Esc as "No" (DEV-78).
+                    if let Some(cursor) = this.active {
+                        if let Some(session) = this
+                            .projects
+                            .get_mut(cursor.project_idx)
+                            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                        {
+                            if let Some(ref tv) = session.terminal_view {
+                                tv.read(cx).send_input(b"\x1b");
+                            }
+                            session.status = session::SessionStatus::Running;
+                            session.attention_context = None;
+                        }
+                    }
+                    cx.notify();
+                }
+                rich::RichViewEvent::OpenTerminal => {
+                    // Hand the prompt to the raw terminal so the user can
+                    // resolve it manually — switch to the terminal tab without
+                    // resolving the prompt ourselves (DEV-78).
+                    this.main_tab = MainTab::Claude;
+                    cx.notify();
+                }
             },
         )
         .detach();

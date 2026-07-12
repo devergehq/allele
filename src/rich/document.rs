@@ -732,6 +732,23 @@ mod permission_wiring_tests {
         doc.record_permission_decision(PermissionAction::Allow);
         assert!(doc.decision_log().is_empty());
     }
+
+    #[test]
+    fn reject_and_open_terminal_actions_are_recorded() {
+        for action in [PermissionAction::Reject, PermissionAction::OpenTerminal] {
+            let mut doc = RichDocument::new();
+            doc.push_permission_request(
+                Some("Write".into()),
+                Some("/etc/hosts".into()),
+                Some(serde_json::json!({ "file_path": "/etc/hosts" })),
+            );
+            doc.record_permission_decision(action);
+            let log = doc.decision_log();
+            assert_eq!(log.len(), 1);
+            assert_eq!(log.decisions()[0].action, action);
+            assert_eq!(log.decisions()[0].request.tool_name, "Write");
+        }
+    }
 }
 
 #[cfg(test)]

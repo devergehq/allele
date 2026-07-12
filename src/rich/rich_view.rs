@@ -45,6 +45,12 @@ pub enum RichViewEvent {
     /// User clicked "Allow" on a permission request block. The parent
     /// should send Enter to the session's PTY to approve the tool call.
     AllowPermission,
+    /// User clicked "Reject". The parent should send the decline keystroke
+    /// (Escape) to the session's PTY so the tool call is refused (DEV-78).
+    RejectPermission,
+    /// User clicked "Open in terminal". The parent should switch to the
+    /// terminal tab so the user can resolve the prompt manually (DEV-78).
+    OpenTerminal,
 }
 
 // ── View ──────────────────────────────────────────────────────────
@@ -1992,33 +1998,82 @@ fn render_permission_request(
         );
     }
 
-    // Allow button
+    // Action row: Allow / Reject / Open in terminal (DEV-78). The transcript
+    // sidecar is always attached to a session with a terminal, so all three
+    // apply here — `permissions::available_actions` gates this at the model
+    // level for callers that may lack a terminal.
     card = card.child(
-        div().w_full().min_w_0().mt(px(8.0)).pl(px(24.0)).child(
-            div()
-                .id("permission-allow-btn")
-                .px(px(12.0))
-                .py(px(4.0))
-                .rounded(px(6.0))
-                .bg(with_alpha(theme().success, 0.15))
-                .text_color(theme().success)
-                .text_size(px(font_size - 1.0))
-                .font_weight(FontWeight::BOLD)
-                .cursor(gpui::CursorStyle::PointingHand)
-                .child("Allow")
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _event, _window, cx| {
-                        // DEV-34: retain the decision before resolving.
-                        this.document
-                            .record_permission_decision(PermissionAction::Allow);
-                        cx.emit(RichViewEvent::AllowPermission);
-                    }),
-                ),
-        ),
+        div()
+            .w_full()
+            .min_w_0()
+            .mt(px(8.0))
+            .pl(px(24.0))
+            .flex()
+            .gap(px(8.0))
+            .items_center()
+            .child(permission_action_button(
+                "permission-allow-btn",
+                "Allow",
+                theme().success,
+                PermissionAction::Allow,
+                font_size,
+                cx,
+            ))
+            .child(permission_action_button(
+                "permission-reject-btn",
+                "Reject",
+                theme().danger,
+                PermissionAction::Reject,
+                font_size,
+                cx,
+            ))
+            .child(permission_action_button(
+                "permission-open-terminal-btn",
+                "Open in terminal",
+                theme().text_secondary,
+                PermissionAction::OpenTerminal,
+                font_size,
+                cx,
+            )),
     );
 
     card
+}
+
+/// One permission-card action button. Records the decision into the ledger's
+/// decision log, then emits the matching `RichViewEvent` for the parent to
+/// route into the PTY / UI (DEV-78).
+fn permission_action_button(
+    id: &'static str,
+    label: &'static str,
+    color: Hsla,
+    action: PermissionAction,
+    font_size: f32,
+    cx: &mut Context<RichView>,
+) -> Stateful<Div> {
+    div()
+        .id(id)
+        .px(px(12.0))
+        .py(px(4.0))
+        .rounded(px(6.0))
+        .bg(with_alpha(color, 0.15))
+        .text_color(color)
+        .text_size(px(font_size - 1.0))
+        .font_weight(FontWeight::BOLD)
+        .cursor(gpui::CursorStyle::PointingHand)
+        .child(label)
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, _window, cx| {
+                // Retain the decision before resolving (DEV-34/78).
+                this.document.record_permission_decision(action);
+                cx.emit(match action {
+                    PermissionAction::Allow => RichViewEvent::AllowPermission,
+                    PermissionAction::Reject => RichViewEvent::RejectPermission,
+                    PermissionAction::OpenTerminal => RichViewEvent::OpenTerminal,
+                });
+            }),
+        )
 }
 
 /// A small coloured risk badge ("LOW" / "MEDIUM" / "HIGH") for a permission
