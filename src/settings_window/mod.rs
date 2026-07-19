@@ -25,8 +25,10 @@ use crate::settings::{AgentConfig, AgentKind};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::AppState;
 
+mod browser;
 mod editor;
 mod widgets;
+use browser::BrowserSection;
 use editor::EditorSection;
 use widgets::{
     card, input_frame, labeled_row, section_header, section_note, section_title, toggle_switch,
@@ -78,8 +80,8 @@ pub struct SettingsWindowState {
     draft_input: Entity<TextInput>,
     /// Editor section (external-editor command).
     editor: EditorSection,
-    /// Mirrored browser-integration toggle.
-    browser_integration_enabled: bool,
+    /// Browser section (Chrome integration toggle).
+    browser: BrowserSection,
     /// Local mirror of the agents list + default, pushed back on every
     /// edit via `UpdateAgents`.
     agents: Vec<AgentConfig>,
@@ -203,7 +205,7 @@ impl SettingsWindowState {
             cleanup_paths: initial_paths,
             draft_input,
             editor: EditorSection::new(cx, initial_external_editor),
-            browser_integration_enabled: initial_browser_integration,
+            browser: BrowserSection::new(initial_browser_integration),
             agents: initial_agents,
             default_agent: initial_default_agent,
             agent_inputs: Vec::new(),
@@ -456,17 +458,6 @@ impl SettingsWindowState {
 
     // --- browser -------------------------------------------------------
 
-    fn push_browser_integration(&self, cx: &mut Context<Self>) {
-        let value = self.browser_integration_enabled;
-        self.app
-            .update(cx, |state: &mut AppState, cx| {
-                state.pending_action =
-                    Some(crate::SettingsAction::UpdateBrowserIntegration(value).into());
-                cx.notify();
-            })
-            .ok();
-    }
-
     // --- agents --------------------------------------------------------
 
     fn push_agents(&self, cx: &mut Context<Self>) {
@@ -678,7 +669,7 @@ fn render_pane(
         Section::Agents => render_agents_pane(this, cx).into_any_element(),
         Section::Naming => render_naming_pane(this, cx).into_any_element(),
         Section::Editor => this.editor.render(cx).into_any_element(),
-        Section::Browser => render_browser_pane(this, cx).into_any_element(),
+        Section::Browser => this.browser.render(cx).into_any_element(),
         Section::Appearance => render_appearance_pane(this, cx).into_any_element(),
     }
 }
@@ -905,55 +896,6 @@ fn render_appearance_pane(
                      same value from inside a terminal.",
         ))
         .child(card().child(controls))
-}
-
-fn render_browser_pane(
-    this: &mut SettingsWindowState,
-    cx: &mut Context<SettingsWindowState>,
-) -> impl IntoElement {
-    let enabled = this.browser_integration_enabled;
-    let toggle = div()
-        .id("browser-toggle")
-        .cursor_pointer()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _event, _window, cx| {
-                this.browser_integration_enabled = !this.browser_integration_enabled;
-                this.push_browser_integration(cx);
-                cx.notify();
-            }),
-        )
-        .child(toggle_switch("browser-knob", enabled))
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(theme().text_primary)
-                .child(if enabled { "Enabled" } else { "Disabled" }),
-        );
-
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .p(px(20.0))
-        .gap(px(12.0))
-        .child(section_title("Browser"))
-        .child(section_note(
-            "Link each Allele session to a tab in your running \
-                     Google Chrome. Switching sessions activates the \
-                     matching tab; new sessions open a tab at the project's \
-                     allele.json preview URL. Uses AppleScript against your \
-                     real Chrome (first use prompts for Automation \
-                     permission). When disabled, preview URLs fall back to \
-                     your system default browser.",
-        ))
-        .child(card().child(toggle))
 }
 
 fn render_infrastructure_pane(
