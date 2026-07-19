@@ -17,10 +17,8 @@
 //! `Changed` / `Submitted` events to push state out.
 
 use crate::theme::theme;
-use gpui::*;
-
-use crate::settings::AgentConfig;
 use crate::AppState;
+use gpui::*;
 
 mod agents;
 mod appearance;
@@ -89,40 +87,37 @@ pub struct SettingsWindowState {
 }
 
 impl SettingsWindowState {
-    pub fn new(
-        cx: &mut Context<Self>,
-        app: WeakEntity<AppState>,
-        initial_paths: Vec<String>,
-        initial_external_editor: String,
-        initial_browser_integration: bool,
-        initial_agents: Vec<AgentConfig>,
-        initial_default_agent: Option<String>,
-        initial_font_size: f32,
-        initial_git_pull_before_new_session: bool,
-        initial_promote_attention_sessions: bool,
-        initial_naming_claude_model: String,
-        initial_naming_opencode_model: String,
-        initial_base_infra_enabled: bool,
-    ) -> Self {
+    /// Build the window state, deriving every section's initial values from the
+    /// app's current `user_settings`. The main window remains the source of
+    /// truth; this just mirrors it into per-section state.
+    pub fn new(cx: &mut Context<Self>, app: WeakEntity<AppState>) -> Self {
+        let settings = app
+            .upgrade()
+            .map(|app| app.read(cx).user_settings.clone())
+            .unwrap_or_default();
+
         let mut s = Self {
             app,
             selected: Section::Sessions,
             sessions: SessionsSection::new(
                 cx,
-                initial_paths,
-                initial_git_pull_before_new_session,
-                initial_promote_attention_sessions,
+                settings.session_cleanup_paths.clone(),
+                settings.git_pull_before_new_session,
+                settings.promote_attention_sessions,
             ),
-            editor: EditorSection::new(cx, initial_external_editor),
-            browser: BrowserSection::new(initial_browser_integration),
-            agents: AgentsSection::new(initial_agents, initial_default_agent),
-            appearance: AppearanceSection::new(initial_font_size),
+            editor: EditorSection::new(
+                cx,
+                settings.external_editor_command.clone().unwrap_or_default(),
+            ),
+            browser: BrowserSection::new(settings.browser_integration_enabled),
+            agents: AgentsSection::new(settings.agents.clone(), settings.default_agent.clone()),
+            appearance: AppearanceSection::new(settings.font_size),
             naming: NamingSection::new(
                 cx,
-                initial_naming_claude_model,
-                initial_naming_opencode_model,
+                settings.naming.claude.model.clone().unwrap_or_default(),
+                settings.naming.opencode.model.clone().unwrap_or_default(),
             ),
-            infrastructure: InfraSection::new(initial_base_infra_enabled),
+            infrastructure: InfraSection::new(settings.base_infra_enabled),
             projects: ProjectsSection::new(cx),
         };
         s.agents.sync_inputs(cx);
@@ -221,17 +216,6 @@ fn render_pane(
 pub fn open_settings_window(
     cx: &mut App,
     app: WeakEntity<AppState>,
-    initial_paths: Vec<String>,
-    initial_external_editor: String,
-    initial_browser_integration: bool,
-    initial_agents: Vec<AgentConfig>,
-    initial_default_agent: Option<String>,
-    initial_font_size: f32,
-    initial_git_pull_before_new_session: bool,
-    initial_promote_attention_sessions: bool,
-    initial_naming_claude_model: String,
-    initial_naming_opencode_model: String,
-    initial_base_infra_enabled: bool,
 ) -> anyhow::Result<WindowHandle<SettingsWindowState>> {
     let window_size = size(px(640.0), px(440.0));
     let options = WindowOptions {
@@ -254,22 +238,6 @@ pub fn open_settings_window(
             }
             true
         });
-        cx.new(move |cx| {
-            SettingsWindowState::new(
-                cx,
-                app,
-                initial_paths,
-                initial_external_editor,
-                initial_browser_integration,
-                initial_agents,
-                initial_default_agent,
-                initial_font_size,
-                initial_git_pull_before_new_session,
-                initial_promote_attention_sessions,
-                initial_naming_claude_model,
-                initial_naming_opencode_model,
-                initial_base_infra_enabled,
-            )
-        })
+        cx.new(move |cx| SettingsWindowState::new(cx, app))
     })
 }

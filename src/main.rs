@@ -2746,51 +2746,11 @@ fn main() {
                             let Some(strong) = handle.upgrade() else {
                                 return;
                             };
-                            let (
-                                existing,
-                                paths,
-                                external_editor,
-                                browser_integration,
-                                agents_list,
-                                default_agent,
-                                font_size,
-                                git_pull_before_new_session,
-                                promote_attention_sessions,
-                                naming_claude_model,
-                                naming_opencode_model,
-                                base_infra_enabled,
-                            ) = strong.update(cx, |state: &mut AppState, _cx| {
-                                (
-                                    state.settings_window,
-                                    state.user_settings.session_cleanup_paths.clone(),
-                                    state
-                                        .user_settings
-                                        .external_editor_command
-                                        .clone()
-                                        .unwrap_or_default(),
-                                    state.user_settings.browser_integration_enabled,
-                                    state.user_settings.agents.clone(),
-                                    state.user_settings.default_agent.clone(),
-                                    state.user_settings.font_size,
-                                    state.user_settings.git_pull_before_new_session,
-                                    state.user_settings.promote_attention_sessions,
-                                    state
-                                        .user_settings
-                                        .naming
-                                        .claude
-                                        .model
-                                        .clone()
-                                        .unwrap_or_default(),
-                                    state
-                                        .user_settings
-                                        .naming
-                                        .opencode
-                                        .model
-                                        .clone()
-                                        .unwrap_or_default(),
-                                    state.user_settings.base_infra_enabled,
-                                )
-                            });
+                            // The window reads its per-section state from
+                            // `user_settings` itself; here we only need the
+                            // handle to an already-open window.
+                            let existing = strong
+                                .update(cx, |state: &mut AppState, _cx| state.settings_window);
 
                             if let Some(win) = existing {
                                 if win
@@ -2804,21 +2764,7 @@ fn main() {
                             }
 
                             let weak = handle.clone();
-                            match settings_window::open_settings_window(
-                                cx,
-                                weak,
-                                paths,
-                                external_editor,
-                                browser_integration,
-                                agents_list,
-                                default_agent,
-                                font_size,
-                                git_pull_before_new_session,
-                                promote_attention_sessions,
-                                naming_claude_model,
-                                naming_opencode_model,
-                                base_infra_enabled,
-                            ) {
+                            match settings_window::open_settings_window(cx, weak) {
                                 Ok(new_handle) => {
                                     strong.update(cx, |state: &mut AppState, _cx| {
                                         state.settings_window = Some(new_handle);
