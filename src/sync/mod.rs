@@ -27,6 +27,7 @@ pub mod ledger;
 pub mod meta;
 pub mod pull;
 pub mod push;
+pub mod rt;
 pub mod s3_store;
 pub mod store;
 
