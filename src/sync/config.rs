@@ -44,6 +44,18 @@ pub fn build_store(config: StoreConfig, key: DataKey) -> anyhow::Result<Box<dyn 
     }
 }
 
+/// Assemble the ready-to-use encrypting store from the user's settings and the
+/// Keychain-cached data key — what the sidebar sync-up/pull actions call. Errors
+/// with an actionable message when sync isn't configured or encryption isn't set
+/// up on this device.
+pub fn build_store_from_settings(settings: &SyncSettings) -> anyhow::Result<Box<dyn SyncStore>> {
+    let key = crate::sync::crypto::keychain::load()?.ok_or_else(|| {
+        anyhow::anyhow!("encryption isn't set up on this Mac — open Settings → Sync")
+    })?;
+    let config = s3_config_from(settings)?;
+    build_store(StoreConfig::S3(config), key)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1255,4 +1255,105 @@ impl AppState {
             .detach();
         }
     }
+
+    /// Push a session's bundle (metadata) up to the configured sync store.
+    /// Gathers the session/project data on the main thread, then does the git
+    /// precondition check + encrypted upload off-thread via the sync bridge.
+    pub(crate) fn sync_up_session(
+        &mut self,
+        cursor: crate::actions::SessionCursor,
+        cx: &mut Context<Self>,
+    ) {
+        // Gather everything the background task needs as owned values, so no
+        // borrow of `self.projects` outlives the mutable settings calls below.
+        let (persisted, project_name, source_path, clone_path, label) = {
+            let Some(project) = self.projects.get(cursor.project_idx) else {
+                return;
+            };
+            let Some(session) = project.sessions.get(cursor.session_idx) else {
+                return;
+            };
+            (
+                crate::state::PersistedSession::from_session(session, &project.id),
+                project.name.clone(),
+                project.source_path.clone(),
+                session.clone_path.clone(),
+                session.label.clone(),
+            )
+        };
+
+        let device_id = self.user_settings.sync.ensure_device_id();
+        self.mark_settings_dirty();
+        let settings = self.user_settings.sync.clone();
+        if !settings.is_configured() {
+            self.sync_notice = Some("Configure sync in Settings → Sync first.".to_string());
+            cx.notify();
+            return;
+        }
+
+        self.sync_notice = Some(format!("Syncing \u{201c}{label}\u{201d} up\u{2026}"));
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    sync_up_blocking(
+                        &settings,
+                        &persisted,
+                        &project_name,
+                        &source_path,
+                        clone_path.as_deref(),
+                        &device_id,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.sync_notice = Some(match outcome {
+                    Ok(rev) => format!("Synced \u{201c}{label}\u{201d} up (revision {rev})."),
+                    Err(e) => format!("Sync failed: {e}"),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+}
+
+/// Blocking worker for [`AppState::sync_up_session`] — runs on a background
+/// thread: enforce the git precondition, build the encrypted store, and push
+/// the bundle. Returns the pushed revision.
+fn sync_up_blocking(
+    settings: &crate::settings::SyncSettings,
+    session: &crate::state::PersistedSession,
+    project_name: &str,
+    source_path: &std::path::Path,
+    clone_path: Option<&std::path::Path>,
+    device_id: &str,
+) -> anyhow::Result<u64> {
+    // The bundle carries the transcript but not the code; refuse to push a
+    // session whose branch isn't fully on the remote (design §2.5).
+    if let Some(clone) = clone_path {
+        let readiness = crate::sync::push::check_push_ready(clone);
+        if let Some(warning) = readiness.warning() {
+            anyhow::bail!("{warning}");
+        }
+    }
+    let git_remote = crate::git::remote_url(source_path, "origin");
+    let project = crate::sync::meta::ProjectIdentity {
+        name: project_name.to_string(),
+        git_remote,
+    };
+    let store = crate::sync::config::build_store_from_settings(settings)?;
+    let mut ledger = crate::sync::ledger::SyncLedger::load();
+    let revision = crate::sync::rt::block_on(crate::sync::push::push_session_bundle(
+        store.as_ref(),
+        &mut ledger,
+        session,
+        project,
+        device_id,
+        std::time::SystemTime::now(),
+    ))?;
+    ledger.save()?;
+    Ok(revision)
 }

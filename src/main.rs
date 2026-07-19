@@ -2947,6 +2947,7 @@ fn main() {
                         user_settings: settings_for_window.clone(),
                         settings_window: None,
                         pull_warning: None,
+                        sync_notice: None,
                         main_tab: MainTab::Claude,
                         browser_status: String::new(),
                         scratch_pad: None,
@@ -3631,6 +3632,53 @@ impl Render for AppState {
                                         MouseButton::Left,
                                         cx.listener(|this: &mut Self, _event, _window, cx| {
                                             this.pull_warning = None;
+                                            cx.notify();
+                                        }),
+                                    ),
+                            ),
+                    );
+                }
+
+                // --- Session-sync notice banner (absolute overlay at top) ---
+                if let Some(ref notice) = self.sync_notice {
+                    let label = notice.clone();
+                    main_area = main_area.child(
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .px(px(16.0))
+                            .py(px(10.0))
+                            .bg(theme().bg_raised)
+                            .border_b_1()
+                            .border_color(theme().border_subtle)
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(theme().text_primary)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .id("sync-notice-dismiss-btn")
+                                    .cursor_pointer()
+                                    .px(px(10.0))
+                                    .py(px(4.0))
+                                    .rounded(px(6.0))
+                                    .bg(theme().bg_hover)
+                                    .text_size(px(11.0))
+                                    .text_color(theme().text_primary)
+                                    .hover(|s| s.bg(theme().bg_active))
+                                    .child("Dismiss")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this: &mut Self, _event, _window, cx| {
+                                            this.sync_notice = None;
                                             cx.notify();
                                         }),
                                     ),
