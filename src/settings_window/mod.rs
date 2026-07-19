@@ -30,13 +30,15 @@ mod browser;
 mod editor;
 mod infrastructure;
 mod naming;
+mod sessions;
 mod widgets;
 use appearance::AppearanceSection;
 use browser::BrowserSection;
 use editor::EditorSection;
 use infrastructure::InfraSection;
 use naming::NamingSection;
-use widgets::{card, input_frame, section_header, section_note, section_title, toggle_switch};
+use sessions::SessionsSection;
+use widgets::{card, input_frame, section_header, section_note, section_title};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -77,11 +79,8 @@ struct AgentInputs {
 pub struct SettingsWindowState {
     app: WeakEntity<AppState>,
     selected: Section,
-    /// Local mirror of `session_cleanup_paths`, kept in sync via
-    /// `push_cleanup_paths` on every edit.
-    cleanup_paths: Vec<String>,
-    /// "Add cleanup path" input.
-    draft_input: Entity<TextInput>,
+    /// Sessions section (cleanup paths + creation toggles).
+    sessions: SessionsSection,
     /// Editor section (external-editor command).
     editor: EditorSection,
     /// Browser section (Chrome integration toggle).
@@ -96,14 +95,6 @@ pub struct SettingsWindowState {
     agent_inputs: Vec<AgentInputs>,
     /// Appearance section (terminal font size).
     appearance: AppearanceSection,
-    /// Whether to run `git pull` on each project's source root before
-    /// creating a new session clone. Mirrored from
-    /// `Settings::git_pull_before_new_session`; pushed back via
-    /// `UpdateGitPullBeforeNewSession`.
-    git_pull_before_new_session: bool,
-    /// Whether attention-needed sessions are promoted to the top of the
-    /// sidebar list. Mirrored from `Settings::promote_attention_sessions`.
-    promote_attention_sessions: bool,
     /// Naming section (branch-naming mode + model overrides).
     naming: NamingSection,
     /// Infrastructure section (base-infra toggle).
@@ -134,17 +125,6 @@ impl SettingsWindowState {
         initial_naming_opencode_model: String,
         initial_base_infra_enabled: bool,
     ) -> Self {
-        let draft_input =
-            cx.new(|cx| TextInput::new(cx, "", "Add a path (e.g. tmp/pids/server.pid)"));
-        cx.subscribe(&draft_input, |this, input, event: &TextInputEvent, cx| {
-            if matches!(event, TextInputEvent::Submitted) {
-                let value = input.read(cx).text().to_string();
-                this.commit_draft(value, cx);
-                input.update(cx, |i, cx| i.set_text_silent("", cx));
-            }
-        })
-        .detach();
-
         let project_startup_input =
             cx.new(|cx| TextInput::new(cx, "", "e.g. session-start.sh {{unique_port}} {{folder}}"));
         cx.subscribe(
@@ -177,16 +157,18 @@ impl SettingsWindowState {
         let mut s = Self {
             app,
             selected: Section::Sessions,
-            cleanup_paths: initial_paths,
-            draft_input,
+            sessions: SessionsSection::new(
+                cx,
+                initial_paths,
+                initial_git_pull_before_new_session,
+                initial_promote_attention_sessions,
+            ),
             editor: EditorSection::new(cx, initial_external_editor),
             browser: BrowserSection::new(initial_browser_integration),
             agents: initial_agents,
             default_agent: initial_default_agent,
             agent_inputs: Vec::new(),
             appearance: AppearanceSection::new(initial_font_size),
-            git_pull_before_new_session: initial_git_pull_before_new_session,
-            promote_attention_sessions: initial_promote_attention_sessions,
             naming: NamingSection::new(
                 cx,
                 initial_naming_claude_model,
@@ -318,63 +300,6 @@ impl SettingsWindowState {
     }
 
     // --- cleanup paths -------------------------------------------------
-
-    fn push_cleanup_paths(&self, cx: &mut Context<Self>) {
-        let paths = self.cleanup_paths.clone();
-        self.app
-            .update(cx, |state: &mut AppState, cx| {
-                state.pending_action =
-                    Some(crate::SettingsAction::UpdateCleanupPaths(paths).into());
-                cx.notify();
-            })
-            .ok();
-    }
-
-    fn commit_draft(&mut self, value: String, cx: &mut Context<Self>) {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        if !self.cleanup_paths.iter().any(|p| p == trimmed) {
-            self.cleanup_paths.push(trimmed.to_string());
-            self.push_cleanup_paths(cx);
-        }
-        cx.notify();
-    }
-
-    fn remove_path(&mut self, idx: usize, cx: &mut Context<Self>) {
-        if idx < self.cleanup_paths.len() {
-            self.cleanup_paths.remove(idx);
-            self.push_cleanup_paths(cx);
-            cx.notify();
-        }
-    }
-
-    // --- editor --------------------------------------------------------
-
-    // --- font size ------------------------------------------------------
-
-    fn push_git_pull_before_new_session(&self, cx: &mut Context<Self>) {
-        let value = self.git_pull_before_new_session;
-        self.app
-            .update(cx, |state: &mut AppState, cx| {
-                state.pending_action =
-                    Some(crate::SettingsAction::UpdateGitPullBeforeNewSession(value).into());
-                cx.notify();
-            })
-            .ok();
-    }
-
-    fn push_promote_attention_sessions(&self, cx: &mut Context<Self>) {
-        let value = self.promote_attention_sessions;
-        self.app
-            .update(cx, |state: &mut AppState, cx| {
-                state.pending_action =
-                    Some(crate::SettingsAction::UpdatePromoteAttentionSessions(value).into());
-                cx.notify();
-            })
-            .ok();
-    }
 
     // --- naming --------------------------------------------------------
 
@@ -587,7 +512,7 @@ fn render_pane(
     match this.selected {
         Section::Projects => render_projects_pane(this, cx).into_any_element(),
         Section::Infrastructure => this.infrastructure.render(&this.app, cx).into_any_element(),
-        Section::Sessions => render_sessions_pane(this, cx).into_any_element(),
+        Section::Sessions => this.sessions.render(cx).into_any_element(),
         Section::Agents => render_agents_pane(this, cx).into_any_element(),
         Section::Naming => this.naming.render(&this.app, cx).into_any_element(),
         Section::Editor => this.editor.render(cx).into_any_element(),
@@ -856,154 +781,6 @@ fn render_projects_pane(
                         .child(project_list),
                 )
                 .child(card().flex_1().child(detail)),
-        )
-}
-
-fn render_sessions_pane(
-    this: &mut SettingsWindowState,
-    cx: &mut Context<SettingsWindowState>,
-) -> impl IntoElement {
-    let mut list = div().flex().flex_col().w_full().gap(px(4.0));
-    for (idx, path) in this.cleanup_paths.iter().enumerate() {
-        let row = div()
-            .flex()
-            .flex_row()
-            .w_full()
-            .min_w(px(0.0))
-            .items_center()
-            .gap(px(8.0))
-            .px(px(10.0))
-            .py(px(6.0))
-            .rounded(px(6.0))
-            .bg(theme().bg_surface)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w(px(0.0))
-                    .text_size(px(12.0))
-                    .text_color(theme().text_primary)
-                    .child(path.clone()),
-            )
-            .child(
-                div()
-                    .id(SharedString::from(format!("cleanup-remove-{idx}")))
-                    .cursor_pointer()
-                    .px(px(6.0))
-                    .py(px(2.0))
-                    .rounded(px(6.0))
-                    .hover(|s| s.bg(theme().bg_raised))
-                    .child(icon(icons::X, 12.0, theme().text_faint))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _event, _window, cx| {
-                            cx.stop_propagation();
-                            this.remove_path(idx, cx);
-                        }),
-                    ),
-            );
-        list = list.child(row);
-    }
-
-    let input = input_frame(this.draft_input.clone());
-
-    let pull_enabled = this.git_pull_before_new_session;
-    let pull_toggle = div()
-        .id("git-pull-toggle")
-        .cursor_pointer()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _event, _window, cx| {
-                this.git_pull_before_new_session = !this.git_pull_before_new_session;
-                this.push_git_pull_before_new_session(cx);
-                cx.notify();
-            }),
-        )
-        .child(toggle_switch("git-pull-knob", pull_enabled))
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(theme().text_primary)
-                .child("Run `git pull` on source before creating a new session"),
-        );
-
-    let promote_enabled = this.promote_attention_sessions;
-    let promote_toggle = div()
-        .id("promote-attention-toggle")
-        .cursor_pointer()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _event, _window, cx| {
-                this.promote_attention_sessions = !this.promote_attention_sessions;
-                this.push_promote_attention_sessions(cx);
-                cx.notify();
-            }),
-        )
-        .child(toggle_switch("promote-knob", promote_enabled))
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(theme().text_primary)
-                .child("Move attention-needed sessions to top of list"),
-        );
-
-    let add_button = div()
-        .id("cleanup-add")
-        .cursor_pointer()
-        .px(px(12.0))
-        .py(px(6.0))
-        .rounded(px(6.0))
-        .bg(theme().accent)
-        .text_size(px(12.0))
-        .text_color(theme().text_on_accent)
-        .hover(|s| s.bg(theme().lavender))
-        .child("Add")
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _event, _window, cx| {
-                cx.stop_propagation();
-                let value = this.draft_input.read(cx).text().to_string();
-                this.commit_draft(value, cx);
-                this.draft_input
-                    .update(cx, |i, cx| i.set_text_silent("", cx));
-            }),
-        );
-
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .p(px(20.0))
-        .gap(px(12.0))
-        .child(section_title("Sessions"))
-        .child(card().child(pull_toggle).child(promote_toggle))
-        .child(section_note(
-            "Cleanup paths — deleted from each new session clone. \
-                     Useful for stale runtime files that the parent working \
-                     tree left behind (e.g. .overmind.sock, \
-                     tmp/pids/server.pid).",
-        ))
-        .child(
-            card().child(list.w_full()).child(
-                div()
-                    .flex()
-                    .flex_row()
-                    .w_full()
-                    .min_w(px(0.0))
-                    .gap(px(8.0))
-                    .items_center()
-                    .child(input)
-                    .child(add_button),
-            ),
         )
 }
 
