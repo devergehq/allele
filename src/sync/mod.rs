@@ -10,18 +10,21 @@
 //! - [`meta`] — portable [`SessionBundleMeta`] schema + path normalization (DEV-190).
 //! - [`ledger`] — per-session revision/base ledger (DEV-192).
 //! - [`identity`] — project identity + git-remote resolver, the sync gate (DEV-191).
+//! - [`crypto`] / [`encrypting_store`] — client-side payload encryption (DEV-189).
 //!
-//! Public items are the surface later Phase 1 tasks build on, so a binary-crate
-//! dead-code sweep flags some until then — allow it.
+//! Public items are the surface the push/pull flows (DEV-193/194) build on, so a
+//! binary-crate dead-code sweep flags some until then — allow it.
 #![allow(dead_code)]
 
+pub mod crypto;
+pub mod encrypting_store;
 pub mod identity;
 pub mod ledger;
 pub mod meta;
 pub mod s3_store;
 pub mod store;
 
-// Flat `crate::sync::…` surface; consumers land in later Phase 1 tasks.
+// Flat `crate::sync::…` surface; consumers land in the push/pull flows.
 #[allow(unused_imports)]
 pub use meta::{ProjectIdentity, SessionBundleMeta, SyncHeader};
 #[allow(unused_imports)]
