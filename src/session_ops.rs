@@ -851,22 +851,36 @@ impl AppState {
         let Some(session) = project.sessions.get(cursor.session_idx) else {
             return;
         };
-        let Some(clone_path) = session.clone_path.clone() else {
-            warn!(
-                "Cannot resume session {} — no clone_path on record",
-                session.id
-            );
-            return;
+        // A pulled session records a clone_path rebased to this Mac's workspace
+        // root that was never actually created here — so a missing directory is
+        // just as much "no workspace" as a `None` path. Treat both the same:
+        // rebuild the workspace from the project + synced transcript, then this
+        // resume runs again for real.
+        let clone_path = match session.clone_path.clone() {
+            Some(path) if path.exists() => path,
+            other => {
+                if self.user_settings.sync.is_configured() {
+                    self.materialize_pulled_session(cursor, window, cx);
+                } else {
+                    warn!(
+                        "Cannot resume session {} — no workspace on this Mac ({}) and \
+                         sync isn't configured",
+                        session.id,
+                        other
+                            .as_deref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                    );
+                    self.sync_notice = Some(
+                        "This session was pulled from another Mac. Configure Settings → Sync \
+                         so its workspace can be rebuilt here."
+                            .to_string(),
+                    );
+                    cx.notify();
+                }
+                return;
+            }
         };
-
-        if !clone_path.exists() {
-            warn!(
-                "Cannot resume session {} — clone_path is missing on disk: {}",
-                session.id,
-                clone_path.display()
-            );
-            return;
-        }
 
         // Resume the *current* Claude conversation. For a session that was
         // `/clear`ed, this is the rotated id (persisted on the session), not
@@ -1255,4 +1269,537 @@ impl AppState {
             .detach();
         }
     }
+
+    /// Push a session's bundle (metadata) up to the configured sync store.
+    /// Gathers the session/project data on the main thread, then does the git
+    /// precondition check + encrypted upload off-thread via the sync bridge.
+    pub(crate) fn sync_up_session(
+        &mut self,
+        cursor: crate::actions::SessionCursor,
+        cx: &mut Context<Self>,
+    ) {
+        // Gather everything the background task needs as owned values, so no
+        // borrow of `self.projects` outlives the mutable settings calls below.
+        let (persisted, project_name, source_path, clone_path, label) = {
+            let Some(project) = self.projects.get(cursor.project_idx) else {
+                return;
+            };
+            let Some(session) = project.sessions.get(cursor.session_idx) else {
+                return;
+            };
+            (
+                crate::state::PersistedSession::from_session(session, &project.id),
+                project.name.clone(),
+                project.source_path.clone(),
+                session.clone_path.clone(),
+                session.label.clone(),
+            )
+        };
+
+        let device_id = self.user_settings.sync.ensure_device_id();
+        self.mark_settings_dirty();
+        let settings = self.user_settings.sync.clone();
+        if !settings.is_configured() {
+            self.sync_notice = Some("Configure sync in Settings → Sync first.".to_string());
+            cx.notify();
+            return;
+        }
+
+        self.sync_notice = Some(format!("Syncing \u{201c}{label}\u{201d} up\u{2026}"));
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move {
+                    sync_up_blocking(
+                        &settings,
+                        &persisted,
+                        &project_name,
+                        &source_path,
+                        clone_path.as_deref(),
+                        &device_id,
+                    )
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.sync_notice = Some(match outcome {
+                    Ok(rev) => format!("Synced \u{201c}{label}\u{201d} up (revision {rev})."),
+                    Err(e) => format!("Sync failed: {e}"),
+                });
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Open the remote-session browser: list the bundles in the configured
+    /// store off-thread, then present them in a picker overlay.
+    pub(crate) fn open_remote_browser(&mut self, cx: &mut Context<Self>) {
+        let device_id = self.user_settings.sync.ensure_device_id();
+        self.mark_settings_dirty();
+        let _ = device_id;
+        let settings = self.user_settings.sync.clone();
+        if !settings.is_configured() {
+            self.sync_notice = Some("Configure sync in Settings → Sync first.".to_string());
+            cx.notify();
+            return;
+        }
+
+        self.sync_notice = Some("Loading remote sessions\u{2026}".to_string());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let listed = cx
+                .background_executor()
+                .spawn(async move { list_remote_blocking(&settings) })
+                .await;
+            let _ = this.update(cx, |this, cx| match listed {
+                Ok(sessions) => {
+                    this.sync_notice = None;
+                    let entity =
+                        cx.new(|cx| crate::remote_browser::RemoteBrowser::new(cx, sessions));
+                    cx.subscribe(&entity, Self::on_remote_browser_event)
+                        .detach();
+                    this.remote_browser = Some(entity);
+                    cx.notify();
+                }
+                Err(e) => {
+                    this.sync_notice = Some(format!("Couldn't load remote sessions: {e}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Bridge the browser's `Pull` / `Close` events onto AppState.
+    fn on_remote_browser_event(
+        this: &mut Self,
+        _browser: Entity<crate::remote_browser::RemoteBrowser>,
+        event: &crate::remote_browser::RemoteBrowserEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            crate::remote_browser::RemoteBrowserEvent::Pull { session_id } => {
+                this.pull_remote_session(session_id.clone(), cx);
+            }
+            crate::remote_browser::RemoteBrowserEvent::Close => {
+                this.remote_browser = None;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Pull a chosen remote session onto this machine: fetch its bundle, resolve
+    /// its project against local projects (the sync gate), and apply it. A first
+    /// pull inserts an inert `Suspended` row (cold-resumes on click). A pull of a
+    /// *newer* revision of a session already here replaces the local row and
+    /// drops its stale clone, so the click re-materializes it at the new
+    /// revision — the round-trip (A → B → A) needs no manual discard. A same-or-
+    /// older revision is left untouched.
+    pub(crate) fn pull_remote_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let settings = self.user_settings.sync.clone();
+        if !settings.is_configured() {
+            self.sync_notice = Some("Configure sync in Settings → Sync first.".to_string());
+            cx.notify();
+            return;
+        }
+
+        let projects: Vec<(String, String, std::path::PathBuf)> = self
+            .projects
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone(), p.source_path.clone()))
+            .collect();
+
+        self.sync_notice = Some("Pulling session\u{2026}".to_string());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { pull_blocking(&settings, projects, &session_id) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match outcome {
+                    Ok(PullOutcome::Ready(session, revision)) => {
+                        this.apply_pulled_session(*session, revision);
+                    }
+                    Ok(PullOutcome::ProjectMissing(name)) => {
+                        this.sync_notice = Some(format!(
+                            "Add the project \u{201c}{name}\u{201d} on this Mac first."
+                        ));
+                    }
+                    Ok(PullOutcome::Vanished) => {
+                        this.sync_notice =
+                            Some("That session is no longer in the store.".to_string());
+                    }
+                    Err(e) => {
+                        this.sync_notice = Some(format!("Pull failed: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Apply a resolved pulled session: insert it (first pull), replace it and
+    /// drop the stale clone (newer revision), or leave it (same/older). Records
+    /// the pulled revision as this device's base in the ledger on apply.
+    fn apply_pulled_session(&mut self, session: crate::state::PersistedSession, revision: u64) {
+        let id = session.id.clone();
+        let label = session.label.clone();
+
+        let existing = self.projects.iter().enumerate().find_map(|(pi, p)| {
+            p.sessions
+                .iter()
+                .position(|s| s.id == id)
+                .map(|si| (pi, si))
+        });
+
+        let mut ledger = crate::sync::ledger::SyncLedger::load();
+        let base = ledger.base_revision(&id).unwrap_or(0);
+
+        match existing {
+            Some(_) if revision <= base => {
+                self.sync_notice = Some(format!(
+                    "\u{201c}{label}\u{201d} is already up to date (revision {base})."
+                ));
+                return;
+            }
+            Some((pi, si)) => {
+                // Newer revision — replace in place and drop the stale clone so
+                // the next click re-materializes the workspace at this revision.
+                let old_clone = self.projects[pi].sessions[si].clone_path.clone();
+                let source = self.projects[pi].source_path.clone();
+                if let Some(clone_path) = old_clone {
+                    if clone_path.exists() && clone_path != source {
+                        let _ = clone::delete_clone(&clone_path);
+                    }
+                }
+                self.projects[pi].sessions[si] = session_from_persisted(&session);
+                self.sync_notice = Some(format!(
+                    "Updated \u{201c}{label}\u{201d} to revision {revision} — open it to load the work."
+                ));
+            }
+            None => {
+                self.insert_pulled_session(session);
+                self.sync_notice = Some(format!("Pulled \u{201c}{label}\u{201d}."));
+            }
+        }
+
+        ledger.record_synced(&id, revision);
+        let _ = ledger.save();
+        self.mark_state_dirty();
+        self.remote_browser = None;
+    }
+
+    /// Materialize a pulled `PersistedSession` into live state as a `Suspended`
+    /// row (mirrors the startup rehydration path). No-op if its owning project
+    /// isn't loaded — the sync gate should have blocked that earlier.
+    fn insert_pulled_session(&mut self, persisted: crate::state::PersistedSession) {
+        let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == persisted.project_id)
+        else {
+            warn!(
+                "Pulled session {} has no local project {}",
+                persisted.id, persisted.project_id
+            );
+            return;
+        };
+        project.sessions.push(session_from_persisted(&persisted));
+    }
+
+    /// Rebuild a pulled session's workspace on this Mac, then resume it. Clones
+    /// the project on the session's branch and restores the synced transcript
+    /// off-thread, sets the session's `clone_path`, and hands back to
+    /// [`AppState::resume_session`] — which now finds a workspace and proceeds.
+    pub(crate) fn materialize_pulled_session(
+        &mut self,
+        cursor: crate::actions::SessionCursor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (session_id, conversation_id, branch_name, project_source, project_name) = {
+            let Some(project) = self.projects.get(cursor.project_idx) else {
+                return;
+            };
+            let Some(session) = project.sessions.get(cursor.session_idx) else {
+                return;
+            };
+            (
+                session.id.clone(),
+                session.claude_session_id().to_string(),
+                session.branch_name.clone(),
+                project.source_path.clone(),
+                project.name.clone(),
+            )
+        };
+        let settings = self.user_settings.sync.clone();
+        let cleanup_paths = self.user_settings.session_cleanup_paths.clone();
+
+        self.sync_notice = Some("Setting up the pulled session\u{2026}".to_string());
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    materialize_blocking(
+                        &settings,
+                        &session_id,
+                        &conversation_id,
+                        branch_name.as_deref(),
+                        &project_source,
+                        &project_name,
+                        &cleanup_paths,
+                    )
+                })
+                .await;
+            let _ = this.update_in(cx, move |this: &mut Self, window, cx| match result {
+                Ok(clone_path) => {
+                    if let Some(session) = this
+                        .projects
+                        .get_mut(cursor.project_idx)
+                        .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                    {
+                        session.clone_path = Some(clone_path);
+                    }
+                    this.mark_state_dirty();
+                    this.sync_notice = None;
+                    // The workspace exists now — resume for real.
+                    this.resume_session(cursor, window, cx);
+                }
+                Err(e) => {
+                    this.sync_notice = Some(format!("Couldn't set up the pulled session: {e}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+}
+
+/// Build a `Suspended` live [`Session`] from a pulled `PersistedSession`,
+/// mirroring the startup rehydration path. Shared by first-pull insert and
+/// newer-revision replace.
+fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session {
+    let mut session = Session::suspended_from_persisted(
+        persisted.id.clone(),
+        persisted.label.clone(),
+        persisted.started_at,
+        persisted.last_active,
+        std::time::Duration::from_secs(persisted.active_runtime_secs),
+        persisted.clone_path.clone(),
+        persisted.merged,
+    )
+    .with_drawer_tabs(
+        persisted.drawer_tab_names.clone(),
+        persisted.drawer_active_tab,
+    )
+    .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
+    .with_agent_id(persisted.agent_id.clone())
+    .with_claude_session_id(persisted.claude_session_id.clone());
+    session.pinned = persisted.pinned;
+    session.comment = persisted.comment.clone();
+    session.branch_name = persisted.branch_name.clone();
+    session.merge_strategy_override = persisted.merge_strategy_override;
+    session.branch_locked = persisted.branch_locked;
+    session
+}
+
+/// Owned result of a background pull, handed back to the main thread.
+enum PullOutcome {
+    /// Resolved to a local project; ready to insert as this session.
+    Ready(Box<crate::state::PersistedSession>, u64),
+    /// The bundle's project isn't present locally — the sync gate blocked it.
+    ProjectMissing(String),
+    /// The bundle disappeared from the store between listing and pulling.
+    Vanished,
+}
+
+/// Background worker: list every remote session header from the store.
+fn list_remote_blocking(
+    settings: &crate::settings::SyncSettings,
+) -> anyhow::Result<Vec<crate::sync::pull::RemoteSession>> {
+    let store = crate::sync::config::build_store_from_settings(settings)?;
+    crate::sync::rt::block_on(crate::sync::pull::list_remote_sessions(store.as_ref()))
+}
+
+/// Background worker: fetch a bundle, resolve it against local projects, and —
+/// on a match — record the pulled revision in the ledger. The live-state insert
+/// happens back on the main thread.
+fn pull_blocking(
+    settings: &crate::settings::SyncSettings,
+    projects: Vec<(String, String, std::path::PathBuf)>,
+    session_id: &str,
+) -> anyhow::Result<PullOutcome> {
+    let store = crate::sync::config::build_store_from_settings(settings)?;
+    let meta = match crate::sync::rt::block_on(crate::sync::pull::fetch_bundle(
+        store.as_ref(),
+        session_id,
+    ))? {
+        Some(meta) => meta,
+        None => return Ok(PullOutcome::Vanished),
+    };
+
+    let idents: Vec<(String, crate::sync::meta::ProjectIdentity)> = projects
+        .into_iter()
+        .map(|(pid, name, path)| (pid, crate::sync::identity::project_identity(&name, &path)))
+        .collect();
+    let candidates: Vec<crate::sync::identity::Candidate> = idents
+        .iter()
+        .map(|(pid, ident)| crate::sync::identity::Candidate {
+            project_id: pid,
+            identity: ident,
+        })
+        .collect();
+
+    match crate::sync::pull::resolve_pull(&meta, &candidates) {
+        crate::sync::pull::PullResolution::Ready(session) => {
+            // The ledger is recorded on the main thread once we've decided
+            // whether this is a first pull or a newer-revision replace — the
+            // comparison needs the current base before it's overwritten.
+            Ok(PullOutcome::Ready(Box::new(session), meta.sync.revision))
+        }
+        crate::sync::pull::PullResolution::ProjectMissing { name } => {
+            Ok(PullOutcome::ProjectMissing(name))
+        }
+    }
+}
+
+/// Blocking worker for [`AppState::materialize_pulled_session`]: create the
+/// APFS clone, check out the session's branch (fetching it from the remote if
+/// needed), and restore the synced Claude transcript into the clone. Returns
+/// the new workspace path.
+fn materialize_blocking(
+    settings: &crate::settings::SyncSettings,
+    session_id: &str,
+    conversation_id: &str,
+    branch_name: Option<&str>,
+    project_source: &std::path::Path,
+    project_name: &str,
+    cleanup_paths: &[String],
+) -> anyhow::Result<std::path::PathBuf> {
+    // 1. Copy-on-write clone of the project source.
+    let clone_path =
+        clone::create_session_clone(project_source, project_name, session_id, cleanup_paths)?;
+    if clone_path == project_source {
+        anyhow::bail!("workspace clone did not produce a separate directory");
+    }
+    clone::cleanup_stale_runtime(&clone_path, cleanup_paths);
+
+    // 2. Check out the session's branch at exactly what was pushed. Reset the
+    //    clone's local branch to origin's tip so we get the *synced* commit, not
+    //    a stale local copy of the same branch name (which bites the round-trip
+    //    back to a machine that already has this branch at an older commit). If
+    //    the branch isn't on origin (an ephemeral one never pushed), fall back
+    //    to creating/checking-out a fresh session branch.
+    if let Some(branch) = branch_name.map(str::trim).filter(|b| !b.is_empty()) {
+        let on_remote =
+            git::fetch_and_reset_to_remote_branch(&clone_path, "origin", branch).unwrap_or(false);
+        if !on_remote {
+            if let Err(e) =
+                git::checkout_or_create_session_branch(&clone_path, session_id, Some(branch))
+            {
+                warn!("pulled session {session_id}: branch '{branch}' checkout failed: {e}");
+            }
+        }
+    }
+
+    // Marker file for orphan cleanup, excluded from git (mirrors new sessions).
+    let _ = std::fs::write(clone_path.join(".allele-session"), session_id);
+    crate::git::exclude_pattern_in_clone(&clone_path, ".allele-session");
+
+    // 3. Restore the synced transcript so `claude --resume` replays the
+    //    conversation. Best-effort — a metadata-only bundle just yields a
+    //    fresh Claude session in the materialized workspace.
+    let store = crate::sync::config::build_store_from_settings(settings)?;
+    if let Some(bytes) = crate::sync::rt::block_on(crate::sync::pull::fetch_transcript(
+        store.as_ref(),
+        session_id,
+    ))? {
+        if let Some(transcript_path) =
+            crate::transcript::expected_session_jsonl(&clone_path, conversation_id)
+        {
+            if let Some(parent) = transcript_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&transcript_path, bytes)?;
+        }
+    }
+
+    Ok(clone_path)
+}
+
+/// Blocking worker for [`AppState::sync_up_session`] — runs on a background
+/// thread: enforce the git precondition, build the encrypted store, and push
+/// the bundle. Returns the pushed revision.
+fn sync_up_blocking(
+    settings: &crate::settings::SyncSettings,
+    session: &crate::state::PersistedSession,
+    project_name: &str,
+    source_path: &std::path::Path,
+    clone_path: Option<&std::path::Path>,
+    device_id: &str,
+) -> anyhow::Result<u64> {
+    // The bundle carries the transcript + metadata but not the code; refuse to
+    // push a session whose branch isn't fully on the remote (design §2.5).
+    if let Some(clone) = clone_path {
+        let readiness = crate::sync::push::check_push_ready(clone);
+        if let Some(warning) = readiness.warning() {
+            anyhow::bail!("{warning}");
+        }
+    }
+
+    // Sync the branch the session is ACTUALLY on right now. `branch_name` is set
+    // once at creation and goes stale the moment the user `git checkout`s a
+    // different branch inside the session — but the readiness check above
+    // validated the *live* branch, and the other Mac rebuilds the workspace from
+    // whatever we record here, so the two must agree. On a detached HEAD (no
+    // branch) we keep the recorded name.
+    let mut synced = session.clone();
+    if let Some(live_branch) = clone_path.and_then(crate::git::current_branch) {
+        synced.branch_name = Some(live_branch);
+    }
+
+    let git_remote = crate::git::remote_url(source_path, "origin");
+    let project = crate::sync::meta::ProjectIdentity {
+        name: project_name.to_string(),
+        git_remote,
+    };
+    let store = crate::sync::config::build_store_from_settings(settings)?;
+    let mut ledger = crate::sync::ledger::SyncLedger::load();
+    let revision = crate::sync::rt::block_on(crate::sync::push::push_session_bundle(
+        store.as_ref(),
+        &mut ledger,
+        &synced,
+        project,
+        device_id,
+        std::time::SystemTime::now(),
+    ))?;
+
+    // Upload the Claude transcript so the conversation replays on another Mac.
+    // Best-effort: a session whose transcript file doesn't exist yet (never
+    // opened, or already cleaned) simply syncs its metadata.
+    if let Some(clone) = clone_path {
+        let conversation_id = synced.claude_session_id.as_deref().unwrap_or(&synced.id);
+        if let Some(transcript_path) =
+            crate::transcript::expected_session_jsonl(clone, conversation_id)
+        {
+            if let Ok(bytes) = std::fs::read(&transcript_path) {
+                crate::sync::rt::block_on(crate::sync::push::push_transcript(
+                    store.as_ref(),
+                    &synced.id,
+                    bytes,
+                ))?;
+            }
+        }
+    }
+
+    ledger.save()?;
+    Ok(revision)
 }

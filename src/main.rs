@@ -22,6 +22,7 @@ mod new_session_modal;
 mod pending_actions;
 mod platform;
 mod project;
+mod remote_browser;
 mod repositories;
 mod rich;
 mod scratch_pad;
@@ -33,6 +34,7 @@ mod shell_env;
 mod sidebar;
 mod state;
 mod stream;
+mod sync;
 mod terminal;
 mod text_input;
 mod theme;
@@ -2946,6 +2948,7 @@ fn main() {
                         user_settings: settings_for_window.clone(),
                         settings_window: None,
                         pull_warning: None,
+                        sync_notice: None,
                         main_tab: MainTab::Claude,
                         browser_status: String::new(),
                         scratch_pad: None,
@@ -2955,6 +2958,7 @@ fn main() {
                         project_context_menu: None,
                         edit_session_modal: None,
                         naming_modal: None,
+                        remote_browser: None,
                         sidebar_filter_input,
                         project_branch_input,
                         project_remote_input,
@@ -3206,23 +3210,64 @@ impl Render for AppState {
                                     .child("Allele"),
                             )
                             .child(
-                                // "Open project" button
                                 div()
-                                    .id("new-project-btn")
-                                    .cursor_pointer()
-                                    .px(px(6.0))
-                                    .py(px(2.0))
-                                    .rounded(px(6.0))
-                                    .text_size(px(16.0))
-                                    .text_color(theme().text_faint)
-                                    .hover(|s| s.bg(theme().bg_raised).text_color(theme().success))
-                                    .child("+")
-                                    .tooltip(|_window, cx| {
-                                        cx.new(|_| SimpleTooltip { text: "Open project".into() }).into()
-                                    })
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _event, _window, cx| {
-                                        this.open_folder_picker(cx);
-                                    })),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(2.0))
+                                    .child(
+                                        // "Pull session from remote" button
+                                        div()
+                                            .id("pull-remote-btn")
+                                            .cursor_pointer()
+                                            .p(px(4.0))
+                                            .rounded(px(6.0))
+                                            .hover(|s| s.bg(theme().bg_raised))
+                                            .child(icon(
+                                                crate::icon::name::CLOUD_DOWNLOAD,
+                                                15.0,
+                                                theme().text_faint,
+                                            ))
+                                            .tooltip(|_window, cx| {
+                                                cx.new(|_| SimpleTooltip {
+                                                    text: "Pull session from remote".into(),
+                                                })
+                                                .into()
+                                            })
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this: &mut Self, _event, _window, cx| {
+                                                    this.open_remote_browser(cx);
+                                                }),
+                                            ),
+                                    )
+                                    .child(
+                                        // "Open project" button
+                                        div()
+                                            .id("new-project-btn")
+                                            .cursor_pointer()
+                                            .px(px(6.0))
+                                            .py(px(2.0))
+                                            .rounded(px(6.0))
+                                            .text_size(px(16.0))
+                                            .text_color(theme().text_faint)
+                                            .hover(|s| {
+                                                s.bg(theme().bg_raised).text_color(theme().success)
+                                            })
+                                            .child("+")
+                                            .tooltip(|_window, cx| {
+                                                cx.new(|_| SimpleTooltip {
+                                                    text: "Open project".into(),
+                                                })
+                                                .into()
+                                            })
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this: &mut Self, _event, _window, cx| {
+                                                    this.open_folder_picker(cx);
+                                                }),
+                                            ),
+                                    ),
                             ),
                     )
                     // Search filter
@@ -3637,6 +3682,53 @@ impl Render for AppState {
                     );
                 }
 
+                // --- Session-sync notice banner (absolute overlay at top) ---
+                if let Some(ref notice) = self.sync_notice {
+                    let label = notice.clone();
+                    main_area = main_area.child(
+                        div()
+                            .absolute()
+                            .top(px(0.0))
+                            .left(px(0.0))
+                            .right(px(0.0))
+                            .px(px(16.0))
+                            .py(px(10.0))
+                            .bg(theme().bg_raised)
+                            .border_b_1()
+                            .border_color(theme().border_subtle)
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(13.0))
+                                    .text_color(theme().text_primary)
+                                    .child(label),
+                            )
+                            .child(
+                                div()
+                                    .id("sync-notice-dismiss-btn")
+                                    .cursor_pointer()
+                                    .px(px(10.0))
+                                    .py(px(4.0))
+                                    .rounded(px(6.0))
+                                    .bg(theme().bg_hover)
+                                    .text_size(px(11.0))
+                                    .text_color(theme().text_primary)
+                                    .hover(|s| s.bg(theme().bg_active))
+                                    .child("Dismiss")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this: &mut Self, _event, _window, cx| {
+                                            this.sync_notice = None;
+                                            cx.notify();
+                                        }),
+                                    ),
+                            ),
+                    );
+                }
+
                 content_col = content_col.child(main_area);
             }
 
@@ -3881,6 +3973,10 @@ impl Render for AppState {
 
         if let Some(modal) = self.naming_modal.clone() {
             outer = outer.child(modal);
+        }
+
+        if let Some(browser) = self.remote_browser.clone() {
+            outer = outer.child(browser);
         }
 
         outer = outer.child(self.render_session_context_menu(cx));

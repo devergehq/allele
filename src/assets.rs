@@ -32,6 +32,8 @@ assets!(
     "icons/svg/chevron-right.svg",
     "icons/svg/circle-fill.svg",
     "icons/svg/circle.svg",
+    "icons/svg/cloud-download.svg",
+    "icons/svg/cloud-upload.svg",
     "icons/svg/file-text.svg",
     "icons/svg/helix.svg",
     "icons/svg/image.svg",

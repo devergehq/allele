@@ -28,6 +28,7 @@ mod infrastructure;
 mod naming;
 mod projects;
 mod sessions;
+mod sync;
 mod widgets;
 use agents::AgentsSection;
 use appearance::AppearanceSection;
@@ -37,6 +38,7 @@ use infrastructure::InfraSection;
 use naming::NamingSection;
 use projects::ProjectsSection;
 use sessions::SessionsSection;
+use sync::SyncSection;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -48,6 +50,7 @@ enum Section {
     Editor,
     Browser,
     Appearance,
+    Sync,
 }
 
 impl Section {
@@ -61,6 +64,7 @@ impl Section {
             Section::Editor => "Editor",
             Section::Browser => "Browser",
             Section::Appearance => "Appearance",
+            Section::Sync => "Sync",
         }
     }
 }
@@ -84,6 +88,8 @@ pub struct SettingsWindowState {
     infrastructure: InfraSection,
     /// Projects section (per-project orchestration).
     projects: ProjectsSection,
+    /// Sync section (session-sync store config + connection test).
+    sync: SyncSection,
 }
 
 impl SettingsWindowState {
@@ -119,6 +125,7 @@ impl SettingsWindowState {
             ),
             infrastructure: InfraSection::new(settings.base_infra_enabled),
             projects: ProjectsSection::new(cx),
+            sync: SyncSection::new(cx, &settings.sync),
         };
         s.agents.sync_inputs(cx);
         s
@@ -148,6 +155,7 @@ fn render_sidebar(selected: Section, cx: &mut Context<SettingsWindowState>) -> i
         Section::Editor,
         Section::Browser,
         Section::Appearance,
+        Section::Sync,
     ];
 
     let mut list = div()
@@ -207,6 +215,7 @@ fn render_pane(
         Section::Editor => this.editor.render(cx).into_any_element(),
         Section::Browser => this.browser.render(cx).into_any_element(),
         Section::Appearance => this.appearance.render(cx).into_any_element(),
+        Section::Sync => this.sync.render(cx).into_any_element(),
     }
 }
 

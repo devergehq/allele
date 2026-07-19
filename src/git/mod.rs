@@ -135,6 +135,44 @@ pub fn has_remote(repo: &Path, name: &str) -> bool {
     }
 }
 
+/// Return the fetch URL configured for remote `name` (e.g. `"origin"`), or
+/// `None` if the repo has no such remote. Used to give a session a portable
+/// project identity for cross-machine sync (see `crate::sync::identity`).
+pub fn remote_url(repo: &Path, name: &str) -> Option<String> {
+    if !is_git_repo(repo) {
+        return None;
+    }
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("remote").arg("get-url").arg(name);
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!url.is_empty()).then_some(url)
+}
+
+/// Number of commits on the current branch not yet on its upstream, or `None`
+/// if the branch has no configured upstream (`@{u}`). Used by session sync-up
+/// to refuse pushing a session whose code isn't on the remote — the bundle
+/// carries the transcript but not the code (see design §2.5).
+pub fn unpushed_commit_count(repo: &Path) -> Option<usize> {
+    if !is_git_repo(repo) {
+        return None;
+    }
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("rev-list").arg("--count").arg("@{u}..HEAD");
+    let output = cmd.output().ok()?;
+    // A non-zero exit means no upstream is configured → "not pushed anywhere".
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<usize>()
+        .ok()
+}
+
 /// Detect the default branch name for a remote (e.g. `main` or `master`).
 /// Checks `refs/remotes/<remote>/HEAD` first; falls back to `"master"`.
 pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
@@ -416,6 +454,48 @@ pub fn fetch_and_checkout_remote_branch(
         .arg(name)
         .arg(format!("{remote}/{name}"));
     run_git(cmd, "checkout -b (remote tracking branch)")
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
+    Ok(true)
+}
+
+/// Fetch `<remote>/<name>` and hard-set the clone's local `<name>` branch to
+/// it, so a materialized workspace reflects exactly what the other machine
+/// pushed — not a stale local copy of the same branch name that happens to
+/// exist in this clone's source. Returns `false` if the branch isn't on the
+/// remote (the caller falls back to creating a fresh branch).
+///
+/// Safe against the user's real branches: this operates on the session clone's
+/// own copy of the ref, never the source repo.
+pub fn fetch_and_reset_to_remote_branch(
+    clone: &Path,
+    remote: &str,
+    name: &str,
+) -> crate::errors::Result<bool> {
+    if !is_git_repo(clone) {
+        return Err(AlleleError::Git(format!(
+            "fetch_and_reset_to_remote_branch: not a git repo: {}",
+            clone.display()
+        )));
+    }
+
+    // Fetch the single branch; a non-zero exit means it isn't on the remote.
+    let mut cmd = user_git_cmd(clone);
+    cmd.arg("fetch")
+        .arg(remote)
+        .arg(format!("{name}:refs/remotes/{remote}/{name}"));
+    if run_git(cmd, &format!("fetch {remote} {name}")).is_err() {
+        return Ok(false);
+    }
+
+    // `-B` creates-or-resets the local branch to the fetched remote tip and
+    // checks it out, with tracking set to `<remote>/<name>` (so sync-back has
+    // an upstream).
+    let mut cmd = git_cmd(Some(clone));
+    cmd.arg("checkout")
+        .arg("-B")
+        .arg(name)
+        .arg(format!("{remote}/{name}"));
+    run_git(cmd, "checkout -B (reset to remote branch)")
         .map_err(|e| AlleleError::Git(e.to_string()))?;
     Ok(true)
 }
