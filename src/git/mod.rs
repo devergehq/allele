@@ -152,6 +152,27 @@ pub fn remote_url(repo: &Path, name: &str) -> Option<String> {
     (!url.is_empty()).then_some(url)
 }
 
+/// Number of commits on the current branch not yet on its upstream, or `None`
+/// if the branch has no configured upstream (`@{u}`). Used by session sync-up
+/// to refuse pushing a session whose code isn't on the remote — the bundle
+/// carries the transcript but not the code (see design §2.5).
+pub fn unpushed_commit_count(repo: &Path) -> Option<usize> {
+    if !is_git_repo(repo) {
+        return None;
+    }
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("rev-list").arg("--count").arg("@{u}..HEAD");
+    let output = cmd.output().ok()?;
+    // A non-zero exit means no upstream is configured → "not pushed anywhere".
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse::<usize>()
+        .ok()
+}
+
 /// Detect the default branch name for a remote (e.g. `main` or `master`).
 /// Checks `refs/remotes/<remote>/HEAD` first; falls back to `"master"`.
 pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
