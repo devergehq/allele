@@ -1691,14 +1691,21 @@ fn materialize_blocking(
     }
     clone::cleanup_stale_runtime(&clone_path, cleanup_paths);
 
-    // 2. Check out the session's branch. The code arrived via the user's own
-    //    `git push`; this fetches it from origin and checks it out (or creates
-    //    it if the remote doesn't have it yet).
+    // 2. Check out the session's branch at exactly what was pushed. Reset the
+    //    clone's local branch to origin's tip so we get the *synced* commit, not
+    //    a stale local copy of the same branch name (which bites the round-trip
+    //    back to a machine that already has this branch at an older commit). If
+    //    the branch isn't on origin (an ephemeral one never pushed), fall back
+    //    to creating/checking-out a fresh session branch.
     if let Some(branch) = branch_name.map(str::trim).filter(|b| !b.is_empty()) {
-        if let Err(e) =
-            git::checkout_or_create_session_branch(&clone_path, session_id, Some(branch))
-        {
-            warn!("pulled session {session_id}: branch '{branch}' checkout failed: {e}");
+        let on_remote =
+            git::fetch_and_reset_to_remote_branch(&clone_path, "origin", branch).unwrap_or(false);
+        if !on_remote {
+            if let Err(e) =
+                git::checkout_or_create_session_branch(&clone_path, session_id, Some(branch))
+            {
+                warn!("pulled session {session_id}: branch '{branch}' checkout failed: {e}");
+            }
         }
     }
 
@@ -1745,6 +1752,18 @@ fn sync_up_blocking(
             anyhow::bail!("{warning}");
         }
     }
+
+    // Sync the branch the session is ACTUALLY on right now. `branch_name` is set
+    // once at creation and goes stale the moment the user `git checkout`s a
+    // different branch inside the session — but the readiness check above
+    // validated the *live* branch, and the other Mac rebuilds the workspace from
+    // whatever we record here, so the two must agree. On a detached HEAD (no
+    // branch) we keep the recorded name.
+    let mut synced = session.clone();
+    if let Some(live_branch) = clone_path.and_then(crate::git::current_branch) {
+        synced.branch_name = Some(live_branch);
+    }
+
     let git_remote = crate::git::remote_url(source_path, "origin");
     let project = crate::sync::meta::ProjectIdentity {
         name: project_name.to_string(),
@@ -1755,7 +1774,7 @@ fn sync_up_blocking(
     let revision = crate::sync::rt::block_on(crate::sync::push::push_session_bundle(
         store.as_ref(),
         &mut ledger,
-        session,
+        &synced,
         project,
         device_id,
         std::time::SystemTime::now(),
@@ -1765,14 +1784,14 @@ fn sync_up_blocking(
     // Best-effort: a session whose transcript file doesn't exist yet (never
     // opened, or already cleaned) simply syncs its metadata.
     if let Some(clone) = clone_path {
-        let conversation_id = session.claude_session_id.as_deref().unwrap_or(&session.id);
+        let conversation_id = synced.claude_session_id.as_deref().unwrap_or(&synced.id);
         if let Some(transcript_path) =
             crate::transcript::expected_session_jsonl(clone, conversation_id)
         {
             if let Ok(bytes) = std::fs::read(&transcript_path) {
                 crate::sync::rt::block_on(crate::sync::push::push_transcript(
                     store.as_ref(),
-                    &session.id,
+                    &synced.id,
                     bytes,
                 ))?;
             }
