@@ -20,6 +20,13 @@ const TRASH_BASE: &str = ".allele/trash";
 /// Single source of truth — do not scatter copies of this value.
 pub const TRASH_TTL_DAYS: u64 = 14;
 
+/// Absolute path to the workspaces root (`~/.allele/workspaces`) — the parent
+/// directory of every session clone. Single source of truth for the base that
+/// session-sync path normalization strips to / rebases from (see `crate::sync`).
+pub fn clones_root() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(CLONE_BASE))
+}
+
 /// Create a clone for a session: uses a short unique session ID as the workspace name.
 /// Entries whose top-level name matches an `exclude` path are skipped entirely,
 /// avoiding the cost of cloning directories that would be deleted immediately after.
