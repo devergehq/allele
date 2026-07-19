@@ -252,6 +252,10 @@ pub enum SettingsAction {
     /// When enabled, brings it up; when disabled, tears it down. Both run
     /// on a background task. Emitted by the Settings window.
     UpdateBaseInfra(bool),
+    /// Replace the session-sync store configuration (bucket / region / profile
+    /// / endpoint / device id) and persist. Emitted by the Settings window
+    /// Sync section (DEV-188).
+    UpdateSync(settings::SyncSettings),
 }
 
 /// Chrome browser integration — sync / close linked tabs.
