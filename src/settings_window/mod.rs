@@ -25,7 +25,9 @@ use crate::settings::{AgentConfig, AgentKind};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::AppState;
 
+mod editor;
 mod widgets;
+use editor::EditorSection;
 use widgets::{
     card, input_frame, labeled_row, section_header, section_note, section_title, toggle_switch,
 };
@@ -74,8 +76,8 @@ pub struct SettingsWindowState {
     cleanup_paths: Vec<String>,
     /// "Add cleanup path" input.
     draft_input: Entity<TextInput>,
-    /// External-editor command input.
-    external_editor_input: Entity<TextInput>,
+    /// Editor section (external-editor command).
+    editor: EditorSection,
     /// Mirrored browser-integration toggle.
     browser_integration_enabled: bool,
     /// Local mirror of the agents list + default, pushed back on every
@@ -140,24 +142,6 @@ impl SettingsWindowState {
         })
         .detach();
 
-        let external_editor_input = cx.new(|cx| {
-            TextInput::new(
-                cx,
-                initial_external_editor,
-                crate::settings::DEFAULT_EXTERNAL_EDITOR,
-            )
-        });
-        cx.subscribe(
-            &external_editor_input,
-            |this, input, event: &TextInputEvent, cx| {
-                if matches!(event, TextInputEvent::Changed | TextInputEvent::Submitted) {
-                    let value = input.read(cx).text().to_string();
-                    this.push_external_editor(value, cx);
-                }
-            },
-        )
-        .detach();
-
         let naming_claude_model_input = cx
             .new(|cx| TextInput::new(cx, initial_naming_claude_model, "claude-haiku-4-5-20251001"));
         cx.subscribe(
@@ -218,7 +202,7 @@ impl SettingsWindowState {
             selected: Section::Sessions,
             cleanup_paths: initial_paths,
             draft_input,
-            external_editor_input,
+            editor: EditorSection::new(cx, initial_external_editor),
             browser_integration_enabled: initial_browser_integration,
             agents: initial_agents,
             default_agent: initial_default_agent,
@@ -396,16 +380,6 @@ impl SettingsWindowState {
     }
 
     // --- editor --------------------------------------------------------
-
-    fn push_external_editor(&self, value: String, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |state: &mut AppState, cx| {
-                state.pending_action =
-                    Some(crate::SettingsAction::UpdateExternalEditor(value).into());
-                cx.notify();
-            })
-            .ok();
-    }
 
     // --- font size ------------------------------------------------------
 
@@ -703,7 +677,7 @@ fn render_pane(
         Section::Sessions => render_sessions_pane(this, cx).into_any_element(),
         Section::Agents => render_agents_pane(this, cx).into_any_element(),
         Section::Naming => render_naming_pane(this, cx).into_any_element(),
-        Section::Editor => render_editor_pane(this, cx).into_any_element(),
+        Section::Editor => this.editor.render(cx).into_any_element(),
         Section::Browser => render_browser_pane(this, cx).into_any_element(),
         Section::Appearance => render_appearance_pane(this, cx).into_any_element(),
     }
@@ -980,30 +954,6 @@ fn render_browser_pane(
                      your system default browser.",
         ))
         .child(card().child(toggle))
-}
-
-fn render_editor_pane(
-    this: &mut SettingsWindowState,
-    _cx: &mut Context<SettingsWindowState>,
-) -> impl IntoElement {
-    let input = input_frame(this.external_editor_input.clone()).w_full();
-
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .p(px(20.0))
-        .gap(px(12.0))
-        .child(section_title("Editor"))
-        .child(section_note(
-            "External editor command — used by \"Open in External Editor\" \
-                     in the file tree's right-click menu. Bare binary name (e.g. \
-                     `subl`, `code`, `mate`) if on PATH, or an absolute path. \
-                     Leave blank to use the default (Sublime Text's `subl`).",
-        ))
-        .child(card().child(input))
 }
 
 fn render_infrastructure_pane(
