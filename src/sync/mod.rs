@@ -18,6 +18,8 @@
 //! dead-code sweep flags some until then — allow it.
 #![allow(dead_code)]
 
+pub mod config;
+pub mod connect;
 pub mod crypto;
 pub mod encrypting_store;
 pub mod identity;
@@ -25,6 +27,7 @@ pub mod ledger;
 pub mod meta;
 pub mod pull;
 pub mod push;
+pub mod rt;
 pub mod s3_store;
 pub mod store;
 

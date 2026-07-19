@@ -1085,6 +1085,23 @@ impl AppState {
                 };
                 snapshot.save();
             }
+            SettingsAction::UpdateSync(sync) => {
+                self.user_settings.sync = sync;
+                let snapshot = Settings {
+                    projects: self
+                        .projects
+                        .iter()
+                        .map(|p| ProjectSave {
+                            id: p.id.clone(),
+                            name: p.name.clone(),
+                            source_path: p.source_path.clone(),
+                            settings: p.settings.clone(),
+                        })
+                        .collect(),
+                    ..self.user_settings.clone()
+                };
+                snapshot.save();
+            }
             SettingsAction::UpdateAgents {
                 agents,
                 default_agent,
