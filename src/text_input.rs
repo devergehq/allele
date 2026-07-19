@@ -80,6 +80,9 @@ pub struct TextInput {
     /// Horizontal scroll offset in pixels — keeps the cursor in view
     /// when content is wider than the input. Updated in prepaint.
     scroll_x: Pixels,
+    /// When true, the content renders as `•` bullets (password field). The
+    /// plaintext still lives in `content`; only the display is masked.
+    masked: bool,
 }
 
 impl EventEmitter<TextInputEvent> for TextInput {}
@@ -103,7 +106,14 @@ impl TextInput {
             last_bounds: None,
             is_selecting: false,
             scroll_x: px(0.0),
+            masked: false,
         }
+    }
+
+    /// Render this input as a masked password field (content shows as `•`).
+    pub fn masked(mut self) -> Self {
+        self.masked = true;
+        self
     }
 
     pub fn text(&self) -> &SharedString {
@@ -601,6 +611,7 @@ impl Element for TextElement {
     ) -> Self::PrepaintState {
         let input = self.input.read(cx);
         let content = input.content.clone();
+        let masked = input.masked;
         let selected_range = input.selected_range.clone();
         let cursor = input.cursor_offset();
         let style = window.text_style();
@@ -608,9 +619,31 @@ impl Element for TextElement {
         let (display_text, text_color) = if content.is_empty() {
             // Catppuccin overlay0 — readable but visibly placeholder.
             (input.placeholder.clone(), theme().text_placeholder)
+        } else if masked {
+            (
+                SharedString::from("•".repeat(content.chars().count())),
+                style.color,
+            )
         } else {
-            (content, style.color)
+            (content.clone(), style.color)
         };
+
+        // Masked fields render as bullets — remap every content byte-offset
+        // (cursor, selection, IME range) into the bullet string so slicing and
+        // x-lookups stay on char boundaries. Each content char → one "•".
+        let to_display = |off: usize| -> usize {
+            if masked && !content.is_empty() {
+                content[..off].chars().count() * "•".len()
+            } else {
+                off
+            }
+        };
+        let cursor = to_display(cursor);
+        let selected_range = to_display(selected_range.start)..to_display(selected_range.end);
+        let marked_range = input
+            .marked_range
+            .as_ref()
+            .map(|r| to_display(r.start)..to_display(r.end));
 
         let run = TextRun {
             len: display_text.len(),
@@ -620,7 +653,7 @@ impl Element for TextElement {
             underline: None,
             strikethrough: None,
         };
-        let runs = if let Some(marked_range) = input.marked_range.as_ref() {
+        let runs = if let Some(marked_range) = marked_range.as_ref() {
             vec![
                 TextRun {
                     len: marked_range.start,

@@ -334,6 +334,51 @@ passphrase), never fall back to plaintext.
 **Tests:** encrypt→decrypt round-trip over `MemStore`; ciphertext ≠ plaintext
 (no leakage); wrong-key fails closed; tamper detection.
 
+### 2.10 Passphrase bootstrap flow (DEV-195 UI) — decided (2026-07-19)
+
+Getting the data key into a device's Keychain is the "bootstrap". It's
+orchestration + UI over the tested DEV-189 primitives (`DataKey::generate` /
+`wrap_with_passphrase` / `unwrap_with_passphrase`, `keychain::store/load/delete`)
+— no new cryptography.
+
+**State machine** (computed when the Sync settings section loads, after the
+connection test passes):
+- `keychain::load()` (fast, local) → key present → **Ready**.
+- else fetch `keyring/identity.age` (async):
+  - present → **NeedsUnlock** (a keyring exists; enter passphrase to unlock this Mac)
+  - absent → **NeedsSetup** (fresh bucket; set a new passphrase)
+- \+ transient **Working** (scrypt is ~1s → runs off the UI thread via the
+  `sync::rt` bridge) and **Error**.
+
+**Placement (decided):** an **Encryption card** inline in the Sync settings
+section, shown once the connection test passes. The DEV-195 push/pull actions
+gate on `keychain::load()`; if absent they deep-link to Settings → Sync.
+
+**UI per state:**
+- **NeedsSetup** → "Set a sync passphrase (entered once per Mac; encrypts
+  everything before it leaves this machine; unrecoverable if lost)."
+  `[passphrase] [confirm] [Create]` → generate → cache Keychain → wrap → upload
+  keyring → Ready.
+- **NeedsUnlock** → "This bucket is already encrypted. Enter your passphrase to
+  unlock this Mac." `[passphrase] [Unlock]`; wrong → "Incorrect passphrase" +
+  **Forgot passphrase?** → Reset.
+- **Ready** → "🔒 Encryption ready on this device." (v1 stops here; change-passphrase
+  + recovery-export are later).
+
+**Guardrails:**
+1. **Setup never overwrites an existing keyring** — NeedsSetup only when the
+   bucket has no keyring, else you orphan every already-encrypted session. A
+   present keyring allows only Unlock or an explicit destructive Reset.
+2. **Reset is destructive** — re-bootstrapping makes all already-synced sessions
+   permanently unreadable; gate behind a typed confirmation.
+3. **Masked input** — add a `masked` mode to `TextInput` (render `•` per grapheme;
+   plaintext stays in the model) for the passphrase fields.
+4. *(later)* change-passphrase (non-destructive: unwrap-old → re-wrap-new →
+   re-upload), recovery-key export, and a conditional-`put` (If-None-Match) on the
+   keyring to close the two-first-devices race.
+
+**V1 scope (decided):** Setup + Unlock + destructive Reset + masked TextInput.
+
 ---
 
 ## Part 3 — Phasing
