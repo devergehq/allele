@@ -851,36 +851,36 @@ impl AppState {
         let Some(session) = project.sessions.get(cursor.session_idx) else {
             return;
         };
-        let Some(clone_path) = session.clone_path.clone() else {
-            // No workspace on this Mac — a pulled session (metadata only), or a
-            // clone that was cleaned. If sync is configured, materialize it:
-            // clone the project on its branch and restore the synced transcript,
-            // then resume. Otherwise there's nothing we can rebuild from.
-            if self.user_settings.sync.is_configured() {
-                self.materialize_pulled_session(cursor, window, cx);
-            } else {
-                warn!(
-                    "Cannot resume session {} — no clone_path and sync isn't configured",
-                    session.id
-                );
-                self.sync_notice = Some(
-                    "This session was pulled from another Mac. Configure Settings → Sync \
-                     so its workspace can be rebuilt here."
-                        .to_string(),
-                );
-                cx.notify();
+        // A pulled session records a clone_path rebased to this Mac's workspace
+        // root that was never actually created here — so a missing directory is
+        // just as much "no workspace" as a `None` path. Treat both the same:
+        // rebuild the workspace from the project + synced transcript, then this
+        // resume runs again for real.
+        let clone_path = match session.clone_path.clone() {
+            Some(path) if path.exists() => path,
+            other => {
+                if self.user_settings.sync.is_configured() {
+                    self.materialize_pulled_session(cursor, window, cx);
+                } else {
+                    warn!(
+                        "Cannot resume session {} — no workspace on this Mac ({}) and \
+                         sync isn't configured",
+                        session.id,
+                        other
+                            .as_deref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "none".to_string()),
+                    );
+                    self.sync_notice = Some(
+                        "This session was pulled from another Mac. Configure Settings → Sync \
+                         so its workspace can be rebuilt here."
+                            .to_string(),
+                    );
+                    cx.notify();
+                }
+                return;
             }
-            return;
         };
-
-        if !clone_path.exists() {
-            warn!(
-                "Cannot resume session {} — clone_path is missing on disk: {}",
-                session.id,
-                clone_path.display()
-            );
-            return;
-        }
 
         // Resume the *current* Claude conversation. For a session that was
         // `/clear`ed, this is the rotated id (persisted on the session), not
