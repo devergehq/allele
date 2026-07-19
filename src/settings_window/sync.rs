@@ -49,7 +49,7 @@ pub(super) struct SyncSection {
     profile_input: Entity<TextInput>,
     bucket_input: Entity<TextInput>,
     endpoint_input: Entity<TextInput>,
-    region: Option<String>,
+    region_input: Entity<TextInput>,
     status: TestStatus,
     enc_state: EncState,
     /// In-progress label while `enc_state == Working`.
@@ -130,6 +130,11 @@ impl SyncSection {
             &settings.endpoint.clone().unwrap_or_default(),
             "Custom endpoint (R2/MinIO/NAS) — leave blank for AWS",
         );
+        let region_input = mk(
+            cx,
+            &settings.region.clone().unwrap_or_default(),
+            "Bucket region (e.g. ap-southeast-2)",
+        );
 
         let passphrase_input = cx.new(|cx| TextInput::new(cx, "", "Sync passphrase").masked());
         let confirm_input = cx.new(|cx| TextInput::new(cx, "", "Confirm passphrase").masked());
@@ -138,7 +143,7 @@ impl SyncSection {
             profile_input,
             bucket_input,
             endpoint_input,
-            region: settings.region.clone(),
+            region_input,
             status: TestStatus::Idle,
             enc_state: EncState::Unknown,
             enc_busy: String::new(),
@@ -154,12 +159,10 @@ impl SyncSection {
     fn s3_config(&self, cx: &Context<SettingsWindowState>) -> Option<S3Config> {
         let profile = non_empty(&self.profile_input.read(cx).text())?;
         let bucket = non_empty(&self.bucket_input.read(cx).text())?;
+        let region = non_empty(&self.region_input.read(cx).text())?;
         Some(S3Config {
             bucket_name: bucket,
-            region: self
-                .region
-                .clone()
-                .unwrap_or_else(|| "us-east-1".to_string()),
+            region,
             profile,
             endpoint: non_empty(&self.endpoint_input.read(cx).text()),
         })
@@ -172,7 +175,7 @@ impl SyncSection {
         let device_id = app_entity.read(cx).user_settings.sync.device_id.clone();
         let sync = SyncSettings {
             bucket: non_empty(&self.bucket_input.read(cx).text()),
-            region: self.region.clone(),
+            region: non_empty(&self.region_input.read(cx).text()),
             profile: non_empty(&self.profile_input.read(cx).text()),
             endpoint: non_empty(&self.endpoint_input.read(cx).text()),
             device_id,
@@ -190,7 +193,8 @@ impl SyncSection {
         cx: &mut Context<SettingsWindowState>,
     ) {
         let Some(config) = self.s3_config(cx) else {
-            self.status = TestStatus::Failed("Enter a profile and a bucket first.".to_string());
+            self.status =
+                TestStatus::Failed("Enter a profile, bucket, and region first.".to_string());
             cx.notify();
             return;
         };
@@ -207,7 +211,6 @@ impl SyncSection {
             let _ = this.update(cx, |this, cx| {
                 match result {
                     Ok(region) => {
-                        this.sync.region = Some(region.clone());
                         this.sync.status = TestStatus::Ok(region);
                         this.sync.persist(&app, cx);
                         // A reachable bucket means we can determine encryption state.
@@ -532,11 +535,6 @@ impl SyncSection {
     }
 
     pub(super) fn render(&self, cx: &mut Context<SettingsWindowState>) -> impl IntoElement {
-        let region_label = self
-            .region
-            .clone()
-            .unwrap_or_else(|| "— (resolved on test)".to_string());
-
         let (status_text, status_color) = match &self.status {
             TestStatus::Idle => (String::new(), theme().text_faint),
             TestStatus::Testing => ("Testing…".to_string(), theme().text_secondary),
@@ -592,10 +590,7 @@ impl SyncSection {
                     ))
                     .child(labeled_row(
                         "Region",
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme().text_secondary)
-                            .child(region_label),
+                        input_frame(self.region_input.clone()),
                     ))
                     .child(
                         div()

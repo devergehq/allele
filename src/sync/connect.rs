@@ -8,7 +8,7 @@
 //! and a least-privilege policy omits it, so an AccessDenied on `list_buckets`
 //! becomes "type the bucket name" rather than a dead end. The authoritative
 //! check is [`validate_bucket`], which exercises `s3:ListBucket` on the chosen
-//! bucket (the permission sync actually uses) and resolves the true region.
+//! bucket (the permission sync actually uses) in its configured region.
 
 use s3::creds::Credentials;
 use s3::error::S3Error;
@@ -44,35 +44,60 @@ pub async fn discover_buckets(profile: &str, region: &str) -> anyhow::Result<Dis
     }
 }
 
-/// Validate access to a specific bucket and resolve its true region — the
-/// authoritative connection check. Returns the resolved region string on
-/// success, or an error describing exactly what failed.
+/// Validate access to a specific bucket in its configured region — the
+/// authoritative connection check. Returns the region on success, or an error
+/// describing exactly what failed.
 ///
-/// For AWS the region is resolved via `GetBucketLocation` (which works from the
-/// `us-east-1` endpoint regardless of the bucket's real region), then access is
-/// exercised with a scoped `ListObjects`. For a custom endpoint (R2/MinIO/NAS)
-/// the configured region is trusted and only access is checked.
+/// Access is exercised with a scoped `ListObjects` (the `s3:ListBucket`
+/// permission sync itself needs). The request must be signed *against the
+/// bucket's real region*: rust-s3's `GetBucketLocation` always targets the
+/// `us-east-1` endpoint and comes back unsigned there, so we can't auto-resolve
+/// the region — the user supplies it (it's known, and encoded in most bucket
+/// names). A wrong region surfaces as an actionable error below.
 pub async fn validate_bucket(config: &S3Config) -> anyhow::Result<String> {
-    let region = if config.endpoint.is_some() {
-        config.region.clone()
-    } else {
-        let (region, _) = bucket_in_region(config, "us-east-1")?
-            .location()
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!("cannot resolve region for '{}': {e}", config.bucket_name)
-            })?;
-        region.to_string()
-    };
+    let region = config.region.trim();
+    if region.is_empty() {
+        anyhow::bail!("enter the bucket's region (e.g. ap-southeast-2)");
+    }
 
-    // ListObjects on the bucket exercises `s3:ListBucket` — the permission sync
-    // itself needs (unlike `ListBuckets`, which tests a broader one).
-    bucket_in_region(config, &region)?
+    bucket_in_region(config, region)?
         .list("allele/".to_string(), Some("/".to_string()))
         .await
-        .map_err(|e| anyhow::anyhow!("cannot access bucket '{}': {e}", config.bucket_name))?;
+        .map_err(|e| explain_access_error(&config.bucket_name, region, config.endpoint.is_some(), e))?;
 
-    Ok(region)
+    Ok(region.to_string())
+}
+
+/// Translate a raw `ListObjects` failure into an actionable message. The three
+/// common real-world causes — an expired SSO session, a wrong region, and a
+/// missing `s3:ListBucket` grant — otherwise surface as opaque S3 XML.
+fn explain_access_error(
+    bucket: &str,
+    region: &str,
+    custom_endpoint: bool,
+    error: S3Error,
+) -> anyhow::Error {
+    let raw = error.to_string();
+    if raw.contains("ExpiredToken") || raw.contains("has expired") {
+        anyhow::anyhow!(
+            "the AWS session has expired — refresh the profile \
+             (e.g. `aws sso login` / yawsso) and test again"
+        )
+    } else if !custom_endpoint
+        && (raw.contains("No AWSAccessKey was presented")
+            || raw.contains("AuthorizationHeaderMalformed")
+            || raw.contains("PermanentRedirect"))
+    {
+        anyhow::anyhow!(
+            "could not reach '{bucket}' in region '{region}' — check the region matches the bucket"
+        )
+    } else if raw.contains("AccessDenied") {
+        anyhow::anyhow!("access denied to '{bucket}' — the profile lacks s3:ListBucket on it")
+    } else if raw.contains("NoSuchBucket") {
+        anyhow::anyhow!("bucket '{bucket}' does not exist")
+    } else {
+        anyhow::anyhow!("cannot access bucket '{bucket}': {error}")
+    }
 }
 
 fn credentials(profile: &str) -> anyhow::Result<Credentials> {
