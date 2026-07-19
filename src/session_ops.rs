@@ -852,10 +852,20 @@ impl AppState {
             return;
         };
         let Some(clone_path) = session.clone_path.clone() else {
+            // A pulled session arrives with no workspace on this Mac (only its
+            // metadata synced). Materializing it — cloning the project on its
+            // branch and restoring the transcript — is not wired up yet, so
+            // tell the user rather than silently doing nothing.
             warn!(
                 "Cannot resume session {} — no clone_path on record",
                 session.id
             );
+            self.sync_notice = Some(
+                "This session was pulled from another Mac and can't be opened here yet — \
+                 materializing a pulled workspace isn't wired up. Track it under Session Sync."
+                    .to_string(),
+            );
+            cx.notify();
             return;
         };
 
