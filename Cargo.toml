@@ -46,6 +46,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Async runtime
 tokio = { version = "1", features = ["full"] }
 
+# Async methods in the `SyncStore` trait (dyn-compatible) — session sync
+async-trait = "0.1"
+
 # File watching (for hook events)
 notify = "7"
 
@@ -54,6 +57,10 @@ pulldown-cmark = { version = "0.13.0", default-features = false }
 
 # Line-level diffs for unified Edit rendering in Rich Sidecar
 similar = "2"
+
+# S3-compatible object store for session sync (durch/rust-s3). Default features
+# use tokio + native-tls, which on macOS is Security.framework (no OpenSSL).
+rust-s3 = "0.37.2"
 
 # APFS COW cloning
 # clonetree or direct libc FFI — evaluate during Phase 1
