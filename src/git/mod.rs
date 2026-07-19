@@ -135,6 +135,23 @@ pub fn has_remote(repo: &Path, name: &str) -> bool {
     }
 }
 
+/// Return the fetch URL configured for remote `name` (e.g. `"origin"`), or
+/// `None` if the repo has no such remote. Used to give a session a portable
+/// project identity for cross-machine sync (see `crate::sync::identity`).
+pub fn remote_url(repo: &Path, name: &str) -> Option<String> {
+    if !is_git_repo(repo) {
+        return None;
+    }
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("remote").arg("get-url").arg(name);
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!url.is_empty()).then_some(url)
+}
+
 /// Detect the default branch name for a remote (e.g. `main` or `master`).
 /// Checks `refs/remotes/<remote>/HEAD` first; falls back to `"master"`.
 pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
