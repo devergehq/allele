@@ -458,6 +458,48 @@ pub fn fetch_and_checkout_remote_branch(
     Ok(true)
 }
 
+/// Fetch `<remote>/<name>` and hard-set the clone's local `<name>` branch to
+/// it, so a materialized workspace reflects exactly what the other machine
+/// pushed — not a stale local copy of the same branch name that happens to
+/// exist in this clone's source. Returns `false` if the branch isn't on the
+/// remote (the caller falls back to creating a fresh branch).
+///
+/// Safe against the user's real branches: this operates on the session clone's
+/// own copy of the ref, never the source repo.
+pub fn fetch_and_reset_to_remote_branch(
+    clone: &Path,
+    remote: &str,
+    name: &str,
+) -> crate::errors::Result<bool> {
+    if !is_git_repo(clone) {
+        return Err(AlleleError::Git(format!(
+            "fetch_and_reset_to_remote_branch: not a git repo: {}",
+            clone.display()
+        )));
+    }
+
+    // Fetch the single branch; a non-zero exit means it isn't on the remote.
+    let mut cmd = user_git_cmd(clone);
+    cmd.arg("fetch")
+        .arg(remote)
+        .arg(format!("{name}:refs/remotes/{remote}/{name}"));
+    if run_git(cmd, &format!("fetch {remote} {name}")).is_err() {
+        return Ok(false);
+    }
+
+    // `-B` creates-or-resets the local branch to the fetched remote tip and
+    // checks it out, with tracking set to `<remote>/<name>` (so sync-back has
+    // an upstream).
+    let mut cmd = git_cmd(Some(clone));
+    cmd.arg("checkout")
+        .arg("-B")
+        .arg(name)
+        .arg(format!("{remote}/{name}"));
+    run_git(cmd, "checkout -B (reset to remote branch)")
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
+    Ok(true)
+}
+
 /// How [`checkout_or_create_session_branch`] resolved the branch for a new
 /// session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

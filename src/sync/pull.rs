@@ -60,6 +60,14 @@ pub async fn list_remote_sessions(store: &dyn SyncStore) -> anyhow::Result<Vec<R
     Ok(sessions)
 }
 
+/// Fetch a session's raw Claude transcript bytes, if one was synced.
+pub async fn fetch_transcript(
+    store: &dyn SyncStore,
+    session_id: &str,
+) -> anyhow::Result<Option<Vec<u8>>> {
+    store.get(&super::store::transcript_key(session_id)).await
+}
+
 /// Fetch and decode a single session bundle.
 pub async fn fetch_bundle(
     store: &dyn SyncStore,

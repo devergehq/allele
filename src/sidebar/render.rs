@@ -998,6 +998,34 @@ pub(crate) fn build_sidebar_items(
                         .items_center()
                         .child(
                             div()
+                                .id(SharedString::from(format!("sync-up-{p_idx}-{s_idx}")))
+                                .cursor_pointer()
+                                .p(px(4.0))
+                                .rounded(px(6.0))
+                                .hover(|s| s.bg(theme().bg_raised))
+                                .child(icon(icons::CLOUD_UPLOAD, 13.0, theme().text_ghost))
+                                .tooltip(|_window, cx| {
+                                    cx.new(|_| SimpleTooltip {
+                                        text: "Sync session up".into(),
+                                    })
+                                    .into()
+                                })
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        this.sync_up_session(
+                                            SessionCursor {
+                                                project_idx: p_idx,
+                                                session_idx: s_idx,
+                                            },
+                                            cx,
+                                        );
+                                    }),
+                                ),
+                        )
+                        .child(
+                            div()
                                 .id(SharedString::from(format!("merge-{p_idx}-{s_idx}")))
                                 .cursor_pointer()
                                 .p(px(4.0))

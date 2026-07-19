@@ -160,6 +160,9 @@ pub(crate) struct AppState {
     /// Transient warning shown when `git pull` on the source root fails
     /// before session creation. Auto-dismissed after a few seconds.
     pub(crate) pull_warning: Option<String>,
+    /// Transient status/result banner for session-sync actions (sync-up /
+    /// pull). Dismissed by the user or replaced by the next message.
+    pub(crate) sync_notice: Option<String>,
     /// Which view the center column is currently showing.
     pub(crate) main_tab: MainTab,
     /// Status text for the Browser tab panel (e.g. "Chrome is not
@@ -186,6 +189,8 @@ pub(crate) struct AppState {
     pub(crate) edit_session_modal: Option<Entity<new_session_modal::EditSessionModal>>,
     /// Interactive naming modal — shown when NamingMode::Interactive generates suggestions.
     pub(crate) naming_modal: Option<Entity<new_session_modal::NamingModal>>,
+    /// Remote-session browser (sync pull). `Some` while the overlay is visible.
+    pub(crate) remote_browser: Option<Entity<crate::remote_browser::RemoteBrowser>>,
     /// Persistent Scratch Pad submission history across all projects.
     /// Loaded from state.json on startup, appended on submit, written back
     /// on every save_state. Filtered by project when the overlay opens.
