@@ -62,6 +62,10 @@ similar = "2"
 # use tokio + native-tls, which on macOS is Security.framework (no OpenSSL).
 rust-s3 = "0.37.2"
 
+# Client-side payload encryption for session sync (X25519 data key + scrypt
+# passphrase wrapping).
+age = "0.12.1"
+
 # APFS COW cloning
 # clonetree or direct libc FFI — evaluate during Phase 1
 
@@ -72,6 +76,8 @@ rustix-openpty = "0.2"
 core-text = "=21.0.0"  # Pin to avoid core-graphics version conflict with GPUI
 cocoa = "0.26"
 objc = "0.2"
+# Keychain storage for the session-sync data key (already in the tree via rust-s3).
+security-framework = "3"
 
 [lints.rust]
 # The `objc` 0.2 crate expands `#[cfg(feature = "cargo-clippy")]` inside its
