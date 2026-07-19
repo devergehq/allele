@@ -11,9 +11,10 @@
 //! - [`ledger`] — per-session revision/base ledger (DEV-192).
 //! - [`identity`] — project identity + git-remote resolver, the sync gate (DEV-191).
 //! - [`crypto`] / [`encrypting_store`] — client-side payload encryption (DEV-189).
+//! - [`push`] — sync-up: build + upload a session bundle, git precondition (DEV-193).
 //!
-//! Public items are the surface the push/pull flows (DEV-193/194) build on, so a
-//! binary-crate dead-code sweep flags some until then — allow it.
+//! Public items are the surface the push/pull flows build on, so a binary-crate
+//! dead-code sweep flags some until then — allow it.
 #![allow(dead_code)]
 
 pub mod crypto;
@@ -21,6 +22,7 @@ pub mod encrypting_store;
 pub mod identity;
 pub mod ledger;
 pub mod meta;
+pub mod push;
 pub mod s3_store;
 pub mod store;
 
