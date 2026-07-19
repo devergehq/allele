@@ -63,7 +63,9 @@ pub async fn validate_bucket(config: &S3Config) -> anyhow::Result<String> {
     bucket_in_region(config, region)?
         .list("allele/".to_string(), Some("/".to_string()))
         .await
-        .map_err(|e| explain_access_error(&config.bucket_name, region, config.endpoint.is_some(), e))?;
+        .map_err(|e| {
+            explain_access_error(&config.bucket_name, region, config.endpoint.is_some(), e)
+        })?;
 
     Ok(region.to_string())
 }

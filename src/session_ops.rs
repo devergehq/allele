@@ -1357,8 +1357,10 @@ impl AppState {
             let _ = this.update(cx, |this, cx| match listed {
                 Ok(sessions) => {
                     this.sync_notice = None;
-                    let entity = cx.new(|cx| crate::remote_browser::RemoteBrowser::new(cx, sessions));
-                    cx.subscribe(&entity, Self::on_remote_browser_event).detach();
+                    let entity =
+                        cx.new(|cx| crate::remote_browser::RemoteBrowser::new(cx, sessions));
+                    cx.subscribe(&entity, Self::on_remote_browser_event)
+                        .detach();
                     this.remote_browser = Some(entity);
                     cx.notify();
                 }
@@ -1450,7 +1452,10 @@ impl AppState {
         let label = session.label.clone();
 
         let existing = self.projects.iter().enumerate().find_map(|(pi, p)| {
-            p.sessions.iter().position(|s| s.id == id).map(|si| (pi, si))
+            p.sessions
+                .iter()
+                .position(|s| s.id == id)
+                .map(|si| (pi, si))
         });
 
         let mut ledger = crate::sync::ledger::SyncLedger::load();
@@ -1680,12 +1685,8 @@ fn materialize_blocking(
     cleanup_paths: &[String],
 ) -> anyhow::Result<std::path::PathBuf> {
     // 1. Copy-on-write clone of the project source.
-    let clone_path = clone::create_session_clone(
-        project_source,
-        project_name,
-        session_id,
-        cleanup_paths,
-    )?;
+    let clone_path =
+        clone::create_session_clone(project_source, project_name, session_id, cleanup_paths)?;
     if clone_path == project_source {
         anyhow::bail!("workspace clone did not produce a separate directory");
     }
@@ -1717,9 +1718,10 @@ fn materialize_blocking(
     //    conversation. Best-effort — a metadata-only bundle just yields a
     //    fresh Claude session in the materialized workspace.
     let store = crate::sync::config::build_store_from_settings(settings)?;
-    if let Some(bytes) =
-        crate::sync::rt::block_on(crate::sync::pull::fetch_transcript(store.as_ref(), session_id))?
-    {
+    if let Some(bytes) = crate::sync::rt::block_on(crate::sync::pull::fetch_transcript(
+        store.as_ref(),
+        session_id,
+    ))? {
         if let Some(transcript_path) =
             crate::transcript::expected_session_jsonl(&clone_path, conversation_id)
         {
