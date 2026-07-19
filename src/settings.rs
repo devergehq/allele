@@ -263,6 +263,53 @@ pub struct Settings {
     /// (LLM model, mode, per-platform settings).
     #[serde(default)]
     pub naming: NamingConfig,
+
+    /// Cross-machine session sync configuration (DEV-188). Empty until the user
+    /// configures a store.
+    #[serde(default)]
+    pub sync: SyncSettings,
+}
+
+/// Session-sync store configuration. All plain strings — no credentials are
+/// stored (auth is a profile name resolved from `~/.aws/credentials`); the only
+/// secret is the encryption key, which lives in the Keychain. See
+/// `Plans/SESSION-SYNC-PROPOSAL.md` §2.3.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SyncSettings {
+    /// S3 bucket name (resolved at config time via the connection test).
+    #[serde(default)]
+    pub bucket: Option<String>,
+    /// Bucket region (auto-resolved from the bucket, not hand-typed).
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Named AWS profile in `~/.aws/credentials` to resolve credentials from.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Custom endpoint for non-AWS S3-compatible targets (R2/MinIO/NAS).
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// Stable per-device id used as `last_writer_device` in bundle headers.
+    /// Generated once via [`SyncSettings::ensure_device_id`].
+    #[serde(default)]
+    pub device_id: Option<String>,
+}
+
+// Consumed by the sync push/pull flows + settings UI wiring (DEV-193/194/195),
+// which land in later stacked branches.
+#[allow(dead_code)]
+impl SyncSettings {
+    /// Return the device id, generating and storing one on first use. The
+    /// caller is responsible for persisting settings afterward.
+    pub fn ensure_device_id(&mut self) -> String {
+        self.device_id
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string())
+            .clone()
+    }
+
+    /// Whether the required S3 fields are all present.
+    pub fn is_configured(&self) -> bool {
+        self.bucket.is_some() && self.region.is_some() && self.profile.is_some()
+    }
 }
 
 fn default_sidebar_width() -> f32 {
@@ -388,6 +435,7 @@ impl Default for Settings {
             git_pull_before_new_session: false,
             promote_attention_sessions: true,
             naming: NamingConfig::default(),
+            sync: SyncSettings::default(),
         }
     }
 }
