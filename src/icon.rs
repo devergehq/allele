@@ -16,6 +16,7 @@ pub mod name {
     pub const CHEVRON_RIGHT: &str = "chevron-right";
     pub const CIRCLE: &str = "circle";
     pub const CIRCLE_FILL: &str = "circle-fill";
+    pub const CLOUD_DOWNLOAD: &str = "cloud-download";
     pub const CLOUD_UPLOAD: &str = "cloud-upload";
     pub const FILE_TEXT: &str = "file-text";
     pub const HELIX: &str = "helix";

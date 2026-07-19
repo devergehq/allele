@@ -1318,6 +1318,230 @@ impl AppState {
         })
         .detach();
     }
+
+    /// Open the remote-session browser: list the bundles in the configured
+    /// store off-thread, then present them in a picker overlay.
+    pub(crate) fn open_remote_browser(&mut self, cx: &mut Context<Self>) {
+        let device_id = self.user_settings.sync.ensure_device_id();
+        self.mark_settings_dirty();
+        let _ = device_id;
+        let settings = self.user_settings.sync.clone();
+        if !settings.is_configured() {
+            self.sync_notice = Some("Configure sync in Settings → Sync first.".to_string());
+            cx.notify();
+            return;
+        }
+
+        self.sync_notice = Some("Loading remote sessions\u{2026}".to_string());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let listed = cx
+                .background_executor()
+                .spawn(async move { list_remote_blocking(&settings) })
+                .await;
+            let _ = this.update(cx, |this, cx| match listed {
+                Ok(sessions) => {
+                    this.sync_notice = None;
+                    let entity = cx.new(|cx| crate::remote_browser::RemoteBrowser::new(cx, sessions));
+                    cx.subscribe(&entity, Self::on_remote_browser_event).detach();
+                    this.remote_browser = Some(entity);
+                    cx.notify();
+                }
+                Err(e) => {
+                    this.sync_notice = Some(format!("Couldn't load remote sessions: {e}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Bridge the browser's `Pull` / `Close` events onto AppState.
+    fn on_remote_browser_event(
+        this: &mut Self,
+        _browser: Entity<crate::remote_browser::RemoteBrowser>,
+        event: &crate::remote_browser::RemoteBrowserEvent,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            crate::remote_browser::RemoteBrowserEvent::Pull { session_id } => {
+                this.pull_remote_session(session_id.clone(), cx);
+            }
+            crate::remote_browser::RemoteBrowserEvent::Close => {
+                this.remote_browser = None;
+                cx.notify();
+            }
+        }
+    }
+
+    /// Pull a chosen remote session onto this machine: fetch its bundle, resolve
+    /// its project against local projects (the sync gate), and — on a match —
+    /// upsert an inert `Suspended` row (no clone yet; cold-resumes on click).
+    pub(crate) fn pull_remote_session(&mut self, session_id: String, cx: &mut Context<Self>) {
+        let settings = self.user_settings.sync.clone();
+        if !settings.is_configured() {
+            self.sync_notice = Some("Configure sync in Settings → Sync first.".to_string());
+            cx.notify();
+            return;
+        }
+
+        // Pull is for bringing a session onto a machine that doesn't have it.
+        // If it's already present locally, don't clobber a possibly-live row.
+        let already_local = self
+            .projects
+            .iter()
+            .any(|p| p.sessions.iter().any(|s| s.id == session_id));
+        if already_local {
+            self.sync_notice =
+                Some("That session already exists on this Mac.".to_string());
+            cx.notify();
+            return;
+        }
+
+        let projects: Vec<(String, String, std::path::PathBuf)> = self
+            .projects
+            .iter()
+            .map(|p| (p.id.clone(), p.name.clone(), p.source_path.clone()))
+            .collect();
+
+        self.sync_notice = Some("Pulling session\u{2026}".to_string());
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let outcome = cx
+                .background_executor()
+                .spawn(async move { pull_blocking(&settings, projects, &session_id) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                match outcome {
+                    Ok(PullOutcome::Ready(session, _revision)) => {
+                        let label = session.label.clone();
+                        this.insert_pulled_session(*session);
+                        this.mark_state_dirty();
+                        this.remote_browser = None;
+                        this.sync_notice =
+                            Some(format!("Pulled \u{201c}{label}\u{201d}."));
+                    }
+                    Ok(PullOutcome::ProjectMissing(name)) => {
+                        this.sync_notice = Some(format!(
+                            "Add the project \u{201c}{name}\u{201d} on this Mac first."
+                        ));
+                    }
+                    Ok(PullOutcome::Vanished) => {
+                        this.sync_notice =
+                            Some("That session is no longer in the store.".to_string());
+                    }
+                    Err(e) => {
+                        this.sync_notice = Some(format!("Pull failed: {e}"));
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Materialize a pulled `PersistedSession` into live state as a `Suspended`
+    /// row (mirrors the startup rehydration path). No-op if its owning project
+    /// isn't loaded — the sync gate should have blocked that earlier.
+    fn insert_pulled_session(&mut self, persisted: crate::state::PersistedSession) {
+        let Some(project) = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == persisted.project_id)
+        else {
+            warn!(
+                "Pulled session {} has no local project {}",
+                persisted.id, persisted.project_id
+            );
+            return;
+        };
+
+        let mut session = Session::suspended_from_persisted(
+            persisted.id.clone(),
+            persisted.label.clone(),
+            persisted.started_at,
+            persisted.last_active,
+            std::time::Duration::from_secs(persisted.active_runtime_secs),
+            persisted.clone_path.clone(),
+            persisted.merged,
+        )
+        .with_drawer_tabs(
+            persisted.drawer_tab_names.clone(),
+            persisted.drawer_active_tab,
+        )
+        .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
+        .with_agent_id(persisted.agent_id.clone())
+        .with_claude_session_id(persisted.claude_session_id.clone());
+        session.pinned = persisted.pinned;
+        session.comment = persisted.comment.clone();
+        session.branch_name = persisted.branch_name.clone();
+        session.merge_strategy_override = persisted.merge_strategy_override;
+        session.branch_locked = persisted.branch_locked;
+        project.sessions.push(session);
+    }
+}
+
+/// Owned result of a background pull, handed back to the main thread.
+enum PullOutcome {
+    /// Resolved to a local project; ready to insert as this session.
+    Ready(Box<crate::state::PersistedSession>, u64),
+    /// The bundle's project isn't present locally — the sync gate blocked it.
+    ProjectMissing(String),
+    /// The bundle disappeared from the store between listing and pulling.
+    Vanished,
+}
+
+/// Background worker: list every remote session header from the store.
+fn list_remote_blocking(
+    settings: &crate::settings::SyncSettings,
+) -> anyhow::Result<Vec<crate::sync::pull::RemoteSession>> {
+    let store = crate::sync::config::build_store_from_settings(settings)?;
+    crate::sync::rt::block_on(crate::sync::pull::list_remote_sessions(store.as_ref()))
+}
+
+/// Background worker: fetch a bundle, resolve it against local projects, and —
+/// on a match — record the pulled revision in the ledger. The live-state insert
+/// happens back on the main thread.
+fn pull_blocking(
+    settings: &crate::settings::SyncSettings,
+    projects: Vec<(String, String, std::path::PathBuf)>,
+    session_id: &str,
+) -> anyhow::Result<PullOutcome> {
+    let store = crate::sync::config::build_store_from_settings(settings)?;
+    let meta = match crate::sync::rt::block_on(crate::sync::pull::fetch_bundle(
+        store.as_ref(),
+        session_id,
+    ))? {
+        Some(meta) => meta,
+        None => return Ok(PullOutcome::Vanished),
+    };
+
+    let idents: Vec<(String, crate::sync::meta::ProjectIdentity)> = projects
+        .into_iter()
+        .map(|(pid, name, path)| (pid, crate::sync::identity::project_identity(&name, &path)))
+        .collect();
+    let candidates: Vec<crate::sync::identity::Candidate> = idents
+        .iter()
+        .map(|(pid, ident)| crate::sync::identity::Candidate {
+            project_id: pid,
+            identity: ident,
+        })
+        .collect();
+
+    match crate::sync::pull::resolve_pull(&meta, &candidates) {
+        crate::sync::pull::PullResolution::Ready(session) => {
+            let revision = meta.sync.revision;
+            let mut ledger = crate::sync::ledger::SyncLedger::load();
+            ledger.record_synced(&session.id, revision);
+            ledger.save()?;
+            Ok(PullOutcome::Ready(Box::new(session), revision))
+        }
+        crate::sync::pull::PullResolution::ProjectMissing { name } => {
+            Ok(PullOutcome::ProjectMissing(name))
+        }
+    }
 }
 
 /// Blocking worker for [`AppState::sync_up_session`] — runs on a background
