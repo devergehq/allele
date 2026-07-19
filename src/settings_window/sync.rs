@@ -180,8 +180,14 @@ impl SyncSection {
             endpoint: non_empty(&self.endpoint_input.read(cx).text()),
             device_id,
         };
+        // Apply + persist directly in the update closure. Routing through
+        // `pending_action` would only dispatch on the *main* window's render
+        // (main.rs), but sync config is edited in this separate settings
+        // window — the queued action could be dropped before the main window
+        // next renders, losing everything but the app-side device_id write.
         app.update(cx, |state: &mut AppState, cx| {
-            state.pending_action = Some(crate::SettingsAction::UpdateSync(sync).into());
+            state.user_settings.sync = sync;
+            state.save_settings();
             cx.notify();
         })
         .ok();
