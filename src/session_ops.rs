@@ -852,20 +852,24 @@ impl AppState {
             return;
         };
         let Some(clone_path) = session.clone_path.clone() else {
-            // A pulled session arrives with no workspace on this Mac (only its
-            // metadata synced). Materializing it — cloning the project on its
-            // branch and restoring the transcript — is not wired up yet, so
-            // tell the user rather than silently doing nothing.
-            warn!(
-                "Cannot resume session {} — no clone_path on record",
-                session.id
-            );
-            self.sync_notice = Some(
-                "This session was pulled from another Mac and can't be opened here yet — \
-                 materializing a pulled workspace isn't wired up. Track it under Session Sync."
-                    .to_string(),
-            );
-            cx.notify();
+            // No workspace on this Mac — a pulled session (metadata only), or a
+            // clone that was cleaned. If sync is configured, materialize it:
+            // clone the project on its branch and restore the synced transcript,
+            // then resume. Otherwise there's nothing we can rebuild from.
+            if self.user_settings.sync.is_configured() {
+                self.materialize_pulled_session(cursor, window, cx);
+            } else {
+                warn!(
+                    "Cannot resume session {} — no clone_path and sync isn't configured",
+                    session.id
+                );
+                self.sync_notice = Some(
+                    "This session was pulled from another Mac. Configure Settings → Sync \
+                     so its workspace can be rebuilt here."
+                        .to_string(),
+                );
+                cx.notify();
+            }
             return;
         };
 
@@ -1491,6 +1495,75 @@ impl AppState {
         session.branch_locked = persisted.branch_locked;
         project.sessions.push(session);
     }
+
+    /// Rebuild a pulled session's workspace on this Mac, then resume it. Clones
+    /// the project on the session's branch and restores the synced transcript
+    /// off-thread, sets the session's `clone_path`, and hands back to
+    /// [`AppState::resume_session`] — which now finds a workspace and proceeds.
+    pub(crate) fn materialize_pulled_session(
+        &mut self,
+        cursor: crate::actions::SessionCursor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (session_id, conversation_id, branch_name, project_source, project_name) = {
+            let Some(project) = self.projects.get(cursor.project_idx) else {
+                return;
+            };
+            let Some(session) = project.sessions.get(cursor.session_idx) else {
+                return;
+            };
+            (
+                session.id.clone(),
+                session.claude_session_id().to_string(),
+                session.branch_name.clone(),
+                project.source_path.clone(),
+                project.name.clone(),
+            )
+        };
+        let settings = self.user_settings.sync.clone();
+        let cleanup_paths = self.user_settings.session_cleanup_paths.clone();
+
+        self.sync_notice = Some("Setting up the pulled session\u{2026}".to_string());
+        cx.notify();
+
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    materialize_blocking(
+                        &settings,
+                        &session_id,
+                        &conversation_id,
+                        branch_name.as_deref(),
+                        &project_source,
+                        &project_name,
+                        &cleanup_paths,
+                    )
+                })
+                .await;
+            let _ = this.update_in(cx, move |this: &mut Self, window, cx| match result {
+                Ok(clone_path) => {
+                    if let Some(session) = this
+                        .projects
+                        .get_mut(cursor.project_idx)
+                        .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                    {
+                        session.clone_path = Some(clone_path);
+                    }
+                    this.mark_state_dirty();
+                    this.sync_notice = None;
+                    // The workspace exists now — resume for real.
+                    this.resume_session(cursor, window, cx);
+                }
+                Err(e) => {
+                    this.sync_notice = Some(format!("Couldn't set up the pulled session: {e}"));
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
 }
 
 /// Owned result of a background pull, handed back to the main thread.
@@ -1554,6 +1627,66 @@ fn pull_blocking(
     }
 }
 
+/// Blocking worker for [`AppState::materialize_pulled_session`]: create the
+/// APFS clone, check out the session's branch (fetching it from the remote if
+/// needed), and restore the synced Claude transcript into the clone. Returns
+/// the new workspace path.
+fn materialize_blocking(
+    settings: &crate::settings::SyncSettings,
+    session_id: &str,
+    conversation_id: &str,
+    branch_name: Option<&str>,
+    project_source: &std::path::Path,
+    project_name: &str,
+    cleanup_paths: &[String],
+) -> anyhow::Result<std::path::PathBuf> {
+    // 1. Copy-on-write clone of the project source.
+    let clone_path = clone::create_session_clone(
+        project_source,
+        project_name,
+        session_id,
+        cleanup_paths,
+    )?;
+    if clone_path == project_source {
+        anyhow::bail!("workspace clone did not produce a separate directory");
+    }
+    clone::cleanup_stale_runtime(&clone_path, cleanup_paths);
+
+    // 2. Check out the session's branch. The code arrived via the user's own
+    //    `git push`; this fetches it from origin and checks it out (or creates
+    //    it if the remote doesn't have it yet).
+    if let Some(branch) = branch_name.map(str::trim).filter(|b| !b.is_empty()) {
+        if let Err(e) =
+            git::checkout_or_create_session_branch(&clone_path, session_id, Some(branch))
+        {
+            warn!("pulled session {session_id}: branch '{branch}' checkout failed: {e}");
+        }
+    }
+
+    // Marker file for orphan cleanup, excluded from git (mirrors new sessions).
+    let _ = std::fs::write(clone_path.join(".allele-session"), session_id);
+    crate::git::exclude_pattern_in_clone(&clone_path, ".allele-session");
+
+    // 3. Restore the synced transcript so `claude --resume` replays the
+    //    conversation. Best-effort — a metadata-only bundle just yields a
+    //    fresh Claude session in the materialized workspace.
+    let store = crate::sync::config::build_store_from_settings(settings)?;
+    if let Some(bytes) =
+        crate::sync::rt::block_on(crate::sync::pull::fetch_transcript(store.as_ref(), session_id))?
+    {
+        if let Some(transcript_path) =
+            crate::transcript::expected_session_jsonl(&clone_path, conversation_id)
+        {
+            if let Some(parent) = transcript_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&transcript_path, bytes)?;
+        }
+    }
+
+    Ok(clone_path)
+}
+
 /// Blocking worker for [`AppState::sync_up_session`] — runs on a background
 /// thread: enforce the git precondition, build the encrypted store, and push
 /// the bundle. Returns the pushed revision.
@@ -1565,8 +1698,8 @@ fn sync_up_blocking(
     clone_path: Option<&std::path::Path>,
     device_id: &str,
 ) -> anyhow::Result<u64> {
-    // The bundle carries the transcript but not the code; refuse to push a
-    // session whose branch isn't fully on the remote (design §2.5).
+    // The bundle carries the transcript + metadata but not the code; refuse to
+    // push a session whose branch isn't fully on the remote (design §2.5).
     if let Some(clone) = clone_path {
         let readiness = crate::sync::push::check_push_ready(clone);
         if let Some(warning) = readiness.warning() {
@@ -1588,6 +1721,25 @@ fn sync_up_blocking(
         device_id,
         std::time::SystemTime::now(),
     ))?;
+
+    // Upload the Claude transcript so the conversation replays on another Mac.
+    // Best-effort: a session whose transcript file doesn't exist yet (never
+    // opened, or already cleaned) simply syncs its metadata.
+    if let Some(clone) = clone_path {
+        let conversation_id = session.claude_session_id.as_deref().unwrap_or(&session.id);
+        if let Some(transcript_path) =
+            crate::transcript::expected_session_jsonl(clone, conversation_id)
+        {
+            if let Ok(bytes) = std::fs::read(&transcript_path) {
+                crate::sync::rt::block_on(crate::sync::push::push_transcript(
+                    store.as_ref(),
+                    &session.id,
+                    bytes,
+                ))?;
+            }
+        }
+    }
+
     ledger.save()?;
     Ok(revision)
 }

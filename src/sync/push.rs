@@ -95,6 +95,19 @@ pub async fn push_session_bundle(
     Ok(revision)
 }
 
+/// Upload a session's Claude transcript bytes alongside its bundle (the Phase-2
+/// payload that lets the conversation replay on another Mac). Best-effort:
+/// callers skip it when the local transcript file doesn't exist yet.
+pub async fn push_transcript(
+    store: &dyn SyncStore,
+    session_id: &str,
+    bytes: Vec<u8>,
+) -> anyhow::Result<()> {
+    store
+        .put(&super::store::transcript_key(session_id), bytes)
+        .await
+}
+
 /// The revision currently in the store for `session_id`, if a bundle exists.
 async fn read_remote_revision(
     store: &dyn SyncStore,

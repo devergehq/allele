@@ -28,6 +28,11 @@ pub fn meta_key(session_id: &str) -> String {
     format!("{SESSIONS_PREFIX}{session_id}/meta.json")
 }
 
+/// Object key for a session's Claude transcript: `sessions/<id>/transcript.jsonl`.
+pub fn transcript_key(session_id: &str) -> String {
+    format!("{SESSIONS_PREFIX}{session_id}/transcript.jsonl")
+}
+
 /// Inverse of the `sessions/<id>/…` layout: extract the session id from a key,
 /// or `None` if the key is not under [`SESSIONS_PREFIX`] or has an empty id
 /// segment.
