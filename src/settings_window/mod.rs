@@ -28,13 +28,13 @@ use crate::AppState;
 mod browser;
 mod editor;
 mod infrastructure;
+mod naming;
 mod widgets;
 use browser::BrowserSection;
 use editor::EditorSection;
 use infrastructure::InfraSection;
-use widgets::{
-    card, input_frame, labeled_row, section_header, section_note, section_title, toggle_switch,
-};
+use naming::NamingSection;
+use widgets::{card, input_frame, section_header, section_note, section_title, toggle_switch};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Section {
@@ -103,10 +103,8 @@ pub struct SettingsWindowState {
     /// Whether attention-needed sessions are promoted to the top of the
     /// sidebar list. Mirrored from `Settings::promote_attention_sessions`.
     promote_attention_sessions: bool,
-    /// Naming model inputs — editable so the user doesn't need to hand-edit
-    /// settings.json (which the app overwrites on every auto-save).
-    naming_claude_model_input: Entity<TextInput>,
-    naming_opencode_model_input: Entity<TextInput>,
+    /// Naming section (branch-naming mode + model overrides).
+    naming: NamingSection,
     /// Infrastructure section (base-infra toggle).
     infrastructure: InfraSection,
     /// Selected project index for the Projects pane.
@@ -144,32 +142,6 @@ impl SettingsWindowState {
                 input.update(cx, |i, cx| i.set_text_silent("", cx));
             }
         })
-        .detach();
-
-        let naming_claude_model_input = cx
-            .new(|cx| TextInput::new(cx, initial_naming_claude_model, "claude-haiku-4-5-20251001"));
-        cx.subscribe(
-            &naming_claude_model_input,
-            |this, input, event: &TextInputEvent, cx| {
-                if matches!(event, TextInputEvent::Changed | TextInputEvent::Submitted) {
-                    let value = input.read(cx).text().to_string();
-                    this.push_naming_model("claude", value, cx);
-                }
-            },
-        )
-        .detach();
-
-        let naming_opencode_model_input =
-            cx.new(|cx| TextInput::new(cx, initial_naming_opencode_model, "openai/gpt-4o-mini"));
-        cx.subscribe(
-            &naming_opencode_model_input,
-            |this, input, event: &TextInputEvent, cx| {
-                if matches!(event, TextInputEvent::Changed | TextInputEvent::Submitted) {
-                    let value = input.read(cx).text().to_string();
-                    this.push_naming_model("opencode", value, cx);
-                }
-            },
-        )
         .detach();
 
         let project_startup_input =
@@ -214,8 +186,11 @@ impl SettingsWindowState {
             font_size: crate::terminal::clamp_font_size(initial_font_size),
             git_pull_before_new_session: initial_git_pull_before_new_session,
             promote_attention_sessions: initial_promote_attention_sessions,
-            naming_claude_model_input,
-            naming_opencode_model_input,
+            naming: NamingSection::new(
+                cx,
+                initial_naming_claude_model,
+                initial_naming_opencode_model,
+            ),
             infrastructure: InfraSection::new(initial_base_infra_enabled),
             projects_selected: None,
             project_startup_input,
@@ -432,23 +407,6 @@ impl SettingsWindowState {
 
     // --- naming --------------------------------------------------------
 
-    fn push_naming_model(&self, which: &str, value: String, cx: &mut Context<Self>) {
-        if let Some(app) = self.app.upgrade() {
-            let mut new_config = app.read(cx).user_settings.naming.clone();
-            let model = if value.is_empty() { None } else { Some(value) };
-            match which {
-                "claude" => new_config.claude.model = model,
-                "opencode" => new_config.opencode.model = model,
-                _ => return,
-            }
-            app.update(cx, |state: &mut crate::AppState, cx| {
-                state.pending_action =
-                    Some(crate::SettingsAction::UpdateNamingConfig(new_config).into());
-                cx.notify();
-            });
-        }
-    }
-
     // --- browser -------------------------------------------------------
 
     // --- agents --------------------------------------------------------
@@ -660,111 +618,11 @@ fn render_pane(
         Section::Infrastructure => this.infrastructure.render(&this.app, cx).into_any_element(),
         Section::Sessions => render_sessions_pane(this, cx).into_any_element(),
         Section::Agents => render_agents_pane(this, cx).into_any_element(),
-        Section::Naming => render_naming_pane(this, cx).into_any_element(),
+        Section::Naming => this.naming.render(&this.app, cx).into_any_element(),
         Section::Editor => this.editor.render(cx).into_any_element(),
         Section::Browser => this.browser.render(cx).into_any_element(),
         Section::Appearance => render_appearance_pane(this, cx).into_any_element(),
     }
-}
-
-fn render_naming_pane(
-    this: &mut SettingsWindowState,
-    cx: &mut Context<SettingsWindowState>,
-) -> impl IntoElement {
-    use crate::naming::NamingMode;
-
-    let naming = this
-        .app
-        .upgrade()
-        .map(|app| app.read(cx).user_settings.naming.clone())
-        .unwrap_or_default();
-
-    let mode = naming.mode;
-    let mode_label = mode.label();
-    let mode_desc = mode.description();
-
-    div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w(px(0.0))
-        .overflow_hidden()
-        .p(px(20.0))
-        .gap(px(12.0))
-        .child(section_title("Branch Naming"))
-        .child(section_note(
-            "Uses the coding agent to generate meaningful branch names \
-                     from your first prompt. Falls back to keyword extraction \
-                     when the agent binary is unavailable.",
-        ))
-        .child(
-            card()
-                // Mode toggle (clickable to cycle)
-                .child(
-                    div()
-                        .id("naming-mode-toggle")
-                        .cursor_pointer()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(8.0))
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, _event, _window, cx| {
-                                let next_mode = match mode {
-                                    NamingMode::Auto => NamingMode::Interactive,
-                                    NamingMode::Interactive => NamingMode::Legacy,
-                                    NamingMode::Legacy => NamingMode::Auto,
-                                };
-                                if let Some(app) = this.app.upgrade() {
-                                    let mut new_config = app.read(cx).user_settings.naming.clone();
-                                    new_config.mode = next_mode;
-                                    app.update(cx, |state: &mut crate::AppState, cx| {
-                                        state.pending_action = Some(
-                                            crate::SettingsAction::UpdateNamingConfig(new_config)
-                                                .into(),
-                                        );
-                                        cx.notify();
-                                    });
-                                }
-                                cx.notify();
-                            }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme().text_faint)
-                                .min_w(px(50.0))
-                                .child("Mode"),
-                        )
-                        .child(
-                            div()
-                                .px(px(8.0))
-                                .py(px(2.0))
-                                .rounded(px(6.0))
-                                .bg(theme().bg_raised)
-                                .text_size(px(12.0))
-                                .text_color(theme().accent)
-                                .child(SharedString::from(mode_label.to_string())),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme().text_faint)
-                                .child(SharedString::from(mode_desc.to_string())),
-                        ),
-                )
-                // Claude model
-                .child(labeled_row(
-                    "Claude",
-                    input_frame(this.naming_claude_model_input.clone()),
-                ))
-                // OpenCode model
-                .child(labeled_row(
-                    "OpenCode",
-                    input_frame(this.naming_opencode_model_input.clone()),
-                )),
-        )
 }
 
 fn render_appearance_pane(
