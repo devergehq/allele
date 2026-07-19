@@ -188,7 +188,11 @@ impl Render for RemoteBrowser {
 
         card = card.child(list);
 
-        div().child(backdrop.child(card))
+        // Return the full-window backdrop as the root element so its
+        // `absolute inset_0` centers the card over the whole window. Wrapping
+        // it in another div would reparent the absolute positioning and drop
+        // the modal to the bottom of the layout flow.
+        backdrop.child(card)
     }
 }
 
