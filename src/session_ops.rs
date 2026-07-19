@@ -1390,25 +1390,16 @@ impl AppState {
     }
 
     /// Pull a chosen remote session onto this machine: fetch its bundle, resolve
-    /// its project against local projects (the sync gate), and — on a match —
-    /// upsert an inert `Suspended` row (no clone yet; cold-resumes on click).
+    /// its project against local projects (the sync gate), and apply it. A first
+    /// pull inserts an inert `Suspended` row (cold-resumes on click). A pull of a
+    /// *newer* revision of a session already here replaces the local row and
+    /// drops its stale clone, so the click re-materializes it at the new
+    /// revision — the round-trip (A → B → A) needs no manual discard. A same-or-
+    /// older revision is left untouched.
     pub(crate) fn pull_remote_session(&mut self, session_id: String, cx: &mut Context<Self>) {
         let settings = self.user_settings.sync.clone();
         if !settings.is_configured() {
             self.sync_notice = Some("Configure sync in Settings → Sync first.".to_string());
-            cx.notify();
-            return;
-        }
-
-        // Pull is for bringing a session onto a machine that doesn't have it.
-        // If it's already present locally, don't clobber a possibly-live row.
-        let already_local = self
-            .projects
-            .iter()
-            .any(|p| p.sessions.iter().any(|s| s.id == session_id));
-        if already_local {
-            self.sync_notice =
-                Some("That session already exists on this Mac.".to_string());
             cx.notify();
             return;
         }
@@ -1429,13 +1420,8 @@ impl AppState {
                 .await;
             let _ = this.update(cx, |this, cx| {
                 match outcome {
-                    Ok(PullOutcome::Ready(session, _revision)) => {
-                        let label = session.label.clone();
-                        this.insert_pulled_session(*session);
-                        this.mark_state_dirty();
-                        this.remote_browser = None;
-                        this.sync_notice =
-                            Some(format!("Pulled \u{201c}{label}\u{201d}."));
+                    Ok(PullOutcome::Ready(session, revision)) => {
+                        this.apply_pulled_session(*session, revision);
                     }
                     Ok(PullOutcome::ProjectMissing(name)) => {
                         this.sync_notice = Some(format!(
@@ -1456,6 +1442,54 @@ impl AppState {
         .detach();
     }
 
+    /// Apply a resolved pulled session: insert it (first pull), replace it and
+    /// drop the stale clone (newer revision), or leave it (same/older). Records
+    /// the pulled revision as this device's base in the ledger on apply.
+    fn apply_pulled_session(&mut self, session: crate::state::PersistedSession, revision: u64) {
+        let id = session.id.clone();
+        let label = session.label.clone();
+
+        let existing = self.projects.iter().enumerate().find_map(|(pi, p)| {
+            p.sessions.iter().position(|s| s.id == id).map(|si| (pi, si))
+        });
+
+        let mut ledger = crate::sync::ledger::SyncLedger::load();
+        let base = ledger.base_revision(&id).unwrap_or(0);
+
+        match existing {
+            Some(_) if revision <= base => {
+                self.sync_notice = Some(format!(
+                    "\u{201c}{label}\u{201d} is already up to date (revision {base})."
+                ));
+                return;
+            }
+            Some((pi, si)) => {
+                // Newer revision — replace in place and drop the stale clone so
+                // the next click re-materializes the workspace at this revision.
+                let old_clone = self.projects[pi].sessions[si].clone_path.clone();
+                let source = self.projects[pi].source_path.clone();
+                if let Some(clone_path) = old_clone {
+                    if clone_path.exists() && clone_path != source {
+                        let _ = clone::delete_clone(&clone_path);
+                    }
+                }
+                self.projects[pi].sessions[si] = session_from_persisted(&session);
+                self.sync_notice = Some(format!(
+                    "Updated \u{201c}{label}\u{201d} to revision {revision} — open it to load the work."
+                ));
+            }
+            None => {
+                self.insert_pulled_session(session);
+                self.sync_notice = Some(format!("Pulled \u{201c}{label}\u{201d}."));
+            }
+        }
+
+        ledger.record_synced(&id, revision);
+        let _ = ledger.save();
+        self.mark_state_dirty();
+        self.remote_browser = None;
+    }
+
     /// Materialize a pulled `PersistedSession` into live state as a `Suspended`
     /// row (mirrors the startup rehydration path). No-op if its owning project
     /// isn't loaded — the sync gate should have blocked that earlier.
@@ -1471,29 +1505,7 @@ impl AppState {
             );
             return;
         };
-
-        let mut session = Session::suspended_from_persisted(
-            persisted.id.clone(),
-            persisted.label.clone(),
-            persisted.started_at,
-            persisted.last_active,
-            std::time::Duration::from_secs(persisted.active_runtime_secs),
-            persisted.clone_path.clone(),
-            persisted.merged,
-        )
-        .with_drawer_tabs(
-            persisted.drawer_tab_names.clone(),
-            persisted.drawer_active_tab,
-        )
-        .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
-        .with_agent_id(persisted.agent_id.clone())
-        .with_claude_session_id(persisted.claude_session_id.clone());
-        session.pinned = persisted.pinned;
-        session.comment = persisted.comment.clone();
-        session.branch_name = persisted.branch_name.clone();
-        session.merge_strategy_override = persisted.merge_strategy_override;
-        session.branch_locked = persisted.branch_locked;
-        project.sessions.push(session);
+        project.sessions.push(session_from_persisted(&persisted));
     }
 
     /// Rebuild a pulled session's workspace on this Mac, then resume it. Clones
@@ -1566,6 +1578,34 @@ impl AppState {
     }
 }
 
+/// Build a `Suspended` live [`Session`] from a pulled `PersistedSession`,
+/// mirroring the startup rehydration path. Shared by first-pull insert and
+/// newer-revision replace.
+fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session {
+    let mut session = Session::suspended_from_persisted(
+        persisted.id.clone(),
+        persisted.label.clone(),
+        persisted.started_at,
+        persisted.last_active,
+        std::time::Duration::from_secs(persisted.active_runtime_secs),
+        persisted.clone_path.clone(),
+        persisted.merged,
+    )
+    .with_drawer_tabs(
+        persisted.drawer_tab_names.clone(),
+        persisted.drawer_active_tab,
+    )
+    .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
+    .with_agent_id(persisted.agent_id.clone())
+    .with_claude_session_id(persisted.claude_session_id.clone());
+    session.pinned = persisted.pinned;
+    session.comment = persisted.comment.clone();
+    session.branch_name = persisted.branch_name.clone();
+    session.merge_strategy_override = persisted.merge_strategy_override;
+    session.branch_locked = persisted.branch_locked;
+    session
+}
+
 /// Owned result of a background pull, handed back to the main thread.
 enum PullOutcome {
     /// Resolved to a local project; ready to insert as this session.
@@ -1615,11 +1655,10 @@ fn pull_blocking(
 
     match crate::sync::pull::resolve_pull(&meta, &candidates) {
         crate::sync::pull::PullResolution::Ready(session) => {
-            let revision = meta.sync.revision;
-            let mut ledger = crate::sync::ledger::SyncLedger::load();
-            ledger.record_synced(&session.id, revision);
-            ledger.save()?;
-            Ok(PullOutcome::Ready(Box::new(session), revision))
+            // The ledger is recorded on the main thread once we've decided
+            // whether this is a first pull or a newer-revision replace — the
+            // comparison needs the current base before it's overwritten.
+            Ok(PullOutcome::Ready(Box::new(session), meta.sync.revision))
         }
         crate::sync::pull::PullResolution::ProjectMissing { name } => {
             Ok(PullOutcome::ProjectMissing(name))
