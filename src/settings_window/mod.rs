@@ -27,9 +27,11 @@ use crate::AppState;
 
 mod browser;
 mod editor;
+mod infrastructure;
 mod widgets;
 use browser::BrowserSection;
 use editor::EditorSection;
+use infrastructure::InfraSection;
 use widgets::{
     card, input_frame, labeled_row, section_header, section_note, section_title, toggle_switch,
 };
@@ -105,8 +107,8 @@ pub struct SettingsWindowState {
     /// settings.json (which the app overwrites on every auto-save).
     naming_claude_model_input: Entity<TextInput>,
     naming_opencode_model_input: Entity<TextInput>,
-    /// Mirrored base-infra enabled toggle.
-    base_infra_enabled: bool,
+    /// Infrastructure section (base-infra toggle).
+    infrastructure: InfraSection,
     /// Selected project index for the Projects pane.
     projects_selected: Option<usize>,
     /// Text inputs for the selected project's startup/shutdown commands.
@@ -214,7 +216,7 @@ impl SettingsWindowState {
             promote_attention_sessions: initial_promote_attention_sessions,
             naming_claude_model_input,
             naming_opencode_model_input,
-            base_infra_enabled: initial_base_infra_enabled,
+            infrastructure: InfraSection::new(initial_base_infra_enabled),
             projects_selected: None,
             project_startup_input,
             project_shutdown_input,
@@ -226,15 +228,6 @@ impl SettingsWindowState {
     }
 
     // --- base infrastructure --------------------------------------------
-
-    fn push_base_infra(&self, enabled: bool, cx: &mut Context<Self>) {
-        self.app
-            .update(cx, |state: &mut AppState, cx| {
-                state.pending_action = Some(crate::SettingsAction::UpdateBaseInfra(enabled).into());
-                cx.notify();
-            })
-            .ok();
-    }
 
     // --- project orchestration ------------------------------------------
 
@@ -664,7 +657,7 @@ fn render_pane(
 ) -> AnyElement {
     match this.selected {
         Section::Projects => render_projects_pane(this, cx).into_any_element(),
-        Section::Infrastructure => render_infrastructure_pane(this, cx).into_any_element(),
+        Section::Infrastructure => this.infrastructure.render(&this.app, cx).into_any_element(),
         Section::Sessions => render_sessions_pane(this, cx).into_any_element(),
         Section::Agents => render_agents_pane(this, cx).into_any_element(),
         Section::Naming => render_naming_pane(this, cx).into_any_element(),
@@ -896,120 +889,6 @@ fn render_appearance_pane(
                      same value from inside a terminal.",
         ))
         .child(card().child(controls))
-}
-
-fn render_infrastructure_pane(
-    this: &mut SettingsWindowState,
-    cx: &mut Context<SettingsWindowState>,
-) -> impl IntoElement {
-    let enabled = this.base_infra_enabled;
-    let status = this
-        .app
-        .upgrade()
-        .and_then(|app| app.read(cx).base_infra_status.clone());
-    let dynamic_path = crate::base_infra::dynamic_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let certs_path = crate::base_infra::certs_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_default();
-
-    let toggle = div()
-        .id("base-infra-toggle")
-        .cursor_pointer()
-        .flex()
-        .flex_row()
-        .items_center()
-        .gap(px(8.0))
-        .on_mouse_down(
-            MouseButton::Left,
-            cx.listener(move |this, _event, _window, cx| {
-                this.base_infra_enabled = !this.base_infra_enabled;
-                this.push_base_infra(this.base_infra_enabled, cx);
-                cx.notify();
-            }),
-        )
-        .child(toggle_switch("base-infra-knob", enabled))
-        .child(
-            div()
-                .text_size(px(12.0))
-                .text_color(theme().text_primary)
-                .child("Enable global Traefik reverse proxy + shared network"),
-        );
-
-    let status_line = status.map(|s| {
-        let color = if s.contains("Running") {
-            theme().success
-        } else if s.contains("Starting") || s.contains("Stopping") || s.contains("Stopped") {
-            theme().warning
-        } else {
-            theme().danger // error
-        };
-        div()
-            .text_size(px(11.0))
-            .text_color(color)
-            .child(SharedString::from(format!("Status: {s}")))
-    });
-
-    let path_row = |label: &str, value: &str| -> AnyElement {
-        div()
-            .flex()
-            .flex_col()
-            .gap(px(2.0))
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(theme().text_faint)
-                    .child(SharedString::from(label.to_string())),
-            )
-            .child(
-                div()
-                    .text_size(px(11.0))
-                    .text_color(theme().text_secondary)
-                    .child(SharedString::from(value.to_string())),
-            )
-            .into_any_element()
-    };
-
-    let mut pane = div()
-        .id("infrastructure-pane")
-        .flex_1()
-        .p(px(20.0))
-        .flex()
-        .flex_col()
-        .gap(px(14.0))
-        .overflow_y_scroll()
-        .child(section_title("Infrastructure"))
-        .child(section_note(
-            "A single Traefik reverse proxy + shared 'allele' Docker network that all \
-                     sessions register HTTPS routes against. Requires Docker. Allele manages \
-                     only the proxy and network — project services stay in your startup scripts.",
-        ))
-        .child(card().child(toggle));
-
-    if let Some(line) = status_line {
-        pane = pane.child(line);
-    }
-
-    pane = pane.child(section_header("Paths")).child(
-        card()
-            .child(path_row(
-                "Dynamic routes (session-start writes here)",
-                &dynamic_path,
-            ))
-            .child(path_row("TLS certificates (drop *.pem here)", &certs_path))
-            .child(
-                div()
-                    .text_size(px(10.0))
-                    .text_color(theme().text_faint)
-                    .child(
-                        "DNS: point your local domains at 127.0.0.1 via dnsmasq + /etc/resolver \
-                         (one-time, needs sudo).",
-                    ),
-            ),
-    );
-
-    pane
 }
 
 fn render_projects_pane(
