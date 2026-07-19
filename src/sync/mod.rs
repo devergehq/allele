@@ -7,14 +7,18 @@
 //! Submodules:
 //! - [`store`] — the [`SyncStore`] object-store abstraction + `MemStore` (DEV-187).
 //! - [`s3_store`] — S3-compatible `SyncStore` via rust-s3 (DEV-187).
+//! - [`meta`] — portable [`SessionBundleMeta`] schema + path normalization (DEV-190).
 //!
 //! Public items are the surface later Phase 1 tasks build on, so a binary-crate
 //! dead-code sweep flags some until then — allow it.
 #![allow(dead_code)]
 
+pub mod meta;
 pub mod s3_store;
 pub mod store;
 
 // Flat `crate::sync::…` surface; consumers land in later Phase 1 tasks.
+#[allow(unused_imports)]
+pub use meta::{ProjectIdentity, SessionBundleMeta, SyncHeader};
 #[allow(unused_imports)]
 pub use store::{meta_key, session_id_from_key, MemStore, SyncStore, SESSIONS_PREFIX};
