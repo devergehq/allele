@@ -12,8 +12,9 @@
 //! - [`identity`] — project identity + git-remote resolver, the sync gate (DEV-191).
 //! - [`crypto`] / [`encrypting_store`] — client-side payload encryption (DEV-189).
 //! - [`push`] — sync-up: build + upload a session bundle, git precondition (DEV-193).
+//! - [`pull`] — sync-down: browse + pull a bundle into local state, project-gated (DEV-194).
 //!
-//! Public items are the surface the push/pull flows build on, so a binary-crate
+//! Public items are the surface the UI (DEV-195) builds on, so a binary-crate
 //! dead-code sweep flags some until then — allow it.
 #![allow(dead_code)]
 
@@ -22,6 +23,7 @@ pub mod encrypting_store;
 pub mod identity;
 pub mod ledger;
 pub mod meta;
+pub mod pull;
 pub mod push;
 pub mod s3_store;
 pub mod store;
