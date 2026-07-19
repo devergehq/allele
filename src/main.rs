@@ -33,6 +33,7 @@ mod shell_env;
 mod sidebar;
 mod state;
 mod stream;
+mod sync;
 mod terminal;
 mod text_input;
 mod theme;
