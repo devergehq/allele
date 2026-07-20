@@ -943,6 +943,7 @@ impl Render for NamingModal {
                     div()
                         .flex_1()
                         .min_w(px(0.0))
+                        .text_color(theme().text_primary)
                         .child(self.custom_input.clone()),
                 )
                 .child(
