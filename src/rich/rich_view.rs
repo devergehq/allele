@@ -300,7 +300,30 @@ impl RichView {
             return div().into_any_element();
         };
         let annotation = self.document.annotation(block.id);
-        render_block(block, annotation, font_size, cx).into_any_element()
+
+        // DEV-77: label the start of a delegated-agent run so a block of
+        // subagent output reads as one grouped unit rather than anonymous
+        // indented lines.
+        let cur_agent = block.parent_agent_id.as_deref();
+        let prev_agent = ix
+            .checked_sub(1)
+            .and_then(|p| self.document.blocks().get(p))
+            .and_then(|b| b.parent_agent_id.as_deref());
+        let agent_header = starts_agent_run(prev_agent, cur_agent).then(|| {
+            render_agent_header(cur_agent.map(short_agent).unwrap_or_default(), font_size)
+        });
+
+        let block_el = render_block(block, annotation, font_size, cx);
+        if let Some(header) = agent_header {
+            div()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(block_el)
+                .into_any_element()
+        } else {
+            block_el.into_any_element()
+        }
     }
 
     fn render_scrollbar(&self) -> Div {
@@ -443,6 +466,14 @@ fn render_block(
     // Constrained here, long text wraps at the list's own width.
     let mut wrapper = div().w_full().min_w_0().pl(indent).pb(px(16.0));
 
+    // DEV-77: a faint left border groups a delegated-agent run visually. A
+    // DEV-29 role accent (below) overrides it for decisions/outcomes.
+    if block.parent_agent_id.is_some() {
+        wrapper = wrapper
+            .border_l_1()
+            .border_color(with_alpha(theme().text_faint, 0.25));
+    }
+
     // DEV-29 narrative emphasis: a left accent bar on salient roles
     // (decisions, outcomes) and a phase-divider pill above Locus phase
     // headers, so a reader's eye lands on the meaningful moments.
@@ -549,6 +580,39 @@ fn render_block(
 }
 
 // ── Navigation strip (DEV-31) ─────────────────────────────────────
+
+/// Whether this block begins a new delegated-agent run — i.e. it belongs to a
+/// subagent and the previous block did not belong to the *same* one (DEV-77).
+fn starts_agent_run(prev_agent: Option<&str>, cur_agent: Option<&str>) -> bool {
+    cur_agent.is_some() && prev_agent != cur_agent
+}
+
+/// Shorten a subagent id (a tool_use_id) for a compact header label.
+fn short_agent(id: &str) -> String {
+    let core = id.strip_prefix("toolu_").unwrap_or(id);
+    core.chars().take(6).collect()
+}
+
+/// Header shown above the first block of a delegated-agent run (DEV-77).
+fn render_agent_header(agent: String, font_size: f32) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .pl(px(24.0))
+        .pb(px(4.0))
+        .child(
+            div()
+                .text_color(theme().text_faint)
+                .text_size(px(font_size - 2.0))
+                .font_weight(FontWeight::BOLD)
+                .child(if agent.is_empty() {
+                    "⟐ delegated agent".to_string()
+                } else {
+                    format!("⟐ delegated agent · {agent}")
+                }),
+        )
+}
 
 /// Whether a block is durable narrative content (vs. a transient UI block
 /// like the thinking indicator or a permission prompt) — used to keep the
@@ -1927,6 +1991,31 @@ mod tests {
     fn preserves_utf8() {
         let input = "\x1b[32m✓ passed\x1b[0m — done";
         assert_eq!(strip_ansi(input), "✓ passed — done");
+    }
+}
+
+#[cfg(test)]
+mod agent_group_tests {
+    use super::{short_agent, starts_agent_run};
+
+    #[test]
+    fn agent_run_starts_on_entering_or_switching_agents() {
+        // main → subagent: starts a run.
+        assert!(starts_agent_run(None, Some("a1")));
+        // same subagent continues: no new header.
+        assert!(!starts_agent_run(Some("a1"), Some("a1")));
+        // switching subagents: new header.
+        assert!(starts_agent_run(Some("a1"), Some("a2")));
+        // subagent → main: not an agent run.
+        assert!(!starts_agent_run(Some("a1"), None));
+        // main → main: nothing.
+        assert!(!starts_agent_run(None, None));
+    }
+
+    #[test]
+    fn short_agent_trims_prefix_and_length() {
+        assert_eq!(short_agent("toolu_0123456789"), "012345");
+        assert_eq!(short_agent("abc"), "abc");
     }
 }
 
