@@ -24,7 +24,7 @@ use super::document::{
 };
 use super::narrative::{Annotation, LocusPhase, NarrativeRole};
 use super::permissions::{PermissionAction, PermissionRequest, RiskLevel};
-use super::reader::{JumpKind, NarrativeIndex, NavCounts};
+use super::reader::{JumpKind, NarrativeIndex, NavCounts, UnreadTracker};
 use crate::stream::RichEvent;
 
 // ── Catppuccin Mocha palette (matching terminal) ──────────────────
@@ -67,6 +67,11 @@ pub struct RichView {
     /// Seq (BlockId) most recently jumped to, so repeated clicks on a nav
     /// chip cycle through that category's targets (DEV-75).
     last_jump_seq: Option<usize>,
+    /// "Since last viewed" tracker (DEV-76). Baselined on first non-empty
+    /// render so pre-existing history counts as read; blocks that arrive
+    /// afterwards are unread until acknowledged.
+    unread: UnreadTracker,
+    unread_baselined: bool,
 }
 
 /// A navigable category selected from the navigation strip (DEV-75).
@@ -126,7 +131,48 @@ impl RichView {
             list_state,
             index: NarrativeIndex::new(),
             last_jump_seq: None,
+            unread: UnreadTracker::new(),
+            unread_baselined: false,
         }
+    }
+
+    /// Highest block id currently in the document (its newest seq), if any.
+    fn highest_seq(&self) -> Option<usize> {
+        self.document.blocks().iter().map(|b| b.id).max()
+    }
+
+    /// Number of unread *content* blocks (arrived since the baseline / last
+    /// acknowledge). Transient blocks (thinking indicator, permission prompt)
+    /// are excluded so they don't register as "new".
+    fn unread_block_count(&self) -> usize {
+        if !self.unread_baselined {
+            return 0;
+        }
+        self.document
+            .blocks()
+            .iter()
+            .filter(|b| is_content_block(&b.kind) && self.unread.is_unread(b.id))
+            .count()
+    }
+
+    /// Scroll to the first unread block and mark everything read (DEV-76).
+    fn jump_to_first_unread(&mut self, cx: &mut Context<Self>) {
+        let first_unread = self
+            .document
+            .blocks()
+            .iter()
+            .filter(|b| is_content_block(&b.kind) && self.unread.is_unread(b.id))
+            .map(|b| b.id)
+            .min();
+        if let Some(id) = first_unread {
+            if let Some(ix) = self.document.blocks().iter().position(|b| b.id == id) {
+                self.list_state.scroll_to_reveal_item(ix);
+            }
+        }
+        if let Some(h) = self.highest_seq() {
+            self.unread.mark_viewed(h);
+        }
+        cx.notify();
     }
 
     /// Scroll to the next navigable point of `cat`, cycling on repeat (DEV-75).
@@ -326,6 +372,16 @@ impl Render for RichView {
                 .child(self.compose_bar.clone());
         }
 
+        // DEV-76: baseline the "since last viewed" tracker on the first render
+        // that has content, so pre-existing history counts as read and only
+        // blocks arriving afterwards register as unread.
+        if !self.unread_baselined {
+            if let Some(h) = self.highest_seq() {
+                self.unread.mark_viewed(h);
+                self.unread_baselined = true;
+            }
+        }
+
         // Virtual list — only renders visible blocks + overdraw.
         let feed_list = list(self.list_state.clone(), cx.processor(Self::render_block_at))
             .with_sizing_behavior(ListSizingBehavior::Auto)
@@ -334,6 +390,7 @@ impl Render for RichView {
 
         let scrollbar = self.render_scrollbar();
         let nav_counts = self.index.counts();
+        let unread = self.unread_block_count();
 
         // `size_full()` is critical — see comment in previous version.
         // The internal flex-col distributes height between the feed
@@ -346,11 +403,11 @@ impl Render for RichView {
             .flex_col()
             .bg(theme().bg_base)
             // DEV-31 navigation strip: a compact tally of navigable points
-            // (phases / decisions / errors / files) once any exist.
+            // (phases / decisions / errors / files), plus a DEV-76 "N new"
+            // jump chip. Shown once there's anything to navigate or read.
             .children(
-                nav_counts
-                    .any()
-                    .then(|| self.render_nav_strip(nav_counts, cx)),
+                (nav_counts.any() || unread > 0)
+                    .then(|| self.render_nav_strip(nav_counts, unread, cx)),
             )
             .child(
                 div()
@@ -493,6 +550,16 @@ fn render_block(
 
 // ── Navigation strip (DEV-31) ─────────────────────────────────────
 
+/// Whether a block is durable narrative content (vs. a transient UI block
+/// like the thinking indicator or a permission prompt) — used to keep the
+/// unread count meaningful (DEV-76).
+fn is_content_block(kind: &BlockKind) -> bool {
+    !matches!(
+        kind,
+        BlockKind::AwaitingResponse | BlockKind::PermissionRequest { .. }
+    )
+}
+
 /// Extract (searchable text, artifact path) for the nav index from a block.
 fn block_index_fields(kind: &BlockKind) -> (String, Option<String>) {
     match kind {
@@ -512,9 +579,9 @@ fn block_index_fields(kind: &BlockKind) -> (String, Option<String>) {
 
 /// A compact tally of navigable points, shown above the feed.
 impl RichView {
-    /// The navigation strip: clickable chips that jump to the next phase /
-    /// decision / outcome / error / file (DEV-31 counts + DEV-75 jump).
-    fn render_nav_strip(&self, counts: NavCounts, cx: &mut Context<Self>) -> Div {
+    /// The navigation strip: a DEV-76 "N new" jump chip plus DEV-31/75
+    /// clickable category chips (phase / decision / outcome / error / file).
+    fn render_nav_strip(&self, counts: NavCounts, unread: usize, cx: &mut Context<Self>) -> Div {
         let fs = self.font_size;
         let mut row = div()
             .w_full()
@@ -527,6 +594,30 @@ impl RichView {
             .border_b_1()
             .border_color(with_alpha(theme().text_faint, 0.15))
             .bg(theme().bg_base);
+        if unread > 0 {
+            // "N new ↓" — jump to the first unread block and mark read.
+            row = row.child(
+                div()
+                    .id("nav-unread")
+                    .flex()
+                    .items_center()
+                    .gap(px(4.0))
+                    .px(px(6.0))
+                    .rounded(px(4.0))
+                    .bg(with_alpha(theme().attention, 0.15))
+                    .cursor(gpui::CursorStyle::PointingHand)
+                    .text_color(theme().attention)
+                    .text_size(px(fs - 3.0))
+                    .font_weight(FontWeight::BOLD)
+                    .child(format!("{unread} new ↓"))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(|this, _event, _window, cx| {
+                            this.jump_to_first_unread(cx);
+                        }),
+                    ),
+            );
+        }
         if counts.phases > 0 {
             row = row.child(self.nav_chip(
                 "nav-phases",
@@ -1836,5 +1927,53 @@ mod tests {
     fn preserves_utf8() {
         let input = "\x1b[32m✓ passed\x1b[0m — done";
         assert_eq!(strip_ansi(input), "✓ passed — done");
+    }
+}
+
+#[cfg(test)]
+mod unread_tests {
+    use super::{is_content_block, RichDocument};
+    use crate::rich::reader::UnreadTracker;
+    use crate::stream::RichEvent;
+
+    fn text(s: &str) -> RichEvent {
+        RichEvent::TextBlock {
+            text: s.into(),
+            parent_agent_id: None,
+        }
+    }
+
+    // Mirrors RichView's unread accounting (baseline highest → new content is
+    // unread, transient blocks excluded) against a real document.
+    #[test]
+    fn baseline_then_new_content_is_unread_transient_excluded() {
+        let mut doc = RichDocument::new();
+        doc.apply_event(text("old history"));
+
+        // Baseline: everything present is read.
+        let mut unread = UnreadTracker::new();
+        if let Some(h) = doc.blocks().iter().map(|b| b.id).max() {
+            unread.mark_viewed(h);
+        }
+        let count = |doc: &RichDocument, u: &UnreadTracker| {
+            doc.blocks()
+                .iter()
+                .filter(|b| is_content_block(&b.kind) && u.is_unread(b.id))
+                .count()
+        };
+        assert_eq!(count(&doc, &unread), 0, "history is read after baseline");
+
+        // New content arrives → unread.
+        let new_id = doc.apply_event(text("brand new reply")).unwrap();
+        // A transient thinking indicator must NOT count as unread.
+        doc.push_awaiting_indicator();
+        assert_eq!(count(&doc, &unread), 1, "only the new text block is unread");
+        assert!(unread.is_unread(new_id));
+
+        // Acknowledge → back to zero.
+        if let Some(h) = doc.blocks().iter().map(|b| b.id).max() {
+            unread.mark_viewed(h);
+        }
+        assert_eq!(count(&doc, &unread), 0, "acknowledging clears unread");
     }
 }
