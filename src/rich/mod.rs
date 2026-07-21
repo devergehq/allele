@@ -23,6 +23,10 @@ pub mod compose_bar;
 mod document;
 pub use document::truncate_to_char_boundary;
 pub(crate) mod markdown;
+// Narrative projection (DEV-29): interpretive layer over the event stream.
+// The transcript reader (DEV-31) is its consumer; allow dead_code until then.
+#[allow(dead_code)]
+mod narrative;
 mod rich_view;
 
 pub use rich_view::{RichView, RichViewEvent};
