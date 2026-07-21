@@ -5,7 +5,42 @@
 //! when using stream-json without `--include-partial-messages`.
 
 use super::types::*;
-use tracing::warn;
+
+/// How completely a single source line was normalised. Recorded per line so
+/// the ledger can report parser coverage without inspecting event contents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coverage {
+    /// Line fully recognised; every part produced a normalised event.
+    Full,
+    /// Line recognised, but one or more parts fell back to raw.
+    Partial,
+    /// Line recognised as a known type we intentionally emit nothing for
+    /// (e.g. rate-limit, pings). The raw line is still retained by the ledger.
+    Ignored,
+    /// Line's top-level `type` was unknown — emitted wholesale as `Fallback`.
+    Fallback,
+    /// Line was not valid JSON — emitted as `Fallback` with the parse error.
+    Unparsed,
+}
+
+/// Result of parsing one NDJSON line: the normalised events plus the
+/// coverage classification and any diagnostics gathered along the way.
+#[derive(Debug, Clone)]
+pub struct ParsedLine {
+    pub events: Vec<RichEvent>,
+    pub coverage: Coverage,
+    pub diagnostics: Vec<String>,
+}
+
+impl ParsedLine {
+    fn new(events: Vec<RichEvent>, coverage: Coverage) -> Self {
+        Self {
+            events,
+            coverage,
+            diagnostics: Vec::new(),
+        }
+    }
+}
 
 /// Transforms wire-format `StreamLine`s into Allele's `RichEvent`s.
 pub struct StreamParser {
@@ -19,15 +54,33 @@ impl StreamParser {
     }
 
     /// Parse a single NDJSON line. Returns events to emit (may be empty).
+    ///
+    /// Back-compatible thin wrapper over [`feed_line_detailed`]. Note that
+    /// unknown/unparseable lines now yield a `RichEvent::Fallback` rather than
+    /// an empty vec — nothing is silently dropped.
     pub fn feed_line(&mut self, line: &str) -> Vec<RichEvent> {
+        self.feed_line_detailed(line).events
+    }
+
+    /// Parse a single NDJSON line, returning normalised events together with
+    /// the coverage classification and diagnostics. This is the lossless
+    /// entry point: every input line maps to exactly one `ParsedLine`, and no
+    /// recognised-but-unsupported shape is ever discarded without a trace.
+    pub fn feed_line_detailed(&mut self, line: &str) -> ParsedLine {
         let parsed: StreamLine = match serde_json::from_str(line) {
             Ok(p) => p,
             Err(e) => {
-                warn!(
-                    "[stream] parse error: {e} — line: {}",
-                    &line[..line.len().min(120)]
+                let reason = format!("invalid JSON: {e}");
+                let mut pl = ParsedLine::new(
+                    vec![RichEvent::Fallback {
+                        raw: line.to_string(),
+                        reason: reason.clone(),
+                        parent_agent_id: None,
+                    }],
+                    Coverage::Unparsed,
                 );
-                return Vec::new();
+                pl.diagnostics.push(reason);
+                return pl;
             }
         };
 
@@ -37,47 +90,85 @@ impl StreamParser {
             StreamLine::User(msg) => self.handle_user(msg),
             StreamLine::StreamEvent(wrapper) => self.handle_stream_event(wrapper),
             StreamLine::Result(result) => self.handle_result(result),
-            StreamLine::RateLimit(_) | StreamLine::Unknown => Vec::new(),
+            StreamLine::RateLimit(_) => ParsedLine::new(Vec::new(), Coverage::Ignored),
+            StreamLine::Unknown => {
+                let reason = "unknown top-level event type".to_string();
+                let mut pl = ParsedLine::new(
+                    vec![RichEvent::Fallback {
+                        raw: line.to_string(),
+                        reason: reason.clone(),
+                        parent_agent_id: None,
+                    }],
+                    Coverage::Fallback,
+                );
+                pl.diagnostics.push(reason);
+                pl
+            }
         }
     }
 
-    fn handle_system(&mut self, sys: SystemEvent) -> Vec<RichEvent> {
+    fn handle_system(&mut self, sys: SystemEvent) -> ParsedLine {
         match sys.subtype.as_str() {
             "init" => {
                 if let Some(sid) = &sys.session_id {
                     self.session_id = Some(sid.clone());
                 }
-                vec![RichEvent::Init {
-                    session_id: sys.session_id.unwrap_or_default(),
-                    model: sys.model.unwrap_or_default(),
-                    tools: sys.tools.unwrap_or_default(),
-                }]
+                ParsedLine::new(
+                    vec![RichEvent::Init {
+                        session_id: sys.session_id.unwrap_or_default(),
+                        model: sys.model.unwrap_or_default(),
+                        tools: sys.tools.unwrap_or_default(),
+                    }],
+                    Coverage::Full,
+                )
             }
             "hook_response" => {
                 // Surface hook events that indicate status changes
                 if let (Some(event), Some(name)) = (sys.hook_event, sys.hook_name) {
                     match event.as_str() {
-                        "PreToolUse" | "PostToolUse" | "Notification" | "Stop" => {
+                        "PreToolUse" | "PostToolUse" | "Notification" | "Stop" => ParsedLine::new(
                             vec![RichEvent::HookStatus {
                                 hook_event: event,
                                 hook_name: name,
-                            }]
-                        }
-                        _ => Vec::new(),
+                            }],
+                            Coverage::Full,
+                        ),
+                        _ => ParsedLine::new(Vec::new(), Coverage::Ignored),
                     }
                 } else {
-                    Vec::new()
+                    ParsedLine::new(Vec::new(), Coverage::Ignored)
                 }
             }
-            _ => Vec::new(),
+            _ => ParsedLine::new(Vec::new(), Coverage::Ignored),
         }
     }
 
-    fn handle_assistant(&mut self, msg: AssistantMessage) -> Vec<RichEvent> {
+    fn handle_assistant(&mut self, msg: AssistantMessage) -> ParsedLine {
         let parent = msg.parent_tool_use_id;
         let mut events = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut fell_back = false;
 
         for block in msg.message.content {
+            let block = match block {
+                MaybeBlock::Known(b) => b,
+                MaybeBlock::Raw(value) => {
+                    // Unrecognised content-block type — preserve it verbatim.
+                    let ty = value
+                        .get("type")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("<no type>")
+                        .to_string();
+                    diagnostics.push(format!("unrecognised content block type: {ty}"));
+                    fell_back = true;
+                    events.push(RichEvent::Fallback {
+                        raw: value.to_string(),
+                        reason: format!("unrecognised content block type: {ty}"),
+                        parent_agent_id: parent.clone(),
+                    });
+                    continue;
+                }
+            };
             match block {
                 ContentBlock::Text { text } => {
                     if !text.is_empty() {
@@ -112,14 +203,22 @@ impl StreamParser {
                         });
                     }
                 }
-                ContentBlock::Other => {}
             }
         }
 
-        events
+        let coverage = if fell_back {
+            Coverage::Partial
+        } else {
+            Coverage::Full
+        };
+        ParsedLine {
+            events,
+            coverage,
+            diagnostics,
+        }
     }
 
-    fn handle_user(&mut self, msg: UserMessage) -> Vec<RichEvent> {
+    fn handle_user(&mut self, msg: UserMessage) -> ParsedLine {
         let parent = msg.parent_tool_use_id;
         let mut events = Vec::new();
 
@@ -157,40 +256,49 @@ impl StreamParser {
             }
         }
 
-        events
+        ParsedLine::new(events, Coverage::Full)
     }
 
-    fn handle_stream_event(&mut self, wrapper: StreamEventWrapper) -> Vec<RichEvent> {
+    fn handle_stream_event(&mut self, wrapper: StreamEventWrapper) -> ParsedLine {
         match wrapper.event {
             StreamEventInner::ContentBlockDelta { delta, .. } => match delta {
-                Delta::Text { text } => vec![RichEvent::TextDelta {
-                    text,
-                    parent_agent_id: None,
-                }],
+                Delta::Text { text } => ParsedLine::new(
+                    vec![RichEvent::TextDelta {
+                        text,
+                        parent_agent_id: None,
+                    }],
+                    Coverage::Full,
+                ),
                 Delta::Thinking { thinking } => {
                     if !thinking.is_empty() {
-                        vec![RichEvent::ThinkingBlock {
-                            thinking,
-                            parent_agent_id: None,
-                        }]
+                        ParsedLine::new(
+                            vec![RichEvent::ThinkingBlock {
+                                thinking,
+                                parent_agent_id: None,
+                            }],
+                            Coverage::Full,
+                        )
                     } else {
-                        Vec::new()
+                        ParsedLine::new(Vec::new(), Coverage::Ignored)
                     }
                 }
-                _ => Vec::new(),
+                _ => ParsedLine::new(Vec::new(), Coverage::Ignored),
             },
-            _ => Vec::new(),
+            _ => ParsedLine::new(Vec::new(), Coverage::Ignored),
         }
     }
 
-    fn handle_result(&self, result: ResultEvent) -> Vec<RichEvent> {
-        vec![RichEvent::SessionResult {
-            duration_ms: result.duration_ms.unwrap_or(0),
-            cost_usd: result.total_cost_usd.unwrap_or(0.0),
-            num_turns: result.num_turns.unwrap_or(0),
-            is_error: result.is_error.unwrap_or(false),
-            result_text: result.result,
-        }]
+    fn handle_result(&self, result: ResultEvent) -> ParsedLine {
+        ParsedLine::new(
+            vec![RichEvent::SessionResult {
+                duration_ms: result.duration_ms.unwrap_or(0),
+                cost_usd: result.total_cost_usd.unwrap_or(0.0),
+                num_turns: result.num_turns.unwrap_or(0),
+                is_error: result.is_error.unwrap_or(false),
+                result_text: result.result,
+            }],
+            Coverage::Full,
+        )
     }
 }
 
@@ -281,10 +389,61 @@ mod tests {
     }
 
     #[test]
-    fn unknown_type_does_not_crash() {
+    fn unknown_type_is_captured_as_fallback() {
         let line = r#"{"type":"future_event_type","data":"whatever"}"#;
         let mut parser = StreamParser::new();
-        let events = parser.feed_line(line);
-        assert!(events.is_empty());
+        let parsed = parser.feed_line_detailed(line);
+        assert_eq!(parsed.coverage, Coverage::Fallback);
+        assert_eq!(parsed.events.len(), 1);
+        match &parsed.events[0] {
+            RichEvent::Fallback { raw, reason, .. } => {
+                assert!(raw.contains("future_event_type"));
+                assert!(reason.contains("unknown top-level"));
+            }
+            other => panic!("Expected Fallback, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn invalid_json_is_captured_as_fallback() {
+        let line = "{not valid json";
+        let mut parser = StreamParser::new();
+        let parsed = parser.feed_line_detailed(line);
+        assert_eq!(parsed.coverage, Coverage::Unparsed);
+        assert_eq!(parsed.events.len(), 1);
+        match &parsed.events[0] {
+            RichEvent::Fallback { raw, .. } => assert_eq!(raw, line),
+            other => panic!("Expected Fallback, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unrecognised_content_block_is_captured() {
+        // A known assistant line carrying an unknown content-block type.
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"},{"type":"redacted_thinking","data":"xyz"}],"stop_reason":null},"parent_tool_use_id":null,"session_id":"abc"}"#;
+        let mut parser = StreamParser::new();
+        let parsed = parser.feed_line_detailed(line);
+        assert_eq!(parsed.coverage, Coverage::Partial);
+        // one text block + one fallback block
+        assert_eq!(parsed.events.len(), 2);
+        let has_fallback = parsed.events.iter().any(|e| {
+            matches!(
+                e,
+                RichEvent::Fallback { raw, .. } if raw.contains("redacted_thinking")
+            )
+        });
+        assert!(
+            has_fallback,
+            "expected the unknown block preserved as Fallback"
+        );
+    }
+
+    #[test]
+    fn rate_limit_is_ignored_not_dropped_silently() {
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"remaining":10}}"#;
+        let mut parser = StreamParser::new();
+        let parsed = parser.feed_line_detailed(line);
+        assert_eq!(parsed.coverage, Coverage::Ignored);
+        assert!(parsed.events.is_empty());
     }
 }

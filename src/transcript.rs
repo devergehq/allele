@@ -23,7 +23,7 @@ use std::fs::File;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use crate::stream::{RichEvent, StreamParser};
+use crate::stream::{EventSource, RichEvent, SessionLedger, StreamParser};
 
 /// Emitted for every new line parsed from a transcript.
 pub enum TranscriptEvent {
@@ -74,24 +74,39 @@ struct TailedFile {
     leftover: String,
     /// Per-file parser — keeps init/session state.
     parser: StreamParser,
-    /// Agent id to stamp on sidechain events (for subagent files), or
-    /// `None` for the main transcript.
-    agent_id: Option<String>,
+    /// Where this file's lines originate, used to tag ledger entries and to
+    /// stamp emitted events with the owning subagent id.
+    source: EventSource,
+    /// When `false`, lines are still ingested into the ledger (lossless) but
+    /// not surfaced as live `TranscriptEvent`s. Used for historical subagent
+    /// files so their content is retained without anchoring the viewport in
+    /// the past.
+    emit_live: bool,
 }
 
 impl TailedFile {
-    fn new(path: PathBuf, agent_id: Option<String>) -> Self {
+    fn new(path: PathBuf, source: EventSource, emit_live: bool) -> Self {
         Self {
             path,
             offset: 0,
             leftover: String::new(),
             parser: StreamParser::new(),
-            agent_id,
+            source,
+            emit_live,
         }
     }
 
-    /// Read newly-appended bytes, split into lines, and return events.
-    fn read_new(&mut self) -> Vec<TranscriptEvent> {
+    /// Agent id to stamp on emitted events, or `None` for the main transcript.
+    fn agent_id(&self) -> Option<String> {
+        match &self.source {
+            EventSource::Main => None,
+            EventSource::Subagent { agent_id, .. } => Some(agent_id.clone()),
+        }
+    }
+
+    /// Read newly-appended bytes, split into lines, ingest every line into the
+    /// ledger, and return the events to render (empty when `emit_live` is off).
+    fn read_new(&mut self, ledger: &mut SessionLedger) -> Vec<TranscriptEvent> {
         let mut out = Vec::new();
         let mut file = match File::open(&self.path) {
             Ok(f) => f,
@@ -128,7 +143,7 @@ impl TailedFile {
             if line.ends_with('\n') {
                 let complete = line[..line.len() - 1].trim_end_matches('\r');
                 self.offset += (line.len() - prev_len) as u64;
-                self.process_line(complete, &mut out);
+                self.process_line(complete, ledger, &mut out);
                 line.clear();
             } else {
                 // Incomplete tail — put it back and stop.
@@ -139,14 +154,32 @@ impl TailedFile {
         out
     }
 
-    fn process_line(&mut self, line: &str, out: &mut Vec<TranscriptEvent>) {
+    fn process_line(
+        &mut self,
+        line: &str,
+        ledger: &mut SessionLedger,
+        out: &mut Vec<TranscriptEvent>,
+    ) {
         if line.is_empty() {
             return;
         }
 
-        // Fast path: detect top-level `type:"user"` with a plain string
-        // `message.content` before handing to StreamParser. Those are
-        // user prompts typed by the human; StreamParser ignores them.
+        // Ingest EVERY line into the ledger first — this is the lossless
+        // record and must include user-prompt lines, which the live view
+        // renders via the fast path below rather than as Rich events. The
+        // JSONL records are a superset of stream-json (extra uuid, parentUuid,
+        // timestamp, isSidechain, sessionId fields are ignored by the wire
+        // types); the ledger retains those raw regardless.
+        let events = ledger.ingest(&mut self.parser, self.source.clone(), line);
+
+        // Historical/quiet files are recorded but not shown live.
+        if !self.emit_live {
+            return;
+        }
+
+        // Fast path: a top-level `type:"user"` with a plain string
+        // `message.content` is a human-typed prompt; render it as such. (It
+        // produced no Rich events above — handle_user only emits tool_results.)
         if let Some(prompt) = try_parse_user_prompt(line) {
             if !prompt.is_empty() {
                 out.push(TranscriptEvent::UserPrompt(prompt));
@@ -154,12 +187,9 @@ impl TailedFile {
             }
         }
 
-        // Everything else: let StreamParser do the work. The JSONL
-        // records are a superset of stream-json (extra uuid, parentUuid,
-        // timestamp, isSidechain, sessionId fields are silently ignored
-        // by #[serde(tag="type")] + non-deny_unknown_fields).
-        for mut event in self.parser.feed_line(line) {
-            if let Some(agent) = &self.agent_id {
+        let agent = self.agent_id();
+        for mut event in events {
+            if let Some(agent) = &agent {
                 stamp_parent_agent(&mut event, agent.clone());
             }
             out.push(TranscriptEvent::Rich(event));
@@ -211,6 +241,9 @@ fn stamp_parent_agent(event: &mut RichEvent, agent: String) {
         }
         | RichEvent::EditDiff {
             parent_agent_id, ..
+        }
+        | RichEvent::Fallback {
+            parent_agent_id, ..
         } => {
             *parent_agent_id = a;
         }
@@ -229,9 +262,13 @@ pub struct TranscriptTailer {
     subagents: HashMap<PathBuf, TailedFile>,
     /// Wall-clock time when this tailer was created. Subagent files last
     /// modified before this time are historical (from a previous agent
-    /// invocation) and are skipped — otherwise they get appended after
-    /// all current-session events and anchor the viewport in the past.
+    /// invocation): their lines are ingested into the ledger but not surfaced
+    /// live, so they don't get appended after current events and anchor the
+    /// viewport in the past.
     created_at: std::time::SystemTime,
+    /// Lossless record of every line seen across the main file and all
+    /// subagent files (current and historical).
+    ledger: SessionLedger,
 }
 
 impl TranscriptTailer {
@@ -240,18 +277,25 @@ impl TranscriptTailer {
     pub fn new(session_jsonl: PathBuf) -> Self {
         let subagents_dir = session_jsonl.with_extension("").join("subagents");
         Self {
-            main: TailedFile::new(session_jsonl, None),
+            main: TailedFile::new(session_jsonl, EventSource::Main, true),
             subagents_dir,
             subagents: HashMap::new(),
             created_at: std::time::SystemTime::now(),
+            ledger: SessionLedger::new(),
         }
+    }
+
+    /// The lossless event ledger backing this tailer.
+    #[allow(dead_code)]
+    pub fn ledger(&self) -> &SessionLedger {
+        &self.ledger
     }
 
     /// Return new events since the last call. Empty vec if nothing
     /// changed. Scans for new subagent files each call (they appear
     /// mid-session when the agent is first spawned).
     pub fn poll(&mut self) -> Vec<TranscriptEvent> {
-        let mut out = self.main.read_new();
+        let mut out = self.main.read_new(&mut self.ledger);
 
         // Discover subagent files (each `agent-<id>.jsonl` appears when
         // the agent's first turn is written).
@@ -269,17 +313,17 @@ impl TranscriptTailer {
                         continue;
                     }
 
-                    // Skip subagent files that predate this tailer — they're
-                    // from a previous agent invocation. If we can't determine
-                    // the mtime, we include the file (safe default).
+                    // Subagent files that predate this tailer are historical
+                    // (a previous agent invocation). Rather than skip them —
+                    // which lost their output entirely (DEV-33 observed defect)
+                    // — we ingest them into the ledger but do not emit them
+                    // live, so the viewport stays anchored to current work. If
+                    // we can't determine the mtime, treat as current.
                     let is_current = entry
                         .metadata()
                         .and_then(|m| m.modified())
                         .map(|t| t > self.created_at)
                         .unwrap_or(true);
-                    if !is_current {
-                        continue;
-                    }
 
                     let agent_id = path
                         .file_stem()
@@ -287,15 +331,19 @@ impl TranscriptTailer {
                         .and_then(|stem| stem.strip_prefix("agent-"))
                         .unwrap_or("unknown")
                         .to_string();
+                    let source = EventSource::Subagent {
+                        agent_id,
+                        historical: !is_current,
+                    };
                     self.subagents
-                        .insert(path.clone(), TailedFile::new(path, Some(agent_id)));
+                        .insert(path.clone(), TailedFile::new(path, source, is_current));
                 }
             }
         }
 
-        // Drain each known subagent file.
+        // Drain each known subagent file (historical ones ingest silently).
         for (_, tail) in self.subagents.iter_mut() {
-            out.extend(tail.read_new());
+            out.extend(tail.read_new(&mut self.ledger));
         }
         out
     }
