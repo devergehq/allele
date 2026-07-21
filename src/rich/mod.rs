@@ -22,7 +22,7 @@ pub mod attachments;
 pub mod compose_bar;
 mod document;
 pub use document::truncate_to_char_boundary;
-mod markdown;
+pub(crate) mod markdown;
 mod rich_view;
 
 pub use rich_view::{RichView, RichViewEvent};

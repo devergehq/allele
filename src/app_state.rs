@@ -127,6 +127,9 @@ pub(crate) struct ReaderState {
     pub(crate) find_query: String,
     /// Whether the in-file find bar is visible.
     pub(crate) find_active: bool,
+    /// For Markdown files: show raw source instead of the rendered view.
+    /// Ignored for non-Markdown files. Reset on each file selection.
+    pub(crate) md_view_source: bool,
 }
 
 /// Cluster of confirmation-gate flags.

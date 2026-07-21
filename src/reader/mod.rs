@@ -132,9 +132,14 @@ impl AppState {
 
         let header = self.render_preview_header(preview, root, cx);
         let body: AnyElement = match &preview.kind {
-            PreviewKind::Text(contents) => self
-                .render_source_body(&preview.path, contents)
-                .into_any_element(),
+            PreviewKind::Text(contents) => {
+                if is_markdown(&preview.path) && !self.reader.md_view_source {
+                    self.render_markdown_body(contents).into_any_element()
+                } else {
+                    self.render_source_body(&preview.path, contents)
+                        .into_any_element()
+                }
+            }
             PreviewKind::Binary => degraded_body(
                 "Binary file",
                 "This file isn't text and can't be previewed.",
@@ -201,6 +206,8 @@ impl AppState {
         };
 
         let can_copy = matches!(preview.kind, PreviewKind::Text(_));
+        let is_md = is_markdown(&preview.path);
+        let md_source = self.reader.md_view_source;
         let path_for_copy = preview.path.clone();
         let path_for_open = preview.path.clone();
         let find_active = self.reader.find_active;
@@ -248,6 +255,24 @@ impl AppState {
                             .text_color(theme().text_ghost)
                             .child(stat),
                     )
+                    .when(is_md, |row| {
+                        let label: SharedString = if md_source {
+                            "Rendered".into()
+                        } else {
+                            "Source".into()
+                        };
+                        row.child(
+                            action("reader-md-toggle", label, true)
+                                .when(md_source, |b| b.bg(theme().bg_active))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(|this: &mut Self, _e, _window, cx| {
+                                        this.reader.md_view_source = !this.reader.md_view_source;
+                                        cx.notify();
+                                    }),
+                                ),
+                        )
+                    })
                     .child(
                         action("reader-find-toggle", "Find".into(), true)
                             .when(find_active, |b| b.bg(theme().bg_active))
@@ -411,6 +436,34 @@ impl AppState {
         }
 
         body
+    }
+
+    /// Rendered-Markdown body: the pulldown-cmark render (reused from the
+    /// transcript renderer) beside a heading outline rail.
+    fn render_markdown_body(&self, contents: &str) -> impl IntoElement {
+        let font_size = self.user_settings.font_size.max(12.0);
+        let outline = markdown_outline(contents);
+
+        let rendered = div()
+            .id("reader-md-scroll")
+            .flex_1()
+            .min_w(px(0.0))
+            .h_full()
+            .overflow_scroll()
+            .px(px(20.0))
+            .py(px(14.0))
+            .child(crate::rich::markdown::render(contents, false, font_size));
+
+        let mut row = div()
+            .flex_1()
+            .min_h(px(0.0))
+            .flex()
+            .flex_row()
+            .child(rendered);
+        if !outline.is_empty() {
+            row = row.child(render_md_outline(outline));
+        }
+        row
     }
 
     /// Floating right-click menu for the file tree. Returns an empty `Div`
@@ -603,11 +656,101 @@ impl AppState {
             },
             Err(e) => PreviewKind::Unreadable(format!("Could not stat file: {e}")),
         };
-        // Selecting a new file resets the in-file find.
+        // Selecting a new file resets the in-file find and Markdown view mode.
         self.reader.find_query.clear();
         self.reader.find_active = false;
+        self.reader.md_view_source = false;
         self.reader.preview = Some(Preview { path, kind });
     }
+}
+
+/// True for files the Reader renders as Markdown by default.
+fn is_markdown(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .as_deref(),
+        Some("md") | Some("markdown") | Some("mdx") | Some("mdown") | Some("mkd")
+    )
+}
+
+/// Extract (level, text) for every heading, for the outline rail.
+fn markdown_outline(contents: &str) -> Vec<(u8, String)> {
+    use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+    let level_num = |l: HeadingLevel| match l {
+        HeadingLevel::H1 => 1,
+        HeadingLevel::H2 => 2,
+        HeadingLevel::H3 => 3,
+        HeadingLevel::H4 => 4,
+        HeadingLevel::H5 => 5,
+        HeadingLevel::H6 => 6,
+    };
+    let parser = Parser::new_ext(contents, Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS);
+    let mut out = Vec::new();
+    let mut cur: Option<(u8, String)> = None;
+    for ev in parser {
+        match ev {
+            Event::Start(Tag::Heading { level, .. }) => {
+                cur = Some((level_num(level), String::new()))
+            }
+            Event::Text(t) | Event::Code(t) => {
+                if let Some((_, s)) = cur.as_mut() {
+                    s.push_str(&t);
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some(h) = cur.take() {
+                    if !h.1.trim().is_empty() {
+                        out.push(h);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Right-hand heading outline for the Markdown reader. Display-only for now —
+/// scroll-to-heading arrives with the DEV-44 deep-link protocol.
+fn render_md_outline(outline: Vec<(u8, String)>) -> impl IntoElement {
+    let mut rail = div()
+        .id("reader-md-outline")
+        .w(px(200.0))
+        .flex_shrink_0()
+        .h_full()
+        .overflow_y_scroll()
+        .bg(theme().bg_surface)
+        .border_l_1()
+        .border_color(theme().border_subtle)
+        .py(px(8.0))
+        .font_family(crate::theme::FONT_UI)
+        .child(
+            div()
+                .px(px(12.0))
+                .pb(px(6.0))
+                .text_size(px(10.0))
+                .text_color(theme().text_ghost)
+                .child("OUTLINE"),
+        );
+    for (level, text) in outline {
+        let indent = 12.0 + (level.saturating_sub(1) as f32) * 10.0;
+        rail = rail.child(
+            div()
+                .pl(px(indent))
+                .pr(px(10.0))
+                .py(px(2.0))
+                .text_size(px(11.0))
+                .text_color(if level <= 1 {
+                    theme().text_primary
+                } else {
+                    theme().text_faint
+                })
+                .child(text),
+        );
+    }
+    rail
 }
 
 /// Centered explanatory panel for a file that can't be rendered as source.
