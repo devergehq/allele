@@ -313,8 +313,17 @@ impl AppState {
             self.projects
                 .get(p_idx)
                 .and_then(|p| p.sessions.get(s_idx))
-                .and_then(|s| s.attention_context.as_ref())
-                .map(|ctx| (ctx.tool_name.clone(), ctx.tool_input_summary.clone()))
+                .and_then(|s| {
+                    s.attention_context.as_ref().map(|ctx| {
+                        // Raw tool input (cached at PreToolUse) drives the
+                        // risk/purpose card (DEV-34).
+                        let input = s
+                            .last_pre_tool_use
+                            .as_ref()
+                            .and_then(|p| p.tool_input.clone());
+                        (ctx.tool_name.clone(), ctx.tool_input_summary.clone(), input)
+                    })
+                })
         } else {
             None
         };
@@ -370,9 +379,9 @@ impl AppState {
         };
         if self.rich.cursor == Some(cursor) {
             if let Some(view) = self.rich.view.as_ref().cloned() {
-                if let Some((tool_name, summary)) = attention_for_rich {
+                if let Some((tool_name, summary, input)) = attention_for_rich {
                     view.update(cx, |rv, cx| {
-                        rv.push_permission_request(tool_name, summary, cx);
+                        rv.push_permission_request(tool_name, summary, input, cx);
                     });
                 } else if prior == SessionStatus::AwaitingInput {
                     view.update(cx, |rv, cx| {
