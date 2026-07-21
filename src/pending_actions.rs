@@ -1322,6 +1322,10 @@ impl AppState {
                 *skip_refocus = true;
                 self.open_search(window, cx);
             }
+            OverlayAction::OpenCommandPalette => {
+                *skip_refocus = true;
+                self.open_command_palette(window, cx);
+            }
         }
     }
 }
