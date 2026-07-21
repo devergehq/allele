@@ -13,6 +13,7 @@ pub(crate) mod highlight;
 pub(crate) mod index;
 pub(crate) mod palette;
 pub(crate) mod search;
+pub(crate) mod ts_highlight;
 
 use crate::theme::theme;
 use gpui::prelude::FluentBuilder as _;
@@ -486,6 +487,13 @@ impl AppState {
             string: theme().success,
             keyword: theme().lavender,
             number: theme().warning,
+            function: theme().info,
+            type_: theme().accent,
+            constant: theme().warning,
+            property: theme().text_body,
+            operator: theme().text_secondary,
+            punctuation: theme().text_muted,
+            variable: theme().text_primary,
         };
         let lines = highlight::highlight(contents, &ext, colors);
         let total = lines.len();
