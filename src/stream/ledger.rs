@@ -18,7 +18,8 @@
 //! normalisation was unsupported. Filters and views may hide entries, but the
 //! ledger itself never destroys information.
 
-use super::parser::{Coverage, ParsedLine, StreamParser};
+use super::adapter::NormalizingAdapter;
+use super::parser::{Coverage, ParsedLine};
 use super::types::RichEvent;
 
 /// Where an ingested line came from. Subagent lines carry their agent id and
@@ -96,15 +97,17 @@ impl SessionLedger {
         Self::default()
     }
 
-    /// Ingest one raw line, driving `parser` to normalise it, and append the
+    /// Ingest one raw line, driving `adapter` to normalise it, and append the
     /// resulting entry. Returns a clone of the normalised events so callers
     /// can forward them to a renderer without borrowing the ledger.
     ///
-    /// `parser` is threaded in (rather than owned) because the tailer keeps a
-    /// distinct parser per file to preserve per-file `init`/session state.
+    /// The adapter is threaded in (rather than owned) because the tailer keeps
+    /// a distinct adapter per file to preserve per-file init/session state, and
+    /// so the ledger stays agnostic to which agent format is being normalised
+    /// (DEV-32).
     pub fn ingest(
         &mut self,
-        parser: &mut StreamParser,
+        adapter: &mut dyn NormalizingAdapter,
         source: EventSource,
         raw_line: &str,
     ) -> Vec<RichEvent> {
@@ -112,7 +115,7 @@ impl SessionLedger {
             events,
             coverage,
             diagnostics,
-        } = parser.feed_line_detailed(raw_line);
+        } = adapter.feed_line(raw_line);
         let entry = LedgerEntry {
             seq: self.next_seq,
             source,
@@ -180,9 +183,9 @@ mod tests {
 
     fn ingest_corpus() -> SessionLedger {
         let mut ledger = SessionLedger::new();
-        let mut parser = StreamParser::new();
+        let mut adapter = super::super::normalizer_for(crate::settings::AgentKind::Claude);
         for line in CORPUS {
-            ledger.ingest(&mut parser, EventSource::Main, line);
+            ledger.ingest(&mut *adapter, EventSource::Main, line);
         }
         ledger
     }
@@ -258,10 +261,10 @@ mod tests {
     #[test]
     fn historical_subagent_lines_are_ingested() {
         let mut ledger = SessionLedger::new();
-        let mut parser = StreamParser::new();
+        let mut adapter = super::super::normalizer_for(crate::settings::AgentKind::Claude);
         let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"sub"}],"stop_reason":null}}"#;
         ledger.ingest(
-            &mut parser,
+            &mut *adapter,
             EventSource::Subagent {
                 agent_id: "a1".into(),
                 historical: true,
