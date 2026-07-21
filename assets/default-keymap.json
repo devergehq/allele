@@ -94,6 +94,7 @@
       "cmd-shift-r":         "allele.toggle_transcript_tab",
       "cmd-,":               "allele.open_settings",
       "cmd-k":               "allele.open_scratch_pad",
+      "cmd-p":               "allele.open_file_palette",
       "cmd-shift-a":         "allele.cycle_attention"
     }
   }
