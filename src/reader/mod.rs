@@ -19,7 +19,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use std::path::PathBuf;
 
-use crate::app_state::{AppState, Preview, PreviewKind};
+use crate::app_state::{AppState, FindMatch, Preview, PreviewKind};
 
 impl AppState {
     /// Root directory for the Reader tab's file tree: the active session's
@@ -290,6 +290,8 @@ impl AppState {
                                         this.reader_find_input.focus_handle(cx).focus(window, cx);
                                     } else {
                                         this.reader.find_query.clear();
+                                        this.reader.find_matches.clear();
+                                        this.reader.find_current = 0;
                                     }
                                     cx.notify();
                                 }),
@@ -321,40 +323,153 @@ impl AppState {
                     ),
             )
             .when(find_active, |strip| {
-                let count = self.find_match_count();
+                let total = self.reader.find_matches.len();
+                let position = if self.reader.find_query.is_empty() {
+                    String::new()
+                } else if total == 0 {
+                    "No results".to_string()
+                } else {
+                    format!("{} of {}", self.reader.find_current + 1, total)
+                };
+                let nav = |id: &'static str, glyph: &'static str| {
+                    div()
+                        .id(id)
+                        .w(px(18.0))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(3.0))
+                        .text_size(px(12.0))
+                        .text_color(theme().text_secondary)
+                        .cursor_pointer()
+                        .hover(|s| s.bg(theme().bg_hover))
+                        .child(glyph)
+                };
                 strip.child(
                     div()
                         .flex()
                         .flex_row()
                         .items_center()
-                        .gap(px(8.0))
+                        .gap(px(6.0))
                         .px(px(10.0))
                         .pb(px(6.0))
+                        // Shift+Enter = previous, Escape = close. Plain Enter is
+                        // handled via the input's Submitted event (next match).
+                        .on_key_down(cx.listener(|this: &mut Self, e: &KeyDownEvent, _w, cx| {
+                            match e.keystroke.key.as_str() {
+                                "escape" => {
+                                    this.reader.find_active = false;
+                                    this.reader.find_query.clear();
+                                    this.reader.find_matches.clear();
+                                    cx.notify();
+                                }
+                                "enter" if e.keystroke.modifiers.shift => {
+                                    this.find_step(-1);
+                                    cx.notify();
+                                }
+                                _ => {}
+                            }
+                        }))
                         .child(div().w(px(220.0)).child(self.reader_find_input.clone()))
                         .child(
                             div()
+                                .min_w(px(60.0))
                                 .text_size(px(10.0))
                                 .text_color(theme().text_faint)
-                                .child(if self.reader.find_query.is_empty() {
-                                    String::new()
-                                } else {
-                                    format!("{count} matches")
-                                }),
-                        ),
+                                .child(position),
+                        )
+                        .child(nav("reader-find-prev", "‹").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this: &mut Self, _e, _w, cx| {
+                                this.find_step(-1);
+                                cx.notify();
+                            }),
+                        ))
+                        .child(nav("reader-find-next", "›").on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this: &mut Self, _e, _w, cx| {
+                                this.find_step(1);
+                                cx.notify();
+                            }),
+                        )),
                 )
             })
     }
 
-    /// Count of in-file find matches (case-insensitive substring) across the
-    /// current text preview. Zero when find is empty or the file isn't text.
-    fn find_match_count(&self) -> usize {
-        let q = self.reader.find_query.to_lowercase();
-        if q.is_empty() {
-            return 0;
+    /// Recompute every match of the find query in the current preview, in
+    /// document order. Only records matches that fall on char boundaries so the
+    /// substring-highlight run split can never bisect a UTF-8 character.
+    pub(crate) fn recompute_find_matches(&mut self) {
+        let lower_q = self.reader.find_query.to_lowercase();
+        let raw_q = self.reader.find_query.clone();
+        let mut matches = Vec::new();
+        const MAX_MATCHES: usize = 5000;
+
+        if !lower_q.is_empty() {
+            if let Some(Preview {
+                kind: PreviewKind::Text(contents),
+                ..
+            }) = self.reader.preview.as_ref()
+            {
+                for (i, line) in contents.split('\n').enumerate() {
+                    // Case-insensitive search is offset-safe only when
+                    // lowercasing preserves byte length (always true for ASCII
+                    // code); otherwise fall back to a case-sensitive scan on the
+                    // original so byte offsets stay valid.
+                    let lower_line = line.to_lowercase();
+                    let (hay, needle) = if lower_line.len() == line.len() {
+                        (lower_line.as_str(), lower_q.as_str())
+                    } else {
+                        (line, raw_q.as_str())
+                    };
+                    let nlen = needle.len();
+                    if nlen == 0 {
+                        continue;
+                    }
+                    let mut start = 0;
+                    while let Some(pos) = hay[start..].find(needle) {
+                        let abs = start + pos;
+                        if line.is_char_boundary(abs) && line.is_char_boundary(abs + nlen) {
+                            matches.push(FindMatch {
+                                line: i + 1,
+                                start: abs,
+                                len: nlen,
+                            });
+                        }
+                        start = abs + nlen;
+                        if matches.len() >= MAX_MATCHES || start > hay.len() {
+                            break;
+                        }
+                    }
+                    if matches.len() >= MAX_MATCHES {
+                        break;
+                    }
+                }
+            }
         }
-        match self.reader.preview.as_ref().map(|p| &p.kind) {
-            Some(PreviewKind::Text(c)) => c.to_lowercase().matches(&q).count(),
-            _ => 0,
+        self.reader.find_matches = matches;
+        self.reader.find_current = 0;
+    }
+
+    /// Move the current-match cursor by `delta` (wrapping) and reveal it.
+    pub(crate) fn find_step(&mut self, delta: i32) {
+        let n = self.reader.find_matches.len();
+        if n == 0 {
+            return;
+        }
+        let next = (self.reader.find_current as i32 + delta).rem_euclid(n as i32) as usize;
+        self.reader.find_current = next;
+        self.focus_current_find_match();
+    }
+
+    /// Scroll the current match into view and mark its line for emphasis.
+    pub(crate) fn focus_current_find_match(&mut self) {
+        if let Some(m) = self.reader.find_matches.get(self.reader.find_current) {
+            let line = m.line;
+            self.reader.reveal_line = Some(line);
+            self.reader
+                .source_scroll
+                .scroll_to_item(line.saturating_sub(1));
         }
     }
 
@@ -376,9 +491,21 @@ impl AppState {
         let total = lines.len();
         let shown = total.min(Self::MAX_RENDER_LINES);
         let gutter_w = px((format!("{total}").len().max(2) as f32) * 8.0 + 16.0);
-        let query = self.reader.find_query.to_lowercase();
         let hl_bg = theme().bg_bell;
+        let hl_bg_current = theme().warning;
         let reveal = self.reader.reveal_line.filter(|&l| l >= 1 && l <= shown);
+
+        // Group find matches by line so each rendered line can highlight its
+        // matched substrings (current match gets a stronger background).
+        let mut line_ranges: std::collections::HashMap<usize, Vec<(usize, usize, bool)>> =
+            std::collections::HashMap::new();
+        let current_match = self.reader.find_current;
+        for (mi, m) in self.reader.find_matches.iter().enumerate() {
+            line_ranges
+                .entry(m.line)
+                .or_default()
+                .push((m.start, m.len, mi == current_match));
+        }
 
         let mut body = div()
             .id("reader-source-body")
@@ -391,15 +518,20 @@ impl AppState {
 
         for (idx, line) in lines.into_iter().take(shown).enumerate() {
             let line_no = idx + 1;
-            let matched = !query.is_empty() && line.text.to_lowercase().contains(&query);
             let is_reveal = reveal == Some(line_no);
+            // Apply find-match backgrounds to this line's runs (splitting runs
+            // at match boundaries; boundaries are char-safe by construction).
+            let runs = match line_ranges.get(&line_no) {
+                Some(ranges) => apply_find_bg(line.runs, ranges, hl_bg, hl_bg_current),
+                None => line.runs,
+            };
             // Defensive: GPUI panics (aborting the whole app) if run lengths
             // don't sum to the text length. Highlighting is cosmetic, so if a
             // lexer edge case ever drifts, fall back to plain text rather than
             // crash the render.
-            let runs_len: usize = line.runs.iter().map(|r| r.len).sum();
+            let runs_len: usize = runs.iter().map(|r| r.len).sum();
             let styled = if runs_len == line.text.len() {
-                StyledText::new(line.text).with_runs(line.runs)
+                StyledText::new(line.text).with_runs(runs)
             } else {
                 StyledText::new(line.text)
             };
@@ -408,7 +540,6 @@ impl AppState {
                 .min_w(px(0.0))
                 .whitespace_normal()
                 .font_family(crate::theme::FONT_MONO)
-                .when(matched, |d| d.bg(hl_bg))
                 .child(styled);
             body = body.child(
                 div()
@@ -744,6 +875,8 @@ impl AppState {
         // any pending deep-link line reveal (set again by reveal_file after).
         self.reader.find_query.clear();
         self.reader.find_active = false;
+        self.reader.find_matches.clear();
+        self.reader.find_current = 0;
         self.reader.md_view_source = false;
         self.reader.reveal_line = None;
         // Record in the recents list (most-recent first, deduped, capped).
@@ -752,6 +885,54 @@ impl AppState {
         self.reader.recent.truncate(50);
         self.reader.preview = Some(Preview { path, kind });
     }
+}
+
+/// Split `runs` at find-match boundaries and paint the matched byte ranges with
+/// a background colour (`bg`, or `bg_current` for the focused match). Preserves
+/// each run's foreground styling and total length; all boundaries are char-safe
+/// because both the incoming runs and the match ranges are char-aligned.
+fn apply_find_bg(
+    runs: Vec<TextRun>,
+    ranges: &[(usize, usize, bool)],
+    bg: Hsla,
+    bg_current: Hsla,
+) -> Vec<TextRun> {
+    if ranges.is_empty() {
+        return runs;
+    }
+    let mut out: Vec<TextRun> = Vec::with_capacity(runs.len());
+    let mut pos = 0usize;
+    for run in runs {
+        let run_end = pos + run.len;
+        let mut cur = pos;
+        while cur < run_end {
+            // Is `cur` inside a match? If so, colour until the match (or run) end.
+            if let Some(&(s, l, is_cur)) = ranges.iter().find(|&&(s, l, _)| cur >= s && cur < s + l)
+            {
+                let seg_end = (s + l).min(run_end);
+                let mut r = run.clone();
+                r.len = seg_end - cur;
+                r.background_color = Some(if is_cur { bg_current } else { bg });
+                out.push(r);
+                cur = seg_end;
+            } else {
+                // Plain until the next match start (or run end).
+                let seg_end = ranges
+                    .iter()
+                    .filter_map(|&(s, _, _)| (s > cur).then_some(s))
+                    .min()
+                    .unwrap_or(run_end)
+                    .min(run_end);
+                let mut r = run.clone();
+                r.len = seg_end - cur;
+                r.background_color = None;
+                out.push(r);
+                cur = seg_end;
+            }
+        }
+        pos = run_end;
+    }
+    out
 }
 
 /// True for files the Reader renders as Markdown by default.
