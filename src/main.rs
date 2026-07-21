@@ -65,7 +65,8 @@ actions!(
         ToggleTranscriptTabAction,
         CycleAttentionSession,
         CaptureUi,
-        OpenFilePaletteAction
+        OpenFilePaletteAction,
+        OpenSearchAction
     ]
 );
 use session::{Session, SessionStatus};
@@ -2693,6 +2694,17 @@ fn main() {
                                 .ok();
                         }
                     });
+                    App::on_action::<OpenSearchAction>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            handle
+                                .update(cx, |this: &mut AppState, cx| {
+                                    this.pending_action = Some(OverlayAction::OpenSearch.into());
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    });
                     App::on_action::<ToggleTranscriptTabAction>(cx, {
                         let handle = toggle_handle.clone();
                         move |_, cx| {
@@ -2927,6 +2939,18 @@ fn main() {
                         },
                     )
                     .detach();
+                    let search_input =
+                        cx.new(|cx| text_input::TextInput::new(cx, "", "Search project…"));
+                    cx.subscribe(
+                        &search_input,
+                        |this: &mut AppState, input, event: &text_input::TextInputEvent, cx| {
+                            if matches!(event, text_input::TextInputEvent::Changed) {
+                                let q = input.read(cx).text().to_string();
+                                this.run_search(&q, cx);
+                            }
+                        },
+                    )
+                    .detach();
 
                     // Auto-start the base infrastructure (Traefik + network)
                     // if enabled. Fire-and-forget on the background executor —
@@ -3008,6 +3032,8 @@ fn main() {
                         file_palette: None,
                         file_palette_input,
                         file_index: Default::default(),
+                        search: None,
+                        search_input,
                         project_branch_input,
                         project_remote_input,
                         sidebar_filter: String::new(),
@@ -4013,6 +4039,10 @@ impl Render for AppState {
 
         if self.file_palette.is_some() {
             outer = outer.child(self.render_file_palette(cx));
+        }
+
+        if self.search.is_some() {
+            outer = outer.child(self.render_search(cx));
         }
 
         if let Some(modal) = self.new_session_modal.clone() {

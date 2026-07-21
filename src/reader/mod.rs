@@ -10,6 +10,7 @@
 pub(crate) mod highlight;
 pub(crate) mod index;
 pub(crate) mod palette;
+pub(crate) mod search;
 
 use crate::theme::theme;
 use gpui::prelude::FluentBuilder as _;
