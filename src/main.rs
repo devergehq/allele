@@ -155,6 +155,102 @@ impl AppState {
             .get(cursor.session_idx)
     }
 
+    fn render_session_summary_header(&self) -> Option<Div> {
+        let cursor = self.active?;
+        let project = self.projects.get(cursor.project_idx)?;
+        let session = project.sessions.get(cursor.session_idx)?;
+        let branch = session.branch_name.as_deref().unwrap_or("branch pending");
+        let agent = session
+            .agent_id
+            .as_deref()
+            .and_then(|id| {
+                self.user_settings
+                    .agents
+                    .iter()
+                    .find(|agent| agent.id == id)
+            })
+            .map(|agent| agent.display_name.as_str())
+            .unwrap_or("Default agent");
+        let state = match session.status {
+            SessionStatus::Running => "Running",
+            SessionStatus::Idle => "Idle",
+            SessionStatus::Done => "Done",
+            SessionStatus::Suspended => "Suspended",
+            SessionStatus::AwaitingInput => "Needs input",
+            SessionStatus::ResponseReady => "Ready to review",
+        };
+        let next_action = match session.status {
+            SessionStatus::AwaitingInput => "Answer in Terminal",
+            SessionStatus::ResponseReady => "Review transcript",
+            SessionStatus::Done | SessionStatus::Suspended => "Resume session",
+            _ if session.git_dirty == Some(true) => "Review changes",
+            _ => "Continue session",
+        };
+        let changed = if self.changes.repo_dir.as_ref() == session.clone_path.as_ref() {
+            self.changes.files.len()
+        } else {
+            0
+        };
+
+        Some(
+            div()
+                .w_full()
+                .px(px(12.0))
+                .py(px(6.0))
+                .border_b_1()
+                .border_color(theme().border_subtle)
+                .bg(theme().bg_surface)
+                .flex()
+                .items_center()
+                .justify_between()
+                .gap(px(12.0))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.0))
+                        .min_w(px(0.0))
+                        .child(icon(
+                            session.status.icon_name(),
+                            11.0,
+                            session.status.color(),
+                        ))
+                        .child(
+                            div()
+                                .text_size(px(12.0))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(theme().text_primary)
+                                .child(format!("{} / {}", project.name, session.label)),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme().text_faint)
+                                .child(format!("{branch} · {agent}")),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.0))
+                        .flex_shrink_0()
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme().text_secondary)
+                                .child(format!("{state} · {changed} changed")),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme().accent)
+                                .child(next_action),
+                        ),
+                ),
+        )
+    }
+
     /// Open the scratch pad compose overlay, or re-focus it if already open.
     pub(crate) fn open_scratch_pad(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Collect per-project history entries before creating the overlay so
@@ -3609,6 +3705,10 @@ impl Render for AppState {
             // --- Attention bar (sessions needing input) — above tabs for visibility ---
             if let Some(attention_bar) = self.render_attention_bar(cx) {
                 content_col = content_col.child(attention_bar);
+            }
+
+            if let Some(summary) = self.render_session_summary_header() {
+                content_col = content_col.child(summary);
             }
 
             // --- Main-area tab strip: Claude / Reader ---

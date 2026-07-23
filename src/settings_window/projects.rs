@@ -231,6 +231,44 @@ impl ProjectsSection {
 
         // Detail pane for selected project
         let detail = if let Some(sel_idx) = selected {
+            // DEV-25: surface where each project's configuration comes from —
+            // UI defaults vs project settings vs versioned allele.json.
+            let (config_path, config_status, branch_source, remote_source) = app
+                .upgrade()
+                .and_then(|app| {
+                    app.read(cx).projects.get(sel_idx).map(|p| {
+                        let path = p.source_path.join("allele.json");
+                        let status = if !path.exists() {
+                            "Not present; using UI settings"
+                        } else if crate::config::ProjectConfig::load(&p.source_path).is_some() {
+                            "Loaded successfully"
+                        } else {
+                            "Invalid; check logs and fix allele.json"
+                        };
+                        (
+                            path,
+                            status,
+                            if p.settings.default_branch.is_some() {
+                                "Project setting"
+                            } else {
+                                "Auto-detected default"
+                            },
+                            if p.settings.remote.is_some() {
+                                "Project setting"
+                            } else {
+                                "Global default: origin"
+                            },
+                        )
+                    })
+                })
+                .unwrap_or_else(|| {
+                    (
+                        std::path::PathBuf::from("allele.json"),
+                        "Unavailable",
+                        "Unavailable",
+                        "Unavailable",
+                    )
+                });
             let terminals: Vec<crate::config::TerminalCfg> = app
                 .upgrade()
                 .and_then(|app| {
@@ -389,6 +427,41 @@ impl ProjectsSection {
                 .flex()
                 .flex_col()
                 .gap(px(16.0))
+                .child(section_header("Configuration precedence"))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme().text_secondary)
+                        .child("Global defaults are overridden by project settings. Versioned allele.json orchestration takes precedence where supported."),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme().text_faint)
+                        .child(format!("Branch: {branch_source} · Remote: {remote_source}")),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme().text_faint)
+                        .child(format!("Advanced configuration: {}", config_path.display())),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(if config_status.starts_with("Invalid") {
+                            theme().danger
+                        } else {
+                            theme().text_faint
+                        })
+                        .child(format!("allele.json: {config_status}")),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme().success)
+                        .child("Changes save automatically"),
+                )
                 .child(section_header("Startup command"))
                 .child(input_frame(self.startup_input.clone()))
                 .child(section_header("Shutdown command"))
@@ -422,7 +495,7 @@ impl ProjectsSection {
             .overflow_y_scroll()
             .child(section_title("Projects"))
             .child(section_note(
-                "Configure per-session orchestration: startup/shutdown lifecycle and drawer terminals.",
+                "Configure project behavior in one place. Active sources and precedence are shown for the selected project.",
             ))
             .child(
                 div()
