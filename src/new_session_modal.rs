@@ -1,6 +1,7 @@
 //! "New Session with Details" modal — lets the user customise session name,
 //! branch slug, agent, and initial prompt before creating a session.
 
+use crate::accessibility::DENSE_CONTROL_MIN_HEIGHT;
 use crate::icon::{icon, name as icons};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::theme;
@@ -410,6 +411,7 @@ impl Render for NewSessionModal {
                             .cursor_pointer()
                             .px(px(12.0))
                             .py(px(5.0))
+                            .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
                             .rounded(px(6.0))
                             .bg(theme().bg_hover)
                             .text_size(px(11.0))
@@ -429,6 +431,7 @@ impl Render for NewSessionModal {
                             .cursor_pointer()
                             .px(px(12.0))
                             .py(px(5.0))
+                            .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
                             .rounded(px(6.0))
                             .bg(theme().success)
                             .text_size(px(11.0))

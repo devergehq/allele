@@ -1,3 +1,4 @@
+mod accessibility;
 mod actions;
 mod agents;
 mod app_state;
