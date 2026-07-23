@@ -589,6 +589,17 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         match action {
+            ArchiveAction::RequestDeleteArchive {
+                project_idx,
+                archive_idx,
+            } => {
+                self.confirming.delete_archive = Some((project_idx, archive_idx));
+                cx.notify();
+            }
+            ArchiveAction::CancelDeleteArchive => {
+                self.confirming.delete_archive = None;
+                cx.notify();
+            }
             ArchiveAction::MergeArchive {
                 project_idx,
                 archive_idx,
@@ -642,6 +653,7 @@ impl AppState {
                 project_idx,
                 archive_idx,
             } => {
+                self.confirming.delete_archive = None;
                 if let Some(project) = self.projects.get_mut(project_idx) {
                     if let Some(entry) = project.archives.get(archive_idx) {
                         let session_id = entry.id.clone();

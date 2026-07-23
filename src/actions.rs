@@ -131,6 +131,13 @@ pub enum SessionAction {
 /// Archive refs — merge / delete / restore a session that has been archived.
 #[derive(Debug)]
 pub enum ArchiveAction {
+    /// Arm the inline confirmation gate before permanently deleting a ref.
+    RequestDeleteArchive {
+        project_idx: usize,
+        archive_idx: usize,
+    },
+    /// Cancel archive deletion confirmation.
+    CancelDeleteArchive,
     /// Merge an archived session ref into canonical's working tree.
     MergeArchive {
         project_idx: usize,

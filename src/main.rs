@@ -3152,6 +3152,7 @@ fn main() {
                             quit: false,
                             remove_project: None,
                             dirty_merge: None,
+                            delete_archive: None,
                         },
                         rich: RichState {
                             view: None,
