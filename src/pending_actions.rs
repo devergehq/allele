@@ -423,6 +423,11 @@ impl AppState {
                         project.loading_sessions.push(project::LoadingSession {
                             id: placeholder_id.clone(),
                             label: format!("{session_label} (rebasing & merging)"),
+                            status: if proj_settings.rebase_before_merge {
+                                "Archiving, rebasing, and merging…".into()
+                            } else {
+                                "Archiving and merging…".into()
+                            },
                         });
                         project.sessions.remove(cursor.session_idx);
                     }
