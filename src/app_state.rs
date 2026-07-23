@@ -70,6 +70,8 @@ pub(crate) struct ChangesPanelState {
     pub(crate) is_repo: bool,
     pub(crate) loading: bool,
     pub(crate) diff_loading: bool,
+    pub(crate) error: Option<String>,
+    pub(crate) diff_error: Option<String>,
     /// A refresh arrived while one was in flight — re-run on completion.
     /// Bounds git-status concurrency to one subprocess per AppState.
     pub(crate) refresh_queued: bool,

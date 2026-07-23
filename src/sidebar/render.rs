@@ -750,6 +750,7 @@ pub(crate) fn build_sidebar_items(
                     let session_pinned = session.pinned;
                     let session_comment = session.comment.clone();
                     let session_startup_status = session.startup_status.clone();
+                    let session_operation_error = session.operation_error.clone();
                     let mut label_row = div()
                         .flex()
                         .flex_row()
@@ -840,6 +841,28 @@ pub(crate) fn build_sidebar_items(
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .child(comment),
+                        );
+                    }
+                    if let Some(error) = session_operation_error {
+                        let retry_kind = error.kind;
+                        let retry_label = if retry_kind == crate::session::OperationErrorKind::Resume { "Retry" } else { "Retry merge" };
+                        info_col = info_col.child(
+                            div().pl(px(16.0)).flex().items_center().gap(px(6.0))
+                                .child(div().flex_1().text_size(px(11.0)).text_color(theme().danger).child(error.message))
+                                .child(
+                                    div().id(SharedString::from(format!("retry-operation-{p_idx}-{s_idx}")))
+                                        .cursor_pointer().text_size(px(11.0)).text_color(theme().accent).child(retry_label)
+                                        .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                            cx.stop_propagation();
+                                            let action = if retry_kind == crate::session::OperationErrorKind::Resume {
+                                                SessionAction::ResumeSession { project_idx: p_idx, session_idx: s_idx }
+                                            } else {
+                                                SessionAction::MergeAndClose { project_idx: p_idx, session_idx: s_idx }
+                                            };
+                                            this.pending_action = Some(action.into());
+                                            cx.notify();
+                                        })),
+                                ),
                         );
                     }
                     info_col
@@ -1314,6 +1337,53 @@ pub(crate) fn build_sidebar_items(
                         )
                         .into_any_element(),
                 );
+                if let Some(message) = archive.merge_error.clone() {
+                    sidebar_items.push(
+                        div()
+                            .border_l_2()
+                            .border_color(with_alpha(theme().danger, 0.4))
+                            .pl(px(40.0))
+                            .pr(px(12.0))
+                            .pb(px(4.0))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.0))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(11.0))
+                                    .text_color(theme().danger)
+                                    .child(message),
+                            )
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!(
+                                        "retry-archive-{p_idx}-{a_idx}"
+                                    )))
+                                    .cursor_pointer()
+                                    .text_size(px(11.0))
+                                    .text_color(theme().accent)
+                                    .child("Retry")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(
+                                            move |this: &mut AppState, _event, _window, cx| {
+                                                cx.stop_propagation();
+                                                this.pending_action = Some(
+                                                    ArchiveAction::MergeArchive {
+                                                        project_idx: p_idx,
+                                                        archive_idx: a_idx,
+                                                    }
+                                                    .into(),
+                                                );
+                                                cx.notify();
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .into_any_element(),
+                    );
+                }
             }
         }
     }

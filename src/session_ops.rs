@@ -13,7 +13,7 @@ use crate::actions::{
     SidebarAction,
 };
 use crate::app_state::AppState;
-use crate::session::{Session, SessionStatus};
+use crate::session::{OperationError, OperationErrorKind, Session, SessionStatus};
 use crate::state::ArchivedSession;
 use crate::terminal::{clamp_font_size, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
 use crate::{
@@ -876,6 +876,20 @@ impl AppState {
                          so its workspace can be rebuilt here."
                             .to_string(),
                     );
+                    // DEV-27: also surface an actionable per-row failure so the
+                    // session shows why it can't resume, not just the global notice.
+                    if let Some(session) = self
+                        .projects
+                        .get_mut(cursor.project_idx)
+                        .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                    {
+                        session.operation_error = Some(OperationError {
+                            kind: OperationErrorKind::Resume,
+                            message:
+                                "Workspace is unavailable. Restore it or discard this session."
+                                    .into(),
+                        });
+                    }
                     cx.notify();
                 }
                 return;
@@ -1028,6 +1042,7 @@ impl AppState {
             .and_then(|p| p.sessions.get_mut(cursor.session_idx))
         {
             session.terminal_view = Some(terminal_view);
+            session.operation_error = None;
             session.set_status(SessionStatus::Running);
             session.last_active = std::time::SystemTime::now();
             // Pin the resolved agent so subsequent resumes pick up the
@@ -1093,6 +1108,7 @@ impl AppState {
                 project_id: project.id.clone(),
                 label: removed_label.clone(),
                 archived_at: now,
+                merge_error: None,
             });
         }
 
