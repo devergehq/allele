@@ -129,7 +129,18 @@ impl AppState {
                 .spawn(async move {
                     let pull_error = if pull_before_clone {
                         match git::pull(&source_for_task) {
-                            Ok(()) => None,
+                            Ok(git::PullOutcome::UpToDate) => None,
+                            Ok(git::PullOutcome::Diverged) => {
+                                // Benign: the source branch has local/remote
+                                // divergence and can't fast-forward. Clone from
+                                // current HEAD; no user-facing warning.
+                                info!(
+                                    "git pull on {} skipped: branch diverged from \
+                                     upstream, cloning from current source",
+                                    source_for_task.display()
+                                );
+                                None
+                            }
                             Err(e) => {
                                 let msg = format!("{e}");
                                 warn!(
@@ -460,7 +471,18 @@ impl AppState {
                 .spawn(async move {
                     let pull_error = if pull_before_clone {
                         match git::pull(&source_for_task) {
-                            Ok(()) => None,
+                            Ok(git::PullOutcome::UpToDate) => None,
+                            Ok(git::PullOutcome::Diverged) => {
+                                // Benign: the source branch has local/remote
+                                // divergence and can't fast-forward. Clone from
+                                // current HEAD; no user-facing warning.
+                                info!(
+                                    "git pull on {} skipped: branch diverged from \
+                                     upstream, cloning from current source",
+                                    source_for_task.display()
+                                );
+                                None
+                            }
                             Err(e) => {
                                 let msg = format!("{e}");
                                 warn!(

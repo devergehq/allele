@@ -192,6 +192,77 @@ pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
     }
 }
 
+/// Result of a best-effort source-root pull before a new session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullOutcome {
+    /// The pull fast-forwarded the branch, or it was already up to date —
+    /// either way the source is current.
+    UpToDate,
+    /// The checked-out branch has diverged from its upstream and cannot be
+    /// fast-forwarded (it has local commits, or the remote has commits we'd
+    /// have to merge/rebase in). This is a **normal** state for an active
+    /// branch, not a failure: we leave the working tree untouched and clone
+    /// from current HEAD. Callers should treat this as benign — no user-facing
+    /// warning — since the whole session pipeline proceeds regardless.
+    Diverged,
+}
+
+/// Best-effort `git pull` on the source root before creating a session.
+///
+/// Forces **fast-forward-only merge** (`-c pull.rebase=false pull --ff-only`)
+/// so behaviour is deterministic regardless of the user's `pull.rebase` /
+/// `pull.ff` config: either the branch fast-forwards, or the pull aborts with
+/// a recognisable "not possible to fast-forward" error. A divergent branch is
+/// reported as [`PullOutcome::Diverged`] (benign, `Ok`) rather than an error,
+/// because it is an expected state — the source simply isn't advanced and we
+/// clone from where it is. Only genuine failures (auth, network, dirty tree,
+/// not-a-repo) return `Err` and warrant surfacing to the user.
+///
+/// Unlike most helpers in this module, this intentionally does **not** use
+/// `git_cmd()` — that sets `GIT_CONFIG_NOSYSTEM=1` which blocks the system
+/// gitconfig where macOS stores `credential.helper=osxkeychain`. Since the
+/// pull hits a remote the user owns, it needs their credential helpers, so we
+/// build the command via [`user_git_cmd`].
+pub fn pull(repo: &Path) -> crate::errors::Result<PullOutcome> {
+    if !is_git_repo(repo) {
+        return Err(AlleleError::Git(format!(
+            "pull: not a git repo: {}",
+            repo.display()
+        )));
+    }
+    let mut cmd = user_git_cmd(repo);
+    // Disable rebase and force fast-forward-only, overriding whatever the user
+    // has in `pull.rebase` / `pull.ff`. This makes a divergent branch fail
+    // predictably instead of attempting a merge or rebase.
+    cmd.arg("-c").arg("pull.rebase=false");
+    cmd.arg("pull").arg("--ff-only");
+    match run_git(cmd, "pull") {
+        Ok(_) => Ok(PullOutcome::UpToDate),
+        Err(e) => {
+            let msg = e.to_string();
+            if is_non_fast_forward(&msg) {
+                Ok(PullOutcome::Diverged)
+            } else {
+                Err(AlleleError::Git(msg))
+            }
+        }
+    }
+}
+
+/// Detect git's "can't fast-forward because the branch diverged" failure.
+///
+/// Matches the messages `git pull --ff-only` emits when the local branch has
+/// diverged from its upstream — the benign case we deliberately swallow. Kept
+/// deliberately narrow so unrelated failures (auth, dirty tree, network) still
+/// surface as real errors.
+fn is_non_fast_forward(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("not possible to fast-forward")
+        || s.contains("can't be fast-forwarded")
+        || s.contains("cannot be fast-forwarded")
+        || s.contains("diverging branches")
+}
+
 /// Fetch the remote's default branch (or `branch_override` if given) and
 /// rebase the current branch onto it.
 ///
@@ -205,30 +276,6 @@ pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
 ///
 /// Returns `Ok(true)` if the rebase made changes, `Ok(false)` if already
 /// up to date (no rebase needed).
-/// Run `git pull` in the given repo. Thin wrapper — whatever the user has
-/// configured for `pull.rebase`, merge strategy, and upstream tracking
-/// applies. Intended for the "pull source root before new session" toggle,
-/// where we want exactly what the user would get typing `git pull`
-/// themselves.
-///
-/// Unlike other git helpers in this module, this intentionally does **not**
-/// use `git_cmd()` — that sets `GIT_CONFIG_NOSYSTEM=1` which blocks the
-/// system gitconfig where macOS stores `credential.helper=osxkeychain`.
-/// Since `pull` is a user-facing operation that should honour the user's
-/// full git config, we build a plain `Command` here.
-pub fn pull(repo: &Path) -> crate::errors::Result<()> {
-    if !is_git_repo(repo) {
-        return Err(AlleleError::Git(format!(
-            "pull: not a git repo: {}",
-            repo.display()
-        )));
-    }
-    let mut cmd = user_git_cmd(repo);
-    cmd.arg("pull");
-    run_git(cmd, "pull").map_err(|e| AlleleError::Git(e.to_string()))?;
-    Ok(())
-}
-
 pub fn fetch_and_rebase_onto_remote_branch(
     repo: &Path,
     remote: &str,
@@ -1764,6 +1811,33 @@ mod tests {
         fs::write(path.join("file.txt"), content).expect("write");
         git_init(&path).expect("git_init");
         (dir, path)
+    }
+
+    #[test]
+    fn non_fast_forward_detects_divergence_messages() {
+        // Real messages emitted by `git pull --ff-only` on a divergent branch.
+        assert!(is_non_fast_forward(
+            "fatal: Not possible to fast-forward, aborting."
+        ));
+        assert!(is_non_fast_forward(
+            "hint: Diverging branches can't be fast-forwarded, you need to either:"
+        ));
+        // Case-insensitive.
+        assert!(is_non_fast_forward("NOT POSSIBLE TO FAST-FORWARD"));
+    }
+
+    #[test]
+    fn non_fast_forward_ignores_real_failures() {
+        // Genuine failures must NOT be classified as benign divergence.
+        assert!(!is_non_fast_forward(
+            "fatal: could not read Username for 'https://github.com': terminal prompts disabled"
+        ));
+        assert!(!is_non_fast_forward(
+            "error: Your local changes to the following files would be overwritten by merge"
+        ));
+        assert!(!is_non_fast_forward(
+            "fatal: unable to access 'https://...': Could not resolve host"
+        ));
     }
 
     /// Get the current HEAD commit hash of a repo.
