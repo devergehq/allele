@@ -857,7 +857,11 @@ pub(crate) fn build_sidebar_items(
                     }
                     if let Some(error) = session_operation_error {
                         let retry_kind = error.kind;
-                        let retry_label = if retry_kind == crate::session::OperationErrorKind::Resume { "Retry" } else { "Retry merge" };
+                        let retry_label = match retry_kind {
+                            crate::session::OperationErrorKind::Resume => "Retry",
+                            crate::session::OperationErrorKind::MergeAndClose => "Retry merge",
+                            crate::session::OperationErrorKind::Startup => "Retry",
+                        };
                         info_col = info_col.child(
                             div().pl(px(16.0)).flex().items_center().gap(px(6.0))
                                 .child(div().flex_1().text_size(px(11.0)).text_color(theme().danger).child(error.message))
@@ -866,10 +870,16 @@ pub(crate) fn build_sidebar_items(
                                         .cursor_pointer().text_size(px(11.0)).text_color(theme().accent).child(retry_label)
                                         .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
                                             cx.stop_propagation();
-                                            let action = if retry_kind == crate::session::OperationErrorKind::Resume {
-                                                SessionAction::ResumeSession { project_idx: p_idx, session_idx: s_idx }
-                                            } else {
-                                                SessionAction::MergeAndClose { project_idx: p_idx, session_idx: s_idx }
+                                            let action = match retry_kind {
+                                                crate::session::OperationErrorKind::Resume => {
+                                                    SessionAction::ResumeSession { project_idx: p_idx, session_idx: s_idx }
+                                                }
+                                                crate::session::OperationErrorKind::MergeAndClose => {
+                                                    SessionAction::MergeAndClose { project_idx: p_idx, session_idx: s_idx }
+                                                }
+                                                crate::session::OperationErrorKind::Startup => {
+                                                    SessionAction::RetryStartup { project_idx: p_idx, session_idx: s_idx }
+                                                }
                                             };
                                             this.pending_action = Some(action.into());
                                             cx.notify();
