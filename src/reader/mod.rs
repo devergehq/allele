@@ -801,13 +801,14 @@ impl AppState {
             Ok(r) => r,
             Err(_) => return,
         };
+        // Hidden (dot-prefixed) entries are shown: dotfiles like `.env` and
+        // directories like `.git` (hooks, info/exclude) are worth browsing.
+        // The tree reads each directory lazily on expand (see below), so
+        // heavyweight contents such as `.git/objects` cost nothing until opened.
         let mut entries: Vec<(PathBuf, bool, String)> = read
             .filter_map(|e| e.ok())
             .filter_map(|e| {
                 let name = e.file_name().to_string_lossy().into_owned();
-                if name.starts_with('.') {
-                    return None;
-                }
                 let is_dir = e.file_type().ok()?.is_dir();
                 Some((e.path(), is_dir, name))
             })
