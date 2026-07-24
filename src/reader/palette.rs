@@ -541,7 +541,10 @@ fn tag_pill(label: &'static str, color: Hsla) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Import the item under test explicitly rather than `use super::*` — this
+    // module's parent does `use gpui::*`, whose glob would shadow the standard
+    // `#[test]` attribute with gpui's own `test` macro.
+    use super::fuzzy_score;
 
     #[test]
     fn fuzzy_matches_subsequence_and_ranks_boundaries() {
