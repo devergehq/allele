@@ -516,7 +516,10 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    // Import the item under test explicitly rather than `use super::*` — this
+    // module's parent does `use gpui::*`, whose glob would shadow the standard
+    // `#[test]` attribute with gpui's own `test` macro.
+    use super::symbol_name;
 
     #[test]
     fn symbol_name_handles_modifiers_and_keywords() {
