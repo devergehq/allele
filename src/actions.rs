@@ -91,6 +91,12 @@ pub enum SessionAction {
     /// Spawn drawer terminals after an async startup command completes.
     /// The config is stored transiently on `AppState.pending_startup`.
     SpawnStartupTerminals(SessionCursor),
+    /// Re-run the per-project `startup` command for a session whose startup
+    /// previously timed out. Clears the error and re-enters `apply_project_config`.
+    RetryStartup {
+        project_idx: usize,
+        session_idx: usize,
+    },
     /// Open the edit-session modal for a given session.
     EditSession {
         project_idx: usize,

@@ -254,6 +254,24 @@ impl AppState {
                 self.resume_session(cursor, window, cx);
                 self.sync_browser_to_active();
             }
+            SessionAction::RetryStartup {
+                project_idx,
+                session_idx,
+            } => {
+                let cursor = SessionCursor {
+                    project_idx,
+                    session_idx,
+                };
+                // Clear the timed-out error and re-enter the startup flow.
+                if let Some(session) = self
+                    .projects
+                    .get_mut(project_idx)
+                    .and_then(|p| p.sessions.get_mut(session_idx))
+                {
+                    session.operation_error = None;
+                }
+                self.apply_project_config(cursor, window, cx);
+            }
             SessionAction::SpawnStartupTerminals(cursor) => {
                 if let Some((_, cfg, port, clone_path)) = self.pending_startup.take() {
                     self.spawn_terminals_and_preview(cursor, &cfg, port, &clone_path, window, cx);

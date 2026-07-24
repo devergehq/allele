@@ -2033,6 +2033,12 @@ impl AppState {
             .map(|s| config::substitute(&s, port, &clone_path))
             .filter(|s| !s.trim().is_empty());
 
+        // How long a per-project `startup` command may run before we treat it
+        // as wedged, kill it, and surface a retryable error. Generous headroom
+        // for a legitimate first-run migrate + seed; a healthy run finishes in
+        // seconds.
+        const STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
         if let Some(startup_cmd) = startup {
             // Show initial status in sidebar while startup runs.
             if let Some(session) = self
@@ -2047,6 +2053,10 @@ impl AppState {
             let clone_for_task = clone_path.clone();
             cx.spawn(async move |this, cx| {
                 let (tx, rx) = std::sync::mpsc::channel::<String>();
+                // Carries the child's process-group id back to the poll loop so
+                // it can kill the whole startup tree (sh → script → php …) if the
+                // command hangs past the timeout.
+                let (pgid_tx, pgid_rx) = std::sync::mpsc::channel::<u32>();
 
                 // Run the startup command on the background executor.
                 // Lines from stdout are sent via the channel so the UI
@@ -2056,20 +2066,42 @@ impl AppState {
                         let cmd = startup_cmd.clone();
                         let cwd = clone_for_task.clone();
                         async move {
+                            use std::os::unix::process::CommandExt;
                             let child = std::process::Command::new("sh")
                                 .arg("-c")
                                 .arg(&cmd)
                                 .current_dir(&cwd)
                                 .stdout(std::process::Stdio::piped())
                                 .stderr(std::process::Stdio::piped())
+                                // New process group (pgid == child pid) so a
+                                // timeout can SIGKILL the entire tree at once.
+                                .process_group(0)
                                 .spawn();
                             match child {
                                 Ok(mut child) => {
+                                    let _ = pgid_tx.send(child.id());
+                                    // Drain stderr on its own thread. If we leave
+                                    // the stderr pipe unread, a startup command that
+                                    // logs verbosely (e.g. a first-run DB seed) fills
+                                    // the OS pipe buffer (~64 KB) and then blocks on
+                                    // its next write — the child never exits, stdout
+                                    // stops, and the sidebar status freezes forever.
+                                    let stderr_drain = child.stderr.take().map(|stderr| {
+                                        std::thread::spawn(move || {
+                                            use std::io::BufRead;
+                                            for line in std::io::BufReader::new(stderr).lines().flatten() {
+                                                warn!("allele: startup command (stderr): {line}");
+                                            }
+                                        })
+                                    });
                                     if let Some(stdout) = child.stdout.take() {
                                         use std::io::BufRead;
                                         for line in std::io::BufReader::new(stdout).lines().flatten() {
                                             let _ = tx.send(line);
                                         }
+                                    }
+                                    if let Some(handle) = stderr_drain {
+                                        let _ = handle.join();
                                     }
                                     match child.wait() {
                                         Ok(s) if !s.success() => {
@@ -2091,10 +2123,24 @@ impl AppState {
                     .detach();
 
                 // Poll the channel for status lines and update the sidebar.
+                // A startup command that hangs (e.g. a DB seed blocked on a
+                // contended shared server) would otherwise freeze the status
+                // forever and never spawn the drawer terminals — so we bound
+                // the wait and kill the tree if it overruns.
+                let deadline = std::time::Instant::now() + STARTUP_TIMEOUT;
+                let mut child_pgid: Option<u32> = None;
+                let mut last_status: Option<String> = None;
+                let mut timed_out = false;
                 loop {
                     cx.background_executor()
                         .timer(std::time::Duration::from_millis(100))
                         .await;
+
+                    if child_pgid.is_none() {
+                        if let Ok(pgid) = pgid_rx.try_recv() {
+                            child_pgid = Some(pgid);
+                        }
+                    }
 
                     let mut last_line = None;
                     let mut done = false;
@@ -2111,6 +2157,7 @@ impl AppState {
                     if let Some(line) = last_line {
                         let trimmed = line.trim().to_string();
                         if !trimmed.is_empty() {
+                            last_status = Some(trimmed.clone());
                             let _ = this.update(cx, |this: &mut Self, cx| {
                                 if let Some(session) = this
                                     .projects
@@ -2124,6 +2171,41 @@ impl AppState {
                         }
                     }
                     if done { break; }
+                    if std::time::Instant::now() >= deadline {
+                        timed_out = true;
+                        // SIGKILL the whole process group. The reader task's
+                        // stdout then hits EOF, `child.wait()` reaps sh, and the
+                        // background closure ends on its own.
+                        if let Some(pgid) = child_pgid {
+                            unsafe { libc::kill(-(pgid as i32), libc::SIGKILL) };
+                        }
+                        break;
+                    }
+                }
+
+                if timed_out {
+                    // Leave the session in a recoverable error state: surface
+                    // the failure with a one-click Retry instead of spawning
+                    // half-configured terminals. Retry re-runs the whole flow.
+                    let stalled_on = last_status
+                        .map(|s| format!(" during: {s}"))
+                        .unwrap_or_default();
+                    warn!("allele: startup command timed out{stalled_on} — killed");
+                    let _ = this.update(cx, move |this: &mut Self, cx| {
+                        if let Some(session) = this
+                            .projects
+                            .get_mut(cursor.project_idx)
+                            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                        {
+                            session.startup_status = None;
+                            session.operation_error = Some(crate::session::OperationError {
+                                kind: crate::session::OperationErrorKind::Startup,
+                                message: format!("Startup timed out{stalled_on}"),
+                            });
+                        }
+                        cx.notify();
+                    });
+                    return;
                 }
 
                 // Clear status and spawn terminals — needs window access,

@@ -91,6 +91,9 @@ pub struct DrawerTab {
 pub enum OperationErrorKind {
     Resume,
     MergeAndClose,
+    /// The per-project `startup` command timed out and was killed. Retry
+    /// re-runs `apply_project_config` for the session.
+    Startup,
 }
 
 #[derive(Debug, Clone)]
