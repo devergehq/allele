@@ -17,6 +17,114 @@ use crate::app_state::AppState;
 use crate::session::SessionStatus;
 use crate::SimpleTooltip;
 
+/// Left indents matching the rows each confirmation strip sits beneath, so the
+/// prompt lines up with the thing it is about to destroy.
+mod px_indent {
+    /// Matches the session row's `pl(24)`.
+    pub(super) const SESSION: f32 = 24.0;
+    /// Matches the archive row's `pl(24)`.
+    pub(super) const ARCHIVE: f32 = 24.0;
+}
+
+/// What a confirmation-strip button does when clicked. Boxed so both buttons
+/// go through one construction path regardless of what they capture.
+type ConfirmHandler = Box<dyn Fn(&mut AppState, &mut Context<AppState>)>;
+
+/// A destructive-confirmation strip, rendered as its own row *below* the row
+/// it applies to.
+///
+/// Stacked — message on its own full-width line, buttons right-aligned
+/// beneath — rather than sharing a line with the buttons. The sidebar is only
+/// a few hundred points wide and user-resizable; once the buttons take their
+/// share of a single line there is not enough room left for copy that says
+/// what is about to be deleted, so an inline layout pushes the buttons out of
+/// sight. Stacking holds at any sidebar width.
+///
+/// The owning row keeps its `danger` tint while this is visible — that, not
+/// the copy, is what identifies which row is about to be destroyed, so the
+/// message never has to spell out a path.
+fn confirm_strip(
+    id_prefix: String,
+    message: &'static str,
+    confirm_label: &'static str,
+    indent: f32,
+    on_confirm: impl Fn(&mut AppState, &mut Context<AppState>) + 'static,
+    on_cancel: impl Fn(&mut AppState, &mut Context<AppState>) + 'static,
+    cx: &mut Context<AppState>,
+) -> AnyElement {
+    let button = |id: String,
+                  label: &'static str,
+                  danger: bool,
+                  handler: ConfirmHandler,
+                  cx: &mut Context<AppState>| {
+        let base = div()
+            .id(SharedString::from(id))
+            .flex_shrink_0()
+            .cursor_pointer()
+            .px(px(8.0))
+            .py(px(2.0))
+            .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
+            .rounded(px(6.0))
+            .text_size(px(11.0));
+        let styled = if danger {
+            base.bg(theme().tint_danger)
+                .text_color(theme().danger)
+                .hover(|s| s.bg(theme().tint_danger_hover))
+        } else {
+            base.text_color(theme().text_muted)
+                .hover(|s| s.text_color(theme().text_primary))
+        };
+        styled.child(label).on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                cx.stop_propagation();
+                handler(this, cx);
+            }),
+        )
+    };
+
+    div()
+        .w_full()
+        .bg(theme().tint_danger)
+        .pl(px(indent))
+        .pr(px(12.0))
+        .pb(px(6.0))
+        .flex()
+        .flex_col()
+        .gap(px(4.0))
+        .child(
+            div()
+                .w_full()
+                .min_w(px(0.0))
+                .text_size(px(11.0))
+                .text_color(theme().danger)
+                .child(message),
+        )
+        .child(
+            div()
+                .flex()
+                .flex_row()
+                .justify_end()
+                .items_center()
+                .gap(px(4.0))
+                .child(button(
+                    format!("{id_prefix}-confirm"),
+                    confirm_label,
+                    true,
+                    Box::new(on_confirm),
+                    cx,
+                ))
+                .child(button(
+                    format!("{id_prefix}-cancel"),
+                    "Cancel",
+                    false,
+                    Box::new(on_cancel),
+                    cx,
+                )),
+        )
+        .into_any_element()
+}
+
 pub(crate) fn build_sidebar_items(
     state: &mut AppState,
     _window: &mut Window,
@@ -652,16 +760,6 @@ pub(crate) fn build_sidebar_items(
                 project_idx: p_idx,
                 session_idx: s_idx,
             };
-            let destructive_target = session
-                .clone_path
-                .as_ref()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| {
-                    format!(
-                        "branch {}",
-                        session.branch_name.as_deref().unwrap_or("workspace")
-                    )
-                });
             let is_confirming_discard = state.confirming.discard == Some(session_cursor);
             let is_confirming_merge = state.confirming.dirty_merge == Some(session_cursor);
 
@@ -894,89 +992,7 @@ pub(crate) fn build_sidebar_items(
                     info_col
                 });
 
-            if is_confirming_discard {
-                row = row.child(
-                    div()
-                        .flex_shrink_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.0))
-                        .items_end()
-                        .child(
-                            div()
-                                .max_w(px(240.0))
-                                .text_size(px(10.0))
-                                .text_color(theme().danger)
-                                .text_ellipsis()
-                                .overflow_hidden()
-                                .whitespace_nowrap()
-                                .child(format!("Delete workspace: {destructive_target}")),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(px(4.0))
-                                .items_center()
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "confirm-discard-{p_idx}-{s_idx}"
-                                        )))
-                                        .cursor_pointer()
-                                        .px(px(6.0))
-                                        .py(px(2.0))
-                                        .rounded(px(6.0))
-                                        .bg(theme().bg_hover)
-                                        .text_size(px(12.0))
-                                        .text_color(theme().danger)
-                                        .hover(|s| s.bg(theme().tint_danger_hover))
-                                        .child("Discard")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(
-                                                move |this: &mut AppState, _event, _window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.pending_action = Some(
-                                                        SessionAction::DiscardSession {
-                                                            project_idx: p_idx,
-                                                            session_idx: s_idx,
-                                                        }
-                                                        .into(),
-                                                    );
-                                                    cx.notify();
-                                                },
-                                            ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "cancel-discard-{p_idx}-{s_idx}"
-                                        )))
-                                        .cursor_pointer()
-                                        .px(px(6.0))
-                                        .py(px(2.0))
-                                        .rounded(px(6.0))
-                                        .text_size(px(12.0))
-                                        .text_color(theme().text_muted)
-                                        .hover(|s| s.text_color(theme().text_primary))
-                                        .child("Cancel")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(
-                                                |this: &mut AppState, _event, _window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.pending_action =
-                                                        Some(SessionAction::CancelDiscard.into());
-                                                    cx.notify();
-                                                },
-                                            ),
-                                        ),
-                                ),
-                        ),
-                );
-            } else if is_confirming_merge {
+            if is_confirming_merge {
                 row = row.child(
                     div()
                         .flex_shrink_0()
@@ -1185,6 +1201,30 @@ pub(crate) fn build_sidebar_items(
             }
 
             sidebar_items.push(row.into_any_element());
+
+            if is_confirming_discard {
+                sidebar_items.push(confirm_strip(
+                    format!("discard-{p_idx}-{s_idx}"),
+                    "Discard this workspace? Uncommitted work is lost.",
+                    "Discard",
+                    px_indent::SESSION,
+                    move |this, cx| {
+                        this.pending_action = Some(
+                            SessionAction::DiscardSession {
+                                project_idx: p_idx,
+                                session_idx: s_idx,
+                            }
+                            .into(),
+                        );
+                        cx.notify();
+                    },
+                    |this, cx| {
+                        this.pending_action = Some(SessionAction::CancelDiscard.into());
+                        cx.notify();
+                    },
+                    cx,
+                ));
+            }
         }
 
         // Archived sessions for this project (hidden when filtering)
@@ -1386,36 +1426,27 @@ pub(crate) fn build_sidebar_items(
                         .into_any_element(),
                 );
                 if is_confirming_delete {
-                    sidebar_items.push(
-                        div().pl(px(40.0)).pr(px(12.0)).pb(px(5.0)).flex().items_center().gap(px(6.0))
-                            .child(
-                                div().flex_1().text_size(px(11.0)).text_color(theme().danger)
-                                    .child("Permanently delete this recovery ref? This cannot be undone."),
-                            )
-                            .child(
-                                div().id(SharedString::from(format!("confirm-delarchive-{p_idx}-{a_idx}")))
-                                    .cursor_pointer().px(px(6.0)).py(px(2.0)).rounded(px(6.0))
-                                    .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
-                                    .bg(theme().tint_danger).text_size(px(11.0)).text_color(theme().danger)
-                                    .child("Delete")
-                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.pending_action = Some(ArchiveAction::DeleteArchive { project_idx: p_idx, archive_idx: a_idx }.into());
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                div().id(SharedString::from(format!("cancel-delarchive-{p_idx}-{a_idx}")))
-                                    .cursor_pointer().px(px(6.0)).py(px(2.0)).text_size(px(11.0))
-                                    .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
-                                    .text_color(theme().text_muted).child("Cancel")
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut AppState, _event, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.pending_action = Some(ArchiveAction::CancelDeleteArchive.into());
-                                        cx.notify();
-                                    })),
-                            ).into_any_element(),
-                    );
+                    sidebar_items.push(confirm_strip(
+                        format!("delarchive-{p_idx}-{a_idx}"),
+                        "Delete this recovery ref? This cannot be undone.",
+                        "Delete",
+                        px_indent::ARCHIVE,
+                        move |this, cx| {
+                            this.pending_action = Some(
+                                ArchiveAction::DeleteArchive {
+                                    project_idx: p_idx,
+                                    archive_idx: a_idx,
+                                }
+                                .into(),
+                            );
+                            cx.notify();
+                        },
+                        |this, cx| {
+                            this.pending_action = Some(ArchiveAction::CancelDeleteArchive.into());
+                            cx.notify();
+                        },
+                        cx,
+                    ));
                 }
                 if let Some(message) = archive.merge_error.clone() {
                     sidebar_items.push(
