@@ -11,8 +11,11 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 ## [Unreleased]
 
-Changes on `master` awaiting the next tagged release (**0.2.0**). This is the large
-batch of work merged after the 0.1.0 baseline.
+Changes on `master` awaiting the next tagged release.
+
+## [0.2.0] - 2026-07-25
+
+The large batch of work merged after the 0.1.0 baseline.
 
 ### Added
 - Native "Lab Instrument" UI refresh: transparent unified titlebar, SF Pro chrome,
@@ -36,6 +39,15 @@ batch of work merged after the 0.1.0 baseline.
 - A user-chosen branch is no longer auto-renamed.
 - Session tracking now follows Claude's session-id rotation on `/clear`.
 - Context-menu dismissal and vibrancy-hole resize-handle fixes.
+- Workspace dirty-status poller could write a `git status` result onto the wrong
+  session when the session list changed while the check was in flight.
+- Session header reported `0 changed` on a dirty workspace until the changes panel
+  was opened, and its next-action label looked like a button but did nothing.
+- Sidebar discard/delete confirmations overflowed the sidebar, putting their
+  buttons out of reach.
+- Settings window opened too small, and the Infrastructure section squashed the
+  section list and search box; settings search now matches keywords, not just
+  section labels.
 
 ### Changed
 - Repository ownership moved to **Deverge Consulting Pty Ltd** (`devergehq/allele`);
@@ -65,5 +77,6 @@ merge batch. Core proof-of-concept complete and runnable.
   browser with merge/delete actions.
 - Per-session drawer terminal panel and auto-naming of sessions from the first prompt.
 
-[Unreleased]: https://github.com/devergehq/allele/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/devergehq/allele/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/devergehq/allele/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/devergehq/allele/releases/tag/v0.1.0
