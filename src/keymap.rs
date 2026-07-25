@@ -40,8 +40,8 @@ use crate::rich::compose_bar as cb;
 use crate::text_input as ti;
 use crate::{
     CycleAttentionSession, OpenCommandPaletteAction, OpenFilePaletteAction, OpenScratchPadAction,
-    OpenSearchAction, OpenSettings, Quit, ToggleDrawerAction, ToggleSidebarAction,
-    ToggleTranscriptTabAction,
+    OpenSearchAction, OpenSettings, Quit, ToggleActiveOnlyAction, ToggleDrawerAction,
+    ToggleSidebarAction, ToggleTranscriptTabAction,
 };
 
 // ── Deprecation aliases ───────────────────────────────────────────
@@ -197,6 +197,7 @@ fn build_binding(
         // ── allele.* (app-wide) ──────────────────────────────────
         "allele.quit" => KeyBinding::new(keystroke, Quit, ctx),
         "allele.toggle_sidebar" => KeyBinding::new(keystroke, ToggleSidebarAction, ctx),
+        "allele.toggle_active_only" => KeyBinding::new(keystroke, ToggleActiveOnlyAction, ctx),
         "allele.toggle_drawer" => KeyBinding::new(keystroke, ToggleDrawerAction, ctx),
         "allele.toggle_transcript_tab" => {
             KeyBinding::new(keystroke, ToggleTranscriptTabAction, ctx)
@@ -305,4 +306,38 @@ pub fn load(cx: &mut App) {
         .collect();
 
     cx.bind_keys(bindings);
+}
+
+#[cfg(test)]
+mod tests {
+    // Import explicitly rather than `use super::*` — gpui's glob would shadow
+    // the standard `#[test]` attribute with gpui's own `test` macro.
+    use super::{
+        build_binding, strip_line_comments, KeymapEntry, KeymapSource, DEFAULT_KEYMAP_JSON,
+    };
+
+    /// Every action name in the shipped keymap must resolve in `build_binding`.
+    ///
+    /// An unresolvable name panics inside `keymap::load`, which runs during
+    /// app startup — so a typo here is a launch failure, not a dead keystroke.
+    /// This test moves that failure to CI.
+    #[test]
+    fn default_keymap_resolves_every_action() {
+        let stripped = strip_line_comments(DEFAULT_KEYMAP_JSON);
+        let entries: Vec<KeymapEntry> =
+            serde_json::from_str(&stripped).expect("default keymap must parse");
+        assert!(!entries.is_empty(), "default keymap must not be empty");
+
+        for entry in &entries {
+            for (keystroke, action_name) in &entry.bindings {
+                // Panics on an unknown action name — that is the assertion.
+                build_binding(
+                    action_name,
+                    keystroke,
+                    entry.context.as_deref(),
+                    &KeymapSource::Default,
+                );
+            }
+        }
+    }
 }

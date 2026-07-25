@@ -19,6 +19,7 @@ pub mod name {
     pub const CLOUD_DOWNLOAD: &str = "cloud-download";
     pub const CLOUD_UPLOAD: &str = "cloud-upload";
     pub const FILE_TEXT: &str = "file-text";
+    pub const FILTER: &str = "filter";
     pub const HELIX: &str = "helix";
     pub const IMAGE: &str = "image";
     pub const LOADER: &str = "loader";

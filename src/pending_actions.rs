@@ -963,6 +963,14 @@ impl AppState {
                     self.refresh_changes(cx);
                 }
             }
+            SidebarAction::ToggleActiveOnly => {
+                self.user_settings.sidebar_active_only = !self.user_settings.sidebar_active_only;
+                self.mark_settings_dirty();
+            }
+            SidebarAction::ShowAllSessions => {
+                self.user_settings.sidebar_active_only = false;
+                self.mark_settings_dirty();
+            }
             SidebarAction::RefreshChanges => {
                 self.refresh_changes(cx);
             }

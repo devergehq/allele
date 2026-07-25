@@ -267,6 +267,15 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub promote_attention_sessions: bool,
 
+    /// When true, the sidebar shows only sessions with a live agent attached
+    /// (see `SessionStatus::is_active`) and hides any project left with
+    /// nothing to show. Suspended/Done sessions are hidden, not deleted —
+    /// flicking the toggle off brings them straight back. Toggled from the
+    /// sidebar header funnel button or ⌘⇧E. Persisted so the view survives
+    /// a restart. See DEV-295.
+    #[serde(default)]
+    pub sidebar_active_only: bool,
+
     /// Branch naming configuration — controls how session branches are named
     /// (LLM model, mode, per-platform settings).
     #[serde(default)]
@@ -443,6 +452,7 @@ impl Default for Settings {
             tool_visibility: std::collections::HashMap::new(),
             git_pull_before_new_session: false,
             promote_attention_sessions: true,
+            sidebar_active_only: false,
             naming: NamingConfig::default(),
             sync: SyncSettings::default(),
         }

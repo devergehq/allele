@@ -90,6 +90,7 @@
     "bindings": {
       "cmd-q":               "allele.quit",
       "cmd-b":               "allele.toggle_sidebar",
+      "cmd-shift-e":         "allele.toggle_active_only",
       "cmd-j":               "allele.toggle_drawer",
       "cmd-shift-r":         "allele.toggle_transcript_tab",
       "cmd-,":               "allele.open_settings",

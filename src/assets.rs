@@ -35,6 +35,7 @@ assets!(
     "icons/svg/cloud-download.svg",
     "icons/svg/cloud-upload.svg",
     "icons/svg/file-text.svg",
+    "icons/svg/filter.svg",
     "icons/svg/helix.svg",
     "icons/svg/image.svg",
     "icons/svg/loader.svg",
