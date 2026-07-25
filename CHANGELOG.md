@@ -13,6 +13,12 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Added
+- Sidebar "active only" view (⌘⇧E, or the funnel button in the sidebar header):
+  hides sessions with no live agent — suspended and ended — along with any project
+  left with nothing to show, so a tree of dozens of parked sessions collapses to
+  just the work in flight. Nothing is deleted; toggling back restores the full tree.
+
 ## [0.2.0] - 2026-07-25
 
 The large batch of work merged after the 0.1.0 baseline.

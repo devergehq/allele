@@ -60,6 +60,7 @@ actions!(
         About,
         Quit,
         ToggleSidebarAction,
+        ToggleActiveOnlyAction,
         ToggleDrawerAction,
         OpenSettings,
         OpenScratchPadAction,
@@ -2541,6 +2542,7 @@ fn install_app_menu(cx: &mut App) {
             name: "View".into(),
             items: vec![
                 MenuItem::action("Show/Hide Sidebar", ToggleSidebarAction),
+                MenuItem::action("Active Sessions Only", ToggleActiveOnlyAction),
                 MenuItem::action("Show/Hide Terminal", ToggleDrawerAction),
                 MenuItem::separator(),
                 MenuItem::action("Open Scratch Pad", OpenScratchPadAction),
@@ -3153,6 +3155,18 @@ fn main() {
                                 .ok();
                         }
                     });
+                    App::on_action::<ToggleActiveOnlyAction>(cx, {
+                        let handle = toggle_handle.clone();
+                        move |_, cx| {
+                            handle
+                                .update(cx, |this: &mut AppState, cx| {
+                                    this.pending_action =
+                                        Some(SidebarAction::ToggleActiveOnly.into());
+                                    cx.notify();
+                                })
+                                .ok();
+                        }
+                    });
                     App::on_action::<ToggleDrawerAction>(cx, {
                         let handle = toggle_handle.clone();
                         move |_, cx| {
@@ -3714,8 +3728,70 @@ impl Render for AppState {
             self.mark_state_dirty();
         }
 
+        // Active-only view mode (DEV-295) — what the filter is holding back.
+        // Computed with the same predicates the sidebar renders with, so the
+        // hint row can't claim a count the tree disagrees with.
+        let active_only = self.user_settings.sidebar_active_only;
+        let (hidden_sessions, hidden_projects) =
+            crate::sidebar::render::active_only_hidden_counts(&self.projects, self.active);
+
         // Build sidebar items: for each project, a header then its sessions
         let sidebar_items = crate::sidebar::render::build_sidebar_items(self, window, cx);
+
+        // Active-only hint row — rendered only when the filter is actually
+        // holding something back. `None` collapses to zero children.
+        let active_only_hint: Option<AnyElement> = (active_only && hidden_sessions > 0).then(|| {
+            div()
+                .px(px(12.0))
+                .py(px(4.0))
+                .bg(with_alpha(theme().accent, 0.08))
+                .border_b_1()
+                .border_color(theme().border_subtle)
+                .flex()
+                .flex_row()
+                .gap(px(6.0))
+                .items_center()
+                .justify_between()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_size(px(11.0))
+                        .text_color(theme().text_dim)
+                        .child(if hidden_projects > 0 {
+                            format!(
+                                "Active only · {hidden_sessions} sessions, {hidden_projects} projects hidden"
+                            )
+                        } else {
+                            format!("Active only · {hidden_sessions} sessions hidden")
+                        }),
+                )
+                .child(
+                    div()
+                        .id("show-all-sessions")
+                        .flex_shrink_0()
+                        .cursor_pointer()
+                        .px(px(4.0))
+                        .rounded(px(4.0))
+                        .min_h(px(crate::accessibility::DENSE_CONTROL_MIN_HEIGHT))
+                        .text_size(px(11.0))
+                        .text_color(theme().accent)
+                        .hover(|s| s.bg(theme().bg_raised))
+                        .child("Show all")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this: &mut Self, _event, _window, cx| {
+                                this.pending_action =
+                                    Some(SidebarAction::ShowAllSessions.into());
+                                cx.notify();
+                            }),
+                        ),
+                )
+                .into_any_element()
+        });
 
         // Status summary
         let total_projects = self.projects.len();
@@ -3830,6 +3906,49 @@ impl Render for AppState {
                                     .flex_row()
                                     .items_center()
                                     .gap(px(2.0))
+                                    .child({
+                                        // Active-only view toggle (DEV-295).
+                                        // Tinted accent while engaged so the
+                                        // filtered view can't be mistaken for
+                                        // a sidebar that lost its sessions.
+                                        let mut btn = div()
+                                            .id("active-only-btn")
+                                            .cursor_pointer()
+                                            .p(px(4.0))
+                                            .rounded(px(6.0))
+                                            .hover(|s| s.bg(theme().bg_raised))
+                                            .child(icon(
+                                                icons::FILTER,
+                                                14.0,
+                                                if active_only {
+                                                    theme().accent
+                                                } else {
+                                                    theme().text_faint
+                                                },
+                                            ))
+                                            .tooltip(move |_window, cx| {
+                                                cx.new(|_| SimpleTooltip {
+                                                    text: if active_only {
+                                                        "Showing active sessions only — click to show all (⌘⇧E)".into()
+                                                    } else {
+                                                        "Show active sessions only (⌘⇧E)".into()
+                                                    },
+                                                })
+                                                .into()
+                                            })
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this: &mut Self, _event, _window, cx| {
+                                                    this.pending_action =
+                                                        Some(SidebarAction::ToggleActiveOnly.into());
+                                                    cx.notify();
+                                                }),
+                                            );
+                                        if active_only {
+                                            btn = btn.bg(theme().bg_raised);
+                                        }
+                                        btn
+                                    })
                                     .child(
                                         // "Pull session from remote" button
                                         div()
@@ -3903,6 +4022,11 @@ impl Render for AppState {
                                     .child(self.sidebar_filter_input.clone()),
                             ),
                     )
+                    // Active-only hint row — states what the filter is holding
+                    // back and offers a one-click way out, so a sidebar that
+                    // filters down to nothing is never a dead end. Sits
+                    // outside the scroll container so it can't scroll away.
+                    .children(active_only_hint)
                     // Session list
                     .child(
                         div()

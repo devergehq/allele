@@ -79,6 +79,21 @@ impl SessionStatus {
     pub fn counts_toward_runtime(&self) -> bool {
         !matches!(self, SessionStatus::Suspended | SessionStatus::Done)
     }
+
+    /// Whether this session still has a live agent behind it.
+    ///
+    /// `Suspended` (PTY killed, cold-resumes on click) and `Done` (the agent
+    /// process exited, leaving dead scrollback) are both inert — the row's
+    /// primary action for either is "Resume session". Everything else is a
+    /// session you can type into right now.
+    ///
+    /// Backs the sidebar's active-only filter (DEV-295). Kept separate from
+    /// [`Self::counts_toward_runtime`]: the two predicates happen to agree
+    /// today but answer different questions (*is it live* vs *is the clock
+    /// running*), so they are free to diverge.
+    pub fn is_active(&self) -> bool {
+        !matches!(self, SessionStatus::Suspended | SessionStatus::Done)
+    }
 }
 
 /// One named drawer terminal tab.

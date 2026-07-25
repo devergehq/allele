@@ -14,6 +14,7 @@ use crate::actions::{
     ArchiveAction, DraggedProject, DraggedSession, ProjectAction, SessionAction, SessionCursor,
 };
 use crate::app_state::AppState;
+use crate::project::Project;
 use crate::session::SessionStatus;
 use crate::SimpleTooltip;
 
@@ -125,6 +126,74 @@ fn confirm_strip(
         .into_any_element()
 }
 
+// ── Active-only view mode (DEV-295) ───────────────────────────────
+//
+// The predicates below are the single source of truth for what the
+// active-only filter hides. `build_sidebar_items` skips rows with them and
+// `active_only_hidden_counts` tallies with them, so the "N hidden" hint can
+// never drift out of step with what is actually on screen.
+
+/// Does this session survive the active-only filter?
+///
+/// Inactive means no live agent — `Suspended` or `Done`. The session under
+/// the active cursor is always kept regardless: hiding the row you are
+/// currently looking at is disorienting, and a failed resume legitimately
+/// leaves the selected session `Suspended` with an error + Retry button that
+/// must stay reachable.
+pub(crate) fn session_survives_active_only(status: SessionStatus, is_active_cursor: bool) -> bool {
+    is_active_cursor || status.is_active()
+}
+
+/// Does this project survive the active-only filter?
+///
+/// Kept when any of its sessions survives, or when a clone is still in
+/// flight — a brand-new session's project must not vanish mid-clone, which
+/// would strand the session being created.
+pub(crate) fn project_survives_active_only(
+    project: &Project,
+    project_idx: usize,
+    active: Option<SessionCursor>,
+) -> bool {
+    !project.loading_sessions.is_empty()
+        || project.sessions.iter().enumerate().any(|(session_idx, s)| {
+            let is_active_cursor = active
+                == Some(SessionCursor {
+                    project_idx,
+                    session_idx,
+                });
+            session_survives_active_only(s.status, is_active_cursor)
+        })
+}
+
+/// How many sessions and projects the active-only filter would hide, as
+/// `(sessions, projects)`. Drives the hint row's "N hidden" copy.
+///
+/// This reports what the *filter* hides, not what happens to be off screen —
+/// a project pinned visible by an open settings panel still counts as hidden.
+pub(crate) fn active_only_hidden_counts(
+    projects: &[Project],
+    active: Option<SessionCursor>,
+) -> (usize, usize) {
+    let mut sessions = 0;
+    let mut hidden_projects = 0;
+    for (project_idx, project) in projects.iter().enumerate() {
+        for (session_idx, s) in project.sessions.iter().enumerate() {
+            let is_active_cursor = active
+                == Some(SessionCursor {
+                    project_idx,
+                    session_idx,
+                });
+            if !session_survives_active_only(s.status, is_active_cursor) {
+                sessions += 1;
+            }
+        }
+        if !project_survives_active_only(project, project_idx, active) {
+            hidden_projects += 1;
+        }
+    }
+    (sessions, hidden_projects)
+}
+
 pub(crate) fn build_sidebar_items(
     state: &mut AppState,
     _window: &mut Window,
@@ -135,9 +204,22 @@ pub(crate) fn build_sidebar_items(
     let active_cursor = state.active;
     let filter = &state.sidebar_filter;
     let filtering = !filter.is_empty();
+    let active_only = state.user_settings.sidebar_active_only;
 
     for (p_idx, project) in state.projects.iter().enumerate() {
         let project_name = project.name.clone();
+
+        // Active-only: drop projects with nothing live in them. Projects the
+        // user is mid-interaction with are pinned visible — otherwise an open
+        // settings panel or a confirmation prompt would disappear under them.
+        if active_only && !project_survives_active_only(project, p_idx, active_cursor) {
+            let has_open_ui = state.editing_project_settings == Some(p_idx)
+                || state.confirming.remove_project == Some(p_idx)
+                || state.confirming.dirty_session == Some(p_idx);
+            if !has_open_ui {
+                continue;
+            }
+        }
 
         // When filtering, skip projects that have no matching sessions.
         if filtering {
@@ -718,6 +800,15 @@ pub(crate) fn build_sidebar_items(
         for s_idx in session_order {
             let session = &project.sessions[s_idx];
 
+            let is_active = active_cursor
+                .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
+                .unwrap_or(false);
+
+            // Active-only: drop sessions with no live agent behind them.
+            if active_only && !session_survives_active_only(session.status, is_active) {
+                continue;
+            }
+
             // Skip sessions that don't match the filter.
             if filtering {
                 let label_matches = session.label.to_lowercase().contains(filter);
@@ -733,9 +824,6 @@ pub(crate) fn build_sidebar_items(
                 }
             }
 
-            let is_active = active_cursor
-                .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
-                .unwrap_or(false);
             let is_suspended = session.status == SessionStatus::Suspended;
             let status_color = session.status.color();
             let status_icon = session.status.icon_name();
@@ -1227,8 +1315,9 @@ pub(crate) fn build_sidebar_items(
             }
         }
 
-        // Archived sessions for this project (hidden when filtering)
-        if !project.archives.is_empty() && !filtering {
+        // Archived sessions for this project. Hidden while text-filtering, and
+        // hidden under active-only — an archive is inactive by definition.
+        if !project.archives.is_empty() && !filtering && !active_only {
             // Section header
             sidebar_items.push(
                 div()
@@ -1500,4 +1589,162 @@ pub(crate) fn build_sidebar_items(
     }
 
     sidebar_items
+}
+
+#[cfg(test)]
+mod tests {
+    // Import explicitly rather than `use super::*` — this module's parent does
+    // `use gpui::*`, whose glob shadows the standard `#[test]` attribute with
+    // gpui's own `test` macro. See src/session/mod.rs for the same note.
+    use super::{
+        active_only_hidden_counts, project_survives_active_only, session_survives_active_only,
+    };
+    use crate::actions::SessionCursor;
+    use crate::project::Project;
+    use crate::session::{Session, SessionStatus};
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    const LIVE: [SessionStatus; 4] = [
+        SessionStatus::Running,
+        SessionStatus::Idle,
+        SessionStatus::AwaitingInput,
+        SessionStatus::ResponseReady,
+    ];
+
+    fn session(status: SessionStatus) -> Session {
+        let now = SystemTime::now();
+        let mut s = Session::suspended_from_persisted(
+            "id".into(),
+            "label".into(),
+            now,
+            now,
+            Duration::ZERO,
+            None,
+            false,
+        );
+        s.status = status;
+        s
+    }
+
+    fn project(statuses: &[SessionStatus]) -> Project {
+        let mut p = Project::new("proj".into(), PathBuf::from("/tmp/proj"));
+        p.sessions = statuses.iter().copied().map(session).collect();
+        p
+    }
+
+    fn cursor(project_idx: usize, session_idx: usize) -> Option<SessionCursor> {
+        Some(SessionCursor {
+            project_idx,
+            session_idx,
+        })
+    }
+
+    // ── session predicate ──────────────────────────────────────────
+
+    #[test]
+    fn suspended_session_is_filtered_out() {
+        assert!(!session_survives_active_only(
+            SessionStatus::Suspended,
+            false
+        ));
+    }
+
+    #[test]
+    fn done_session_is_filtered_out() {
+        // Done = the agent process exited; the row's action is "Resume
+        // session", same as Suspended. Clutter, not live work.
+        assert!(!session_survives_active_only(SessionStatus::Done, false));
+    }
+
+    #[test]
+    fn live_sessions_survive() {
+        for status in LIVE {
+            assert!(
+                session_survives_active_only(status, false),
+                "{status:?} should survive the active-only filter"
+            );
+        }
+    }
+
+    #[test]
+    fn selected_session_survives_even_when_inactive() {
+        // A failed resume leaves the *selected* session Suspended with an
+        // error + Retry button. Hiding it would strand the user.
+        assert!(session_survives_active_only(SessionStatus::Suspended, true));
+        assert!(session_survives_active_only(SessionStatus::Done, true));
+    }
+
+    // ── project predicate ──────────────────────────────────────────
+
+    #[test]
+    fn project_with_only_inactive_sessions_is_filtered_out() {
+        let p = project(&[SessionStatus::Suspended, SessionStatus::Done]);
+        assert!(!project_survives_active_only(&p, 0, None));
+    }
+
+    #[test]
+    fn project_survives_on_a_single_live_session() {
+        let p = project(&[
+            SessionStatus::Suspended,
+            SessionStatus::Suspended,
+            SessionStatus::Running,
+        ]);
+        assert!(project_survives_active_only(&p, 0, None));
+    }
+
+    #[test]
+    fn empty_project_is_filtered_out() {
+        assert!(!project_survives_active_only(&project(&[]), 0, None));
+    }
+
+    #[test]
+    fn project_survives_while_a_clone_is_in_flight() {
+        // Otherwise a brand-new session's project vanishes mid-clone and the
+        // session being created becomes unreachable.
+        let mut p = project(&[SessionStatus::Suspended]);
+        p.loading_sessions.push(crate::project::LoadingSession {
+            id: "loading".into(),
+            label: "new session".into(),
+            status: "Cloning…".into(),
+        });
+        assert!(project_survives_active_only(&p, 0, None));
+    }
+
+    #[test]
+    fn project_survives_because_its_inactive_session_is_selected() {
+        let p = project(&[SessionStatus::Suspended]);
+        assert!(!project_survives_active_only(&p, 0, None));
+        assert!(project_survives_active_only(&p, 0, cursor(0, 0)));
+        // …but only for the project the cursor actually points at.
+        assert!(!project_survives_active_only(&p, 1, cursor(0, 0)));
+    }
+
+    // ── hidden counts ──────────────────────────────────────────────
+
+    #[test]
+    fn hidden_counts_tally_sessions_and_projects() {
+        let projects = vec![
+            // Fully inactive → 2 sessions + 1 project hidden.
+            project(&[SessionStatus::Suspended, SessionStatus::Done]),
+            // Mixed → 1 session hidden, project stays.
+            project(&[SessionStatus::Suspended, SessionStatus::Running]),
+            // Fully live → nothing hidden.
+            project(&[SessionStatus::Running]),
+        ];
+        assert_eq!(active_only_hidden_counts(&projects, None), (3, 1));
+    }
+
+    #[test]
+    fn hidden_counts_exclude_the_selected_session() {
+        let projects = vec![project(&[SessionStatus::Suspended, SessionStatus::Done])];
+        // Selecting the Suspended row keeps it (and its project) visible.
+        assert_eq!(active_only_hidden_counts(&projects, cursor(0, 0)), (1, 0));
+    }
+
+    #[test]
+    fn hidden_counts_are_zero_when_everything_is_live() {
+        let projects = vec![project(&LIVE)];
+        assert_eq!(active_only_hidden_counts(&projects, None), (0, 0));
+    }
 }

@@ -188,6 +188,13 @@ pub enum SidebarAction {
     ToggleSidebar,
     /// Toggle the right sidebar visibility.
     ToggleRightSidebar,
+    /// Toggle the sidebar's active-only view mode (DEV-295). When on, the
+    /// tree shows only sessions with a live agent and hides projects left
+    /// with nothing to show.
+    ToggleActiveOnly,
+    /// Turn the active-only view mode off unconditionally — the "Show all"
+    /// escape hatch in the hint row, so an empty sidebar is never a dead end.
+    ShowAllSessions,
     /// Re-run `git status` for the changes panel (manual refresh button,
     /// hook-event triggers).
     RefreshChanges,
