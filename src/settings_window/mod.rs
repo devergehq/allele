@@ -68,6 +68,117 @@ impl Section {
             Section::Sync => "Sync",
         }
     }
+
+    /// Extra terms this section answers to.
+    ///
+    /// Matching on the label alone made the search box near-useless: the
+    /// labels are single abstract nouns, so you had to already know which
+    /// section owned a setting in order to find it. These are the words people
+    /// actually reach for — the control's own vocabulary ("traefik", "font
+    /// size", "chrome") rather than the drawer it happens to live in.
+    fn keywords(self) -> &'static [&'static str] {
+        match self {
+            Section::Projects => &[
+                "project",
+                "repository",
+                "repo",
+                "orchestration",
+                "precedence",
+                "source",
+                "per-project",
+                "startup",
+                "config",
+            ],
+            Section::Infrastructure => &[
+                "infrastructure",
+                "traefik",
+                "proxy",
+                "reverse proxy",
+                "docker",
+                "network",
+                "tls",
+                "certificate",
+                "cert",
+                "https",
+                "dns",
+                "route",
+                "port",
+            ],
+            Section::Sessions => &[
+                "session",
+                "cleanup",
+                "path",
+                "git pull",
+                "pull",
+                "attention",
+                "promote",
+                "workspace",
+                "clone",
+            ],
+            Section::Agents => &[
+                "agent",
+                "claude",
+                "opencode",
+                "codex",
+                "registry",
+                "default agent",
+                "command",
+                "model",
+                "cli",
+            ],
+            Section::Naming => &[
+                "naming",
+                "name",
+                "branch",
+                "branch name",
+                "slug",
+                "title",
+                "auto-name",
+                "model",
+            ],
+            Section::Editor => &[
+                "editor",
+                "external editor",
+                "open in",
+                "vscode",
+                "zed",
+                "command",
+            ],
+            Section::Browser => &["browser", "chrome", "integration", "tab"],
+            Section::Appearance => &[
+                "appearance",
+                "theme",
+                "font",
+                "font size",
+                "text size",
+                "terminal",
+                "colour",
+                "color",
+                "dark",
+                "light",
+            ],
+            Section::Sync => &[
+                "sync",
+                "store",
+                "remote",
+                "connection",
+                "backup",
+                "restore",
+                "share",
+                "device",
+            ],
+        }
+    }
+
+    /// Whether this section should stay visible for `query` (already
+    /// lowercased and trimmed). An empty query matches everything.
+    fn matches(self, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        self.label().to_lowercase().contains(query)
+            || self.keywords().iter().any(|kw| kw.contains(query))
+    }
 }
 
 pub struct SettingsWindowState {
@@ -181,6 +292,10 @@ fn render_sidebar(
     let mut list = div()
         .flex()
         .flex_col()
+        // Without this the 180pt width is only a *preferred* width: a pane with
+        // high min-content width (Infrastructure's unwrapped filesystem paths)
+        // wins the negotiation and squashes the list and its search box.
+        .flex_shrink_0()
         .w(px(180.0))
         .h_full()
         .py(px(12.0))
@@ -197,13 +312,19 @@ fn render_sidebar(
                 .border_1()
                 .border_color(theme().border_default)
                 .bg(theme().bg_sunken)
+                // The input lays out at its own natural width; clip it to the
+                // list rather than letting it paint over the pane.
+                .min_w(px(0.0))
+                .overflow_hidden()
                 .child(this.settings_search_input.clone()),
         );
 
+    let mut any_match = false;
     for section in sections {
-        if !query.is_empty() && !section.label().to_lowercase().contains(&query) {
+        if !section.matches(&query) {
             continue;
         }
+        any_match = true;
         let is_selected = section == selected;
         let id: SharedString = format!("settings-section-{}", section.label()).into();
         let row = div()
@@ -234,10 +355,39 @@ fn render_sidebar(
         list = list.child(row);
     }
 
+    if !any_match {
+        list = list.child(
+            div()
+                .px(px(14.0))
+                .py(px(6.0))
+                .text_size(px(11.0))
+                .text_color(theme().text_faint)
+                .child("No matching settings"),
+        );
+    }
+
     list
 }
 
 fn render_pane(
+    this: &mut SettingsWindowState,
+    cx: &mut Context<SettingsWindowState>,
+) -> AnyElement {
+    // One clipping boundary for every section. `flex_shrink_0` on the list
+    // protects it from being squashed but relocates the pressure here, and
+    // several sections carry min-content vectors of their own (Projects' fixed
+    // detail column, Infrastructure's paths). Containing it once is what stops
+    // this class of bug recurring each time a section gains a long string.
+    div()
+        .flex_1()
+        .min_w(px(0.0))
+        .h_full()
+        .overflow_hidden()
+        .child(render_section_pane(this, cx))
+        .into_any_element()
+}
+
+fn render_section_pane(
     this: &mut SettingsWindowState,
     cx: &mut Context<SettingsWindowState>,
 ) -> AnyElement {
@@ -261,13 +411,18 @@ pub fn open_settings_window(
     cx: &mut App,
     app: WeakEntity<AppState>,
 ) -> anyhow::Result<WindowHandle<SettingsWindowState>> {
-    let window_size = size(px(640.0), px(440.0));
+    // Sized so the widest sections (Projects' two-column layout, Infrastructure's
+    // filesystem paths) are readable on open. At the old 640x440 every session
+    // started with a manual resize.
+    let window_size = size(px(940.0), px(660.0));
     let options = WindowOptions {
         titlebar: Some(TitlebarOptions {
             title: Some("Allele Settings".into()),
             ..Default::default()
         }),
-        window_min_size: Some(size(px(520.0), px(360.0))),
+        // Floor raised in step with the section list's fixed 180pt width, so a
+        // fully-shrunk window still leaves a usable pane beside it.
+        window_min_size: Some(size(px(680.0), px(420.0))),
         window_bounds: Some(WindowBounds::centered(window_size, cx)),
         ..Default::default()
     };

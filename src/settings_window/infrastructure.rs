@@ -89,6 +89,8 @@ impl InfraSection {
             div()
                 .flex()
                 .flex_col()
+                .w_full()
+                .min_w(px(0.0))
                 .gap(px(2.0))
                 .child(
                     div()
@@ -97,7 +99,16 @@ impl InfraSection {
                         .child(SharedString::from(label.to_string())),
                 )
                 .child(
+                    // A filesystem path has no break opportunities, so its
+                    // min-content width is the whole string. Left unclipped it
+                    // sets the pane's minimum width and squashes the section
+                    // list beside it.
                     div()
+                        .w_full()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
                         .text_size(px(11.0))
                         .text_color(theme().text_secondary)
                         .child(SharedString::from(value.to_string())),
@@ -108,6 +119,7 @@ impl InfraSection {
         let mut pane = div()
             .id("infrastructure-pane")
             .flex_1()
+            .min_w(px(0.0))
             .p(px(20.0))
             .flex()
             .flex_col()
