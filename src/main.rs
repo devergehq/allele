@@ -97,6 +97,19 @@ impl Render for DragPreview {
     }
 }
 
+/// What the session summary header's single action button does when clicked.
+///
+/// Kept as a value rather than a closure so the label and the behaviour are
+/// decided together in one `match` — the header previously rendered an
+/// accent-coloured string that looked like a button and did nothing.
+#[derive(Clone, Copy)]
+enum HeaderAction {
+    GoToTerminal,
+    GoToTranscript,
+    ReviewChanges,
+    Resume,
+}
+
 /// A minimal tooltip view for hover text on buttons.
 pub(crate) struct SimpleTooltip {
     pub(crate) text: SharedString,
@@ -155,11 +168,45 @@ impl AppState {
             .get(cursor.session_idx)
     }
 
-    fn render_session_summary_header(&self) -> Option<Div> {
+    /// The single header action, and what clicking it does.
+    ///
+    /// Every variant except `Resume` is pure navigation — it moves the user to
+    /// the place where they act, and nothing else. `Resume` is the one
+    /// side-effectful case (it spawns a PTY and runs the project's startup
+    /// command), so it is only ever offered behind the same resumability gate
+    /// the "Session ended" overlay uses.
+    fn header_action(
+        status: SessionStatus,
+        dirty: bool,
+        resumable: bool,
+    ) -> (&'static str, HeaderAction) {
+        match status {
+            SessionStatus::AwaitingInput => ("Answer in terminal", HeaderAction::GoToTerminal),
+            SessionStatus::ResponseReady => ("Review transcript", HeaderAction::GoToTranscript),
+            SessionStatus::Done | SessionStatus::Suspended if resumable => {
+                ("Resume session", HeaderAction::Resume)
+            }
+            // Not resumable: send the user to the tab that owns the
+            // Resume/Restart overlay rather than offering a dead action.
+            SessionStatus::Done | SessionStatus::Suspended => {
+                ("Open session", HeaderAction::GoToTerminal)
+            }
+            _ if dirty => ("Review changes", HeaderAction::ReviewChanges),
+            _ => ("Open terminal", HeaderAction::GoToTerminal),
+        }
+    }
+
+    fn render_session_summary_header(
+        &self,
+        resumable: bool,
+        cx: &mut Context<Self>,
+    ) -> Option<Div> {
         let cursor = self.active?;
         let project = self.projects.get(cursor.project_idx)?;
         let session = project.sessions.get(cursor.session_idx)?;
-        let branch = session.branch_name.as_deref().unwrap_or("branch pending");
+        // An unnamed branch is an absent value, not a status message — "branch
+        // pending" read as if it described work in progress.
+        let branch = session.branch_name.as_deref().unwrap_or("—");
         let agent = session
             .agent_id
             .as_deref()
@@ -179,17 +226,14 @@ impl AppState {
             SessionStatus::AwaitingInput => "Needs input",
             SessionStatus::ResponseReady => "Ready to review",
         };
-        let next_action = match session.status {
-            SessionStatus::AwaitingInput => "Answer in Terminal",
-            SessionStatus::ResponseReady => "Review transcript",
-            SessionStatus::Done | SessionStatus::Suspended => "Resume session",
-            _ if session.git_dirty == Some(true) => "Review changes",
-            _ => "Continue session",
-        };
-        let changed = if self.changes.repo_dir.as_ref() == session.clone_path.as_ref() {
-            self.changes.files.len()
-        } else {
-            0
+        let (action_label, action) =
+            Self::header_action(session.status, session.git_dirty == Some(true), resumable);
+        // Read the session's own observation, never `self.changes` — that is
+        // drawer-scoped state which survives the panel closing, so the header
+        // used to report 0 changed on a dirty tree until the panel was opened.
+        let changed = match session.git_dirty_count {
+            Some(n) => format!("{n} changed"),
+            None => "— changed".to_string(),
         };
 
         Some(
@@ -239,13 +283,49 @@ impl AppState {
                             div()
                                 .text_size(px(11.0))
                                 .text_color(theme().text_secondary)
-                                .child(format!("{state} · {changed} changed")),
+                                .child(format!("{state} · {changed}")),
                         )
                         .child(
                             div()
+                                .id("session-header-action")
+                                .cursor_pointer()
+                                .px(px(8.0))
+                                .py(px(2.0))
+                                .rounded(px(6.0))
+                                .bg(theme().bg_hover)
                                 .text_size(px(11.0))
                                 .text_color(theme().accent)
-                                .child(next_action),
+                                .hover(|s| s.bg(theme().bg_raised))
+                                .child(action_label)
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this: &mut Self, _event, _window, cx| {
+                                        match action {
+                                            HeaderAction::GoToTerminal => {
+                                                this.main_tab = MainTab::Claude;
+                                            }
+                                            HeaderAction::GoToTranscript => {
+                                                this.main_tab = MainTab::Transcript;
+                                            }
+                                            HeaderAction::ReviewChanges => {
+                                                this.right_panel.visible = true;
+                                                this.refresh_changes(cx);
+                                            }
+                                            HeaderAction::Resume => {
+                                                if let Some(active) = this.active {
+                                                    this.pending_action = Some(
+                                                        SessionAction::ResumeSession {
+                                                            project_idx: active.project_idx,
+                                                            session_idx: active.session_idx,
+                                                        }
+                                                        .into(),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        cx.notify();
+                                    }),
+                                ),
                         ),
                 ),
         )
@@ -3918,7 +3998,7 @@ impl Render for AppState {
                 content_col = content_col.child(attention_bar);
             }
 
-            if let Some(summary) = self.render_session_summary_header() {
+            if let Some(summary) = self.render_session_summary_header(active_is_resumable, cx) {
                 content_col = content_col.child(summary);
             }
 
