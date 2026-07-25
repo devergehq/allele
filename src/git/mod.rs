@@ -105,18 +105,29 @@ pub fn is_git_repo(path: &Path) -> bool {
     )
 }
 
-/// Return true if the working tree has uncommitted changes (staged,
-/// unstaged, or untracked files). Uses `git status --porcelain` — any
-/// non-empty output means dirty.
-pub fn is_working_tree_dirty(path: &Path) -> bool {
+/// Count the entries the changes panel would list for `path`.
+///
+/// Deliberately routed through `status_changes` — the panel's own parser —
+/// so that "N changed" in the session header and the panel's row count are
+/// the *same unit*. A raw `--porcelain` line count would disagree: `MM` is
+/// one line but two panel rows (staged + unstaged side), while `UU` is one
+/// line and one row. See `parse_porcelain_z`.
+///
+/// Returns `None` when `path` is not a git repo or git fails, so callers can
+/// tell "clean" apart from "not known yet".
+pub fn working_tree_change_count(path: &Path) -> Option<usize> {
     if !is_git_repo(path) {
-        return false;
+        return None;
     }
-    let mut cmd = git_cmd(Some(path));
-    cmd.arg("status").arg("--porcelain");
-    cmd.output()
-        .map(|o| o.status.success() && !o.stdout.is_empty())
-        .unwrap_or(false)
+    status_changes(path).ok().map(|files| files.len())
+}
+
+/// Return true if the working tree has uncommitted changes (staged,
+/// unstaged, or untracked files). Shares one code path with
+/// `working_tree_change_count` so the dirty dot and the header count can
+/// never disagree about what "dirty" means.
+pub fn is_working_tree_dirty(path: &Path) -> bool {
+    working_tree_change_count(path).is_some_and(|count| count > 0)
 }
 
 /// Return true if the repo has a remote with the given name (e.g. `"origin"`).
@@ -1949,6 +1960,38 @@ mod tests {
         let (_dir, path) = make_canonical("hello");
         fs::write(path.join("new.txt"), "untracked").unwrap();
         assert!(is_working_tree_dirty(&path));
+    }
+
+    #[test]
+    fn change_count_is_none_outside_a_repo() {
+        // `None` (not `Some(0)`) so the UI can say "unknown" rather than
+        // asserting a clean tree it never actually observed.
+        let dir = TempDir::new().unwrap();
+        assert_eq!(working_tree_change_count(dir.path()), None);
+    }
+
+    #[test]
+    fn change_count_is_zero_on_clean_repo() {
+        let (_dir, path) = make_canonical("hello");
+        assert_eq!(working_tree_change_count(&path), Some(0));
+    }
+
+    #[test]
+    fn change_count_matches_changes_panel_entry_count() {
+        // The contract that keeps the session header and the changes panel
+        // from disagreeing: same parser, same unit. A staged-and-then-modified
+        // file is one porcelain line but two panel rows.
+        let (_dir, path) = make_canonical("hello");
+        fs::write(path.join("file.txt"), "staged").unwrap();
+        let mut add = git_cmd(Some(&path));
+        add.arg("add").arg("file.txt");
+        add.output().unwrap();
+        fs::write(path.join("file.txt"), "staged then modified again").unwrap();
+        fs::write(path.join("new.txt"), "untracked").unwrap();
+
+        let panel_rows = status_changes(&path).unwrap().len();
+        assert_eq!(working_tree_change_count(&path), Some(panel_rows));
+        assert_eq!(panel_rows, 3, "MM yields two rows, plus one untracked");
     }
 
     #[test]

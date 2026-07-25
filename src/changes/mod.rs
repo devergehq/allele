@@ -19,6 +19,33 @@ use crate::git::{ChangeKind, ChangedFile};
 const DIFF_LINE_CAP: usize = 2000;
 
 impl AppState {
+    /// Record an observed working-tree change count against whichever session
+    /// owns `repo`.
+    ///
+    /// Both writers of session dirtiness funnel through here — the 15s
+    /// background poller and the changes panel's own refresh — so the sidebar
+    /// dot, the session header, and the panel can never disagree. Matching on
+    /// `clone_path` rather than a session index keeps the write correct when
+    /// the session list is reordered or a session is removed while a `git
+    /// status` is in flight.
+    ///
+    /// `count: None` means "no longer known" (not a repo, or git failed) and
+    /// clears the dirty flag back to unobserved rather than asserting clean.
+    pub(crate) fn record_workspace_change_count(
+        &mut self,
+        repo: &std::path::Path,
+        count: Option<usize>,
+    ) {
+        for project in &mut self.projects {
+            for session in &mut project.sessions {
+                if session.clone_path.as_deref() == Some(repo) {
+                    session.git_dirty_count = count;
+                    session.git_dirty = count.map(|n| n > 0);
+                }
+            }
+        }
+    }
+
     /// Render-time staleness check: when the panel is visible but its data
     /// was loaded for a different directory than the active session's clone
     /// (session switch, first open), kick off a refresh. The guard is the
@@ -70,6 +97,10 @@ impl AppState {
 
         self.changes.loading = true;
         cx.notify();
+        // Kept alongside the moved `dir` so the completion handler can write
+        // the observed count back onto the owning session (see
+        // `record_workspace_change_count`).
+        let repo_dir = dir.clone();
         cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
@@ -105,6 +136,11 @@ impl AppState {
                             }
                         }
                         this.changes.files = files;
+                        // Opening or refreshing the panel is a fresh, exact
+                        // observation — fold it back into the session so the
+                        // header doesn't wait up to 15s for the next poll.
+                        let observed = this.changes.files.len();
+                        this.record_workspace_change_count(&repo_dir, Some(observed));
                         // DEV-40: keep the file index consistent. A changed
                         // file absent from the cached index means the file set
                         // moved (add/rename) — rebuild so Cmd+P and search stay
@@ -131,6 +167,9 @@ impl AppState {
                         tracing::warn!("changes panel: git status failed: {e}");
                         this.changes.files.clear();
                         this.changes.error = Some(format!("Could not load changes: {e}"));
+                        // A failed status is not an observation of "clean" —
+                        // drop back to unknown rather than claiming zero.
+                        this.record_workspace_change_count(&repo_dir, None);
                     }
                 }
                 cx.notify();

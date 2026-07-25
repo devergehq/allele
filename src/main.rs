@@ -2916,12 +2916,16 @@ fn main() {
                                 .timer(std::time::Duration::from_secs(15))
                                 .await;
 
+                            // Collect clone paths, not (p_idx, s_idx). The
+                            // status runs across an await during which the
+                            // user can reorder or remove sessions, which would
+                            // land a result on the wrong session's row.
                             let Ok(targets) = this.update(cx, |this: &mut AppState, _cx| {
                                 let mut t = Vec::new();
-                                for (p_idx, project) in this.projects.iter().enumerate() {
-                                    for (s_idx, session) in project.sessions.iter().enumerate() {
+                                for project in this.projects.iter() {
+                                    for session in project.sessions.iter() {
                                         if let Some(cp) = &session.clone_path {
-                                            t.push((p_idx, s_idx, cp.clone()));
+                                            t.push(cp.clone());
                                         }
                                     }
                                 }
@@ -2938,7 +2942,10 @@ fn main() {
                                 .spawn(async move {
                                     targets
                                         .into_iter()
-                                        .map(|(p, s, cp)| (p, s, git::is_working_tree_dirty(&cp)))
+                                        .map(|cp| {
+                                            let count = git::working_tree_change_count(&cp);
+                                            (cp, count)
+                                        })
                                         .collect::<Vec<_>>()
                                 })
                                 .await;
@@ -2946,16 +2953,16 @@ fn main() {
                             if this
                                 .update(cx, |this: &mut AppState, cx| {
                                     let mut changed = false;
-                                    for (p_idx, s_idx, dirty) in results {
-                                        if let Some(session) = this
+                                    for (repo, count) in results {
+                                        let current = this
                                             .projects
-                                            .get_mut(p_idx)
-                                            .and_then(|p| p.sessions.get_mut(s_idx))
-                                        {
-                                            if session.git_dirty != Some(dirty) {
-                                                session.git_dirty = Some(dirty);
-                                                changed = true;
-                                            }
+                                            .iter()
+                                            .flat_map(|p| p.sessions.iter())
+                                            .find(|s| s.clone_path.as_deref() == Some(&*repo))
+                                            .map(|s| s.git_dirty_count);
+                                        if current != Some(count) {
+                                            this.record_workspace_change_count(&repo, count);
+                                            changed = true;
                                         }
                                     }
                                     if changed {
