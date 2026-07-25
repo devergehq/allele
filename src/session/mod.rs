@@ -186,6 +186,13 @@ pub struct Session {
     /// Whether the workspace has uncommitted changes. `None` until the
     /// first background poll completes. Display-only; never persisted.
     pub git_dirty: Option<bool>,
+    /// How many entries the changes panel would list for this workspace.
+    /// `None` until first observed — rendered as "—", never as "0 changed",
+    /// so the header can't assert a clean tree it hasn't actually seen.
+    /// Written by the background git poller *and* by `refresh_changes`, both
+    /// via `git::working_tree_change_count`'s unit, so the header, the sidebar
+    /// dirty dot, and the panel always agree. Display-only; never persisted.
+    pub git_dirty_count: Option<usize>,
     /// The current git branch name for this session (e.g. "fix-auth-5dc47535").
     /// Persisted to state.json for orphan cleanup identification.
     pub branch_name: Option<String>,
@@ -259,6 +266,7 @@ impl Session {
             comment: None,
             merge_strategy_override: None,
             git_dirty: None,
+            git_dirty_count: None,
             branch_name: None,
             branch_locked: false,
             naming_suggestions: None,
@@ -312,6 +320,7 @@ impl Session {
             comment: None,
             merge_strategy_override: None,
             git_dirty: None,
+            git_dirty_count: None,
             branch_name: None,
             branch_locked: false,
             naming_suggestions: None,
