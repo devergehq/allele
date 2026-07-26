@@ -38,9 +38,127 @@ pub enum StreamLine {
     #[serde(rename = "rate_limit_event")]
     RateLimit(RateLimitEvent),
 
+    /// Session bookkeeping Claude Code interleaves with the conversation in the
+    /// on-disk JSONL: titles, modes, agent names, file-history backups, bridge
+    /// and fork pointers. None of it belongs in a reading view — it is recorded
+    /// by the ledger and rendered nowhere (DEV-321). Together these account for
+    /// roughly a fifth of every session file.
+    #[serde(
+        rename = "last-prompt",
+        alias = "custom-title",
+        alias = "ai-title",
+        alias = "agent-name",
+        alias = "permission-mode",
+        alias = "mode",
+        alias = "file-history-snapshot",
+        alias = "file-history-delta",
+        alias = "bridge-session",
+        alias = "fork-context-ref",
+        alias = "summary"
+    )]
+    SessionMetadata,
+
+    /// A pull request was opened during the session.
+    #[serde(rename = "pr-link")]
+    PrLink(PrLinkEvent),
+
+    /// An artifact was published to claude.ai.
+    #[serde(rename = "frame-link")]
+    FrameLink(FrameLinkEvent),
+
+    /// A message or task notification was queued.
+    #[serde(rename = "queue-operation")]
+    QueueOperation(QueueOperationEvent),
+
+    /// Out-of-band content attached to the conversation. Multiplexes ~20
+    /// subtypes under `attachment.type`, most of them context plumbing.
+    #[serde(rename = "attachment")]
+    Attachment(AttachmentEvent),
+
     /// Catch-all for unknown/future event types.
     #[serde(other)]
     Unknown,
+}
+
+// ── JSONL session records (DEV-321) ───────────────────────────────
+//
+// Claude Code's on-disk session JSONL is a superset of stream-json. These
+// records appear only there, and unlike the stream-json types above they use
+// camelCase keys — hence `rename_all` on each struct.
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+#[serde(rename_all = "camelCase")]
+pub struct PrLinkEvent {
+    pub pr_number: Option<u64>,
+    pub pr_url: Option<String>,
+    pub pr_repository: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameLinkEvent {
+    pub title: Option<String>,
+    pub frame_url: Option<String>,
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueOperationEvent {
+    pub operation: Option<String>,
+    pub content: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+pub struct AttachmentEvent {
+    /// Absent or unrecognised subtypes deserialise to `Attachment::Other`.
+    pub attachment: Option<Attachment>,
+}
+
+/// The subtypes of `attachment` we render. Everything else — task reminders,
+/// skill listings, hook success, MCP/agent/tool listing deltas, date changes —
+/// is context plumbing and lands in `Other`.
+#[derive(Debug, Deserialize)]
+#[allow(dead_code)]
+#[serde(tag = "type")]
+pub enum Attachment {
+    /// The user edited a file outside Claude and it was re-read.
+    #[serde(rename = "edited_text_file", rename_all = "camelCase")]
+    EditedTextFile { filename: Option<String> },
+
+    /// The user attached a file or image to the conversation.
+    #[serde(rename = "file", rename_all = "camelCase")]
+    File {
+        filename: Option<String>,
+        display_path: Option<String>,
+    },
+
+    /// A plan was accepted and plan mode exited.
+    #[serde(rename = "plan_mode_exit", rename_all = "camelCase")]
+    PlanModeExit { plan_file_path: Option<String> },
+
+    /// A hook returned an error. `blocking_error` is an object in the samples
+    /// we have but is modelled as a free value so a bare string also parses.
+    #[serde(rename = "hook_blocking_error", rename_all = "camelCase")]
+    HookBlockingError {
+        hook_name: Option<String>,
+        blocking_error: Option<serde_json::Value>,
+    },
+
+    #[serde(rename = "hook_non_blocking_error", rename_all = "camelCase")]
+    HookNonBlockingError {
+        hook_name: Option<String>,
+        #[serde(alias = "nonBlockingError")]
+        blocking_error: Option<serde_json::Value>,
+    },
+
+    /// Every other subtype — recorded by the ledger, rendered nowhere.
+    #[serde(other)]
+    Other,
 }
 
 // ── System events ─────────────────────────────────────────────────
@@ -316,6 +434,17 @@ pub enum RichEvent {
         hook_name: String,
     },
 
+    /// A compact one-line annotation for a session event that carries real
+    /// narrative signal but isn't conversation — a PR opened, an artifact
+    /// published, a file edited outside Claude (DEV-321).
+    Notice {
+        kind: NoticeKind,
+        text: String,
+        /// URL or file path the notice points at, when there is one.
+        link: Option<String>,
+        parent_agent_id: Option<String>,
+    },
+
     /// An event or content block that could not be normalised. Carries the
     /// exact raw payload plus a human-readable reason so unsupported states
     /// remain inspectable and are never silently dropped. This is the
@@ -327,4 +456,44 @@ pub enum RichEvent {
         reason: String,
         parent_agent_id: Option<String>,
     },
+}
+
+/// What a [`RichEvent::Notice`] is about. Drives the glyph and colour the
+/// renderer picks; the accompanying text carries the detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoticeKind {
+    /// A pull request was opened.
+    PullRequest,
+    /// An artifact was published.
+    Artifact,
+    /// The user edited a file outside Claude.
+    FileEdited,
+    /// The user attached a file or image.
+    FileAttached,
+    /// A plan was accepted and plan mode exited.
+    PlanAccepted,
+    /// A message or task notification was queued.
+    Queued,
+    /// A hook reported an error.
+    HookError,
+}
+
+impl NoticeKind {
+    /// Leading glyph for this notice in the transcript.
+    pub fn glyph(self) -> &'static str {
+        match self {
+            NoticeKind::PullRequest => "⑂",
+            NoticeKind::Artifact => "◈",
+            NoticeKind::FileEdited => "✎",
+            NoticeKind::FileAttached => "⎘",
+            NoticeKind::PlanAccepted => "✓",
+            NoticeKind::Queued => "⋯",
+            NoticeKind::HookError => "⚠",
+        }
+    }
+
+    /// True when this notice reports a failure and should be coloured as one.
+    pub fn is_error(self) -> bool {
+        matches!(self, NoticeKind::HookError)
+    }
 }

@@ -153,6 +153,9 @@ impl NarrativeProjector {
             | RichEvent::ToolResult { .. }
             | RichEvent::EditDiff { .. } => NarrativeRole::Activity,
             RichEvent::SessionResult { .. } => NarrativeRole::Outcome,
+            // A notice punctuates the narrative rather than advancing it —
+            // Activity keeps it out of the prose/decision classification.
+            RichEvent::Notice { .. } => NarrativeRole::Activity,
             RichEvent::Fallback { .. } => NarrativeRole::Unsupported,
             RichEvent::Init { .. } | RichEvent::HookStatus { .. } => NarrativeRole::Prose,
         };
@@ -203,6 +206,9 @@ fn event_agent(event: &RichEvent) -> Option<String> {
             parent_agent_id, ..
         }
         | RichEvent::EditDiff {
+            parent_agent_id, ..
+        }
+        | RichEvent::Notice {
             parent_agent_id, ..
         }
         | RichEvent::Fallback {
