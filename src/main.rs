@@ -332,8 +332,26 @@ impl AppState {
         )
     }
 
+    /// Note the project the active session belongs to, so the overview pane
+    /// still knows its subject after the cursor is cleared (DEV-310). A no-op
+    /// while nothing is selected — that's what makes the id survive a suspend.
+    fn track_overview_project(&mut self) {
+        let Some(project) = self
+            .active
+            .and_then(|cursor| self.projects.get(cursor.project_idx))
+        else {
+            return;
+        };
+        if self.overview_project_id.as_deref() != Some(project.id.as_str()) {
+            self.overview_project_id = Some(project.id.clone());
+        }
+    }
+
     fn render_project_overview(&self, cx: &mut Context<Self>) -> Div {
-        let Some(project) = self.projects.first() else {
+        let project =
+            project::resolve_overview_project(&self.projects, self.overview_project_id.as_deref())
+                .and_then(|idx| self.projects.get(idx));
+        let Some(project) = project else {
             return div()
                 .size_full()
                 .flex()
@@ -3511,6 +3529,7 @@ fn main() {
                     AppState {
                         projects,
                         active: initial_active,
+                        overview_project_id: None,
                         pending_action: initial_pending,
                         sidebar: SidebarState {
                             visible: settings_for_window.sidebar_visible,
@@ -3611,6 +3630,9 @@ impl Render for AppState {
 
         // Keep Reader state scoped to the active session (DEV-66).
         self.sync_reader_session();
+
+        // Remember which project the overview should describe (DEV-310).
+        self.track_overview_project();
 
         if self.capture_ui_requested {
             self.capture_ui_requested = false;

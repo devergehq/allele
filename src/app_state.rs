@@ -211,6 +211,16 @@ pub(crate) struct RichState {
 pub(crate) struct AppState {
     pub(crate) projects: Vec<Project>,
     pub(crate) active: Option<SessionCursor>,
+    /// Id of the project the no-session overview pane describes (DEV-310).
+    ///
+    /// The overview only renders once `active` is `None`, so it can't derive
+    /// its subject from the cursor — it has to be remembered from before the
+    /// cursor was cleared. Refreshed every frame a session is selected, the
+    /// same way `ReaderState::active_root` tracks the active workspace root.
+    ///
+    /// Held as an id rather than an index so removing or reordering projects
+    /// can't leave it pointing at a different one.
+    pub(crate) overview_project_id: Option<String>,
     pub(crate) pending_action: Option<PendingAction>,
     pub(crate) sidebar: SidebarState,
     pub(crate) right_panel: RightPanelState,
