@@ -706,12 +706,7 @@ pub fn checkout_or_create_session_branch(
                             0
                         };
                         reset_branch_to_remote(clone, remote, name).map_err(|e| {
-                            AlleleError::Git(format!(
-                                "Can't put this session on '{name}': {e}. This usually means \
-                                 the project's source repo has uncommitted changes that would \
-                                 be overwritten. Commit, stash, or discard them in the source \
-                                 repo, then try again."
-                            ))
+                            AlleleError::Git(explain_checkout_failure(name, &e.to_string()))
                         })?;
                         if ahead > 0 {
                             let plural = if ahead == 1 { "commit" } else { "commits" };
@@ -747,12 +742,7 @@ pub fn checkout_or_create_session_branch(
             //    branch by this name (or the project has no remote at all).
             if local_branch_exists(clone, name) {
                 checkout_branch(clone, name).map_err(|e| {
-                    AlleleError::Git(format!(
-                        "Can't put this session on '{name}': {e}. This usually means the \
-                         project's source repo has uncommitted changes that would be \
-                         overwritten. Commit, stash, or discard them in the source repo, \
-                         then try again."
-                    ))
+                    AlleleError::Git(explain_checkout_failure(name, &e.to_string()))
                 })?;
                 return Ok(SessionBranchResolution {
                     outcome: SessionBranchOutcome::CheckedOutLocal,
@@ -774,6 +764,60 @@ pub fn checkout_or_create_session_branch(
         outcome: SessionBranchOutcome::CreatedNew,
         warning,
     })
+}
+
+/// Turn a failed session checkout into a message that prescribes the *right*
+/// remedy.
+///
+/// Git blocks a checkout for two distinct reasons and prescribes opposite fixes:
+///
+/// - **Modified tracked files** — "Your local changes to the following files
+///   would be overwritten" → commit, stash, or discard.
+/// - **Untracked files the target branch tracks** — "The following untracked
+///   working tree files would be overwritten" → move or remove them. Committing
+///   or stashing does nothing here, because the files are not tracked. This is
+///   the case `--no-overwrite-ignore` deliberately surfaces: an ignored file such
+///   as `.env`, inherited from the source repo, that the target branch tracks.
+///
+/// Both can fire at once. Asserting one when the other is true sends the user
+/// down a fix that cannot work, so the reason is read off git's own output
+/// rather than guessed.
+///
+/// Git's message already names the offending files, so it is quoted verbatim;
+/// what it cannot know is that the fix belongs in the **source repo** — the
+/// workspace is torn down when session creation is refused.
+fn explain_checkout_failure(name: &str, err: &str) -> String {
+    // Drop `run_git`'s internal framing ("git <context> failed: ") — the
+    // subcommand and its flags mean nothing to someone reading a banner.
+    let detail = err
+        .strip_prefix("git ")
+        .and_then(|rest| rest.split_once(" failed: "))
+        .map(|(_, msg)| msg)
+        .unwrap_or(err)
+        .trim();
+
+    let modified = detail.contains("local changes to the following files would be overwritten");
+    let untracked = detail.contains("untracked working tree files would be overwritten");
+
+    let remedy = match (modified, untracked) {
+        (true, true) => {
+            "Some files are modified and others are untracked. In the project's source repo, \
+             commit or discard the modified ones and move or remove the untracked ones, then \
+             try again."
+        }
+        (true, false) => {
+            "Commit, stash, or discard those changes in the project's source repo, then try \
+             again."
+        }
+        (false, true) => {
+            "Those files are untracked in your source repo — often ones git ignores, such as \
+             a local .env — but this branch tracks them. Move or remove them in the project's \
+             source repo, then try again."
+        }
+        (false, false) => "Resolve this in the project's source repo, then try again.",
+    };
+
+    format!("Can't put this session on '{name}'. {detail}\n\n{remedy}")
 }
 
 /// Hard-move the clone's local `name` onto the already-fetched
@@ -2554,6 +2598,83 @@ mod tests {
             main_head_before,
             "the source repo must be untouched"
         );
+    }
+
+    // Verbatim stderr from git 2.49.0 for the two checkout collision kinds.
+    const GIT_MODIFIED_ERR: &str = "error: Your local changes to the following files would be \
+         overwritten by checkout:\n\t.gitignore\nPlease commit your changes or stash them before \
+         you switch branches.\nAborting";
+    const GIT_UNTRACKED_ERR: &str = "error: The following untracked working tree files would be \
+         overwritten by checkout:\n\tsecrets.env\nPlease move or remove them before you switch \
+         branches.\nAborting";
+
+    #[test]
+    fn checkout_failure_prescribes_moving_untracked_files() {
+        // The `--no-overwrite-ignore` case: an inherited ignored file such as
+        // .env that the target branch tracks. Telling the user to commit or
+        // stash here is useless — the file is not tracked.
+        let msg = explain_checkout_failure("feature/x", GIT_UNTRACKED_ERR);
+        assert!(msg.contains("Move or remove them"), "{msg}");
+        assert!(
+            !msg.contains("Commit, stash, or discard those changes"),
+            "must not prescribe the tracked-file remedy: {msg}"
+        );
+        assert!(msg.contains("secrets.env"), "must name the file: {msg}");
+        assert!(
+            msg.contains("source repo"),
+            "the fix belongs upstream: {msg}"
+        );
+    }
+
+    #[test]
+    fn checkout_failure_prescribes_committing_modified_files() {
+        let msg = explain_checkout_failure("feature/x", GIT_MODIFIED_ERR);
+        assert!(msg.contains("Commit, stash, or discard"), "{msg}");
+        assert!(
+            !msg.contains("Move or remove them"),
+            "must not prescribe the untracked-file remedy: {msg}"
+        );
+        assert!(msg.contains(".gitignore"), "must name the file: {msg}");
+    }
+
+    #[test]
+    fn checkout_failure_covers_both_collision_kinds_at_once() {
+        // Git emits both blocks when both conditions hold.
+        let both = format!("{GIT_MODIFIED_ERR}\n{GIT_UNTRACKED_ERR}");
+        let msg = explain_checkout_failure("feature/x", &both);
+        assert!(msg.contains("modified and others are untracked"), "{msg}");
+        assert!(
+            msg.contains(".gitignore") && msg.contains("secrets.env"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn checkout_failure_strips_internal_command_framing() {
+        // The banner is user-facing: `run_git`'s subcommand framing is noise.
+        let wrapped =
+            format!("git checkout -B (reset to remote branch) failed: {GIT_UNTRACKED_ERR}");
+        let msg = explain_checkout_failure("feature/x", &wrapped);
+        assert!(
+            !msg.contains("checkout -B"),
+            "internal framing leaked: {msg}"
+        );
+        assert!(!msg.contains("failed:"), "internal framing leaked: {msg}");
+        // The part that actually helps is still there.
+        assert!(msg.contains("secrets.env"), "{msg}");
+        assert!(msg.contains("Move or remove them"), "{msg}");
+    }
+
+    #[test]
+    fn checkout_failure_falls_back_without_asserting_a_cause() {
+        // An unrecognised failure must not invent a remedy.
+        let msg = explain_checkout_failure("feature/x", "error: something else entirely");
+        assert!(
+            msg.contains("Resolve this in the project's source repo"),
+            "{msg}"
+        );
+        assert!(!msg.contains("Commit, stash"), "{msg}");
+        assert!(!msg.contains("Move or remove"), "{msg}");
     }
 
     #[test]
