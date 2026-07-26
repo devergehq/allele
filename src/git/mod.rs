@@ -473,89 +473,133 @@ pub fn checkout_branch(clone: &Path, name: &str) -> crate::errors::Result<()> {
     Ok(())
 }
 
-/// Try to fetch `name` from `remote` and check it out as a local branch that
-/// tracks it. Returns `Ok(true)` on success, `Ok(false)` if the branch does
-/// not exist on the remote, and `Err` only on an unexpected git failure
-/// after a successful fetch.
+/// Strip a leading `<remote>/` from a user-typed branch name.
 ///
-/// Uses [`user_git_cmd`] for the fetch so the user's credential helpers
-/// (osxkeychain, SSH agent) are available, matching [`pull`] and
-/// [`fetch_and_rebase_onto_remote_branch`].
-pub fn fetch_and_checkout_remote_branch(
-    clone: &Path,
-    remote: &str,
-    name: &str,
-) -> crate::errors::Result<bool> {
-    if !is_git_repo(clone) {
-        return Err(AlleleError::Git(format!(
-            "fetch_and_checkout_remote_branch: not a git repo: {}",
-            clone.display()
-        )));
-    }
-
-    // Fetch the single branch into its remote-tracking ref. A non-zero exit
-    // here almost always means "no such branch on the remote" — treat that
-    // as "not found" rather than a hard error so the caller can fall back to
-    // creating a fresh branch.
-    let mut cmd = user_git_cmd(clone);
-    cmd.arg("fetch")
-        .arg(remote)
-        .arg(format!("{name}:refs/remotes/{remote}/{name}"));
-    if run_git(cmd, &format!("fetch {remote} {name}")).is_err() {
-        return Ok(false);
-    }
-
-    // Create a local branch tracking the fetched ref and switch to it.
-    let mut cmd = git_cmd(Some(clone));
-    cmd.arg("checkout")
-        .arg("-b")
-        .arg(name)
-        .arg(format!("{remote}/{name}"));
-    run_git(cmd, "checkout -b (remote tracking branch)")
-        .map_err(|e| AlleleError::Git(e.to_string()))?;
-    Ok(true)
+/// Typing `origin/feature/x` and `feature/x` must select the same branch —
+/// the remote qualifier is cosmetic. Only the project's *configured* remote is
+/// stripped: Allele deliberately resolves against exactly one remote, so a
+/// name qualified with some other remote is treated as a literal branch name
+/// rather than silently retargeted.
+///
+/// The prefix is only removed when something remains after it, so a branch
+/// literally named `origin` survives intact.
+pub fn strip_remote_prefix<'a>(name: &'a str, remote: &str) -> &'a str {
+    name.strip_prefix(remote)
+        .and_then(|rest| rest.strip_prefix('/'))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(name)
 }
 
-/// Fetch `<remote>/<name>` and hard-set the clone's local `<name>` branch to
-/// it, so a materialized workspace reflects exactly what the other machine
-/// pushed — not a stale local copy of the same branch name that happens to
-/// exist in this clone's source. Returns `false` if the branch isn't on the
-/// remote (the caller falls back to creating a fresh branch).
+/// Whether a branch exists on `remote`, determined authoritatively.
 ///
-/// Safe against the user's real branches: this operates on the session clone's
-/// own copy of the ref, never the source repo.
-pub fn fetch_and_reset_to_remote_branch(
-    clone: &Path,
-    remote: &str,
-    name: &str,
-) -> crate::errors::Result<bool> {
-    if !is_git_repo(clone) {
-        return Err(AlleleError::Git(format!(
-            "fetch_and_reset_to_remote_branch: not a git repo: {}",
-            clone.display()
-        )));
+/// Returns `Some(true)` / `Some(false)` when the remote answered, and `None`
+/// when the query itself failed (network, auth, no such remote) — a state that
+/// must never be conflated with "the branch isn't there".
+///
+/// Uses `ls-remote --exit-code`'s documented exit codes (`0` found, `2` no
+/// matching refs) rather than parsing stderr, which is localised and varies
+/// between git versions. The ref is matched as the full `refs/heads/<name>` so
+/// `feat` cannot match `refs/heads/xfeat`.
+fn remote_branch_exists(repo: &Path, remote: &str, name: &str) -> Option<bool> {
+    let mut cmd = user_git_cmd(repo);
+    cmd.arg("ls-remote")
+        .arg("--exit-code")
+        .arg("--heads")
+        .arg(remote)
+        .arg(format!("refs/heads/{name}"));
+    match cmd.output().ok()?.status.code() {
+        Some(0) => Some(true),
+        Some(2) => Some(false),
+        _ => None,
     }
+}
 
-    // Fetch the single branch; a non-zero exit means it isn't on the remote.
+/// Outcome of fetching a single branch from a remote.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RemoteBranchFetch {
+    /// `refs/remotes/<remote>/<name>` is now current.
+    Fetched,
+    /// The remote answered and has no such branch.
+    NotOnRemote,
+    /// The fetch failed for some other reason (network, auth, no remote). The
+    /// branch may well exist — callers must not treat this as absence.
+    Failed(String),
+}
+
+/// Fetch a single branch into its remote-tracking ref, distinguishing "not on
+/// the remote" from "the fetch broke".
+///
+/// The refspec is **forced** (`+`) and **fully qualified** on both sides, and
+/// both halves are load-bearing:
+///
+/// - Without `+`, git rejects the remote-tracking update as non-fast-forward
+///   whenever the branch was rebased or force-pushed, leaving the stale ref in
+///   place — which would defeat this entire module's purpose on exactly the
+///   long-lived PR-stacked branches it exists to keep current.
+/// - Without the `refs/heads/` source qualifier, a bare `<name>` can resolve to
+///   a *tag* of the same name, silently basing the session on a tag.
+///
+/// The happy path costs one round trip; the extra `ls-remote` disambiguation
+/// is only paid on failure.
+fn fetch_remote_branch(clone: &Path, remote: &str, name: &str) -> RemoteBranchFetch {
     let mut cmd = user_git_cmd(clone);
     cmd.arg("fetch")
         .arg(remote)
-        .arg(format!("{name}:refs/remotes/{remote}/{name}"));
-    if run_git(cmd, &format!("fetch {remote} {name}")).is_err() {
-        return Ok(false);
+        .arg(format!("+refs/heads/{name}:refs/remotes/{remote}/{name}"));
+    match run_git(cmd, &format!("fetch {remote} {name}")) {
+        Ok(_) => RemoteBranchFetch::Fetched,
+        Err(e) => match remote_branch_exists(clone, remote, name) {
+            Some(false) => RemoteBranchFetch::NotOnRemote,
+            _ => RemoteBranchFetch::Failed(e.to_string()),
+        },
     }
+}
 
-    // `-B` creates-or-resets the local branch to the fetched remote tip and
-    // checks it out, with tracking set to `<remote>/<name>` (so sync-back has
-    // an upstream).
+/// True when the repo's git directory lives inside the repo itself.
+///
+/// An APFS clone copies the working tree verbatim — including a `.git` that is
+/// a *file* rather than a directory, as used by `git worktree` linked worktrees,
+/// submodules, and `--separate-git-dir`. Such a file holds an absolute
+/// `gitdir:` pointer, so git commands run in the copy operate on the **original**
+/// repository's refs. A `checkout -B` there would hard-reset the user's real
+/// branch in their canonical repo, which the "the clone is disposable" safety
+/// argument otherwise relies on being impossible.
+///
+/// `--git-common-dir` is the shared directory for linked worktrees, so it
+/// catches the pointer case that `--git-dir` alone would not. Fails closed:
+/// anything unresolvable is treated as unsafe.
+fn has_self_contained_git_dir(repo: &Path) -> bool {
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("rev-parse").arg("--git-common-dir");
+    let Ok(raw) = run_git_stdout(cmd, "rev-parse --git-common-dir") else {
+        return false;
+    };
+    let dir = Path::new(raw.trim()).to_path_buf();
+    let dir = if dir.is_absolute() {
+        dir
+    } else {
+        repo.join(dir)
+    };
+    match (dir.canonicalize(), repo.canonicalize()) {
+        (Ok(d), Ok(r)) => d.starts_with(&r),
+        _ => false,
+    }
+}
+
+/// Number of commits on local `name` that are absent from `<remote>/<name>`.
+///
+/// Used to report how much local-only history a reset is about to move off the
+/// branch tip. Returns 0 when the count can't be determined — this only feeds a
+/// warning message, never a control-flow decision.
+fn commits_ahead_of_remote(clone: &Path, remote: &str, name: &str) -> usize {
     let mut cmd = git_cmd(Some(clone));
-    cmd.arg("checkout")
-        .arg("-B")
-        .arg(name)
-        .arg(format!("{remote}/{name}"));
-    run_git(cmd, "checkout -B (reset to remote branch)")
-        .map_err(|e| AlleleError::Git(e.to_string()))?;
-    Ok(true)
+    cmd.arg("rev-list")
+        .arg("--count")
+        .arg(format!("{remote}/{name}..{name}"));
+    run_git_stdout(cmd, "rev-list --count (ahead of remote)")
+        .ok()
+        .and_then(|s| s.trim().parse().ok())
+        .unwrap_or(0)
 }
 
 /// How [`checkout_or_create_session_branch`] resolved the branch for a new
@@ -564,45 +608,156 @@ pub fn fetch_and_reset_to_remote_branch(
 pub enum SessionBranchOutcome {
     /// A fresh session branch was created (and renamed to the custom name).
     CreatedNew,
-    /// An existing branch (local, or fetched from `origin`) was checked out.
-    CheckedOutExisting,
+    /// A local-only branch was checked out as-is, because the remote does not
+    /// have a branch by that name.
+    CheckedOutLocal,
+    /// The branch was fetched and the clone's local copy hard-reset to the
+    /// remote tip — the normal path for a branch that exists upstream.
+    ResetToRemote,
+}
+
+/// Result of resolving a new session's branch, including anything the user
+/// needs to be told about.
+///
+/// Reaching this type at all means the session is on the base the user asked
+/// for. Anything that would leave it on a *different* base is an `Err` from
+/// [`checkout_or_create_session_branch`] and must abort session creation —
+/// see that function's contract.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionBranchResolution {
+    pub outcome: SessionBranchOutcome,
+    /// Informational only: the branch is correct, but something about how it
+    /// got there is worth reporting (e.g. local-only commits moved off the tip).
+    pub warning: Option<String>,
 }
 
 /// Resolve the branch a new session should sit on.
 ///
-/// If `custom_branch` names a branch that already exists — first locally,
-/// then on `origin` — that branch is checked out and the session works
-/// directly on it (the PR-review workflow). Otherwise a fresh session branch
-/// is created at HEAD and renamed to the sanitised custom name (the original
-/// behaviour).
+/// When `custom_branch` names a branch, the **remote is authoritative**:
 ///
-/// Network access (the remote fetch) means callers should run this off the
-/// UI thread.
+/// 1. Any `<remote>/` qualifier the user typed is stripped — `origin/foo` and
+///    `foo` are the same request.
+/// 2. The branch is fetched from `remote` and the clone's local copy is
+///    hard-reset onto the fetched tip ([`SessionBranchOutcome::ResetToRemote`]).
+/// 3. If the remote genuinely has no such branch, an existing local-only branch
+///    is checked out instead ([`SessionBranchOutcome::CheckedOutLocal`]).
+/// 4. Otherwise a fresh session branch is created at HEAD and renamed to the
+///    sanitised custom name ([`SessionBranchOutcome::CreatedNew`]).
+///
+/// Resolving remote-first is the point. A session clone is an APFS copy of the
+/// canonical repo, so *every* branch the user has ever checked out canonically
+/// already exists locally at whatever commit canonical last saw. Checking the
+/// local ref first therefore always won, and silently started sessions on a
+/// stale base — worst on long-lived rebased or PR-stacked branches, where the
+/// local copy has diverged from the remote tip.
+///
+/// The reset is safe **only** because `clone` is a disposable session
+/// workspace: the user's canonical repo is never touched, and the pre-reset tip
+/// remains in the clone's reflog. Never call this against a canonical repo.
+///
+/// Deliberately does *not* force the checkout: a clone inherits canonical's
+/// uncommitted changes, and git carries those across a checkout when they don't
+/// conflict and refuses when they would be overwritten. Refusing loudly beats
+/// discarding the user's work in progress.
+///
+/// ## Failing closed
+///
+/// An `Err` means **the session must not be created**. Anything that would put
+/// the session on a base other than the one requested — an unreachable remote,
+/// a checkout blocked by uncommitted changes, a git directory outside the
+/// workspace — returns `Err` rather than proceeding with a warning. Hours spent
+/// on a stale base cost far more than retrying, so every message is worded for
+/// the user and says how to fix it. `Ok` means the branch is what was asked for;
+/// [`SessionBranchResolution::warning`] is informational only.
+///
+/// Network access (the fetch) means callers should run this off the UI thread.
 pub fn checkout_or_create_session_branch(
     clone: &Path,
     session_id: &str,
     custom_branch: Option<&str>,
-) -> crate::errors::Result<SessionBranchOutcome> {
+    remote: &str,
+) -> crate::errors::Result<SessionBranchResolution> {
+    let mut warning = None;
+
     if let Some(raw) = custom_branch {
-        let name = raw.trim();
+        let name = strip_remote_prefix(raw.trim(), remote);
         if !name.is_empty() {
-            // 1. Existing local branch → check it out as-is.
-            if local_branch_exists(clone, name) {
-                checkout_branch(clone, name)?;
-                return Ok(SessionBranchOutcome::CheckedOutExisting);
+            // A clone whose `.git` is a pointer to some *other* repository
+            // (linked worktree, submodule, --separate-git-dir) would have its
+            // ref writes land on the user's real repo. Never hard-reset there,
+            // and never quietly carry on from whatever base that leaves.
+            if !has_self_contained_git_dir(clone) {
+                return Err(AlleleError::Git(format!(
+                    "Can't put this session on '{name}'. The project's git directory lives \
+                     outside its folder (a linked worktree, submodule, or --separate-git-dir), \
+                     so updating '{name}' here would rewrite branches in the original \
+                     repository. Point the project at a standalone clone, then try again."
+                )));
             }
-            // 2. Existing remote branch → fetch it and check it out.
-            if has_remote(clone, "origin") {
-                match fetch_and_checkout_remote_branch(clone, "origin", name) {
-                    Ok(true) => return Ok(SessionBranchOutcome::CheckedOutExisting),
-                    Ok(false) => { /* not on remote — fall through to create */ }
-                    Err(e) => {
-                        warn!(
-                            "fetch of existing branch '{name}' failed: {e} \
-                             (creating a new branch instead)"
-                        );
+
+            // 1. Remote first — always fetch, so the base is current even when
+            //    a stale local branch of the same name exists.
+            if has_remote(clone, remote) {
+                match fetch_remote_branch(clone, remote, name) {
+                    RemoteBranchFetch::Fetched => {
+                        let ahead = if local_branch_exists(clone, name) {
+                            commits_ahead_of_remote(clone, remote, name)
+                        } else {
+                            0
+                        };
+                        reset_branch_to_remote(clone, remote, name).map_err(|e| {
+                            AlleleError::Git(format!(
+                                "Can't put this session on '{name}': {e}. This usually means \
+                                 the project's source repo has uncommitted changes that would \
+                                 be overwritten. Commit, stash, or discard them in the source \
+                                 repo, then try again."
+                            ))
+                        })?;
+                        if ahead > 0 {
+                            let plural = if ahead == 1 { "commit" } else { "commits" };
+                            warning = Some(format!(
+                                "'{name}' was reset to {remote}/{name}; {ahead} local-only \
+                                 {plural} from your source repo are not on this session's \
+                                 branch (recoverable from the workspace reflog)"
+                            ));
+                        }
+                        return Ok(SessionBranchResolution {
+                            outcome: SessionBranchOutcome::ResetToRemote,
+                            warning,
+                        });
+                    }
+                    RemoteBranchFetch::NotOnRemote => { /* fall through to local */ }
+                    RemoteBranchFetch::Failed(e) => {
+                        // Refuse rather than degrade to a possibly-stale local
+                        // branch. Silently working from a stale base is the
+                        // failure this function exists to prevent, and hours of
+                        // work on the wrong base costs far more than a retry.
+                        warn!("fetch of '{name}' from {remote} failed: {e}");
+                        return Err(AlleleError::Git(format!(
+                            "Can't reach {remote} to check '{name}' is up to date: {e}. \
+                             The session was not created, because starting from a possibly \
+                             stale copy of '{name}' risks losing work. Check your network and \
+                             git credentials, then try again."
+                        )));
                     }
                 }
+            }
+
+            // 2. Local-only branch — the remote answered and genuinely has no
+            //    branch by this name (or the project has no remote at all).
+            if local_branch_exists(clone, name) {
+                checkout_branch(clone, name).map_err(|e| {
+                    AlleleError::Git(format!(
+                        "Can't put this session on '{name}': {e}. This usually means the \
+                         project's source repo has uncommitted changes that would be \
+                         overwritten. Commit, stash, or discard them in the source repo, \
+                         then try again."
+                    ))
+                })?;
+                return Ok(SessionBranchResolution {
+                    outcome: SessionBranchOutcome::CheckedOutLocal,
+                    warning,
+                });
             }
         }
     }
@@ -610,12 +765,39 @@ pub fn checkout_or_create_session_branch(
     // 3. No match (or no custom name) → fresh session branch, optional rename.
     create_session_branch(clone, session_id)?;
     if let Some(raw) = custom_branch {
-        let sanitised = sanitise_branch_name(raw, 100);
+        let sanitised = sanitise_branch_name(strip_remote_prefix(raw.trim(), remote), 100);
         if !sanitised.is_empty() {
             rename_current_branch(clone, &sanitised)?;
         }
     }
-    Ok(SessionBranchOutcome::CreatedNew)
+    Ok(SessionBranchResolution {
+        outcome: SessionBranchOutcome::CreatedNew,
+        warning,
+    })
+}
+
+/// Hard-move the clone's local `name` onto the already-fetched
+/// `<remote>/<name>` and check it out, setting upstream tracking.
+///
+/// `--no-overwrite-ignore` is deliberate. Checkout's default is to overwrite
+/// *ignored* files when the target commit tracks a path that is currently an
+/// ignored file — silently destroying things like a local `.env` or scratch
+/// database that the clone inherited from canonical and that exist in no git
+/// object anywhere. Refusing the checkout is recoverable; clobbering is not.
+///
+/// Not forced otherwise: a clone inherits canonical's uncommitted changes, and
+/// git carries those across a checkout when they don't conflict while refusing
+/// when they would be overwritten. Both refusals surface as a caller warning.
+fn reset_branch_to_remote(clone: &Path, remote: &str, name: &str) -> crate::errors::Result<()> {
+    let mut cmd = git_cmd(Some(clone));
+    cmd.arg("checkout")
+        .arg("--no-overwrite-ignore")
+        .arg("-B")
+        .arg(name)
+        .arg(format!("{remote}/{name}"));
+    run_git(cmd, "checkout -B (reset to remote branch)")
+        .map_err(|e| AlleleError::Git(e.to_string()))?;
+    Ok(())
 }
 
 /// Fetch the session branch from a clone back into canonical as an archive
@@ -2100,15 +2282,20 @@ mod tests {
     }
 
     #[test]
-    fn session_branch_checks_out_existing_local_branch() {
+    fn session_branch_checks_out_local_only_branch() {
         let (_dir, path) = make_canonical("hello");
         make_branch(&path, "existing-feature");
 
-        let outcome =
-            checkout_or_create_session_branch(&path, "sessionid01", Some("existing-feature"))
-                .unwrap();
+        let res = checkout_or_create_session_branch(
+            &path,
+            "sessionid01",
+            Some("existing-feature"),
+            "origin",
+        )
+        .unwrap();
 
-        assert_eq!(outcome, SessionBranchOutcome::CheckedOutExisting);
+        // No remote at all, so the local branch is the best available base.
+        assert_eq!(res.outcome, SessionBranchOutcome::CheckedOutLocal);
         assert_eq!(current_branch(&path).as_deref(), Some("existing-feature"));
     }
 
@@ -2116,11 +2303,15 @@ mod tests {
     fn session_branch_creates_new_when_name_unknown() {
         let (_dir, path) = make_canonical("hello");
 
-        let outcome =
-            checkout_or_create_session_branch(&path, "sessionid02", Some("brand-new-branch"))
-                .unwrap();
+        let res = checkout_or_create_session_branch(
+            &path,
+            "sessionid02",
+            Some("brand-new-branch"),
+            "origin",
+        )
+        .unwrap();
 
-        assert_eq!(outcome, SessionBranchOutcome::CreatedNew);
+        assert_eq!(res.outcome, SessionBranchOutcome::CreatedNew);
         // Falls back to creating the session branch then renaming it.
         assert_eq!(current_branch(&path).as_deref(), Some("brand-new-branch"));
         assert!(local_branch_exists(&path, "brand-new-branch"));
@@ -2130,10 +2321,262 @@ mod tests {
     fn session_branch_creates_session_name_when_no_custom() {
         let (_dir, path) = make_canonical("hello");
 
-        let outcome = checkout_or_create_session_branch(&path, "sessionid03", None).unwrap();
+        let res = checkout_or_create_session_branch(&path, "sessionid03", None, "origin").unwrap();
 
-        assert_eq!(outcome, SessionBranchOutcome::CreatedNew);
+        assert_eq!(res.outcome, SessionBranchOutcome::CreatedNew);
         assert_eq!(current_branch(&path).as_deref(), Some("session-sessioni"));
+    }
+
+    #[test]
+    fn strip_remote_prefix_removes_configured_remote_only() {
+        // The remote qualifier is cosmetic — both spellings name one branch.
+        assert_eq!(
+            strip_remote_prefix("origin/feature/x", "origin"),
+            "feature/x"
+        );
+        assert_eq!(strip_remote_prefix("feature/x", "origin"), "feature/x");
+        // A different remote is not ours to reinterpret.
+        assert_eq!(
+            strip_remote_prefix("upstream/feat", "origin"),
+            "upstream/feat"
+        );
+        // Honours a non-default configured remote.
+        assert_eq!(strip_remote_prefix("upstream/feat", "upstream"), "feat");
+        // Nothing left after the prefix → keep the literal name.
+        assert_eq!(strip_remote_prefix("origin", "origin"), "origin");
+        assert_eq!(strip_remote_prefix("origin/", "origin"), "origin/");
+        // Prefix must be a whole path segment.
+        assert_eq!(strip_remote_prefix("originals/x", "origin"), "originals/x");
+    }
+
+    /// Build an upstream repo plus a clone of it, with `branch` present on both.
+    /// Returns (upstream_dir, upstream_path, clone_dir, clone_path).
+    fn make_upstream_and_clone(branch: &str) -> (TempDir, PathBuf, TempDir, PathBuf) {
+        let (up_dir, up) = make_canonical("v1");
+        let mut co = git_cmd(Some(&up));
+        co.arg("checkout").arg("-b").arg(branch);
+        run_git(co, "checkout -b (fixture)").unwrap();
+
+        let clone_dir = TempDir::new().unwrap();
+        let clone_path = clone_dir.path().join("work");
+        let mut cmd = git_cmd(None);
+        cmd.arg("clone").arg("--quiet").arg(&up).arg(&clone_path);
+        run_git(cmd, "clone (fixture)").unwrap();
+        (up_dir, up, clone_dir, clone_path)
+    }
+
+    /// Commit `content` onto the currently checked-out branch of `repo`.
+    fn commit_file(repo: &Path, content: &str) -> String {
+        fs::write(repo.join("file.txt"), content).unwrap();
+        let mut add = git_cmd(Some(repo));
+        add.arg("add").arg("-A");
+        run_git(add, "add (fixture)").unwrap();
+        let mut commit = git_cmd(Some(repo));
+        commit.arg("commit").arg("-m").arg(content);
+        run_git(commit, "commit (fixture)").unwrap();
+        head_commit(repo).trim().to_string()
+    }
+
+    #[test]
+    fn session_branch_resets_stale_local_branch_to_remote_tip() {
+        // The core regression: the clone already has the branch (as an APFS
+        // copy of canonical would), but at an older commit than the remote.
+        // The clone lands on `feat` already (it is upstream's HEAD branch),
+        // mirroring an APFS copy that inherited the branch from canonical.
+        let (_ud, up, _cd, clone) = make_upstream_and_clone("feat");
+        let stale = head_commit(&clone).trim().to_string();
+        assert_eq!(current_branch(&clone).as_deref(), Some("feat"));
+
+        let fresh = commit_file(&up, "v2-on-remote");
+        assert_ne!(stale, fresh);
+
+        let res = checkout_or_create_session_branch(&clone, "sid", Some("feat"), "origin").unwrap();
+
+        assert_eq!(res.outcome, SessionBranchOutcome::ResetToRemote);
+        assert_eq!(current_branch(&clone).as_deref(), Some("feat"));
+        assert_eq!(
+            head_commit(&clone).trim(),
+            fresh,
+            "must sit on the remote tip"
+        );
+    }
+
+    #[test]
+    fn session_branch_resets_after_remote_force_push() {
+        // Rebase / force-push rewrites history non-fast-forward. An unforced
+        // refspec silently leaves the remote-tracking ref stale, which would
+        // reintroduce the exact bug this module exists to prevent.
+        let (_ud, up, _cd, clone) = make_upstream_and_clone("feat");
+        commit_file(&up, "will-be-rewritten");
+
+        // Rewind and recommit upstream — the new tip is NOT a descendant.
+        let mut reset = git_cmd(Some(&up));
+        reset.arg("reset").arg("--hard").arg("HEAD~1");
+        run_git(reset, "reset (fixture)").unwrap();
+        let rewritten = commit_file(&up, "rebased-tip");
+
+        let res = checkout_or_create_session_branch(&clone, "sid", Some("feat"), "origin").unwrap();
+
+        assert_eq!(res.outcome, SessionBranchOutcome::ResetToRemote);
+        assert_eq!(
+            head_commit(&clone).trim(),
+            rewritten,
+            "force-pushed tip must win over the stale local branch"
+        );
+    }
+
+    #[test]
+    fn session_branch_ignores_remote_prefix_in_typed_name() {
+        // `origin/feat` and `feat` must resolve identically.
+        let (_ud, up, _cd, clone) = make_upstream_and_clone("feat");
+        let fresh = commit_file(&up, "v2");
+
+        let res = checkout_or_create_session_branch(&clone, "sid", Some("origin/feat"), "origin")
+            .unwrap();
+
+        assert_eq!(res.outcome, SessionBranchOutcome::ResetToRemote);
+        assert_eq!(current_branch(&clone).as_deref(), Some("feat"));
+        assert_eq!(head_commit(&clone).trim(), fresh);
+    }
+
+    #[test]
+    fn session_branch_warns_when_local_commits_are_reset_away() {
+        let (_ud, up, _cd, clone) = make_upstream_and_clone("feat");
+        commit_file(&clone, "my-unpushed-work");
+        commit_file(&up, "v2");
+
+        let res = checkout_or_create_session_branch(&clone, "sid", Some("feat"), "origin").unwrap();
+
+        assert_eq!(res.outcome, SessionBranchOutcome::ResetToRemote);
+        let warning = res
+            .warning
+            .expect("dropping local commits must be reported");
+        assert!(
+            warning.contains('1'),
+            "should name the commit count: {warning}"
+        );
+    }
+
+    #[test]
+    fn session_branch_falls_back_to_local_when_absent_from_remote() {
+        let (_ud, _up, _cd, clone) = make_upstream_and_clone("feat");
+        make_branch(&clone, "never-pushed");
+
+        let res = checkout_or_create_session_branch(&clone, "sid", Some("never-pushed"), "origin")
+            .unwrap();
+
+        assert_eq!(res.outcome, SessionBranchOutcome::CheckedOutLocal);
+        assert_eq!(current_branch(&clone).as_deref(), Some("never-pushed"));
+        assert!(
+            res.warning.is_none(),
+            "a never-pushed branch is not an anomaly"
+        );
+    }
+
+    #[test]
+    fn session_branch_creates_fresh_when_on_neither_side() {
+        let (_ud, _up, _cd, clone) = make_upstream_and_clone("feat");
+
+        let res =
+            checkout_or_create_session_branch(&clone, "sid", Some("brand-new"), "origin").unwrap();
+
+        assert_eq!(res.outcome, SessionBranchOutcome::CreatedNew);
+        assert_eq!(current_branch(&clone).as_deref(), Some("brand-new"));
+    }
+
+    #[test]
+    fn self_contained_git_dir_accepts_ordinary_repo() {
+        let (_dir, path) = make_canonical("hello");
+        assert!(has_self_contained_git_dir(&path));
+    }
+
+    #[test]
+    fn self_contained_git_dir_rejects_copied_linked_worktree() {
+        // An APFS clone copies `.git` verbatim. For a linked worktree that
+        // `.git` is a *file* holding an absolute gitdir pointer, so git
+        // commands in the copy mutate the ORIGINAL repo's refs — a reset there
+        // would destroy a real user branch.
+        let (_dir, main) = make_canonical("hello");
+        let wt_parent = TempDir::new().unwrap();
+        let linked = wt_parent.path().join("linked");
+        let mut cmd = git_cmd(Some(&main));
+        cmd.arg("worktree")
+            .arg("add")
+            .arg(&linked)
+            .arg("-b")
+            .arg("wt");
+        run_git(cmd, "worktree add (fixture)").unwrap();
+        assert!(has_self_contained_git_dir(&main));
+
+        // Copy the worktree the way create_session_clone would.
+        let copy_parent = TempDir::new().unwrap();
+        let copied = copy_parent.path().join("copied");
+        let mut cp = Command::new("cp");
+        cp.arg("-R").arg(&linked).arg(&copied);
+        assert!(cp.status().unwrap().success());
+
+        assert!(
+            !has_self_contained_git_dir(&copied),
+            "a copied linked worktree must be refused: its refs are the source repo's"
+        );
+    }
+
+    #[test]
+    fn session_branch_refuses_to_reset_a_copied_linked_worktree() {
+        let (_dir, main) = make_canonical("hello");
+        let wt_parent = TempDir::new().unwrap();
+        let linked = wt_parent.path().join("linked");
+        let mut cmd = git_cmd(Some(&main));
+        cmd.arg("worktree")
+            .arg("add")
+            .arg(&linked)
+            .arg("-b")
+            .arg("wt");
+        run_git(cmd, "worktree add (fixture)").unwrap();
+        let main_head_before = head_commit(&main).trim().to_string();
+
+        let copy_parent = TempDir::new().unwrap();
+        let copied = copy_parent.path().join("copied");
+        let mut cp = Command::new("cp");
+        cp.arg("-R").arg(&linked).arg(&copied);
+        assert!(cp.status().unwrap().success());
+
+        let err = checkout_or_create_session_branch(&copied, "sid", Some("wt"), "origin")
+            .expect_err("must refuse rather than risk rewriting the original repo");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("standalone clone"),
+            "the error must tell the user how to fix it: {msg}"
+        );
+        assert_eq!(
+            head_commit(&main).trim(),
+            main_head_before,
+            "the source repo must be untouched"
+        );
+    }
+
+    #[test]
+    fn session_branch_blocks_when_remote_is_unreachable() {
+        // An unreachable remote must never degrade to the local branch: that
+        // is how work ends up on a stale base. Fail closed instead.
+        let (_dir, path) = make_canonical("hello");
+        make_branch(&path, "feat");
+        let mut cmd = git_cmd(Some(&path));
+        cmd.arg("remote")
+            .arg("add")
+            .arg("origin")
+            .arg("/nonexistent/definitely-not-a-repo.git");
+        run_git(cmd, "remote add (fixture)").unwrap();
+
+        let err = checkout_or_create_session_branch(&path, "sid", Some("feat"), "origin")
+            .expect_err("an unreachable remote must abort session creation");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("try again"),
+            "the error must tell the user how to fix it: {msg}"
+        );
     }
 
     #[test]
