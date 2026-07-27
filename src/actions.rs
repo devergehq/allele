@@ -144,6 +144,13 @@ pub enum ArchiveAction {
     },
     /// Cancel archive deletion confirmation.
     CancelDeleteArchive,
+    /// Arm the inline confirmation gate before deleting *every* archive ref
+    /// belonging to one project.
+    RequestDeleteAllArchives { project_idx: usize },
+    /// Cancel the bulk archive deletion confirmation.
+    CancelDeleteAllArchives,
+    /// Delete every archive ref for a project without merging any of them.
+    DeleteAllArchives { project_idx: usize },
     /// Merge an archived session ref into canonical's working tree.
     MergeArchive {
         project_idx: usize,

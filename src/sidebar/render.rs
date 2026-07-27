@@ -25,6 +25,9 @@ mod px_indent {
     pub(super) const SESSION: f32 = 24.0;
     /// Matches the archive row's `pl(24)`.
     pub(super) const ARCHIVE: f32 = 24.0;
+    /// Matches the ARCHIVES section header's `px(16)`. Used by the bulk-delete
+    /// strip, which applies to the whole section rather than to one row.
+    pub(super) const ARCHIVES_HEADER: f32 = 16.0;
 }
 
 /// What a confirmation-strip button does when clicked. Boxed so both buttons
@@ -46,7 +49,9 @@ type ConfirmHandler = Box<dyn Fn(&mut AppState, &mut Context<AppState>)>;
 /// message never has to spell out a path.
 fn confirm_strip(
     id_prefix: String,
-    message: &'static str,
+    // Owned rather than `&'static str` so a caller can name what it is about to
+    // destroy — the bulk-archive prompt interpolates a count.
+    message: impl Into<SharedString>,
     confirm_label: &'static str,
     indent: f32,
     on_confirm: impl Fn(&mut AppState, &mut Context<AppState>) + 'static,
@@ -99,7 +104,7 @@ fn confirm_strip(
                 .min_w(px(0.0))
                 .text_size(px(11.0))
                 .text_color(theme().danger)
-                .child(message),
+                .child(message.into()),
         )
         .child(
             div()
@@ -1318,10 +1323,14 @@ pub(crate) fn build_sidebar_items(
         // Archived sessions for this project. Hidden while text-filtering, and
         // hidden under active-only — an archive is inactive by definition.
         if !project.archives.is_empty() && !filtering && !active_only {
+            let archive_count = project.archives.len();
+            let is_confirming_delete_all = state.confirming.delete_all_archives == Some(p_idx);
+
             // Section header
             sidebar_items.push(
                 div()
                     .id(SharedString::from(format!("archives-header-{p_idx}")))
+                    .group(format!("archives-hdr-{p_idx}"))
                     // Opaque recessed fill: without it the row shows only the
                     // sidebar's 85%-translucent surface and washes out (bright
                     // window content blooms through, text becomes illegible).
@@ -1334,14 +1343,72 @@ pub(crate) fn build_sidebar_items(
                     .flex()
                     .flex_row()
                     .items_center()
+                    .justify_between()
                     .child(
                         div()
                             .text_size(px(12.0))
                             .text_color(theme().text_dim)
-                            .child(format!("ARCHIVES ({})", project.archives.len())),
+                            .child(format!("ARCHIVES ({archive_count})")),
+                    )
+                    .child(
+                        // Bulk delete — hover-revealed like the per-row buttons
+                        // so a destructive control is never one stray click away.
+                        div()
+                            .id(SharedString::from(format!("delallarchives-{p_idx}")))
+                            .invisible()
+                            .group_hover(format!("archives-hdr-{p_idx}"), |s| s.visible())
+                            .cursor_pointer()
+                            .px(px(4.0))
+                            .py(px(1.0))
+                            .rounded(px(6.0))
+                            .text_size(px(11.0))
+                            .text_color(theme().text_ghost)
+                            .hover(|s| s.bg(theme().bg_raised).text_color(theme().danger))
+                            .child("delete all")
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| SimpleTooltip {
+                                    text: "Delete every archive in this project".into(),
+                                })
+                                .into()
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.pending_action = Some(
+                                        ArchiveAction::RequestDeleteAllArchives {
+                                            project_idx: p_idx,
+                                        }
+                                        .into(),
+                                    );
+                                    cx.notify();
+                                }),
+                            ),
                     )
                     .into_any_element(),
             );
+
+            if is_confirming_delete_all {
+                sidebar_items.push(confirm_strip(
+                    format!("delallarchives-{p_idx}"),
+                    format!(
+                        "Delete all {archive_count} recovery refs? Unmerged work in them is \
+                         lost. This cannot be undone."
+                    ),
+                    "Delete all",
+                    px_indent::ARCHIVES_HEADER,
+                    move |this, cx| {
+                        this.pending_action =
+                            Some(ArchiveAction::DeleteAllArchives { project_idx: p_idx }.into());
+                        cx.notify();
+                    },
+                    |this, cx| {
+                        this.pending_action = Some(ArchiveAction::CancelDeleteAllArchives.into());
+                        cx.notify();
+                    },
+                    cx,
+                ));
+            }
 
             for (a_idx, archive) in project.archives.iter().enumerate() {
                 let is_confirming_delete = state.confirming.delete_archive == Some((p_idx, a_idx));

@@ -618,6 +618,50 @@ impl AppState {
                 self.confirming.delete_archive = None;
                 cx.notify();
             }
+            ArchiveAction::RequestDeleteAllArchives { project_idx } => {
+                // Only one destructive strip open at a time — a per-archive
+                // gate left armed underneath would ask two questions at once.
+                self.confirming.delete_archive = None;
+                self.confirming.delete_all_archives = Some(project_idx);
+                cx.notify();
+            }
+            ArchiveAction::CancelDeleteAllArchives => {
+                self.confirming.delete_all_archives = None;
+                cx.notify();
+            }
+            ArchiveAction::DeleteAllArchives { project_idx } => {
+                self.confirming.delete_all_archives = None;
+                if let Some(project) = self.projects.get_mut(project_idx) {
+                    // Drain once and rebuild from the failures. Removing by
+                    // index inside a loop would shift every later index and
+                    // silently skip half the list.
+                    let entries = std::mem::take(&mut project.archives);
+                    let total = entries.len();
+                    for entry in entries {
+                        match git::delete_ref(
+                            &project.source_path,
+                            &git::archive_ref_name(&entry.id),
+                        ) {
+                            Ok(()) => info!("Deleted archive ref for {}", entry.id),
+                            Err(e) => {
+                                // Keep the row: the ref still exists, and
+                                // dropping it from the list would strand it
+                                // with no way to retry.
+                                warn!("delete_ref failed for archive {}: {e}", entry.id);
+                                project.archives.push(entry);
+                            }
+                        }
+                    }
+                    let failed = project.archives.len();
+                    info!(
+                        "Bulk-deleted {} of {total} archive refs for {}",
+                        total - failed,
+                        project.name
+                    );
+                }
+                self.mark_state_dirty();
+                cx.notify();
+            }
             ArchiveAction::MergeArchive {
                 project_idx,
                 archive_idx,
@@ -1020,9 +1064,13 @@ impl AppState {
                     if let Some(editing) = &mut self.editing_project_settings {
                         *editing = remap(*editing);
                     }
+                    // Index-carrying confirm states are now stale — leaving one
+                    // armed would point it at whichever project took that slot.
                     self.confirming.remove_project = None;
                     self.confirming.discard = None;
                     self.confirming.dirty_merge = None;
+                    self.confirming.delete_archive = None;
+                    self.confirming.delete_all_archives = None;
                     self.mark_settings_dirty();
                     self.mark_state_dirty();
                     cx.notify();

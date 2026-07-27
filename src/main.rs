@@ -2439,6 +2439,12 @@ impl AppState {
             other => other,
         };
 
+        // Archive confirmation gates carry a project index, which every later
+        // project just shifted out from under. An armed gate would resolve to
+        // the wrong project's archives.
+        self.confirming.delete_archive = None;
+        self.confirming.delete_all_archives = None;
+
         self.mark_settings_dirty();
         self.mark_state_dirty();
         cx.notify();
@@ -3555,6 +3561,7 @@ fn main() {
                             remove_project: None,
                             dirty_merge: None,
                             delete_archive: None,
+                            delete_all_archives: None,
                         },
                         rich: RichState {
                             view: None,

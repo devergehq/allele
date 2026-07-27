@@ -192,6 +192,10 @@ pub(crate) struct ConfirmationState {
     pub(crate) dirty_merge: Option<SessionCursor>,
     /// Archive awaiting permanent ref deletion confirmation.
     pub(crate) delete_archive: Option<(usize, usize)>,
+    /// Project index whose *entire* archive list awaits bulk-deletion
+    /// confirmation. Kept separate from `delete_archive` so the two gates
+    /// can never be confused for one another; arming this one clears that one.
+    pub(crate) delete_all_archives: Option<usize>,
 }
 
 /// Rich Sidecar (transcript view) state. Lazily created the first time the
