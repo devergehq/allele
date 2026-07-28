@@ -175,6 +175,29 @@ pub(crate) struct ReaderState {
     pub(crate) sessions: std::collections::HashMap<PathBuf, ReaderSelection>,
 }
 
+/// A fingerprint of the sidebar's *shape*: how many projects exist, how many
+/// sessions across all of them, how many archives across all of them.
+///
+/// Confirmation gates address their target by index, so any change to these
+/// three counts can shift the thing a prompt points at. Comparing a stamp taken
+/// when the prompt was armed against the current one is how a stale prompt is
+/// detected.
+///
+/// Deliberately counts *structure only*. Session status is excluded: agent
+/// statuses flip every few seconds, and a prompt that evaporated while the user
+/// was still reading it would be a worse bug than the one this prevents.
+pub(crate) type StructuralStamp = (usize, usize, usize);
+
+/// Compute the stamp for a project list. Free function over a slice rather than
+/// a method on `AppState` so it can be tested without standing one up.
+pub(crate) fn structural_stamp(projects: &[Project]) -> StructuralStamp {
+    (
+        projects.len(),
+        projects.iter().map(|p| p.sessions.len()).sum(),
+        projects.iter().map(|p| p.archives.len()).sum(),
+    )
+}
+
 /// Cluster of confirmation-gate flags.
 pub(crate) struct ConfirmationState {
     /// Inline confirmation gate for the Discard action. When `Some(cursor)`
@@ -196,6 +219,40 @@ pub(crate) struct ConfirmationState {
     /// confirmation. Kept separate from `delete_archive` so the two gates
     /// can never be confused for one another; arming this one clears that one.
     pub(crate) delete_all_archives: Option<usize>,
+    /// The structural stamp taken when the currently-armed gate was set, or
+    /// `None` when no index-carrying gate is armed. Set by
+    /// `AppState::arm_confirmation`; compared by `AppState::confirmation_is_stale`.
+    pub(crate) armed_at: Option<StructuralStamp>,
+}
+
+impl ConfirmationState {
+    /// Is any index-carrying gate currently armed?
+    ///
+    /// Answering a prompt clears its own gate but leaves `armed_at` behind, so
+    /// the stamp alone is not proof that a prompt is open. Staleness is only
+    /// meaningful while something is actually armed.
+    pub(crate) fn any_armed(&self) -> bool {
+        self.discard.is_some()
+            || self.dirty_session.is_some()
+            || self.remove_project.is_some()
+            || self.dirty_merge.is_some()
+            || self.delete_archive.is_some()
+            || self.delete_all_archives.is_some()
+    }
+
+    /// Clear every gate that addresses something by index, plus the stamp.
+    ///
+    /// `quit` is deliberately left alone: it is a global banner that names no
+    /// project, session, or archive, so nothing can go stale underneath it.
+    pub(crate) fn dismiss_armed(&mut self) {
+        self.discard = None;
+        self.dirty_session = None;
+        self.remove_project = None;
+        self.dirty_merge = None;
+        self.delete_archive = None;
+        self.delete_all_archives = None;
+        self.armed_at = None;
+    }
 }
 
 /// Rich Sidecar (transcript view) state. Lazily created the first time the
@@ -345,6 +402,223 @@ impl AppState {
         if self.settings_dirty {
             self.save_settings();
             self.settings_dirty = false;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{structural_stamp, ConfirmationState};
+    use crate::actions::{
+        ArchiveAction, PendingAction, ProjectAction, SessionAction, SessionCursor,
+    };
+    use crate::project::Project;
+    use crate::session::Session;
+    use crate::state::ArchivedSession;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    fn session() -> Session {
+        let now = SystemTime::now();
+        Session::suspended_from_persisted(
+            "id".into(),
+            "label".into(),
+            now,
+            now,
+            Duration::ZERO,
+            None,
+            false,
+        )
+    }
+
+    fn archive() -> ArchivedSession {
+        ArchivedSession {
+            id: "arch".into(),
+            project_id: "proj".into(),
+            label: "archived".into(),
+            archived_at: 0,
+            merge_error: None,
+        }
+    }
+
+    fn project(sessions: usize, archives: usize) -> Project {
+        let mut p = Project::new("proj".into(), PathBuf::from("/tmp/proj"));
+        p.sessions = (0..sessions).map(|_| session()).collect();
+        p.archives = (0..archives).map(|_| archive()).collect();
+        p
+    }
+
+    fn armed_state() -> ConfirmationState {
+        ConfirmationState {
+            discard: None,
+            dirty_session: None,
+            quit: false,
+            remove_project: None,
+            dirty_merge: None,
+            delete_archive: None,
+            delete_all_archives: None,
+            armed_at: None,
+        }
+    }
+
+    #[test]
+    fn stamp_counts_projects_sessions_and_archives() {
+        let projects = vec![project(2, 1), project(3, 0)];
+        assert_eq!(structural_stamp(&projects), (2, 5, 1));
+    }
+
+    #[test]
+    fn stamp_is_stable_when_nothing_structural_changes() {
+        let mut projects = vec![project(2, 1)];
+        let before = structural_stamp(&projects);
+        // Renaming and re-labelling touch no count. Status churn must not
+        // dismiss a prompt, which is the whole point of counting shape only.
+        projects[0].name = "renamed".into();
+        assert_eq!(structural_stamp(&projects), before);
+    }
+
+    #[test]
+    fn stamp_changes_when_an_archive_is_removed() {
+        let mut projects = vec![project(1, 3)];
+        let before = structural_stamp(&projects);
+        projects[0].archives.clear();
+        assert_ne!(structural_stamp(&projects), before);
+    }
+
+    #[test]
+    fn stamp_changes_when_a_session_is_appended() {
+        // An append shifts no existing index, but still dismisses. Deliberate:
+        // an unnecessary re-click is cheaper than a misdirected delete.
+        let mut projects = vec![project(1, 0)];
+        let before = structural_stamp(&projects);
+        projects[0].sessions.push(session());
+        assert_ne!(structural_stamp(&projects), before);
+    }
+
+    #[test]
+    fn stamp_cannot_see_a_reorder() {
+        // Documents the known blind spot the reorder handlers cover by hand.
+        let projects = vec![project(1, 0), project(2, 0)];
+        let reordered = vec![project(2, 0), project(1, 0)];
+        assert_eq!(structural_stamp(&projects), structural_stamp(&reordered));
+    }
+
+    #[test]
+    fn nothing_armed_by_default() {
+        assert!(!armed_state().any_armed());
+    }
+
+    #[test]
+    fn each_index_carrying_gate_counts_as_armed() {
+        let cursor = SessionCursor {
+            project_idx: 0,
+            session_idx: 0,
+        };
+        let cases: Vec<Box<dyn Fn(&mut ConfirmationState)>> = vec![
+            Box::new(move |c| c.discard = Some(cursor)),
+            Box::new(|c| c.dirty_session = Some(0)),
+            Box::new(|c| c.remove_project = Some(0)),
+            Box::new(move |c| c.dirty_merge = Some(cursor)),
+            Box::new(|c| c.delete_archive = Some((0, 0))),
+            Box::new(|c| c.delete_all_archives = Some(0)),
+        ];
+        for arm in cases {
+            let mut state = armed_state();
+            arm(&mut state);
+            assert!(state.any_armed());
+        }
+    }
+
+    #[test]
+    fn quit_banner_is_not_an_armed_gate() {
+        // `quit` names no project or session, so nothing can go stale under it
+        // and `dismiss_armed` must leave it standing.
+        let mut state = armed_state();
+        state.quit = true;
+        assert!(!state.any_armed());
+        state.dismiss_armed();
+        assert!(state.quit);
+    }
+
+    #[test]
+    fn dismiss_clears_every_gate_and_the_stamp() {
+        let cursor = SessionCursor {
+            project_idx: 1,
+            session_idx: 2,
+        };
+        let mut state = armed_state();
+        state.discard = Some(cursor);
+        state.dirty_session = Some(1);
+        state.remove_project = Some(1);
+        state.dirty_merge = Some(cursor);
+        state.delete_archive = Some((1, 2));
+        state.delete_all_archives = Some(1);
+        state.armed_at = Some((1, 2, 3));
+
+        state.dismiss_armed();
+
+        assert!(!state.any_armed());
+        assert!(state.armed_at.is_none());
+    }
+
+    #[test]
+    fn only_confirmation_gated_actions_are_droppable() {
+        let gated: Vec<PendingAction> = vec![
+            SessionAction::DiscardSession {
+                project_idx: 0,
+                session_idx: 0,
+            }
+            .into(),
+            SessionAction::ProceedDirtyMerge {
+                project_idx: 0,
+                session_idx: 0,
+            }
+            .into(),
+            SessionAction::ProceedDirtySession(0).into(),
+            ArchiveAction::DeleteArchive {
+                project_idx: 0,
+                archive_idx: 0,
+            }
+            .into(),
+            ArchiveAction::DeleteAllArchives { project_idx: 0 }.into(),
+            ProjectAction::RemoveProject(0).into(),
+        ];
+        for action in gated {
+            assert!(action.needs_confirmation(), "{action:?} should be gated");
+        }
+    }
+
+    #[test]
+    fn requesting_and_cancelling_are_not_gated_actions() {
+        // These arm or clear a prompt. Dropping them on a stale stamp would
+        // strand the user with a prompt they cannot dismiss.
+        let ungated: Vec<PendingAction> = vec![
+            SessionAction::RequestDiscardSession {
+                project_idx: 0,
+                session_idx: 0,
+            }
+            .into(),
+            SessionAction::CancelDiscard.into(),
+            ArchiveAction::RequestDeleteAllArchives { project_idx: 0 }.into(),
+            ArchiveAction::CancelDeleteAllArchives.into(),
+            ArchiveAction::CancelDeleteArchive.into(),
+            ProjectAction::CancelRemoveProject.into(),
+            ArchiveAction::RestoreArchive {
+                project_idx: 0,
+                archive_idx: 0,
+            }
+            .into(),
+            ArchiveAction::MergeArchive {
+                project_idx: 0,
+                archive_idx: 0,
+            }
+            .into(),
+        ];
+        for action in ungated {
+            assert!(
+                !action.needs_confirmation(),
+                "{action:?} should not be gated"
+            );
         }
     }
 }

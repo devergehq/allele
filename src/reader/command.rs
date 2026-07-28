@@ -167,7 +167,7 @@ impl AppState {
                 // actual discard still requires the user to confirm.
                 if let Some(cursor) = self.active {
                     self.sidebar.visible = true;
-                    self.confirming.discard = Some(cursor);
+                    self.arm_confirmation(|c| c.discard = Some(cursor));
                 }
             }
         }
