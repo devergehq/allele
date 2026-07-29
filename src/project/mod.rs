@@ -50,3 +50,66 @@ impl Project {
             .to_string()
     }
 }
+
+/// Resolve which project the no-session overview pane should describe.
+///
+/// `remembered` is the id of the project the user was last in — captured
+/// while a session was still selected, because the overview only renders
+/// once the active cursor has been cleared (DEV-310). Ids rather than
+/// indices, so removing or reordering projects can't silently point the
+/// overview at a different one.
+///
+/// Falls back to the first project when there is nothing remembered or the
+/// remembered project has since been closed. Returns `None` only when no
+/// projects are open at all.
+pub fn resolve_overview_project(projects: &[Project], remembered: Option<&str>) -> Option<usize> {
+    if let Some(id) = remembered {
+        if let Some(idx) = projects.iter().position(|project| project.id == id) {
+            return Some(idx);
+        }
+    }
+    (!projects.is_empty()).then_some(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn project(id: &str) -> Project {
+        let mut project = Project::new(id.to_string(), PathBuf::from("/tmp").join(id));
+        project.id = id.to_string();
+        project
+    }
+
+    #[test]
+    fn resolves_the_remembered_project() {
+        let projects = [project("a"), project("b"), project("c")];
+        assert_eq!(resolve_overview_project(&projects, Some("b")), Some(1));
+    }
+
+    #[test]
+    fn falls_back_to_first_when_remembered_project_closed() {
+        let projects = [project("a"), project("b")];
+        assert_eq!(resolve_overview_project(&projects, Some("gone")), Some(0));
+    }
+
+    #[test]
+    fn falls_back_to_first_when_nothing_remembered() {
+        let projects = [project("a"), project("b")];
+        assert_eq!(resolve_overview_project(&projects, None), Some(0));
+    }
+
+    #[test]
+    fn resolves_nothing_without_projects() {
+        assert_eq!(resolve_overview_project(&[], Some("a")), None);
+        assert_eq!(resolve_overview_project(&[], None), None);
+    }
+
+    #[test]
+    fn survives_projects_being_reordered() {
+        // The bug this guards: an index captured before a reorder points at
+        // whatever moved into that slot. An id follows the project.
+        let projects = [project("b"), project("a"), project("c")];
+        assert_eq!(resolve_overview_project(&projects, Some("a")), Some(1));
+    }
+}
