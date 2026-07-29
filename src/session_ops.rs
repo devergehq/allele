@@ -13,14 +13,45 @@ use crate::actions::{
     SidebarAction,
 };
 use crate::app_state::AppState;
-use crate::session::{OperationError, OperationErrorKind, Session, SessionStatus};
+use crate::session::{
+    OperationError, OperationErrorKind, OperationResult, Session, SessionStatus,
+    OPERATION_RESULT_TTL,
+};
 use crate::state::ArchivedSession;
 use crate::terminal::{clamp_font_size, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
 use crate::{
     agents, browser, claude_session_history_exists, clone, config, git, project, settings,
 };
 
+/// Subtitle for a freshly created session, given whether the APFS clone took.
+///
+/// Success is an event, not a state: it ages out so a days-old row doesn't
+/// keep announcing a clone that finished long ago. Failure *is* a state — the
+/// session is working directly in the project source with no isolation — so
+/// that warning stays put until something replaces it.
+fn clone_operation_result(clone_succeeded: bool) -> OperationResult {
+    if clone_succeeded {
+        OperationResult::transient("Workspace cloned successfully.")
+    } else {
+        OperationResult::durable("Clone failed; session is running in the project source.")
+    }
+}
+
 impl AppState {
+    /// Repaint the sidebar once a transient operation result has aged out, so
+    /// the subtitle clears itself instead of lingering until the next
+    /// unrelated redraw. Expiry is enforced on read, so this is only a nudge —
+    /// if the task never runs, the message is still hidden.
+    fn schedule_operation_result_repaint(cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(OPERATION_RESULT_TTL + std::time::Duration::from_millis(100))
+                .await;
+            let _ = this.update(cx, |_this, cx| cx.notify());
+        })
+        .detach();
+    }
+
     /// Create a new session inside a project. Runs the APFS clone on a
     /// background task so the UI stays responsive. A "Cloning..." placeholder
     /// appears in the sidebar while the clone is in flight.
@@ -333,11 +364,7 @@ impl AppState {
                 )
                 .with_clone(clone_path)
                 .with_agent_id(agent_id_for_task.clone());
-                session.operation_result = Some(if clone_succeeded {
-                    "Workspace cloned successfully.".into()
-                } else {
-                    "Clone failed; session is running in the project source.".into()
-                });
+                session.operation_result = Some(clone_operation_result(clone_succeeded));
                 let Some(project) = this.projects.get_mut(project_idx) else {
                     return;
                 };
@@ -350,6 +377,7 @@ impl AppState {
                 this.active = Some(cursor);
                 this.apply_project_config(cursor, window, cx);
                 this.mark_state_dirty();
+                Self::schedule_operation_result_repaint(cx);
                 cx.notify();
             });
 
@@ -712,11 +740,7 @@ impl AppState {
                 )
                 .with_clone(clone_path)
                 .with_agent_id(agent_id_for_task.clone());
-                session.operation_result = Some(if clone_succeeded {
-                    "Workspace cloned successfully.".into()
-                } else {
-                    "Clone failed; session is running in the project source.".into()
-                });
+                session.operation_result = Some(clone_operation_result(clone_succeeded));
 
                 if skip_auto_naming {
                     session.auto_naming_fired = true;
@@ -735,6 +759,7 @@ impl AppState {
                 this.active = Some(cursor);
                 this.apply_project_config(cursor, window, cx);
                 this.mark_state_dirty();
+                Self::schedule_operation_result_repaint(cx);
 
                 // Send the initial prompt if provided.
                 if let Some(ref prompt_text) = prompt {

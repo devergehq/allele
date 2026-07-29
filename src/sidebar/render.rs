@@ -961,7 +961,11 @@ pub(crate) fn build_sidebar_items(
                     let session_comment = session.comment.clone();
                     let session_startup_status = session.startup_status.clone();
                     let session_operation_error = session.operation_error.clone();
-                    let session_operation_result = session.operation_result.clone();
+                    // Read through the accessor, not the field — transient
+                    // confirmations age out and must stop rendering.
+                    let session_operation_result = session
+                        .operation_result_message()
+                        .map(|m| SharedString::from(m.to_string()));
                     let mut label_row = div()
                         .flex()
                         .flex_row()

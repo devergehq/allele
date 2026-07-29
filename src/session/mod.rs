@@ -117,6 +117,56 @@ pub struct OperationError {
     pub message: String,
 }
 
+/// How long a success confirmation stays under a session title before it
+/// stops being true enough to show. Matches the pull-warning banner's
+/// auto-dismiss so transient feedback reads consistently across the app.
+pub const OPERATION_RESULT_TTL: Duration = Duration::from_secs(8);
+
+/// Outcome message for the latest operation on a session, shown as the
+/// sidebar row's subtitle.
+///
+/// Two flavours, distinguished by `expires_at`:
+///
+/// - **Transient** (`Some`) — a confirmation that something *happened*, e.g.
+///   "Workspace cloned successfully.". A past event is not a state, so it
+///   ages out; leaving it in place makes a four-day-old row read as if the
+///   clone just finished.
+/// - **Durable** (`None`) — a description of a condition that *remains true*,
+///   e.g. a failed clone meaning the session has no workspace isolation and
+///   is editing the project source. That warning must not disappear.
+#[derive(Debug, Clone)]
+pub struct OperationResult {
+    pub message: String,
+    /// When the message stops being displayed. `None` means never.
+    pub expires_at: Option<SystemTime>,
+}
+
+impl OperationResult {
+    /// A confirmation that ages out after [`OPERATION_RESULT_TTL`].
+    pub fn transient(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            expires_at: Some(SystemTime::now() + OPERATION_RESULT_TTL),
+        }
+    }
+
+    /// A message describing an ongoing condition. Shown until replaced.
+    pub fn durable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            expires_at: None,
+        }
+    }
+
+    /// The message, or `None` once `now` is past the expiry.
+    pub fn message_at(&self, now: SystemTime) -> Option<&str> {
+        match self.expires_at {
+            Some(expiry) if now >= expiry => None,
+            _ => Some(&self.message),
+        }
+    }
+}
+
 /// A single Claude Code session.
 ///
 /// `terminal_view` is `None` for sessions that were rehydrated from
@@ -243,8 +293,12 @@ pub struct Session {
     pub active_since: Option<SystemTime>,
     /// Transient failure for an operation initiated from this session row.
     pub operation_error: Option<OperationError>,
-    /// Durable completion or degraded-result message for the latest operation.
-    pub operation_result: Option<String>,
+    /// Completion or degraded-result message for the latest operation. May be
+    /// transient (a confirmation that ages out) or durable (an ongoing
+    /// condition) — see [`OperationResult`]. Read via
+    /// [`Session::operation_result_message`], never directly, so the expiry
+    /// is honoured.
+    pub operation_result: Option<OperationResult>,
 }
 
 impl Session {
@@ -440,6 +494,16 @@ impl Session {
     /// continues from where it left off — never the session's wall-clock age.
     /// Days are surfaced once the total reaches 24h so long-lived sessions read
     /// as e.g. "3d 5h" rather than "77h".
+    /// The operation-result subtitle to show right now, or `None` if there
+    /// isn't one or it has aged out. Expiry is evaluated on read rather than
+    /// by a timer alone, so a dropped or delayed clear task can't strand a
+    /// stale confirmation under the session title.
+    pub fn operation_result_message(&self) -> Option<&str> {
+        self.operation_result
+            .as_ref()
+            .and_then(|r| r.message_at(SystemTime::now()))
+    }
+
     pub fn elapsed_display(&self) -> String {
         let secs = self.active_runtime().as_secs();
         if secs < 60 {
@@ -459,8 +523,8 @@ mod tests {
     // Import Session explicitly rather than `use super::*` — this module's
     // parent does `use gpui::*`, whose glob would shadow the standard
     // `#[test]` attribute with gpui's own `test` macro.
-    use super::Session;
-    use std::time::SystemTime;
+    use super::{OperationResult, Session, OPERATION_RESULT_TTL};
+    use std::time::{Duration, SystemTime};
 
     fn sample(id: &str) -> Session {
         let now = SystemTime::now();
@@ -504,6 +568,84 @@ mod tests {
     fn with_claude_session_id_keeps_divergent_pointer() {
         let s = sample("workspace-abc").with_claude_session_id(Some("rotated-xyz".into()));
         assert_eq!(s.claude_session_id.as_deref(), Some("rotated-xyz"));
+    }
+
+    // --- Operation-result subtitle ---------------------------------------
+
+    #[test]
+    fn transient_result_disappears_once_expired() {
+        // "Workspace cloned successfully." is a past event, not a state: it
+        // must not sit under the title for the life of the session.
+        let r = OperationResult::transient("Workspace cloned successfully.");
+        let created = r.expires_at.unwrap() - OPERATION_RESULT_TTL;
+
+        assert_eq!(
+            r.message_at(created),
+            Some("Workspace cloned successfully."),
+            "should show immediately after creation"
+        );
+        assert_eq!(
+            r.message_at(created + OPERATION_RESULT_TTL - Duration::from_secs(1)),
+            Some("Workspace cloned successfully."),
+            "should still show just before the TTL elapses"
+        );
+        assert_eq!(
+            r.message_at(created + OPERATION_RESULT_TTL),
+            None,
+            "should be gone the moment the TTL elapses"
+        );
+        assert_eq!(
+            r.message_at(created + Duration::from_secs(4 * 86_400)),
+            None,
+            "must not resurface days later"
+        );
+    }
+
+    #[test]
+    fn durable_result_survives_indefinitely() {
+        // A failed clone means the session has no workspace isolation — a
+        // condition that stays true, so the warning must stay visible.
+        let r = OperationResult::durable("Clone failed; session is running in the project source.");
+        assert_eq!(r.expires_at, None);
+
+        let now = SystemTime::now();
+        for offset in [Duration::ZERO, Duration::from_secs(4 * 86_400)] {
+            assert_eq!(
+                r.message_at(now + offset),
+                Some("Clone failed; session is running in the project source."),
+            );
+        }
+    }
+
+    #[test]
+    fn session_hides_expired_result_and_keeps_durable_one() {
+        // The Session-level accessor is what the sidebar renders through.
+        let mut s = sample("s");
+        assert_eq!(
+            s.operation_result_message(),
+            None,
+            "no result → no subtitle"
+        );
+
+        s.operation_result = Some(OperationResult {
+            message: "Workspace cloned successfully.".into(),
+            expires_at: Some(SystemTime::now() - Duration::from_secs(1)),
+        });
+        assert_eq!(
+            s.operation_result_message(),
+            None,
+            "already-expired result must not render"
+        );
+
+        s.operation_result = Some(OperationResult::transient("Workspace cloned successfully."));
+        assert_eq!(
+            s.operation_result_message(),
+            Some("Workspace cloned successfully."),
+            "fresh confirmation renders"
+        );
+
+        s.operation_result = Some(OperationResult::durable("Clone failed."));
+        assert_eq!(s.operation_result_message(), Some("Clone failed."));
     }
 
     // --- Active-runtime timer -------------------------------------------
