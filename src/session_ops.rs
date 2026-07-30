@@ -166,9 +166,10 @@ impl AppState {
 
             // Back on the main thread with window access
             let _ = this.update_in(cx, move |this: &mut Self, window, cx| {
-                // Surface git pull failures as a transient warning banner.
+                // Surface git pull failures as a transient warning banner. The
+                // banner renders the message verbatim, so name the failure here.
                 if let Some(msg) = pull_error {
-                    this.pull_warning = Some(msg);
+                    this.pull_warning = Some(format!("git pull failed: {msg}"));
                     cx.notify();
                 }
 
@@ -396,6 +397,9 @@ impl AppState {
 
         let source_path = project.source_path.clone();
         let project_name = project.name.clone();
+        // Branch resolution is scoped to this project's configured remote —
+        // Allele deliberately resolves against exactly one remote.
+        let session_remote = project.settings.resolved_remote().to_string();
         let session_count = project.sessions.len() + project.loading_sessions.len() + 1;
 
         let project_override =
@@ -466,7 +470,7 @@ impl AppState {
         let session_id_for_branch = session_id.clone();
 
         cx.spawn_in(window, async move |this, cx| {
-            let (clone_result, pull_error) = cx
+            let (clone_result, pull_error, branch_warning, branch_error) = cx
                 .background_executor()
                 .spawn(async move {
                     let pull_error = if pull_before_clone {
@@ -504,29 +508,61 @@ impl AppState {
                     );
 
                     // Resolve the session branch here (off the UI thread):
-                    // check out an existing local/remote branch if the user
-                    // named one, otherwise create a fresh session branch.
+                    // fetch and reset onto the remote tip if the user named a
+                    // branch, otherwise create a fresh session branch.
+                    let mut branch_warning = None;
+                    let mut branch_error = None;
                     if let Ok(ref clone_path) = clone {
                         if clone_path != &source_for_task {
-                            if let Err(e) = git::checkout_or_create_session_branch(
+                            match git::checkout_or_create_session_branch(
                                 clone_path,
                                 &session_id_for_branch,
                                 branch_slug_for_clone.as_deref(),
+                                &session_remote,
                             ) {
-                                warn!(
-                                    "session branch setup failed for \
-                                     {session_id_for_branch}: {e}"
-                                );
+                                Ok(resolution) => branch_warning = resolution.warning,
+                                Err(e) => {
+                                    warn!(
+                                        "session branch setup failed for \
+                                         {session_id_for_branch}: {e}"
+                                    );
+                                    // Fail closed: opening the session anyway
+                                    // would put work on a base the user did not
+                                    // ask for, which is the whole failure mode
+                                    // this path exists to prevent.
+                                    branch_error = Some(format!("{e}"));
+                                }
                             }
                         }
                     }
 
-                    (clone, pull_error)
+                    (clone, pull_error, branch_warning, branch_error)
                 })
                 .await;
 
             let _ = this.update_in(cx, move |this: &mut Self, window, cx| {
-                if let Some(msg) = pull_error {
+                // Branch resolution failed → abort. Tear the clone down, drop
+                // the loading placeholder, and tell the user how to fix it.
+                if let Some(msg) = branch_error {
+                    if let Ok(ref p) = clone_result {
+                        if p != &source_path {
+                            let _ = clone::delete_clone(p);
+                        }
+                    }
+                    if let Some(project) = this.projects.get_mut(project_idx) {
+                        project.loading_sessions.retain(|l| l.id != session_id);
+                    }
+                    this.pull_warning = Some(msg);
+                    cx.notify();
+                    return;
+                }
+
+                // Branch warnings take precedence: a session sitting on the
+                // wrong base is more consequential than a failed source pull.
+                // The banner renders verbatim, so each message names itself.
+                let notice = branch_warning
+                    .or_else(|| pull_error.map(|msg| format!("git pull failed: {msg}")));
+                if let Some(msg) = notice {
                     this.pull_warning = Some(msg);
                     cx.notify();
                 }
@@ -1582,7 +1618,7 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (session_id, conversation_id, branch_name, project_source, project_name) = {
+        let (session_id, conversation_id, branch_name, project_source, project_name, remote) = {
             let Some(project) = self.projects.get(cursor.project_idx) else {
                 return;
             };
@@ -1595,6 +1631,7 @@ impl AppState {
                 session.branch_name.clone(),
                 project.source_path.clone(),
                 project.name.clone(),
+                project.settings.resolved_remote().to_string(),
             )
         };
         let settings = self.user_settings.sync.clone();
@@ -1615,6 +1652,7 @@ impl AppState {
                         &project_source,
                         &project_name,
                         &cleanup_paths,
+                        &remote,
                     )
                 })
                 .await;
@@ -1742,6 +1780,7 @@ fn materialize_blocking(
     project_source: &std::path::Path,
     project_name: &str,
     cleanup_paths: &[String],
+    remote: &str,
 ) -> anyhow::Result<std::path::PathBuf> {
     // 1. Copy-on-write clone of the project source.
     let clone_path =
@@ -1751,19 +1790,21 @@ fn materialize_blocking(
     }
     clone::cleanup_stale_runtime(&clone_path, cleanup_paths);
 
-    // 2. Check out the session's branch at exactly what was pushed. Reset the
-    //    clone's local branch to origin's tip so we get the *synced* commit, not
-    //    a stale local copy of the same branch name (which bites the round-trip
-    //    back to a machine that already has this branch at an older commit). If
-    //    the branch isn't on origin (an ephemeral one never pushed), fall back
-    //    to creating/checking-out a fresh session branch.
+    // 2. Check out the session's branch at exactly what was pushed. Resolution
+    //    is remote-first, so we get the *synced* commit rather than a stale
+    //    local copy of the same branch name (which bites the round-trip back to
+    //    a machine that already has this branch at an older commit). If the
+    //    branch isn't on the remote (an ephemeral one never pushed), this falls
+    //    back to a local checkout or a fresh session branch.
     if let Some(branch) = branch_name.map(str::trim).filter(|b| !b.is_empty()) {
-        let on_remote =
-            git::fetch_and_reset_to_remote_branch(&clone_path, "origin", branch).unwrap_or(false);
-        if !on_remote {
-            if let Err(e) =
-                git::checkout_or_create_session_branch(&clone_path, session_id, Some(branch))
-            {
+        match git::checkout_or_create_session_branch(&clone_path, session_id, Some(branch), remote)
+        {
+            Ok(resolution) => {
+                if let Some(w) = resolution.warning {
+                    warn!("pulled session {session_id}: {w}");
+                }
+            }
+            Err(e) => {
                 warn!("pulled session {session_id}: branch '{branch}' checkout failed: {e}");
             }
         }

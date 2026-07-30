@@ -4443,7 +4443,10 @@ impl Render for AppState {
 
                 // --- Pull warning banner (absolute overlay at top) ---
                 if let Some(ref warning) = self.pull_warning {
-                    let label = format!("git pull failed: {warning}");
+                    // The banner carries more than pull failures now (branch
+                    // resolution warnings land here too), so the message
+                    // supplies its own context rather than being prefixed.
+                    let label = warning.clone();
                     main_area = main_area.child(
                         div()
                             .absolute()

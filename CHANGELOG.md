@@ -27,6 +27,20 @@ Changes on `master` awaiting the next tagged release.
   prompt carries a project index, so it could reappear against a different project's
   archives once the indices shifted underneath it.
 
+### Fixed
+- Naming an existing branch in "New session with details" no longer silently starts
+  the session on a stale copy of it. Because a workspace is an APFS clone of the
+  source repo, every branch you have ever checked out there already exists locally,
+  so the old local-first lookup always won and the remote was never consulted —
+  which meant long-lived rebased or PR-stacked branches quietly began from an
+  out-of-date base. Branch resolution is now remote-first: it always fetches, then
+  moves the workspace's copy of the branch onto the remote tip. The `origin/` prefix
+  is now optional (`origin/feature/x` and `feature/x` are the same request), and the
+  remote is taken from the project's configured remote rather than assuming `origin`.
+  If the branch can't be confirmed up to date — unreachable remote, or uncommitted
+  changes in the source repo blocking the checkout — the session is refused with an
+  explanation instead of quietly starting from the wrong base.
+
 ## [0.2.0] - 2026-07-25
 
 The large batch of work merged after the 0.1.0 baseline.
