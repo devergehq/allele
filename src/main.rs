@@ -50,7 +50,8 @@ use actions::{
 };
 use app_state::{
     AppState, ChangesPanelState, ConfirmationState, DrawerState, MainTab, ReaderState, RichState,
-    RightPanelState, SidebarState, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
+    RightPanelState, SidebarState, StructuralStamp, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH,
+    SIDEBAR_MIN_WIDTH,
 };
 use gpui::*;
 use project::Project;
@@ -2394,6 +2395,37 @@ impl AppState {
         }
     }
 
+    /// Snapshot the sidebar's current shape. See `StructuralStamp`.
+    pub(crate) fn structural_stamp(&self) -> StructuralStamp {
+        app_state::structural_stamp(&self.projects)
+    }
+
+    /// Arm a confirmation gate, recording the shape of the world it was armed
+    /// against.
+    ///
+    /// Every gate goes through here rather than assigning the field directly,
+    /// so a confirmation added later inherits the staleness check for free
+    /// instead of depending on someone remembering it exists.
+    pub(crate) fn arm_confirmation(&mut self, arm: impl FnOnce(&mut ConfirmationState)) {
+        let stamp = self.structural_stamp();
+        arm(&mut self.confirming);
+        self.confirming.armed_at = Some(stamp);
+    }
+
+    /// True when a gate is armed against a shape the sidebar no longer has —
+    /// something was added or removed underneath the prompt, so whatever index
+    /// it holds can no longer be trusted to mean what the user picked.
+    ///
+    /// A pure reorder leaves all three counts untouched and so is invisible
+    /// here; the reorder handlers clear the gates themselves.
+    pub(crate) fn confirmation_is_stale(&self) -> bool {
+        self.confirming.any_armed()
+            && self
+                .confirming
+                .armed_at
+                .is_some_and(|armed| armed != self.structural_stamp())
+    }
+
     /// Remove a project and all its sessions (deleting all clones asynchronously).
     pub(crate) fn remove_project(
         &mut self,
@@ -2439,11 +2471,10 @@ impl AppState {
             other => other,
         };
 
-        // Archive confirmation gates carry a project index, which every later
-        // project just shifted out from under. An armed gate would resolve to
-        // the wrong project's archives.
-        self.confirming.delete_archive = None;
-        self.confirming.delete_all_archives = None;
+        // Every later project just shifted index. The stamp check would catch
+        // this on the next render anyway, but dismissing here means the prompt
+        // never survives even one frame past the removal.
+        self.confirming.dismiss_armed();
 
         self.mark_settings_dirty();
         self.mark_state_dirty();
@@ -3562,6 +3593,7 @@ fn main() {
                             dirty_merge: None,
                             delete_archive: None,
                             delete_all_archives: None,
+                            armed_at: None,
                         },
                         rich: RichState {
                             view: None,

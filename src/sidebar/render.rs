@@ -204,6 +204,14 @@ pub(crate) fn build_sidebar_items(
     _window: &mut Window,
     cx: &mut Context<AppState>,
 ) -> Vec<AnyElement> {
+    // A confirmation armed against a shape the sidebar no longer has would
+    // render against whatever now occupies its index — a destructive prompt
+    // silently relocated to a row the user never picked. Drop it before it can
+    // be drawn; the dispatcher refuses the matching action for the same reason.
+    if state.confirmation_is_stale() {
+        state.confirming.dismiss_armed();
+    }
+
     // Build sidebar items: for each project, a header then its sessions
     let mut sidebar_items: Vec<AnyElement> = Vec::new();
     let active_cursor = state.active;

@@ -52,7 +52,7 @@ impl AppState {
         if git::is_working_tree_dirty(&project.source_path)
             && self.confirming.dirty_session.is_none()
         {
-            self.confirming.dirty_session = Some(project_idx);
+            self.arm_confirmation(|c| c.dirty_session = Some(project_idx));
             cx.notify();
             return;
         }

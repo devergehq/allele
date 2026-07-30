@@ -27,6 +27,22 @@ impl AppState {
         };
         // Dismiss the session context menu on any action.
         self.session_context_menu = None;
+
+        // A prompt armed against a shape the sidebar no longer has cannot be
+        // trusted: its index may now address a different session, project, or
+        // archive. Dismiss it, and refuse whatever destructive action it was
+        // about to authorise. Unrelated actions still go through — a stale
+        // prompt is no reason to swallow an ordinary click.
+        if self.confirmation_is_stale() {
+            self.confirming.dismiss_armed();
+            if action.needs_confirmation() {
+                warn!("Dropped {action:?}: its confirmation went stale before it was answered");
+                cx.notify();
+                return;
+            }
+            cx.notify();
+        }
+
         let mut skip_refocus = false;
         match action {
             PendingAction::Session(a) => {
@@ -137,9 +153,11 @@ impl AppState {
             } => {
                 // Arm the inline confirmation gate. The sidebar row will
                 // render Confirm/Cancel buttons on the next frame.
-                self.confirming.discard = Some(SessionCursor {
-                    project_idx,
-                    session_idx,
+                self.arm_confirmation(|c| {
+                    c.discard = Some(SessionCursor {
+                        project_idx,
+                        session_idx,
+                    })
                 });
                 cx.notify();
             }
@@ -197,7 +215,7 @@ impl AppState {
                     .unwrap_or(false);
 
                 if is_dirty {
-                    self.confirming.dirty_merge = Some(cursor);
+                    self.arm_confirmation(|c| c.dirty_merge = Some(cursor));
                     cx.notify();
                 } else {
                     self.execute_merge_and_close(cursor, false, window, cx);
@@ -325,9 +343,9 @@ impl AppState {
                                     };
                                 }
                             }
-                            // Index-carrying confirm states are now stale.
-                            self.confirming.discard = None;
-                            self.confirming.dirty_merge = None;
+                            // A reorder leaves every count untouched, so the
+                            // structural stamp cannot see it. Dismiss here.
+                            self.confirming.dismiss_armed();
                             self.mark_state_dirty();
                             cx.notify();
                         }
@@ -611,7 +629,7 @@ impl AppState {
                 project_idx,
                 archive_idx,
             } => {
-                self.confirming.delete_archive = Some((project_idx, archive_idx));
+                self.arm_confirmation(|c| c.delete_archive = Some((project_idx, archive_idx)));
                 cx.notify();
             }
             ArchiveAction::CancelDeleteArchive => {
@@ -621,8 +639,10 @@ impl AppState {
             ArchiveAction::RequestDeleteAllArchives { project_idx } => {
                 // Only one destructive strip open at a time — a per-archive
                 // gate left armed underneath would ask two questions at once.
-                self.confirming.delete_archive = None;
-                self.confirming.delete_all_archives = Some(project_idx);
+                self.arm_confirmation(|c| {
+                    c.delete_archive = None;
+                    c.delete_all_archives = Some(project_idx);
+                });
                 cx.notify();
             }
             ArchiveAction::CancelDeleteAllArchives => {
@@ -1064,13 +1084,9 @@ impl AppState {
                     if let Some(editing) = &mut self.editing_project_settings {
                         *editing = remap(*editing);
                     }
-                    // Index-carrying confirm states are now stale — leaving one
-                    // armed would point it at whichever project took that slot.
-                    self.confirming.remove_project = None;
-                    self.confirming.discard = None;
-                    self.confirming.dirty_merge = None;
-                    self.confirming.delete_archive = None;
-                    self.confirming.delete_all_archives = None;
+                    // A reorder leaves every count untouched, so the structural
+                    // stamp cannot see it. Dismiss here.
+                    self.confirming.dismiss_armed();
                     self.mark_settings_dirty();
                     self.mark_state_dirty();
                     cx.notify();
@@ -1089,7 +1105,7 @@ impl AppState {
                 }
             }
             ProjectAction::RequestRemoveProject(project_idx) => {
-                self.confirming.remove_project = Some(project_idx);
+                self.arm_confirmation(|c| c.remove_project = Some(project_idx));
                 cx.notify();
             }
             ProjectAction::CancelRemoveProject => {
