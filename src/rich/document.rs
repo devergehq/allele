@@ -7,7 +7,7 @@
 use crate::rich::narrative::{Annotation, NarrativeProjector};
 use crate::rich::permissions::{DecisionLog, PermissionAction, PermissionRequest};
 use crate::rich::tool_rail::{classify_tool, default_collapsed};
-use crate::stream::RichEvent;
+use crate::stream::{NoticeKind, RichEvent};
 use std::collections::HashMap;
 
 /// Unique identifier for a block in the document.
@@ -72,6 +72,14 @@ pub enum BlockKind {
 
     /// A prompt the user submitted (echoed into the feed on submit).
     UserPrompt { content: String },
+
+    /// A compact one-line session annotation — PR opened, artifact published,
+    /// file edited outside Claude, plan accepted, hook error (DEV-321).
+    Notice {
+        kind: NoticeKind,
+        content: String,
+        link: Option<String>,
+    },
 
     /// Transient "thinking" indicator shown while the CLI is processing
     /// but hasn't produced any output blocks yet. Removed when the first
@@ -504,6 +512,27 @@ impl RichDocument {
                 Some(id)
             }
 
+            RichEvent::Notice {
+                kind,
+                text,
+                link,
+                parent_agent_id,
+            } => {
+                self.close_text_stream();
+                let id = self.push_block(Block {
+                    id: self.next_id,
+                    kind: BlockKind::Notice {
+                        kind,
+                        content: text,
+                        link,
+                    },
+                    parent_agent_id,
+                    collapsed: false,
+                    cached_height: None,
+                });
+                Some(id)
+            }
+
             RichEvent::Fallback {
                 raw,
                 reason,
@@ -512,6 +541,11 @@ impl RichDocument {
                 // An event we couldn't normalise. Render it collapsed so it
                 // stays inspectable without cluttering the narrative — the
                 // full raw payload is one click away.
+                //
+                // The Claude JSONL path no longer produces these for unknown
+                // top-level types (DEV-321); they now come only from genuinely
+                // corrupt lines and from other agent adapters, so the volume is
+                // low enough for a raw dump to be the right call.
                 self.close_text_stream();
                 let id = self.push_block(Block {
                     id: self.next_id,

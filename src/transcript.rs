@@ -248,6 +248,9 @@ fn stamp_parent_agent(event: &mut RichEvent, agent: String) {
         | RichEvent::EditDiff {
             parent_agent_id, ..
         }
+        | RichEvent::Notice {
+            parent_agent_id, ..
+        }
         | RichEvent::Fallback {
             parent_agent_id, ..
         } => {

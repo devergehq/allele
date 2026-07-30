@@ -215,18 +215,18 @@ mod tests {
     #[test]
     fn unsupported_lines_remain_inspectable() {
         let ledger = ingest_corpus();
-        // The unknown top-level type and the invalid-JSON line both survive as
-        // raw, inspectable entries carrying Fallback events.
+        // An unknown top-level type survives as a raw, inspectable entry with
+        // its coverage and diagnostic intact — but emits no renderable event,
+        // so it never reaches the reading view (DEV-321). Retention lives in
+        // the ledger; rendering is a separate decision.
         let unknown = ledger
             .entries()
             .iter()
             .find(|e| e.raw.contains("totally_new_event"))
             .expect("unknown event retained");
         assert_eq!(unknown.coverage, Coverage::Fallback);
-        assert!(matches!(
-            unknown.events.first(),
-            Some(RichEvent::Fallback { .. })
-        ));
+        assert!(unknown.events.is_empty());
+        assert!(!unknown.diagnostics.is_empty());
 
         let bad = ledger
             .entries()

@@ -97,19 +97,127 @@ impl StreamParser {
             StreamLine::StreamEvent(wrapper) => self.handle_stream_event(wrapper),
             StreamLine::Result(result) => self.handle_result(result),
             StreamLine::RateLimit(_) => ParsedLine::new(Vec::new(), Coverage::Ignored),
+            StreamLine::SessionMetadata => ParsedLine::new(Vec::new(), Coverage::Ignored),
+            StreamLine::PrLink(pr) => self.handle_pr_link(pr),
+            StreamLine::FrameLink(frame) => self.handle_frame_link(frame),
+            StreamLine::QueueOperation(op) => self.handle_queue_operation(op),
+            StreamLine::Attachment(att) => self.handle_attachment(att),
             StreamLine::Unknown => {
+                // An event type we don't model. Emit nothing: the ledger has
+                // already retained the exact raw line, so rendering it buys no
+                // information and costs readability — unmodelled types are ~40%
+                // of a session file (DEV-321). Coverage stays `Fallback` and the
+                // diagnostic is still recorded, so parser gaps remain reportable
+                // (DEV-322) without polluting the reading view.
                 let reason = "unknown top-level event type".to_string();
-                let mut pl = ParsedLine::new(
-                    vec![RichEvent::Fallback {
-                        raw: line.to_string(),
-                        reason: reason.clone(),
-                        parent_agent_id: None,
-                    }],
-                    Coverage::Fallback,
-                );
+                let mut pl = ParsedLine::new(Vec::new(), Coverage::Fallback);
                 pl.diagnostics.push(reason);
                 pl
             }
+        }
+    }
+
+    fn handle_pr_link(&self, pr: PrLinkEvent) -> ParsedLine {
+        let label = match (pr.pr_number, &pr.pr_repository) {
+            (Some(n), Some(repo)) => format!("pull request {repo}#{n}"),
+            (Some(n), None) => format!("pull request #{n}"),
+            (None, Some(repo)) => format!("pull request on {repo}"),
+            (None, None) => "pull request".to_string(),
+        };
+        ParsedLine::full(vec![RichEvent::Notice {
+            kind: NoticeKind::PullRequest,
+            text: label,
+            link: pr.pr_url,
+            parent_agent_id: None,
+        }])
+    }
+
+    fn handle_frame_link(&self, frame: FrameLinkEvent) -> ParsedLine {
+        let title = frame.title.unwrap_or_else(|| "artifact".to_string());
+        ParsedLine::full(vec![RichEvent::Notice {
+            kind: NoticeKind::Artifact,
+            text: title,
+            link: frame.frame_url.or(frame.path),
+            parent_agent_id: None,
+        }])
+    }
+
+    fn handle_queue_operation(&self, op: QueueOperationEvent) -> ParsedLine {
+        // Only enqueues are interesting; dequeue/remove are the bookkeeping
+        // half of the same action and would double every entry.
+        if op.operation.as_deref() != Some("enqueue") {
+            return ParsedLine::new(Vec::new(), Coverage::Ignored);
+        }
+        let content = op.content.unwrap_or_default();
+        let summary = first_line_truncated(&content, 120);
+        if summary.is_empty() {
+            return ParsedLine::new(Vec::new(), Coverage::Ignored);
+        }
+        ParsedLine::full(vec![RichEvent::Notice {
+            kind: NoticeKind::Queued,
+            text: summary,
+            link: None,
+            parent_agent_id: None,
+        }])
+    }
+
+    fn handle_attachment(&self, att: AttachmentEvent) -> ParsedLine {
+        let Some(attachment) = att.attachment else {
+            return ParsedLine::new(Vec::new(), Coverage::Ignored);
+        };
+        let notice = match attachment {
+            Attachment::EditedTextFile { filename } => Some((
+                NoticeKind::FileEdited,
+                format!("edited outside Claude: {}", basename(filename.as_deref())),
+                filename,
+            )),
+            Attachment::File {
+                filename,
+                display_path,
+            } => {
+                let shown = display_path
+                    .clone()
+                    .unwrap_or_else(|| basename(filename.as_deref()));
+                Some((
+                    NoticeKind::FileAttached,
+                    format!("attached {shown}"),
+                    filename,
+                ))
+            }
+            Attachment::PlanModeExit { plan_file_path } => Some((
+                NoticeKind::PlanAccepted,
+                "plan accepted".to_string(),
+                plan_file_path,
+            )),
+            Attachment::HookBlockingError {
+                hook_name,
+                blocking_error,
+            }
+            | Attachment::HookNonBlockingError {
+                hook_name,
+                blocking_error,
+            } => {
+                let hook = hook_name.unwrap_or_else(|| "hook".to_string());
+                let detail = hook_error_detail(blocking_error.as_ref());
+                let text = match detail {
+                    Some(d) => format!("{hook} hook error: {d}"),
+                    None => format!("{hook} hook error"),
+                };
+                Some((NoticeKind::HookError, text, None))
+            }
+            // Context plumbing — task reminders, skill/agent/MCP listings, hook
+            // success, date changes. Retained by the ledger, rendered nowhere.
+            Attachment::Other => None,
+        };
+
+        match notice {
+            Some((kind, text, link)) => ParsedLine::full(vec![RichEvent::Notice {
+                kind,
+                text,
+                link,
+                parent_agent_id: None,
+            }]),
+            None => ParsedLine::new(Vec::new(), Coverage::Ignored),
         }
     }
 
@@ -308,6 +416,47 @@ impl StreamParser {
     }
 }
 
+/// Final path component, for a compact notice label.
+fn basename(path: Option<&str>) -> String {
+    let Some(path) = path else {
+        return "file".to_string();
+    };
+    path.rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+/// First non-empty line of `text`, truncated to `max` chars.
+fn first_line_truncated(text: &str, max: usize) -> String {
+    let line = text.lines().map(str::trim).find(|l| !l.is_empty());
+    let Some(line) = line else {
+        return String::new();
+    };
+    if line.chars().count() <= max {
+        return line.to_string();
+    }
+    let head: String = line.chars().take(max).collect();
+    format!("{head}…")
+}
+
+/// Pull a human-readable message out of a hook error payload, which is an
+/// object in the samples we have but may also be a bare string.
+fn hook_error_detail(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    let raw = match value {
+        serde_json::Value::String(s) => s.as_str(),
+        other => other
+            .get("blockingError")
+            .or_else(|| other.get("nonBlockingError"))
+            .or_else(|| other.get("message"))
+            .and_then(|v| v.as_str())?,
+    };
+    let summary = first_line_truncated(raw, 120);
+    (!summary.is_empty()).then_some(summary)
+}
+
 /// Extract structured diff data from an Edit tool_use input.
 fn extract_edit_diff(
     tool_use_id: &str,
@@ -395,18 +544,257 @@ mod tests {
     }
 
     #[test]
-    fn unknown_type_is_captured_as_fallback() {
+    fn unknown_type_renders_nothing_but_is_still_counted() {
+        // DEV-321: unmodelled types must not reach the reading view — the
+        // ledger already retains the raw line — but coverage stays `Fallback`
+        // and the diagnostic survives so parser gaps remain reportable.
         let line = r#"{"type":"future_event_type","data":"whatever"}"#;
         let mut parser = StreamParser::new();
         let parsed = parser.feed_line_detailed(line);
         assert_eq!(parsed.coverage, Coverage::Fallback);
-        assert_eq!(parsed.events.len(), 1);
-        match &parsed.events[0] {
-            RichEvent::Fallback { raw, reason, .. } => {
-                assert!(raw.contains("future_event_type"));
-                assert!(reason.contains("unknown top-level"));
+        assert!(
+            parsed.events.is_empty(),
+            "unknown types must emit no renderable event, got {:?}",
+            parsed.events
+        );
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert!(parsed.diagnostics[0].contains("unknown top-level"));
+    }
+
+    #[test]
+    fn session_metadata_types_are_ignored() {
+        // The bulk of a JSONL session file: titles, modes, agent names,
+        // file-history bookkeeping. None of it belongs in a reading view.
+        let lines = [
+            r#"{"type":"custom-title","customTitle":"Claude 22","sessionId":"s1"}"#,
+            r#"{"type":"agent-name","agentName":"Claude 22","sessionId":"s1"}"#,
+            r#"{"type":"permission-mode","permissionMode":"acceptEdits","sessionId":"s1"}"#,
+            r#"{"type":"mode","mode":"normal","sessionId":"s1"}"#,
+            r#"{"type":"last-prompt","leafUuid":"u1","sessionId":"s1"}"#,
+            r#"{"type":"ai-title","aiTitle":"Some title","sessionId":"s1"}"#,
+            r#"{"type":"bridge-session","sessionId":"s1","bridgeSessionId":"cse_1"}"#,
+            r#"{"type":"fork-context-ref","agentId":"a1","parentSessionId":"s0"}"#,
+            r#"{"type":"file-history-snapshot","messageId":"m1","snapshot":{}}"#,
+            r#"{"type":"file-history-delta","messageId":"m1","trackingPath":"/tmp/x"}"#,
+        ];
+        let mut parser = StreamParser::new();
+        for line in lines {
+            let parsed = parser.feed_line_detailed(line);
+            assert_eq!(parsed.coverage, Coverage::Ignored, "line: {line}");
+            assert!(parsed.events.is_empty(), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn pr_link_becomes_a_notice() {
+        let line = r#"{"type":"pr-link","sessionId":"s1","prNumber":8687,"prUrl":"https://github.com/o/r/pull/8687","prRepository":"o/r","timestamp":"2026-07-26T00:41:28.086Z"}"#;
+        let mut parser = StreamParser::new();
+        let parsed = parser.feed_line_detailed(line);
+        assert_eq!(parsed.coverage, Coverage::Full);
+        match &parsed.events[..] {
+            [RichEvent::Notice {
+                kind, text, link, ..
+            }] => {
+                assert_eq!(*kind, NoticeKind::PullRequest);
+                assert_eq!(text, "pull request o/r#8687");
+                assert_eq!(link.as_deref(), Some("https://github.com/o/r/pull/8687"));
             }
-            other => panic!("Expected Fallback, got: {other:?}"),
+            other => panic!("expected one PullRequest notice, got {other:?}"),
+        }
+    }
+
+    /// Replays every JSONL session file on this machine through the parser and
+    /// prints a coverage census. Ignored by default because it depends on local
+    /// data; run it after a Claude Code upgrade to find newly-shipped event
+    /// types before they reach users:
+    ///
+    ///   cargo test -- --ignored --nocapture replay_local_corpus
+    ///
+    /// Superseded as a shipped feature by DEV-322.
+    #[test]
+    #[ignore = "reads the developer's local ~/.claude/projects corpus"]
+    fn replay_local_corpus() {
+        use std::collections::BTreeMap;
+        use std::io::BufRead;
+
+        let Some(root) = dirs::home_dir().map(|h| h.join(".claude").join("projects")) else {
+            eprintln!("no home directory; skipping");
+            return;
+        };
+        let mut files = Vec::new();
+        collect_jsonl(&root, &mut files);
+        if files.is_empty() {
+            eprintln!("no JSONL files under {}; skipping", root.display());
+            return;
+        }
+
+        let (mut total, mut rendered, mut unknown) = (0u64, 0u64, 0u64);
+        let mut unknown_types: BTreeMap<String, u64> = BTreeMap::new();
+        let mut notices: BTreeMap<String, u64> = BTreeMap::new();
+        for path in &files {
+            let Ok(file) = std::fs::File::open(path) else {
+                continue;
+            };
+            let mut parser = StreamParser::new();
+            for line in std::io::BufReader::new(file).lines().map_while(Result::ok) {
+                if line.trim().is_empty() {
+                    continue;
+                }
+                total += 1;
+                let parsed = parser.feed_line_detailed(&line);
+                rendered += parsed.events.len() as u64;
+                for event in &parsed.events {
+                    if let RichEvent::Notice { kind, .. } = event {
+                        *notices.entry(format!("{kind:?}")).or_default() += 1;
+                    }
+                }
+                if parsed.coverage == Coverage::Fallback {
+                    unknown += 1;
+                    let ty = serde_json::from_str::<serde_json::Value>(&line)
+                        .ok()
+                        .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(String::from))
+                        .unwrap_or_else(|| "<none>".into());
+                    *unknown_types.entry(ty).or_default() += 1;
+                }
+            }
+        }
+
+        eprintln!("files={}  lines={total}  events={rendered}", files.len());
+        eprintln!(
+            "unmodelled lines: {unknown} ({:.2}%)",
+            100.0 * unknown as f64 / total.max(1) as f64
+        );
+        for (ty, n) in &unknown_types {
+            eprintln!("  {ty}: {n}");
+        }
+        eprintln!("notices emitted:");
+        for (kind, n) in &notices {
+            eprintln!("  {kind}: {n}");
+        }
+
+        // The whole point of DEV-321: no unmodelled line may reach the view.
+        let fallbacks_rendered = unknown_types.is_empty();
+        assert!(
+            fallbacks_rendered || unknown < total,
+            "sanity: not every line can be unmodelled"
+        );
+    }
+
+    fn collect_jsonl(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_jsonl(&path, out);
+            } else if path.extension().is_some_and(|e| e == "jsonl") {
+                out.push(path);
+            }
+        }
+    }
+
+    #[test]
+    fn frame_link_becomes_an_artifact_notice() {
+        let line = r#"{"type":"frame-link","sessionId":"s1","path":"/tmp/a.html","frameUrl":"https://claude.ai/code/artifact/x","title":"RN vs Capacitor"}"#;
+        let mut parser = StreamParser::new();
+        let parsed = parser.feed_line_detailed(line);
+        match &parsed.events[..] {
+            [RichEvent::Notice {
+                kind, text, link, ..
+            }] => {
+                assert_eq!(*kind, NoticeKind::Artifact);
+                assert_eq!(text, "RN vs Capacitor");
+                assert_eq!(link.as_deref(), Some("https://claude.ai/code/artifact/x"));
+            }
+            other => panic!("expected one Artifact notice, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn only_enqueue_queue_operations_surface() {
+        let mut parser = StreamParser::new();
+        let enqueue = r#"{"type":"queue-operation","operation":"enqueue","sessionId":"s1","content":"run the tests\nthen report"}"#;
+        match &parser.feed_line_detailed(enqueue).events[..] {
+            [RichEvent::Notice { kind, text, .. }] => {
+                assert_eq!(*kind, NoticeKind::Queued);
+                assert_eq!(text, "run the tests");
+            }
+            other => panic!("expected a Queued notice, got {other:?}"),
+        }
+        // The dequeue half of the same action would double every entry.
+        let dequeue = r#"{"type":"queue-operation","operation":"dequeue","sessionId":"s1","content":"run the tests"}"#;
+        let parsed = parser.feed_line_detailed(dequeue);
+        assert_eq!(parsed.coverage, Coverage::Ignored);
+        assert!(parsed.events.is_empty());
+    }
+
+    #[test]
+    fn signal_bearing_attachments_become_notices() {
+        let cases: [(&str, NoticeKind, &str); 4] = [
+            (
+                r#"{"type":"attachment","attachment":{"type":"edited_text_file","filename":"/a/b/Foo.php","snippet":"1\t<?php"}}"#,
+                NoticeKind::FileEdited,
+                "edited outside Claude: Foo.php",
+            ),
+            (
+                r#"{"type":"attachment","attachment":{"type":"file","filename":"/a/.storybook/preview.js","content":"x","displayPath":".storybook/preview.js"}}"#,
+                NoticeKind::FileAttached,
+                "attached .storybook/preview.js",
+            ),
+            (
+                r#"{"type":"attachment","attachment":{"type":"plan_mode_exit","planFilePath":"/p/plan.md","planExists":false}}"#,
+                NoticeKind::PlanAccepted,
+                "plan accepted",
+            ),
+            (
+                r#"{"type":"attachment","attachment":{"type":"hook_blocking_error","hookName":"Stop","hookEvent":"Stop","blockingError":{"blockingError":"I want to interrogate an idea.","command":"/bin/hook"}}}"#,
+                NoticeKind::HookError,
+                "Stop hook error: I want to interrogate an idea.",
+            ),
+        ];
+        let mut parser = StreamParser::new();
+        for (line, want_kind, want_text) in cases {
+            match &parser.feed_line_detailed(line).events[..] {
+                [RichEvent::Notice { kind, text, .. }] => {
+                    assert_eq!(*kind, want_kind, "line: {line}");
+                    assert_eq!(text, want_text, "line: {line}");
+                }
+                other => panic!("expected one notice for {line}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn plumbing_attachments_are_ignored_not_fallback() {
+        // Unrecognised subtypes must degrade to Ignored — never fail the whole
+        // line into the unknown-type path.
+        let lines = [
+            r#"{"type":"attachment","attachment":{"type":"task_reminder","content":"..."}}"#,
+            r#"{"type":"attachment","attachment":{"type":"skill_listing","skills":[]}}"#,
+            r#"{"type":"attachment","attachment":{"type":"some_future_subtype","x":1}}"#,
+            r#"{"type":"attachment"}"#,
+        ];
+        let mut parser = StreamParser::new();
+        for line in lines {
+            let parsed = parser.feed_line_detailed(line);
+            assert_eq!(parsed.coverage, Coverage::Ignored, "line: {line}");
+            assert!(parsed.events.is_empty(), "line: {line}");
+        }
+    }
+
+    #[test]
+    fn hook_error_accepts_a_bare_string_payload() {
+        // Guards the shape assumption: our samples nest the message in an
+        // object, but a bare string must not break parsing.
+        let line = r#"{"type":"attachment","attachment":{"type":"hook_blocking_error","hookName":"PreToolUse","blockingError":"denied by policy"}}"#;
+        let mut parser = StreamParser::new();
+        match &parser.feed_line_detailed(line).events[..] {
+            [RichEvent::Notice { kind, text, .. }] => {
+                assert_eq!(*kind, NoticeKind::HookError);
+                assert_eq!(text, "PreToolUse hook error: denied by policy");
+            }
+            other => panic!("expected a HookError notice, got {other:?}"),
         }
     }
 

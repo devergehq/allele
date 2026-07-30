@@ -21,13 +21,14 @@ Changes on `master` awaiting the next tagged release.
 - "Delete all" on the sidebar ARCHIVES header — clears every archived session in a
   project in one confirmed step, instead of one ✕-and-confirm per row. Hover-revealed,
   and gated by the same inline prompt as a single delete.
+- The transcript now surfaces session events it previously ignored, as compact
+  one-line notices: a pull request opened, an artifact published, a file edited
+  outside Claude, a plan accepted, a queued message, and hook errors.
 
 ### Fixed
 - Archive delete confirmations no longer survive a project reorder or removal. An armed
   prompt carries a project index, so it could reappear against a different project's
   archives once the indices shifted underneath it.
-
-### Fixed
 - Naming an existing branch in "New session with details" no longer silently starts
   the session on a stale copy of it. Because a workspace is an APFS clone of the
   source repo, every branch you have ever checked out there already exists locally,
@@ -40,6 +41,14 @@ Changes on `master` awaiting the next tagged release.
   If the branch can't be confirmed up to date — unreachable remote, or uncommitted
   changes in the source repo blocking the checkout — the session is refused with an
   explanation instead of quietly starting from the wrong base.
+- The transcript no longer fills with `⚠ unsupported event` JSON dumps. Claude Code
+  writes a lot of session bookkeeping — titles, modes, agent names, file-history
+  backups, context plumbing — interleaved with the conversation, and every line the
+  parser didn't model was rendered raw. On a real corpus that was roughly 40% of the
+  transcript. Those types are now modelled and skipped, and any *future* event type
+  Claude Code introduces is recorded without being rendered, so the reading view
+  degrades quietly instead of filling with JSON. Nothing is lost: the session ledger
+  still retains every original line verbatim.
 
 ## [0.2.0] - 2026-07-25
 

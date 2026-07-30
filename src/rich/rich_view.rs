@@ -25,7 +25,7 @@ use super::document::{
 use super::narrative::{Annotation, LocusPhase, NarrativeRole};
 use super::permissions::{PermissionAction, PermissionRequest, RiskLevel};
 use super::reader::{JumpKind, NarrativeIndex, NavCounts, UnreadTracker};
-use crate::stream::RichEvent;
+use crate::stream::{NoticeKind, RichEvent};
 use crate::text_input::{TextInput, TextInputEvent};
 
 // ── Catppuccin Mocha palette (matching terminal) ──────────────────
@@ -630,6 +630,13 @@ fn render_block(
         BlockKind::UserPrompt { content } => {
             wrapper = wrapper.child(render_user_prompt(content, font_size));
         }
+        BlockKind::Notice {
+            kind,
+            content,
+            link,
+        } => {
+            wrapper = wrapper.child(render_notice(*kind, content, link.as_deref(), font_size));
+        }
         BlockKind::AwaitingResponse => {
             wrapper = wrapper.child(render_awaiting(font_size));
         }
@@ -708,6 +715,7 @@ fn block_index_fields(kind: &BlockKind) -> (String, Option<String>) {
         } => (format!("{tool_name} {input_summary}"), None),
         BlockKind::Diff { file_path, .. } => (file_path.clone(), Some(file_path.clone())),
         BlockKind::UserPrompt { content } => (content.clone(), None),
+        BlockKind::Notice { content, link, .. } => (content.clone(), link.clone()),
         BlockKind::SessionEnd { .. } => ("session complete".to_string(), None),
         _ => (String::new(), None),
     }
@@ -1912,6 +1920,42 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
                         .child(content.to_string()),
                 ),
         )
+}
+
+// ── Notice (DEV-321) ──────────────────────────────────────────────
+
+/// A single quiet line for a session event that carries signal but isn't
+/// conversation — a PR opened, an artifact published, a file edited outside
+/// Claude. Deliberately lighter than a tool call: these punctuate the
+/// narrative, they don't compete with it.
+fn render_notice(kind: NoticeKind, content: &str, link: Option<&str>, font_size: f32) -> Div {
+    let color = if kind.is_error() {
+        theme().danger
+    } else {
+        theme().text_faint
+    };
+    let mut row = div()
+        .w_full()
+        .min_w_0()
+        .my(px(2.0))
+        .pl(px(24.0))
+        .flex()
+        .items_baseline()
+        .gap(px(6.0))
+        .text_size(px(font_size - 1.0))
+        .text_color(color)
+        .child(div().flex_shrink_0().child(kind.glyph()))
+        .child(div().min_w_0().child(content.to_string()));
+
+    if let Some(link) = link {
+        row = row.child(
+            div()
+                .min_w_0()
+                .text_color(with_alpha(color, 0.7))
+                .child(link.to_string()),
+        );
+    }
+    row
 }
 
 // ── Permission request ────────────────────────────────────────────
