@@ -28,6 +28,28 @@ pub enum PendingAction {
     Overlay(OverlayAction),
 }
 
+impl PendingAction {
+    /// Is this action only reachable by answering a confirmation prompt?
+    ///
+    /// These are the destructive ones a confirm strip authorises. Each carries
+    /// the index the prompt was armed with, so if that prompt has gone stale
+    /// the action must be dropped rather than applied to whatever now occupies
+    /// the slot. Everything else is dispatched normally — a stale prompt is no
+    /// reason to swallow an unrelated click.
+    pub fn needs_confirmation(&self) -> bool {
+        matches!(
+            self,
+            PendingAction::Session(
+                SessionAction::DiscardSession { .. }
+                    | SessionAction::ProceedDirtyMerge { .. }
+                    | SessionAction::ProceedDirtySession(_)
+            ) | PendingAction::Archive(
+                ArchiveAction::DeleteArchive { .. } | ArchiveAction::DeleteAllArchives { .. }
+            ) | PendingAction::Project(ProjectAction::RemoveProject(_))
+        )
+    }
+}
+
 /// Session lifecycle — create, close, select, resume, edit, pin, reveal.
 #[derive(Debug)]
 pub enum SessionAction {
@@ -144,6 +166,13 @@ pub enum ArchiveAction {
     },
     /// Cancel archive deletion confirmation.
     CancelDeleteArchive,
+    /// Arm the inline confirmation gate before deleting *every* archive ref
+    /// belonging to one project.
+    RequestDeleteAllArchives { project_idx: usize },
+    /// Cancel the bulk archive deletion confirmation.
+    CancelDeleteAllArchives,
+    /// Delete every archive ref for a project without merging any of them.
+    DeleteAllArchives { project_idx: usize },
     /// Merge an archived session ref into canonical's working tree.
     MergeArchive {
         project_idx: usize,

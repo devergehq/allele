@@ -18,6 +18,14 @@ Changes on `master` awaiting the next tagged release.
   hides sessions with no live agent — suspended and ended — along with any project
   left with nothing to show, so a tree of dozens of parked sessions collapses to
   just the work in flight. Nothing is deleted; toggling back restores the full tree.
+- "Delete all" on the sidebar ARCHIVES header — clears every archived session in a
+  project in one confirmed step, instead of one ✕-and-confirm per row. Hover-revealed,
+  and gated by the same inline prompt as a single delete.
+
+### Fixed
+- Archive delete confirmations no longer survive a project reorder or removal. An armed
+  prompt carries a project index, so it could reappear against a different project's
+  archives once the indices shifted underneath it.
 
 ## [0.2.0] - 2026-07-25
 
