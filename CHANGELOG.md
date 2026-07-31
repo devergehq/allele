@@ -19,6 +19,13 @@ Changes on `master` awaiting the next tagged release.
   left with nothing to show, so a tree of dozens of parked sessions collapses to
   just the work in flight. Nothing is deleted; toggling back restores the full tree.
 
+### Fixed
+- New sessions no longer fail with `Failed to create PTY: Too many open files
+  (os error 24)` once a project has many sessions open. macOS gives apps launched
+  from Finder/Dock a soft file-descriptor limit of 256, which a few dozen sessions'
+  worth of PTYs exhausts; Allele now raises its own limit at startup before
+  anything spawns.
+
 ## [0.2.0] - 2026-07-25
 
 The large batch of work merged after the 0.1.0 baseline.

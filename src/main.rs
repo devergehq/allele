@@ -11,6 +11,7 @@ mod config;
 mod debug_capture;
 mod drawer;
 mod errors;
+mod fd_limit;
 mod git;
 mod hook_events;
 mod hooks;
@@ -2652,6 +2653,12 @@ fn show_about_panel() {
 fn main() {
     errors::init_tracing();
     install_panic_hook();
+
+    // Raise the descriptor ceiling before anything spawns. launchd gives GUI
+    // apps a soft RLIMIT_NOFILE of 256, which a few dozen sessions' worth of
+    // PTYs exhausts — new sessions then die with EMFILE. Children inherit the
+    // limit in force when they fork, so this has to come first.
+    fd_limit::raise_open_file_limit();
 
     // Fix launchd's bare GUI PATH before anything spawns — PTY sessions,
     // the git availability check, and agent detection all inherit it.
