@@ -1,11 +1,15 @@
 name: CI
 
 # Fast, per-PR checks. Kept separate from release.yml (which only runs on
-# `v*` tags). Add further jobs here (clippy, test) as the tree is made clean
-# enough to enforce them.
+# `v*` tags).
 #
-# The `rustfmt` job is advisory until `master` has a branch-protection rule
-# requiring it — see CONTRIBUTING.md.
+# `rustfmt`, `test`, and `architecture` are all green on the current tree —
+# mark all three as required status checks in the branch-protection rule for
+# `master` (see CONTRIBUTING.md). Without that rule none of this blocks a merge.
+#
+# `clippy` is the one exception: it carries 47 pre-existing warnings plus one
+# deny-by-default error, so it runs advisory-only until DEV-349 clears them. A
+# permanently-red required check is one everyone learns to ignore.
 
 on:
   pull_request:
@@ -33,3 +37,65 @@ jobs:
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  test:
+    name: test
+    # Must be macOS: the crate pulls in cocoa/objc/core-text/security-framework
+    # for the target_os = "macos" paths, which don't build on Linux runners.
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        # GPUI + alacritty_terminal + tree-sitter dominate build time.
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test
+
+      - name: Run tests
+        run: cargo test --all-features
+
+  architecture:
+    name: architecture
+    # Split out from `test` so a violated ARCHITECTURE.md invariant is obvious
+    # in the status list rather than buried in the full test output.
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: test # share the `test` job's cache; same profile
+
+      - name: Architecture fitness tests
+        run: cargo test --test architecture -- --nocapture
+
+  clippy:
+    name: clippy (advisory)
+    # TODO(DEV-349): drop continue-on-error and add -D warnings once the 47
+    # warnings and the deny-level `overly_complex_bool_expr` error are cleared.
+    continue-on-error: true
+    runs-on: macos-14
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pinned Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+
+      - name: Run clippy
+        run: cargo clippy --all-targets --all-features
