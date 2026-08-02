@@ -13,6 +13,20 @@ BINARY="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 shift
 BINARY_DIR="$(dirname "$BINARY")"
 
+# A cargo `runner` is used for EVERY executable cargo runs for this target —
+# `cargo test` binaries included, not just `cargo run`. Bundling a test binary
+# and launching it via `open -W` detaches it from the terminal: stdout is
+# discarded, stderr goes to the log file, and `open` exits 0 regardless of the
+# harness's own exit code. The effect is that `cargo test` silently reports
+# success no matter how many tests fail.
+#
+# Only the real app binary needs the bundle (for CFBundleIdentifier). Everything
+# else — test harnesses, benches, examples — must exec directly so cargo sees
+# the true exit status.
+if [[ "$(basename "$BINARY")" != "Allele" ]]; then
+    exec "$BINARY" "$@"
+fi
+
 APP_DIR="$BINARY_DIR/Allele.app"
 CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
