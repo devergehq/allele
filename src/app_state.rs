@@ -5,8 +5,10 @@
 //! sub-struct composition target implemented in phase 11 of
 //! `docs/RE-DECOMPOSITION-PLAN.md`.
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 use gpui::{Entity, FocusHandle, Pixels, Point, WindowHandle};
 
@@ -19,6 +21,10 @@ use crate::{new_session_modal, rich, scratch_pad, settings_window, state, text_i
 pub(crate) const SIDEBAR_MIN_WIDTH: f32 = 160.0;
 pub(crate) const DRAWER_MIN_HEIGHT: f32 = 100.0;
 pub(crate) const RIGHT_SIDEBAR_MIN_WIDTH: f32 = 160.0;
+/// Height the main content area always keeps for itself above the drawer.
+/// The drawer's resize clamp reserves this, so dragging the drawer up can
+/// never push the content column into overflow.
+pub(crate) const MAIN_AREA_MIN_HEIGHT: f32 = 100.0;
 
 /// Which view is shown in the main (center) column.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -92,6 +98,16 @@ pub(crate) struct DrawerState {
     /// Focus handle for the inline rename input. Created lazily when rename
     /// mode first activates in a given AppState instance.
     pub(crate) rename_focus: Option<FocusHandle>,
+    /// Window-space Y of the main content area's top edge, recorded during
+    /// prepaint. The resize clamp needs it because the chrome stacked above the
+    /// drawer (attention rows, session summary, tab strip) is dynamic — a
+    /// static viewport-relative ceiling drifts as rows appear and lets the
+    /// drawer overshoot the space the column actually has.
+    ///
+    /// `Rc<Cell<_>>` because prepaint listeners are handed `&mut App`, not
+    /// `&mut Context<Self>`; routing through `Entity::update` there risks a
+    /// re-entrant borrow while this view is mid-render.
+    pub(crate) main_area_top: Rc<Cell<f32>>,
 }
 
 /// Outcome of loading a file into the Reader preview. Distinguishes readable

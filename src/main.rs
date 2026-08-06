@@ -50,8 +50,8 @@ use actions::{
 };
 use app_state::{
     AppState, ChangesPanelState, ConfirmationState, DrawerState, MainTab, ReaderState, RichState,
-    RightPanelState, SidebarState, StructuralStamp, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH,
-    SIDEBAR_MIN_WIDTH,
+    RightPanelState, SidebarState, StructuralStamp, DRAWER_MIN_HEIGHT, MAIN_AREA_MIN_HEIGHT,
+    RIGHT_SIDEBAR_MIN_WIDTH, SIDEBAR_MIN_WIDTH,
 };
 use gpui::*;
 use project::Project;
@@ -3586,6 +3586,7 @@ fn main() {
                             resizing: false,
                             rename: None,
                             rename_focus: None,
+                            main_area_top: Default::default(),
                         },
                         reader: ReaderState {
                             selected_path: None,
@@ -4152,6 +4153,10 @@ impl Render for AppState {
                     .id("sidebar-resize-handle")
                     .w(px(6.0))
                     .h_full()
+                    // Same reason as the drawer handle: never let the flex row
+                    // reclaim these 6px. A crushed handle cannot be grabbed to
+                    // undo the overflow that crushed it.
+                    .flex_shrink_0()
                     // Opaque at rest — an unpainted strip would show the raw
                     // blurred desktop through the vibrant window background.
                     .bg(theme().bg_base)
@@ -4178,21 +4183,34 @@ impl Render for AppState {
                 .flex()
                 .flex_col();
 
+            // The chrome above the main area is conditional, so its height is
+            // not knowable up front. Count the children as they go in; the
+            // prepaint listener below uses the index to read back the main
+            // area's real top edge for the drawer's resize clamp.
+            let mut main_area_idx = 0usize;
+
             // --- Attention bar (sessions needing input) — above tabs for visibility ---
             if let Some(attention_bar) = self.render_attention_bar(cx) {
                 content_col = content_col.child(attention_bar);
+                main_area_idx += 1;
             }
 
             if let Some(summary) = self.render_session_summary_header(active_is_resumable, cx) {
                 content_col = content_col.child(summary);
+                main_area_idx += 1;
             }
 
             // --- Main-area tab strip: Claude / Reader ---
             content_col = content_col.child(self.render_main_tab_strip(cx));
+            main_area_idx += 1;
 
             // --- Main terminal area (flex_1, takes remaining space) ---
             {
-                let mut main_area = div().flex_1().min_h(px(100.0)).overflow_hidden().relative();
+                let mut main_area = div()
+                    .flex_1()
+                    .min_h(px(MAIN_AREA_MIN_HEIGHT))
+                    .overflow_hidden()
+                    .relative();
 
                 match self.main_tab {
                     MainTab::Claude => {
@@ -4547,6 +4565,16 @@ impl Render for AppState {
                     content_col.children(crate::drawer::build_drawer_items(self, window, cx));
             }
 
+            // Hand the drawer's resize clamp the main area's real top edge.
+            // Writing through the shared cell rather than `Entity::update`
+            // keeps this off the notify path — prepaint must not re-render.
+            let main_area_top = self.drawer.main_area_top.clone();
+            content_col = content_col.on_children_prepainted(move |bounds, _window, _cx| {
+                if let Some(b) = bounds.get(main_area_idx) {
+                    main_area_top.set(f32::from(b.origin.y));
+                }
+            });
+
             content_col
         });
 
@@ -4558,6 +4586,8 @@ impl Render for AppState {
                     .id("right-sidebar-resize-handle")
                     .w(px(6.0))
                     .h_full()
+                    // See the left sidebar handle above.
+                    .flex_shrink_0()
                     .bg(theme().bg_base)
                     .cursor_col_resize()
                     .hover(|s| s.bg(theme().bg_hover))
@@ -4743,8 +4773,9 @@ impl Render for AppState {
                             let viewport_w = f32::from(window.viewport_size().width);
                             let mouse_x = f32::from(event.position.x);
                             // Right sidebar width = distance from right edge to mouse
-                            let new_width = (viewport_w - mouse_x)
-                                .clamp(RIGHT_SIDEBAR_MIN_WIDTH, viewport_w - 200.0);
+                            let max = (viewport_w - 200.0).max(RIGHT_SIDEBAR_MIN_WIDTH);
+                            let new_width =
+                                (viewport_w - mouse_x).clamp(RIGHT_SIDEBAR_MIN_WIDTH, max);
                             if (new_width - this.right_panel.width).abs() > 0.5 {
                                 this.right_panel.width = new_width;
                                 window.refresh();
