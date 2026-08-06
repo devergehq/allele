@@ -15,7 +15,7 @@ use crate::theme::theme;
 use gpui::*;
 
 use crate::actions::{DrawerAction, SessionCursor, SettingsAction};
-use crate::app_state::{AppState, DRAWER_MIN_HEIGHT};
+use crate::app_state::{AppState, DRAWER_MIN_HEIGHT, MAIN_AREA_MIN_HEIGHT};
 use crate::session::DrawerTab;
 use crate::terminal::{
     clamp_font_size, ShellCommand, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE,
@@ -191,6 +191,11 @@ pub(crate) fn build_drawer_items(
             .id("drawer-resize-handle")
             .w_full()
             .h(px(6.0))
+            // Never let the flex column reclaim these 6px. Without this the
+            // handle is the column's only child with neither `flex_shrink_0`
+            // nor a min height, so any overflow shrinks it to nothing — and a
+            // zero-height handle cannot be grabbed to undo the overflow.
+            .flex_shrink_0()
             .cursor_row_resize()
             // Invisible at rest (matches the content background); the hover
             // tint is the affordance.
@@ -444,10 +449,14 @@ pub(crate) fn build_drawer_items(
     );
 
     // Drawer content — active tab's terminal view
+    // Deliberately shrinkable: when the column runs out of room the drawer
+    // gives the space back, rather than the handle above it being crushed.
+    // `min_h(0)` is required — flex items default to `min-height: auto`, which
+    // would resolve to the terminal's min-content size and block the shrink.
     let mut drawer_panel = div()
         .w_full()
         .h(px(drawer_h))
-        .flex_shrink_0()
+        .min_h(px(0.0))
         .bg(theme().bg_base);
 
     if let Some(dt) = active_tab_view {
@@ -487,6 +496,23 @@ pub(crate) fn build_drawer_items(
     items
 }
 
+/// Resolve the drawer height for a resize drag: the drawer's top edge follows
+/// the mouse, bounded below by `DRAWER_MIN_HEIGHT` and above by the space the
+/// content column can actually spare.
+///
+/// The ceiling is measured rather than guessed. `main_area_top` is the window-space
+/// Y of the main area's top edge, so everything above it is chrome the drawer can
+/// never have — and that chrome is dynamic, growing a row per session awaiting
+/// input. The main area then keeps `MAIN_AREA_MIN_HEIGHT` of what remains; without
+/// that reserve the column overflows and the flex layout crushes the resize handle,
+/// leaving no way to drag the drawer back down.
+fn drag_height(viewport_h: f32, main_area_top: f32, mouse_y: f32) -> f32 {
+    // `.max()` also keeps the range from inverting on very short windows, where
+    // `clamp` would panic rather than merely misbehave.
+    let max_height = (viewport_h - main_area_top - MAIN_AREA_MIN_HEIGHT).max(DRAWER_MIN_HEIGHT);
+    (viewport_h - mouse_y).clamp(DRAWER_MIN_HEIGHT, max_height)
+}
+
 /// Full-viewport drag overlay shown while the user is actively resizing the
 /// drawer. Tracks mouse movement, clamps the new height, and persists
 /// settings on mouse-up. Caller is responsible for only attaching this when
@@ -508,9 +534,7 @@ pub(crate) fn build_drawer_drag_overlay(
             cx.listener(|this: &mut AppState, event: &MouseMoveEvent, window, cx| {
                 let viewport_h = f32::from(window.viewport_size().height);
                 let mouse_y = f32::from(event.position.y);
-                // Drawer height = distance from bottom of viewport to mouse
-                let new_height =
-                    (viewport_h - mouse_y).clamp(DRAWER_MIN_HEIGHT, viewport_h - 200.0);
+                let new_height = drag_height(viewport_h, this.drawer.main_area_top.get(), mouse_y);
                 if (new_height - this.drawer.height).abs() > 0.5 {
                     this.drawer.height = new_height;
                     window.refresh();
@@ -527,4 +551,51 @@ pub(crate) fn build_drawer_drag_overlay(
             }),
         )
         .into_any_element()
+}
+
+#[cfg(test)]
+mod tests {
+    // Deliberately not `use super::*` — this module glob-imports `gpui::*`,
+    // whose `test` attribute macro would shadow the one from libtest.
+    use super::{drag_height, DRAWER_MIN_HEIGHT};
+
+    /// Chrome above the drawer is dynamic — each session awaiting input adds an
+    /// attention row — so the ceiling has to follow the measured main-area top
+    /// rather than a fixed viewport offset.
+    #[test]
+    fn drag_ceiling_follows_measured_chrome() {
+        // Bare column: chrome ends 64px down, so 700 - 64 - 100 = 536 is the cap.
+        assert_eq!(drag_height(700.0, 64.0, 0.0), 536.0);
+        // Two attention rows push the main area down; the cap drops with it.
+        assert_eq!(drag_height(700.0, 150.0, 0.0), 450.0);
+    }
+
+    #[test]
+    fn drag_tracks_the_mouse_between_the_bounds() {
+        assert_eq!(drag_height(700.0, 64.0, 400.0), 300.0);
+    }
+
+    #[test]
+    fn drag_respects_the_minimum() {
+        // Mouse dragged to the very bottom of the window.
+        assert_eq!(drag_height(700.0, 64.0, 700.0), DRAWER_MIN_HEIGHT);
+    }
+
+    /// The old ceiling was `viewport_h - 200.0`, which inverts the clamp range
+    /// on a short window and panics inside `f32::clamp`.
+    #[test]
+    fn drag_does_not_panic_when_the_window_cannot_fit_the_minimum() {
+        assert_eq!(drag_height(180.0, 64.0, 0.0), DRAWER_MIN_HEIGHT);
+        assert_eq!(drag_height(180.0, 64.0, 180.0), DRAWER_MIN_HEIGHT);
+    }
+
+    /// Reproduces the reported stuck state: a 739.6px drawer height persisted
+    /// from a taller window, reloaded into a ~660px viewport. The drag must
+    /// resolve to something the column can actually render.
+    #[test]
+    fn drag_recovers_a_height_persisted_from_a_taller_window() {
+        let recovered = drag_height(660.0, 150.0, 200.0);
+        assert!(recovered < 739.6);
+        assert_eq!(recovered, 410.0);
+    }
 }
