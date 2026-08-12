@@ -5,6 +5,7 @@ use crate::accessibility::DENSE_CONTROL_MIN_HEIGHT;
 use crate::icon::{icon, name as icons};
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::theme;
+use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 
 /// Events emitted by the modal that AppState listens for.
@@ -16,6 +17,7 @@ pub enum NewSessionModalEvent {
         branch_slug: Option<String>,
         agent_id: Option<String>,
         initial_prompt: Option<String>,
+        skip_orchestration: bool,
     },
     Close,
 }
@@ -48,6 +50,9 @@ pub struct NewSessionModal {
     /// Local branch names in the project's source repo, for the live hint.
     existing_branches: Vec<String>,
     branch_hint: BranchHint,
+    /// When set, the session skips the project's startup command, drawer
+    /// terminals, preview URL, and shutdown command. See DEV-400.
+    skip_orchestration: bool,
     focus_handle: FocusHandle,
 }
 
@@ -104,6 +109,7 @@ impl NewSessionModal {
             default_label,
             existing_branches,
             branch_hint: BranchHint::Empty,
+            skip_orchestration: false,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -168,6 +174,7 @@ impl NewSessionModal {
             branch_slug,
             agent_id,
             initial_prompt,
+            skip_orchestration: self.skip_orchestration,
         });
     }
 
@@ -177,6 +184,11 @@ impl NewSessionModal {
 
     fn toggle_agent_selector(&mut self, cx: &mut Context<Self>) {
         self.agent_selector_open = !self.agent_selector_open;
+        cx.notify();
+    }
+
+    fn toggle_skip_orchestration(&mut self, cx: &mut Context<Self>) {
+        self.skip_orchestration = !self.skip_orchestration;
         cx.notify();
     }
 
@@ -198,6 +210,67 @@ impl NewSessionModal {
                     .child(label_text.to_string()),
             )
             .child(div().flex_1().min_w(px(0.0)).child(content))
+    }
+
+    /// A checkbox row body: a box that fills when checked, a bold label, and a
+    /// dim line of consequence underneath. Shared by both modals so the
+    /// skip-orchestration control reads identically wherever it appears.
+    fn checkbox(id: &'static str, checked: bool, label: &str, hint: &str) -> Stateful<Div> {
+        let box_bg = if checked {
+            theme().accent
+        } else {
+            theme().bg_sunken
+        };
+        let box_border = if checked {
+            theme().accent
+        } else {
+            theme().border_default
+        };
+        div()
+            .id(id)
+            .cursor_pointer()
+            .w_full()
+            .flex()
+            .flex_row()
+            .items_start()
+            .gap(px(8.0))
+            .child(
+                div()
+                    .w(px(14.0))
+                    .h(px(14.0))
+                    .flex_shrink_0()
+                    .mt(px(1.0))
+                    .rounded(px(4.0))
+                    .border_1()
+                    .border_color(box_border)
+                    .bg(box_bg)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .when(checked, |d| {
+                        d.child(icon(icons::CHECK, 10.0, theme().text_on_accent))
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.0))
+                    .child(
+                        div()
+                            .text_size(px(12.0))
+                            .text_color(theme().text_primary)
+                            .child(label.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.0))
+                            .text_color(theme().text_faint)
+                            .child(hint.to_string()),
+                    ),
+            )
     }
 
     fn input_frame(child: Entity<TextInput>) -> Div {
@@ -384,12 +457,35 @@ impl Render for NewSessionModal {
                         "Initial prompt",
                         Self::input_frame(self.prompt_input.clone()),
                     ))
+                    // Project setup opt-out. Lives beside the other creation
+                    // choices because it is one: a session for a question does
+                    // not want the project's dev servers. See DEV-400.
+                    .child(Self::render_form_row(
+                        "Project setup",
+                        Self::checkbox(
+                            "new-session-skip-orchestration",
+                            self.skip_orchestration,
+                            "Skip startup procedures",
+                            "No startup command, drawer terminals, or preview — \
+                             and no shutdown command when it closes.",
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this: &mut Self, _ev, _w, cx| {
+                                cx.stop_propagation();
+                                this.toggle_skip_orchestration(cx);
+                            }),
+                        ),
+                    ))
                     .child(Self::render_form_row(
                         "Outcome",
-                        div().text_size(px(11.0)).text_color(theme().text_dim).child(match self.branch_hint {
-                            BranchHint::Empty => "Creates an isolated workspace on an automatically named branch.",
-                            BranchHint::ExistingLocal => "Creates an isolated workspace and checks out the existing local branch.",
-                            BranchHint::NewOrRemote => "Creates an isolated workspace, checking out a matching remote branch or creating a new branch.",
+                        div().text_size(px(11.0)).text_color(theme().text_dim).child(match (self.branch_hint, self.skip_orchestration) {
+                            (BranchHint::Empty, false) => "Creates an isolated workspace on an automatically named branch.",
+                            (BranchHint::ExistingLocal, false) => "Creates an isolated workspace and checks out the existing local branch.",
+                            (BranchHint::NewOrRemote, false) => "Creates an isolated workspace, checking out a matching remote branch or creating a new branch.",
+                            (BranchHint::Empty, true) => "Creates an isolated workspace on an automatically named branch, and starts nothing else.",
+                            (BranchHint::ExistingLocal, true) => "Creates an isolated workspace on the existing local branch, and starts nothing else.",
+                            (BranchHint::NewOrRemote, true) => "Creates an isolated workspace on a matching remote or new branch, and starts nothing else.",
                         }),
                     )),
             )
@@ -475,6 +571,7 @@ pub enum EditSessionModalEvent {
         branch_slug: Option<String>,
         comment: Option<String>,
         pinned: bool,
+        skip_orchestration: bool,
     },
     Close,
 }
@@ -488,10 +585,18 @@ pub struct EditSessionModal {
     branch_input: Entity<TextInput>,
     comment_input: Entity<TextInput>,
     pinned: bool,
+    /// Editable here so the creation-time choice is not a one-way door: without
+    /// it, Retry Startup would be a permanent silent no-op for a session ticked
+    /// at creation, with no recovery short of recreating it. See DEV-400.
+    skip_orchestration: bool,
     focus_handle: FocusHandle,
 }
 
 impl EditSessionModal {
+    // Every field the modal edits is an independent scalar; bundling them into a
+    // parameter struct used at exactly one call site would be indirection, not
+    // clarity. Matches `NewSessionModal::new` and `settings_window::agents`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cx: &mut Context<Self>,
         project_idx: usize,
@@ -500,6 +605,7 @@ impl EditSessionModal {
         current_branch_slug: &str,
         current_comment: &str,
         pinned: bool,
+        skip_orchestration: bool,
     ) -> Self {
         let label_owned: SharedString = current_label.to_string().into();
         let branch_owned: SharedString = current_branch_slug.to_string().into();
@@ -543,6 +649,7 @@ impl EditSessionModal {
             branch_input,
             comment_input,
             pinned,
+            skip_orchestration,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -582,6 +689,7 @@ impl EditSessionModal {
             branch_slug,
             comment,
             pinned: self.pinned,
+            skip_orchestration: self.skip_orchestration,
         });
     }
 
@@ -591,6 +699,11 @@ impl EditSessionModal {
 
     fn toggle_pinned(&mut self, cx: &mut Context<Self>) {
         self.pinned = !self.pinned;
+        cx.notify();
+    }
+
+    fn toggle_skip_orchestration(&mut self, cx: &mut Context<Self>) {
+        self.skip_orchestration = !self.skip_orchestration;
         cx.notify();
     }
 }
@@ -731,6 +844,23 @@ impl Render for EditSessionModal {
                                     this.toggle_pinned(cx);
                                 }),
                             ),
+                    ))
+                    .child(NewSessionModal::render_form_row(
+                        "Project setup",
+                        NewSessionModal::checkbox(
+                            "edit-session-skip-orchestration",
+                            self.skip_orchestration,
+                            "Skip startup procedures",
+                            "Applies from the next resume onwards. Nothing \
+                             currently running is started or stopped.",
+                        )
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this: &mut Self, _ev, _w, cx| {
+                                cx.stop_propagation();
+                                this.toggle_skip_orchestration(cx);
+                            }),
+                        ),
                     )),
             )
             // Footer

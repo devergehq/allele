@@ -146,6 +146,7 @@ mod tests {
             branch_name: Some("fix-auth".into()),
             merge_strategy_override: None,
             branch_locked: false,
+            skip_orchestration: false,
         }
     }
 

@@ -123,6 +123,7 @@ impl AppState {
                 branch_slug,
                 agent_id,
                 initial_prompt,
+                skip_orchestration,
             } => {
                 self.add_session_to_project_with_details(
                     project_idx,
@@ -130,6 +131,7 @@ impl AppState {
                     branch_slug,
                     agent_id,
                     initial_prompt,
+                    skip_orchestration,
                     window,
                     cx,
                 );
@@ -292,7 +294,26 @@ impl AppState {
             }
             SessionAction::SpawnStartupTerminals(cursor) => {
                 if let Some((_, cfg, port, clone_path)) = self.pending_startup.take() {
-                    self.spawn_terminals_and_preview(cursor, &cfg, port, &clone_path, window, cx);
+                    // Re-check rather than trusting the earlier gate: a startup
+                    // command can run for minutes, and the session can be
+                    // switched to lightweight from the Edit modal while it is
+                    // still in flight. Dropping the pending state above means
+                    // this simply lands nothing. See DEV-400.
+                    let skip = self
+                        .projects
+                        .get(cursor.project_idx)
+                        .and_then(|p| p.sessions.get(cursor.session_idx))
+                        .is_some_and(|s| s.skip_orchestration);
+                    if !skip {
+                        self.spawn_terminals_and_preview(
+                            cursor,
+                            &cfg,
+                            port,
+                            &clone_path,
+                            window,
+                            cx,
+                        );
+                    }
                 }
             }
             SessionAction::EditSession {
@@ -390,6 +411,7 @@ impl AppState {
                 branch_slug,
                 comment,
                 pinned,
+                skip_orchestration,
             } => {
                 if let Some(session) = self
                     .projects
@@ -399,6 +421,10 @@ impl AppState {
                     session.label = label.clone();
                     session.comment = comment;
                     session.pinned = pinned;
+                    // Takes effect from the next resume: `apply_project_config`
+                    // reads it there. Deliberately does not retroactively start
+                    // or tear down anything for the running session.
+                    session.skip_orchestration = skip_orchestration;
                     session.auto_naming_fired = true;
 
                     // Rename the git branch if a name was provided.
@@ -444,6 +470,12 @@ impl AppState {
                 let restore_last_active = session.last_active;
                 let restore_active_runtime = session.active_runtime();
                 let restore_agent_id = session.agent_id.clone();
+                // Carried explicitly: the restore below rebuilds the session
+                // from a handful of fields, so anything not named here silently
+                // reverts to its default. Losing this one would quietly re-arm
+                // the project's startup scripts on a session the user created
+                // to skip them. See DEV-400.
+                let restore_skip_orchestration = session.skip_orchestration;
 
                 let needs_git = clone_path.as_ref().map_or(false, |cp| *cp != canonical);
 
@@ -586,6 +618,7 @@ impl AppState {
                                 )
                                 .with_agent_id(restore_agent_id.clone());
                                 let mut restored = restored;
+                                restored.skip_orchestration = restore_skip_orchestration;
                                 restored.operation_error = Some(OperationError {
                                     kind: OperationErrorKind::MergeAndClose,
                                     message: e.to_string(),
