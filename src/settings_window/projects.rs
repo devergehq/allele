@@ -487,6 +487,13 @@ impl ProjectsSection {
 
         div()
             .id("projects-pane")
+            // The section fills the window and scrolls inside it. Without
+            // `min_h`, `min-height: auto` stops this flex item shrinking below
+            // its content, so it lays out at content height — taller than the
+            // window — and `overflow_y_scroll` above has nothing to scroll,
+            // leaving the lower fields clipped and unreachable. See DEV-399.
+            .h_full()
+            .min_h(px(0.0))
             .flex_1()
             .p(px(20.0))
             .flex()
@@ -502,7 +509,16 @@ impl ProjectsSection {
                     .flex()
                     .flex_row()
                     .gap(px(16.0))
-                    .flex_1()
+                    // Content height, NOT viewport height. `flex_1` here would
+                    // size this row to the scroll container and let the detail
+                    // column overflow *inside* it — the container's content
+                    // would never exceed its own height, so there would be
+                    // nothing to scroll and the lower sections (Startup,
+                    // Shutdown, Drawer terminals) would simply be clipped until
+                    // the user resized the window. `flex_shrink_0` keeps the row
+                    // at its natural height so the scroll actually engages.
+                    // See DEV-399.
+                    .flex_shrink_0()
                     .child(
                         div()
                             .w(px(160.0))

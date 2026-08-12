@@ -382,6 +382,7 @@ fn render_pane(
         .flex_1()
         .min_w(px(0.0))
         .h_full()
+        .min_h(px(0.0))
         .overflow_hidden()
         .child(render_section_pane(this, cx))
         .into_any_element()

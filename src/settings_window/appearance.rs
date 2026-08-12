@@ -158,11 +158,22 @@ impl AppearanceSection {
             .child(reset);
 
         div()
+            .id("appearance-pane")
+            // The section fills the window and scrolls inside it. Without
+            // `min_h`, `min-height: auto` stops this flex item shrinking below
+            // its content, so it lays out at content height — taller than the
+            // window — and `overflow_y_scroll` above has nothing to scroll,
+            // leaving the lower fields clipped and unreachable. See DEV-399.
+            .h_full()
+            .min_h(px(0.0))
             .flex()
             .flex_col()
             .flex_1()
             .min_w(px(0.0))
-            .overflow_hidden()
+            // Horizontal stays clipped as before; vertical scrolls so a short
+            // window can still reach the bottom of the section (DEV-399).
+            .overflow_x_hidden()
+            .overflow_y_scroll()
             .p(px(20.0))
             .gap(px(12.0))
             .child(section_title("Appearance"))
