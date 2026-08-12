@@ -39,6 +39,9 @@ pub enum AlleleError {
     #[error("platform operation unsupported on this OS: {0}")]
     PlatformUnsupported(String),
 
+    #[error("dispatch error: {0}")]
+    Dispatch(String),
+
     #[error("{0}")]
     Other(String),
 }

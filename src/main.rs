@@ -11,6 +11,7 @@ mod config;
 mod conversation_picker;
 mod conversations;
 mod debug_capture;
+mod dispatch;
 mod drawer;
 mod errors;
 mod fd_limit;
@@ -3726,6 +3727,9 @@ fn main() {
                         repos: repositories::Repositories::production(),
                         platform: crate::platform::global().clone_arcs(),
                         capture_ui_requested: false,
+                        // Captured on the first render, once the root view
+                        // exists and the handle can be downcast.
+                        main_window: None,
                     }
                 })
             },
@@ -3736,6 +3740,15 @@ fn main() {
 
 impl Render for AppState {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Stash the main window handle for off-thread callers (DEV-415).
+        // Done here rather than at `open_window` because the downcast needs
+        // the root view to exist, and because binding that call's result
+        // makes rustfmt reflow the whole 800-line window-construction block.
+        // See `src/dispatch/mod.rs` for what needs it.
+        if self.main_window.is_none() {
+            self.main_window = window.window_handle().downcast::<AppState>();
+        }
+
         // Process pending actions — dispatcher lives in src/pending_actions.rs.
         self.dispatch_pending_action(window, cx);
 
