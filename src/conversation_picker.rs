@@ -285,8 +285,9 @@ impl Render for ConversationPickerModal {
                                     .px(px(10.0))
                                     .py(px(5.0))
                                     .rounded(px(6.0))
-                                    .bg(theme().bg_hover)
-                                    .hover(|s| s.bg(theme().bg_active))
+                                    .border_1()
+                                    .border_color(theme().border_default)
+                                    .hover(|s| s.bg(theme().bg_hover))
                                     .text_size(px(11.0))
                                     .text_color(theme().text_secondary)
                                     .on_mouse_down(
@@ -307,10 +308,16 @@ impl Render for ConversationPickerModal {
                                     .px(px(10.0))
                                     .py(px(5.0))
                                     .rounded(px(6.0))
-                                    .bg(theme().bg_active)
-                                    .hover(|s| s.bg(theme().bg_hover))
+                                    // Solid accent fill, as elsewhere in the
+                                    // app: the primary action should read as
+                                    // the primary action without hunting for
+                                    // it. Cancel is a bordered ghost so the
+                                    // two never look interchangeable.
+                                    .bg(theme().accent)
+                                    .hover(|s| s.bg(theme().info))
                                     .text_size(px(11.0))
-                                    .text_color(theme().text_primary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme().text_on_accent)
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, _e, _w, cx| {
