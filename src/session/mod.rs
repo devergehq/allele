@@ -5,6 +5,47 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::terminal::TerminalView;
 
+/// How much of the project's orchestration a session runs (DEV-415).
+///
+/// DEV-400 shipped this as a single `skip_orchestration` bool, which bundled
+/// two independent decisions. A dispatched — or hand-started — session often
+/// needs the `startup` command (provision a database so tests can run) while
+/// emphatically not wanting the drawer terminals (a server, a queue worker, a
+/// scheduler and a bundler it will never look at).
+///
+/// Deliberately three states rather than two independent flags: terminals
+/// without the startup command that prepares what they run against is not a
+/// shape anyone wants, so the type refuses to express it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Orchestration {
+    /// The project's whole setup: `startup`, drawer terminals, preview URL,
+    /// and `shutdown` when the session is discarded.
+    #[default]
+    Full,
+    /// `startup` (and `shutdown` on discard), but no drawer terminals and no
+    /// preview. The dispatched-session default.
+    StartupOnly,
+    /// None of it.
+    Nothing,
+}
+
+impl Orchestration {
+    /// Whether the project's `startup` command runs at creation and resume —
+    /// and, symmetrically, whether `shutdown` runs on discard.
+    pub fn runs_startup(self) -> bool {
+        !matches!(self, Orchestration::Nothing)
+    }
+
+    /// Whether the drawer terminals and the preview URL are set up. The
+    /// preview follows the terminals rather than the startup command: it
+    /// points at a dev server that only the terminals bring up, so a preview
+    /// without them would just be a broken link.
+    pub fn runs_terminals(self) -> bool {
+        matches!(self, Orchestration::Full)
+    }
+}
+
 /// Cached context from the most recent PreToolUse hook event. PreToolUse
 /// fires before the permission Notification, so we stash it here and pull
 /// the tool details when the Notification arrives.
@@ -267,17 +308,17 @@ pub struct Session {
     /// stays put until the user explicitly changes it. Persisted so a rehydrated
     /// session with a placeholder label can't re-fire the rename after restart.
     pub branch_locked: bool,
-    /// When `true`, this session deliberately skips the project's orchestration:
-    /// the `startup` command, the drawer `terminals[]`, the `preview` URL and its
-    /// linked browser tab, and the `shutdown` command on discard. The workspace
-    /// clone and its branch are unaffected — this is a lightweight session for a
-    /// question or a short investigation, not a degraded one.
+    /// How much of the project's setup this session runs — the `startup`
+    /// command, the drawer `terminals[]`, the `preview` URL and its linked
+    /// browser tab, and the `shutdown` command on discard. The workspace clone
+    /// and its branch are unaffected in every mode: a reduced session is
+    /// lightweight, not degraded.
     ///
     /// Persisted, and carried through sync, because `apply_project_config` runs
-    /// on every cold-resume as well as at creation. A non-persisted flag would
+    /// on every cold-resume as well as at creation. A non-persisted value would
     /// mean a suspended lightweight session spun the whole project up the next
-    /// time it was clicked. See DEV-400.
-    pub skip_orchestration: bool,
+    /// time it was clicked. See DEV-400 and DEV-415.
+    pub orchestration: Orchestration,
     /// The user has explicitly chosen which conversation backs this session via
     /// the picker. Suppresses further unprompted asking: once they have decided,
     /// a newer sibling transcript is not news, it is the choice they made.
@@ -353,7 +394,7 @@ impl Session {
             git_dirty_count: None,
             branch_name: None,
             branch_locked: false,
-            skip_orchestration: false,
+            orchestration: Orchestration::default(),
             conversation_choice_explicit: false,
             naming_suggestions: None,
             last_pre_tool_use: None,
@@ -409,7 +450,7 @@ impl Session {
             git_dirty_count: None,
             branch_name: None,
             branch_locked: false,
-            skip_orchestration: false,
+            orchestration: Orchestration::default(),
             conversation_choice_explicit: false,
             naming_suggestions: None,
             last_pre_tool_use: None,
@@ -545,6 +586,48 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use super::Orchestration;
+
+    /// The middle state is the whole point of the split: the startup command
+    /// runs (so a database is provisioned and tests can run) while the drawer
+    /// terminals — a server, a queue worker, a scheduler, a bundler — do not.
+    #[test]
+    fn startup_only_runs_startup_but_not_terminals() {
+        assert!(Orchestration::StartupOnly.runs_startup());
+        assert!(!Orchestration::StartupOnly.runs_terminals());
+    }
+
+    #[test]
+    fn full_runs_everything_and_nothing_runs_nothing() {
+        assert!(Orchestration::Full.runs_startup());
+        assert!(Orchestration::Full.runs_terminals());
+        assert!(!Orchestration::Nothing.runs_startup());
+        assert!(!Orchestration::Nothing.runs_terminals());
+    }
+
+    /// Terminals imply startup in every mode — the type cannot express
+    /// "terminals without the command that prepares what they run against".
+    #[test]
+    fn terminals_always_imply_startup() {
+        for mode in [
+            Orchestration::Full,
+            Orchestration::StartupOnly,
+            Orchestration::Nothing,
+        ] {
+            assert!(
+                !mode.runs_terminals() || mode.runs_startup(),
+                "{mode:?} would spawn terminals without running startup"
+            );
+        }
+    }
+
+    /// Unspecified means the project's full setup — the behaviour every
+    /// session had before any of this existed.
+    #[test]
+    fn default_is_full() {
+        assert_eq!(Orchestration::default(), Orchestration::Full);
+    }
+
     // Import Session explicitly rather than `use super::*` — this module's
     // parent does `use gpui::*`, whose glob would shadow the standard
     // `#[test]` attribute with gpui's own `test` macro.

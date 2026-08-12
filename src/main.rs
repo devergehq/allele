@@ -1280,12 +1280,14 @@ impl AppState {
         // independent of `apply_project_config`, so without the guard a session
         // created to ask one question would still pop an about:blank tab — the
         // exact ceremony the flag exists to avoid. Explicit "Open in Chrome"
-        // still works; only the automatic sync is suppressed. See DEV-400.
+        // still works; only the automatic sync is suppressed. Keyed on
+        // terminals rather than startup: the preview points at a dev server
+        // only the terminals bring up. See DEV-400 and DEV-415.
         if self
             .projects
             .get(cursor.project_idx)
             .and_then(|p| p.sessions.get(cursor.session_idx))
-            .is_some_and(|s| s.skip_orchestration)
+            .is_some_and(|s| !s.orchestration.runs_terminals())
         {
             self.browser_status.clear();
             return;
@@ -1812,7 +1814,7 @@ impl AppState {
                 &branch_slug,
                 session.comment.as_deref().unwrap_or(""),
                 session.pinned,
-                session.skip_orchestration,
+                session.orchestration,
             )
         });
 
@@ -1827,7 +1829,7 @@ impl AppState {
                         branch_slug,
                         comment,
                         pinned,
-                        skip_orchestration,
+                        orchestration,
                     } => {
                         this.edit_session_modal = None;
                         this.pending_action = Some(
@@ -1838,7 +1840,7 @@ impl AppState {
                                 branch_slug: branch_slug.clone(),
                                 comment: comment.clone(),
                                 pinned: *pinned,
-                                skip_orchestration: *skip_orchestration,
+                                orchestration: *orchestration,
                             }
                             .into(),
                         );
@@ -2066,7 +2068,7 @@ impl AppState {
                         branch_slug,
                         agent_id,
                         initial_prompt,
-                        skip_orchestration,
+                        orchestration,
                     } => {
                         this.new_session_modal = None;
                         this.pending_action = Some(
@@ -2076,7 +2078,7 @@ impl AppState {
                                 branch_slug: branch_slug.clone(),
                                 agent_id: agent_id.clone(),
                                 initial_prompt: initial_prompt.clone(),
-                                skip_orchestration: *skip_orchestration,
+                                orchestration: *orchestration,
                             }
                             .into(),
                         );
@@ -2111,16 +2113,20 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A lightweight session opts out of the whole of this: no port
-        // allocation, no `startup` command, no drawer terminals, no preview
-        // URL. Checked here rather than at the call sites because this runs on
-        // cold-resume and on Retry Startup as well as at creation, and every
-        // one of those must stay quiet. See DEV-400.
+        // A session that runs none of the project's setup opts out of the whole
+        // of this: no port allocation, no `startup` command, no drawer
+        // terminals, no preview URL. Checked here rather than at the call sites
+        // because this runs on cold-resume and on Retry Startup as well as at
+        // creation, and every one of those must stay quiet. See DEV-400.
+        //
+        // `StartupOnly` continues past this point and is gated further down, in
+        // `spawn_terminals_and_preview` — the port is still allocated, because
+        // the startup command's `{port}` substitution depends on it. See DEV-415.
         if self
             .projects
             .get(cursor.project_idx)
             .and_then(|p| p.sessions.get(cursor.session_idx))
-            .is_some_and(|s| s.skip_orchestration)
+            .is_some_and(|s| !s.orchestration.runs_startup())
         {
             return;
         }
@@ -2402,6 +2408,20 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // `StartupOnly` gets the startup command but none of this (DEV-415):
+        // a session that needs a database provisioned so it can run tests does
+        // not need a server, a queue worker, a scheduler and a bundler it will
+        // never look at. Gated here rather than at the two call sites so both
+        // the with-startup and without-startup paths are covered by one check.
+        if self
+            .projects
+            .get(cursor.project_idx)
+            .and_then(|p| p.sessions.get(cursor.session_idx))
+            .is_some_and(|s| !s.orchestration.runs_terminals())
+        {
+            return;
+        }
+
         for term in &cfg.terminals {
             let substituted = config::substitute(&term.command, port, clone_path);
             // Always spawn an interactive shell (inherit default — None).
@@ -3074,7 +3094,7 @@ fn main() {
                         session.branch_name = persisted.branch_name.clone();
                         session.merge_strategy_override = persisted.merge_strategy_override;
                         session.branch_locked = persisted.branch_locked;
-                        session.skip_orchestration = persisted.skip_orchestration;
+                        session.orchestration = persisted.orchestration();
                         conversations::repair_session_pointer(&mut session);
                         project.sessions.push(session);
                     }

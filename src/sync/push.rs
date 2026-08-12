@@ -154,6 +154,7 @@ mod tests {
             merge_strategy_override: None,
             branch_locked: false,
             skip_orchestration: false,
+            orchestration: None,
         }
     }
 
