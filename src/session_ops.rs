@@ -13,6 +13,7 @@ use crate::actions::{
     SidebarAction,
 };
 use crate::app_state::AppState;
+use crate::conversation_picker::{ConversationPickerEvent, ConversationPickerModal};
 use crate::session::{
     OperationError, OperationErrorKind, OperationResult, Session, SessionStatus,
     OPERATION_RESULT_TTL,
@@ -20,7 +21,8 @@ use crate::session::{
 use crate::state::ArchivedSession;
 use crate::terminal::{clamp_font_size, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
 use crate::{
-    agents, browser, claude_session_history_exists, clone, config, git, project, settings,
+    agents, browser, claude_session_history_exists, clone, config, conversations, git, project,
+    settings,
 };
 
 /// Subtitle for a freshly created session, given whether the APFS clone took.
@@ -941,6 +943,111 @@ impl AppState {
         cx.notify();
     }
 
+    /// Ask which conversation a workspace should continue, and replay the
+    /// resume once the user has chosen.
+    ///
+    /// Reading previews touches each transcript's tail, so this runs only on the
+    /// ambiguous path — never on an ordinary resume.
+    pub(crate) fn open_conversation_picker(
+        &mut self,
+        cursor: SessionCursor,
+        clone_path: &std::path::Path,
+        label: &str,
+        current: &str,
+        cx: &mut Context<Self>,
+    ) {
+        let mut list = conversations::list(clone_path);
+        if list.len() < 2 {
+            // Nothing to choose between — let the caller resume normally.
+            return;
+        }
+        conversations::load_previews(&mut list);
+
+        let current = current.to_string();
+        let label = label.to_string();
+        let entity =
+            cx.new(|cx| ConversationPickerModal::new(cx, label, list, Some(current.clone())));
+
+        cx.subscribe(
+            &entity,
+            move |this: &mut Self, _modal, event: &ConversationPickerEvent, cx| {
+                this.conversation_picker = None;
+                let Some(cursor) = this.pending_conversation_choice.take() else {
+                    cx.notify();
+                    return;
+                };
+                match event {
+                    ConversationPickerEvent::Pick { conversation_id } => {
+                        let Some(session) = this
+                            .projects
+                            .get_mut(cursor.project_idx)
+                            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+                        else {
+                            cx.notify();
+                            return;
+                        };
+                        tracing::info!(
+                            "conversation picker: session {} -> conversation {}",
+                            session.id,
+                            conversation_id
+                        );
+                        // A pointer equal to the workspace id is stored as None,
+                        // matching `with_claude_session_id`.
+                        session.claude_session_id =
+                            Some(conversation_id.clone()).filter(|c| c != &session.id);
+                        // Only a session with no live PTY can be resumed into
+                        // the chosen conversation right now. Restarting a
+                        // running one would kill the agent mid-turn and lose
+                        // whatever the user had typed, so record the choice and
+                        // let it take effect on the next resume instead.
+                        let idle = matches!(
+                            session.status,
+                            SessionStatus::Suspended | SessionStatus::Done
+                        );
+                        if !idle {
+                            session.operation_result = Some(OperationResult::transient(
+                                "Conversation switched. It takes effect the next \
+                                 time this session resumes.",
+                            ));
+                        }
+
+                        this.mark_state_dirty();
+                        // Force the transcript tailer to rebuild against the
+                        // chosen conversation's `.jsonl`.
+                        if this.rich.cursor == Some(cursor) {
+                            this.rich.cursor = None;
+                        }
+                        if idle {
+                            // Replay the resume. `resume_session` needs a
+                            // Window, which a subscription doesn't have, so go
+                            // through the pending-action queue. The one-shot
+                            // flag stops the picker reopening on the choice
+                            // just made.
+                            this.conversation_choice_confirmed = Some(cursor);
+                            this.pending_action = Some(
+                                SessionAction::ResumeSession {
+                                    project_idx: cursor.project_idx,
+                                    session_idx: cursor.session_idx,
+                                }
+                                .into(),
+                            );
+                        }
+                    }
+                    ConversationPickerEvent::Cancel => {
+                        // Leave the session suspended and the pointer untouched.
+                        tracing::info!("conversation picker: cancelled");
+                    }
+                }
+                cx.notify();
+            },
+        )
+        .detach();
+
+        self.pending_conversation_choice = Some(cursor);
+        self.conversation_picker = Some(entity);
+        cx.notify();
+    }
+
     /// Resume a Suspended session by spawning a fresh PTY with
     /// `claude --resume <id>` inside the stored clone_path.
     ///
@@ -1024,6 +1131,33 @@ impl AppState {
             stored_agent_id.as_deref(),
         )
         .cloned();
+
+        // A workspace is not one conversation. Claude Code rotates to a fresh
+        // transcript on `/clear` and on some compactions, and `session_id`
+        // above is only as fresh as the last hook event Allele managed to
+        // observe — a rotation that happens while Allele isn't running is never
+        // recorded. Resuming the stale pointer then replays *older* work with
+        // no visible error, because the superseded `.jsonl` is still on disk
+        // and every existence check passes.
+        //
+        // So when the pointer isn't the newest conversation in the workspace,
+        // ask rather than guess. Everything else resumes exactly as before.
+        //
+        // Claude-only: no other agent keeps transcripts under
+        // `~/.claude/projects`, so there is nothing there to disambiguate.
+        let is_claude = agent
+            .as_ref()
+            .is_some_and(|a| matches!(a.kind, settings::AgentKind::Claude));
+        // One-shot: the user has just chosen, so don't re-ask for that choice.
+        let choice_confirmed = self.conversation_choice_confirmed.take() == Some(cursor);
+        if is_claude
+            && !choice_confirmed
+            && self.conversation_picker.is_none()
+            && conversations::resume_is_ambiguous(&clone_path, &session_id)
+        {
+            self.open_conversation_picker(cursor, &clone_path, &label, &session_id, cx);
+            return;
+        }
 
         // Only adapters that understand session ids care about history —
         // for claude this gates `--resume` vs `--session-id`.

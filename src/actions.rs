@@ -109,6 +109,12 @@ pub enum SessionAction {
     CancelDirtySession,
     /// Auto-resume a session after launch. Fires once from the first render
     /// tick so `resume_session` has a valid `window` / `cx`.
+    /// Reopen the conversation picker for a session on demand, regardless of
+    /// whether Allele considers the resume ambiguous.
+    ChooseConversation {
+        project_idx: usize,
+        session_idx: usize,
+    },
     ResumeSession {
         project_idx: usize,
         session_idx: usize,

@@ -8,6 +8,8 @@ mod browser;
 mod changes;
 mod clone;
 mod config;
+mod conversation_picker;
+mod conversations;
 mod debug_capture;
 mod drawer;
 mod errors;
@@ -1601,6 +1603,29 @@ impl AppState {
             )
             .child(separator())
             .child(
+                menu_item(
+                    "session-ctx-conversation",
+                    "Choose Claude conversation…",
+                    theme().text_primary,
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.session_context_menu = None;
+                        this.pending_action = Some(
+                            SessionAction::ChooseConversation {
+                                project_idx: p_idx,
+                                session_idx: s_idx,
+                            }
+                            .into(),
+                        );
+                        cx.notify();
+                    }),
+                ),
+            )
+            .child(separator())
+            .child(
                 menu_item("session-ctx-reveal", "Open in Finder", theme().text_primary)
                     .on_mouse_down(
                         MouseButton::Left,
@@ -3048,6 +3073,7 @@ fn main() {
                         session.merge_strategy_override = persisted.merge_strategy_override;
                         session.branch_locked = persisted.branch_locked;
                         session.skip_orchestration = persisted.skip_orchestration;
+                        conversations::repair_session_pointer(&mut session);
                         project.sessions.push(session);
                     }
 
@@ -3676,6 +3702,9 @@ fn main() {
                         project_context_menu: None,
                         edit_session_modal: None,
                         naming_modal: None,
+                        conversation_picker: None,
+                        pending_conversation_choice: None,
+                        conversation_choice_confirmed: None,
                         remote_browser: None,
                         sidebar_filter_input,
                         reader_find_input,
@@ -4865,6 +4894,10 @@ impl Render for AppState {
         }
 
         if let Some(modal) = self.naming_modal.clone() {
+            outer = outer.child(modal);
+        }
+
+        if let Some(modal) = self.conversation_picker.clone() {
             outer = outer.child(modal);
         }
 
