@@ -86,6 +86,11 @@ pub struct PersistedSession {
     /// re-fire the rename after a restart.
     #[serde(default)]
     pub branch_locked: bool,
+    /// True when the session was created as lightweight — no project `startup`
+    /// command, drawer terminals, preview URL, or `shutdown` on discard.
+    /// `serde(default)` so state written before DEV-400 still loads.
+    #[serde(default)]
+    pub skip_orchestration: bool,
 }
 
 impl PersistedSession {
@@ -118,6 +123,7 @@ impl PersistedSession {
             branch_name: session.branch_name.clone(),
             merge_strategy_override: session.merge_strategy_override,
             branch_locked: session.branch_locked,
+            skip_orchestration: session.skip_orchestration,
         }
     }
 }
@@ -255,4 +261,56 @@ pub fn referenced_clone_paths(state: &PersistedState) -> std::collections::HashS
 
 fn canonical_or_raw(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `state.json` written before DEV-400 has no `skip_orchestration` key.
+    /// It must still load, defaulting to "run the project's orchestration" —
+    /// the behaviour every pre-existing session was created with.
+    #[test]
+    fn persisted_session_loads_without_skip_orchestration() {
+        let json = r#"{
+            "id": "4989c913-0000-0000-0000-000000000000",
+            "project_id": "proj-1",
+            "label": "Claude 1",
+            "clone_path": null,
+            "last_known_status": "Suspended",
+            "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "merged": false,
+            "drawer_tab_names": [],
+            "drawer_active_tab": 0
+        }"#;
+        let session: PersistedSession =
+            serde_json::from_str(json).expect("legacy state.json must still deserialise");
+        assert!(!session.skip_orchestration);
+        assert_eq!(session.label, "Claude 1");
+    }
+
+    /// And a session that opted out round-trips through the file format.
+    #[test]
+    fn persisted_session_round_trips_skip_orchestration() {
+        let json = r#"{
+            "id": "4989c913-0000-0000-0000-000000000000",
+            "project_id": "proj-1",
+            "label": "Quick question",
+            "clone_path": null,
+            "last_known_status": "Suspended",
+            "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "merged": false,
+            "drawer_tab_names": [],
+            "drawer_active_tab": 0,
+            "skip_orchestration": true
+        }"#;
+        let session: PersistedSession = serde_json::from_str(json).expect("parses");
+        assert!(session.skip_orchestration);
+
+        let encoded = serde_json::to_string(&session).expect("serialises");
+        let back: PersistedSession = serde_json::from_str(&encoded).expect("re-parses");
+        assert!(back.skip_orchestration);
+    }
 }

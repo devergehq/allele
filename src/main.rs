@@ -1273,6 +1273,20 @@ impl AppState {
             self.browser_status.clear();
             return;
         };
+        // Lightweight sessions get no automatic Chrome tab. This path is
+        // independent of `apply_project_config`, so without the guard a session
+        // created to ask one question would still pop an about:blank tab — the
+        // exact ceremony the flag exists to avoid. Explicit "Open in Chrome"
+        // still works; only the automatic sync is suppressed. See DEV-400.
+        if self
+            .projects
+            .get(cursor.project_idx)
+            .and_then(|p| p.sessions.get(cursor.session_idx))
+            .is_some_and(|s| s.skip_orchestration)
+        {
+            self.browser_status.clear();
+            return;
+        }
         if !browser::chrome_running() {
             self.browser_status = "Start Google Chrome and try again.".to_string();
             return;
@@ -1772,6 +1786,7 @@ impl AppState {
                 &branch_slug,
                 session.comment.as_deref().unwrap_or(""),
                 session.pinned,
+                session.skip_orchestration,
             )
         });
 
@@ -1786,6 +1801,7 @@ impl AppState {
                         branch_slug,
                         comment,
                         pinned,
+                        skip_orchestration,
                     } => {
                         this.edit_session_modal = None;
                         this.pending_action = Some(
@@ -1796,6 +1812,7 @@ impl AppState {
                                 branch_slug: branch_slug.clone(),
                                 comment: comment.clone(),
                                 pinned: *pinned,
+                                skip_orchestration: *skip_orchestration,
                             }
                             .into(),
                         );
@@ -2023,6 +2040,7 @@ impl AppState {
                         branch_slug,
                         agent_id,
                         initial_prompt,
+                        skip_orchestration,
                     } => {
                         this.new_session_modal = None;
                         this.pending_action = Some(
@@ -2032,6 +2050,7 @@ impl AppState {
                                 branch_slug: branch_slug.clone(),
                                 agent_id: agent_id.clone(),
                                 initial_prompt: initial_prompt.clone(),
+                                skip_orchestration: *skip_orchestration,
                             }
                             .into(),
                         );
@@ -2066,6 +2085,20 @@ impl AppState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // A lightweight session opts out of the whole of this: no port
+        // allocation, no `startup` command, no drawer terminals, no preview
+        // URL. Checked here rather than at the call sites because this runs on
+        // cold-resume and on Retry Startup as well as at creation, and every
+        // one of those must stay quiet. See DEV-400.
+        if self
+            .projects
+            .get(cursor.project_idx)
+            .and_then(|p| p.sessions.get(cursor.session_idx))
+            .is_some_and(|s| s.skip_orchestration)
+        {
+            return;
+        }
+
         let (clone_path, project_settings) = match self.projects.get(cursor.project_idx) {
             Some(project) => {
                 let cp = project
@@ -3014,6 +3047,7 @@ fn main() {
                         session.branch_name = persisted.branch_name.clone();
                         session.merge_strategy_override = persisted.merge_strategy_override;
                         session.branch_locked = persisted.branch_locked;
+                        session.skip_orchestration = persisted.skip_orchestration;
                         project.sessions.push(session);
                     }
 

@@ -75,6 +75,12 @@ pub struct SessionBundleMeta {
     /// Whether the session was pinned to the top of its project list.
     #[serde(default)]
     pub pinned: bool,
+    /// Whether the session skips the project's orchestration (DEV-400). Travels
+    /// deliberately: it is a user decision not to run project scripts, and the
+    /// target machine's scripts are exactly what would otherwise fire on the
+    /// first resume after an import.
+    #[serde(default)]
+    pub skip_orchestration: bool,
     /// Original creation time.
     pub started_at: SystemTime,
     /// Last observed activity time.
@@ -109,6 +115,7 @@ impl SessionBundleMeta {
             clone_rel,
             agent_id: session.agent_id.clone(),
             pinned: session.pinned,
+            skip_orchestration: session.skip_orchestration,
             started_at: session.started_at,
             last_active: session.last_active,
             active_runtime_secs: session.active_runtime_secs,
@@ -149,6 +156,7 @@ impl SessionBundleMeta {
             branch_name: self.branch_name.clone(),
             merge_strategy_override: None,
             branch_locked: false,
+            skip_orchestration: self.skip_orchestration,
         }
     }
 }
@@ -221,6 +229,7 @@ mod tests {
             branch_name: Some("fix-auth-5dc47535".into()),
             merge_strategy_override: None,
             branch_locked: true,
+            skip_orchestration: true,
         }
     }
 
@@ -280,6 +289,10 @@ mod tests {
         assert_eq!(back.drawer_active_tab, 0);
         assert!(back.merge_strategy_override.is_none());
         assert!(!back.branch_locked);
+        // A lightweight session must stay lightweight after a sync hop —
+        // otherwise the first resume on the target machine runs *that*
+        // machine's project scripts, which is what the user opted out of.
+        assert!(back.skip_orchestration);
         assert!(!back.merged);
         assert_eq!(back.clone_path, None);
 

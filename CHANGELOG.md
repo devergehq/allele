@@ -14,6 +14,12 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- "Skip startup procedures" on the New Session dialog — creates a session with its own
+  workspace clone and branch but runs none of the project's orchestration: no startup
+  command, no drawer terminals, no preview, and no shutdown command when it closes. For
+  asking a question or doing a short investigation in a project without spinning up its
+  dev servers. The choice persists across suspend/resume and can be changed later from
+  Edit Session.
 - Sidebar "active only" view (⌘⇧E, or the funnel button in the sidebar header):
   hides sessions with no live agent — suspended and ended — along with any project
   left with nothing to show, so a tree of dozens of parked sessions collapses to

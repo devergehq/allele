@@ -66,6 +66,9 @@ pub enum SessionAction {
         branch_slug: Option<String>,
         agent_id: Option<String>,
         initial_prompt: Option<String>,
+        /// Skip the project's startup command, drawer terminals, preview URL,
+        /// and shutdown command for this session. See DEV-400.
+        skip_orchestration: bool,
     },
     /// Kill the PTY, keep the clone, mark Suspended. Next click cold-resumes.
     CloseSessionKeepClone {
@@ -153,6 +156,7 @@ pub enum SessionAction {
         branch_slug: Option<String>,
         comment: Option<String>,
         pinned: bool,
+        skip_orchestration: bool,
     },
 }
 

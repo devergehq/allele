@@ -267,6 +267,17 @@ pub struct Session {
     /// stays put until the user explicitly changes it. Persisted so a rehydrated
     /// session with a placeholder label can't re-fire the rename after restart.
     pub branch_locked: bool,
+    /// When `true`, this session deliberately skips the project's orchestration:
+    /// the `startup` command, the drawer `terminals[]`, the `preview` URL and its
+    /// linked browser tab, and the `shutdown` command on discard. The workspace
+    /// clone and its branch are unaffected — this is a lightweight session for a
+    /// question or a short investigation, not a degraded one.
+    ///
+    /// Persisted, and carried through sync, because `apply_project_config` runs
+    /// on every cold-resume as well as at creation. A non-persisted flag would
+    /// mean a suspended lightweight session spun the whole project up the next
+    /// time it was clicked. See DEV-400.
+    pub skip_orchestration: bool,
     /// Transient: LLM-generated naming suggestions awaiting user selection
     /// (only populated in Interactive naming mode).
     pub naming_suggestions: Option<Vec<String>>,
@@ -338,6 +349,7 @@ impl Session {
             git_dirty_count: None,
             branch_name: None,
             branch_locked: false,
+            skip_orchestration: false,
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
@@ -392,6 +404,7 @@ impl Session {
             git_dirty_count: None,
             branch_name: None,
             branch_locked: false,
+            skip_orchestration: false,
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
