@@ -256,12 +256,14 @@ impl Render for ConversationPickerModal {
             )
             .child(list)
             .child(
+                // Two rows, not one. Sharing a row with the hint let the text
+                // win the space fight and clipped the confirm button's label.
+                // Stacking keeps the buttons at their natural width whatever
+                // the hint says.
                 div()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.0))
+                    .flex_col()
+                    .gap(px(10.0))
                     .child(
                         div()
                             .text_size(px(10.0))
@@ -272,10 +274,12 @@ impl Render for ConversationPickerModal {
                         div()
                             .flex()
                             .flex_row()
+                            .justify_end()
                             .gap(px(8.0))
                             .child(
                                 div()
                                     .id("conversation-picker-cancel")
+                                    .flex_shrink_0()
                                     .cursor_pointer()
                                     .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
                                     .px(px(10.0))
@@ -297,6 +301,7 @@ impl Render for ConversationPickerModal {
                             .child(
                                 div()
                                     .id("conversation-picker-confirm")
+                                    .flex_shrink_0()
                                     .cursor_pointer()
                                     .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
                                     .px(px(10.0))
