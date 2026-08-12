@@ -51,6 +51,9 @@ Changes on `master` awaiting the next tagged release.
   still retains every original line verbatim.
 
 ### Fixed
+- Settings sections scroll vertically. Projects, Sessions, Naming, Editor, Browser and
+  Appearance all clipped their lower content in a short window, with no way to reach it
+  but resizing the window.
 - New sessions no longer fail with `Failed to create PTY: Too many open files
   (os error 24)` once a project has many sessions open. macOS gives apps launched
   from Finder/Dock a soft file-descriptor limit of 256, which a few dozen sessions'
