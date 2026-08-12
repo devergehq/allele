@@ -278,6 +278,10 @@ pub struct Session {
     /// mean a suspended lightweight session spun the whole project up the next
     /// time it was clicked. See DEV-400.
     pub skip_orchestration: bool,
+    /// The user has explicitly chosen which conversation backs this session via
+    /// the picker. Suppresses further unprompted asking: once they have decided,
+    /// a newer sibling transcript is not news, it is the choice they made.
+    pub conversation_choice_explicit: bool,
     /// Transient: LLM-generated naming suggestions awaiting user selection
     /// (only populated in Interactive naming mode).
     pub naming_suggestions: Option<Vec<String>>,
@@ -350,6 +354,7 @@ impl Session {
             branch_name: None,
             branch_locked: false,
             skip_orchestration: false,
+            conversation_choice_explicit: false,
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
@@ -405,6 +410,7 @@ impl Session {
             branch_name: None,
             branch_locked: false,
             skip_orchestration: false,
+            conversation_choice_explicit: false,
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
@@ -416,6 +422,12 @@ impl Session {
 
     pub fn with_clone(mut self, clone_path: PathBuf) -> Self {
         self.clone_path = Some(clone_path);
+        self
+    }
+
+    /// Restore the "user picked this conversation" flag during rehydration.
+    pub fn with_conversation_choice_explicit(mut self, explicit: bool) -> Self {
+        self.conversation_choice_explicit = explicit;
         self
     }
 

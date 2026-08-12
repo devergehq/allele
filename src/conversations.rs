@@ -193,22 +193,51 @@ pub(crate) fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Whether resuming `cwd` is ambiguous: more than one conversation exists and
-/// `resolved` — the id resume would otherwise use — is not the newest one.
+/// Whether Allele is *guessing* which conversation to resume, and should ask.
 ///
-/// A single conversation, or a pointer that already names the newest, resumes
-/// silently as before.
-pub(crate) fn resume_is_ambiguous(cwd: &Path, resolved: &str) -> bool {
+/// Fires when the workspace holds more than one conversation and either:
+///
+/// - **no pointer was ever recorded** (`pointer_known == false`), so the resume
+///   is falling back to the workspace uuid and Allele genuinely does not know
+///   which transcript is live; or
+/// - the pointer it does hold **is not the newest**, so a rotation happened
+///   that Allele failed to observe.
+///
+/// The first case is the one that bit in the field and that an earlier, narrower
+/// predicate missed: both transcripts were forks of one lineage, the stale one
+/// was still being actively written, and so it *was* the newest. Keying only on
+/// staleness asked nothing precisely when the user was least able to tell the
+/// two apart.
+///
+/// `choice_explicit` silences it entirely: once the user has picked from the
+/// picker, a newer sibling is not news — it is the choice they made.
+pub(crate) fn resume_is_ambiguous(
+    cwd: &Path,
+    resolved: &str,
+    pointer_known: bool,
+    choice_explicit: bool,
+) -> bool {
     match project_dir(cwd) {
-        Some(dir) => ambiguous_in_dir(&dir, resolved),
+        Some(dir) => ambiguous_in_dir(&dir, resolved, pointer_known, choice_explicit),
         None => false,
     }
 }
 
 /// [`resume_is_ambiguous`] against an explicit project directory.
-pub(crate) fn ambiguous_in_dir(dir: &Path, resolved: &str) -> bool {
+pub(crate) fn ambiguous_in_dir(
+    dir: &Path,
+    resolved: &str,
+    pointer_known: bool,
+    choice_explicit: bool,
+) -> bool {
+    if choice_explicit {
+        return false;
+    }
     let all = list_in_dir(dir);
-    all.len() > 1 && all.first().map(|c| c.id.as_str()) != Some(resolved)
+    if all.len() < 2 {
+        return false;
+    }
+    !pointer_known || all.first().map(|c| c.id.as_str()) != Some(resolved)
 }
 
 /// Read the leading sidecar records for a `custom-title`.
@@ -580,10 +609,9 @@ mod tests {
     fn a_single_conversation_never_interrupts() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "only.jsonl", &[&user("hi")]);
-        assert!(!ambiguous_in_dir(dir.path(), "only"));
-        // Even a pointer naming nothing on disk: with one candidate there is
-        // no choice to offer.
-        assert!(!ambiguous_in_dir(dir.path(), "some-other-id"));
+        assert!(!ambiguous_in_dir(dir.path(), "only", true, false));
+        // Even with no pointer at all: with one candidate there is no choice.
+        assert!(!ambiguous_in_dir(dir.path(), "only", false, false));
     }
 
     #[test]
@@ -592,7 +620,7 @@ mod tests {
         let old = write(dir.path(), "old.jsonl", &[&user("old")]);
         write(dir.path(), "new.jsonl", &[&user("new")]);
         backdate(&old, 3600);
-        assert!(!ambiguous_in_dir(dir.path(), "new"));
+        assert!(!ambiguous_in_dir(dir.path(), "new", true, false));
     }
 
     #[test]
@@ -603,7 +631,7 @@ mod tests {
         let old = write(dir.path(), "old.jsonl", &[&user("old")]);
         write(dir.path(), "new.jsonl", &[&user("new")]);
         backdate(&old, 3600);
-        assert!(ambiguous_in_dir(dir.path(), "old"));
+        assert!(ambiguous_in_dir(dir.path(), "old", true, false));
     }
 
     #[test]
@@ -618,13 +646,44 @@ mod tests {
         );
         write(dir.path(), "rotated-uuid.jsonl", &[&user("the live work")]);
         backdate(&workspace, 3600);
-        assert!(ambiguous_in_dir(dir.path(), "workspace-uuid"));
+        assert!(ambiguous_in_dir(dir.path(), "workspace-uuid", false, false));
+    }
+
+    #[test]
+    fn an_absent_pointer_interrupts_even_when_it_names_the_newest() {
+        // The regression this predicate was widened for. Two forks of one
+        // lineage; the conversation resume falls back to is *also* the most
+        // recently written, so a staleness-only test asked nothing — precisely
+        // when the user was least able to tell the two apart.
+        let dir = tempfile::tempdir().unwrap();
+        let other = write(dir.path(), "other-fork.jsonl", &[&user("the work I want")]);
+        write(
+            dir.path(),
+            "workspace-uuid.jsonl",
+            &[&user("the fork I am stuck in")],
+        );
+        backdate(&other, 3600);
+        // Newest *is* the id resume would pick, and it must still ask.
+        assert_eq!(list_in_dir(dir.path())[0].id, "workspace-uuid");
+        assert!(ambiguous_in_dir(dir.path(), "workspace-uuid", false, false));
+    }
+
+    #[test]
+    fn an_explicit_choice_is_never_second_guessed() {
+        // Having picked the older fork on purpose, the user must not be asked
+        // again on every resume.
+        let dir = tempfile::tempdir().unwrap();
+        let chosen = write(dir.path(), "chosen.jsonl", &[&user("what I picked")]);
+        write(dir.path(), "newer.jsonl", &[&user("newer but not wanted")]);
+        backdate(&chosen, 3600);
+        assert!(ambiguous_in_dir(dir.path(), "chosen", true, false));
+        assert!(!ambiguous_in_dir(dir.path(), "chosen", true, true));
     }
 
     #[test]
     fn an_empty_workspace_never_interrupts() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!ambiguous_in_dir(dir.path(), "anything"));
+        assert!(!ambiguous_in_dir(dir.path(), "anything", true, false));
     }
 
     #[test]

@@ -134,6 +134,7 @@ mod tests {
         PersistedSession {
             id: id.to_string(),
             claude_session_id: None,
+            conversation_choice_explicit: false,
             project_id: "local-project".into(),
             label: "My session".into(),
             clone_path: None,

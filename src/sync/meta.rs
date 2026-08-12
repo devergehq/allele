@@ -56,6 +56,10 @@ pub struct SessionBundleMeta {
     /// Post-`/clear` conversation id, if it has diverged from `id`.
     #[serde(default)]
     pub claude_session_id: Option<String>,
+    /// Whether the user picked that conversation by hand. Travels so another
+    /// machine doesn't re-ask a question this one already answered.
+    #[serde(default)]
+    pub conversation_choice_explicit: bool,
     /// Sidebar display label.
     pub label: String,
     /// Optional user comment shown as a row subtitle.
@@ -109,6 +113,7 @@ impl SessionBundleMeta {
         Self {
             id: session.id.clone(),
             claude_session_id: session.claude_session_id.clone(),
+            conversation_choice_explicit: session.conversation_choice_explicit,
             label: session.label.clone(),
             comment: session.comment.clone(),
             branch_name: session.branch_name.clone(),
@@ -136,6 +141,7 @@ impl SessionBundleMeta {
         PersistedSession {
             id: self.id.clone(),
             claude_session_id: self.claude_session_id.clone(),
+            conversation_choice_explicit: self.conversation_choice_explicit,
             project_id: project_id.to_string(),
             label: self.label.clone(),
             clone_path,
@@ -211,6 +217,7 @@ mod tests {
         PersistedSession {
             id: "4989c913-e28a-482a-9c11-abcdef012345".into(),
             claude_session_id: Some("rotated-after-clear".into()),
+            conversation_choice_explicit: false,
             project_id: "local-project-uuid".into(),
             label: "My session".into(),
             clone_path: clone,

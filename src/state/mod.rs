@@ -25,6 +25,11 @@ pub struct PersistedSession {
     /// cold resume pick up the post-clear transcript instead of the original.
     #[serde(default)]
     pub claude_session_id: Option<String>,
+    /// Whether `claude_session_id` was chosen by the user in the conversation
+    /// picker rather than inferred. Defaults false for state written before
+    /// the field existed.
+    #[serde(default)]
+    pub conversation_choice_explicit: bool,
     /// Links back to the owning `Project.id` in settings.json.
     pub project_id: String,
     /// Display label for the sidebar.
@@ -98,6 +103,7 @@ impl PersistedSession {
         Self {
             id: session.id.clone(),
             claude_session_id: session.claude_session_id.clone(),
+            conversation_choice_explicit: session.conversation_choice_explicit,
             project_id: project_id.to_string(),
             label: session.label.clone(),
             clone_path: session.clone_path.clone(),
