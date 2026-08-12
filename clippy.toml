@@ -1,0 +1,31 @@
+# Clippy configuration — the lint half of Allele's architecture enforcement.
+#
+# The other half lives in `tests/architecture.rs` (structural rules) and
+# `.github/workflows/ci.yml` (which gates both on every PR).
+#
+# Rules here are the ones Clippy can express directly. Anything needing tree
+# walking or cross-file reasoning belongs in tests/architecture.rs instead.
+
+# Match the toolchain in rust-toolchain.toml so Clippy doesn't suggest APIs
+# that are newer than what we build against.
+msrv = "1.93"
+
+# ARCHITECTURE.md §7.6 — public API boundaries use crate::errors::AlleleError.
+# anyhow stays allowed for internal helpers, so this is a nudge rather than a
+# hard ban; tests/architecture.rs holds the per-file allowlist that actually
+# ratchets adoption forward.
+disallowed-types = []
+
+# ARCHITECTURE.md §7.2 — handlers must call mark_state_dirty() /
+# mark_settings_dirty() rather than saving directly, so the render-tick
+# coordinator can coalesce writes.
+#
+# NOTE: save_state / save_settings are currently `pub(crate)` on AppState
+# (src/main.rs), so this rule can only be advisory until DEV-106 makes them
+# genuinely private. Once they are module-private the compiler enforces it and
+# this entry becomes redundant — delete it then.
+disallowed-methods = []
+
+# Keep an eye on accidental complexity growth in the god-files.
+too-many-arguments-threshold = 10
+type-complexity-threshold = 500
