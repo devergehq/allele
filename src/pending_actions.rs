@@ -263,6 +263,30 @@ impl AppState {
                 self.confirming.dirty_session = None;
                 cx.notify();
             }
+            SessionAction::ChooseConversation {
+                project_idx,
+                session_idx,
+            } => {
+                let cursor = SessionCursor {
+                    project_idx,
+                    session_idx,
+                };
+                // On-demand: this path is how a user recovers after Allele has
+                // already resumed the wrong conversation, so it must work for a
+                // running session too, not just a suspended one.
+                let details = self
+                    .projects
+                    .get(cursor.project_idx)
+                    .and_then(|p| p.sessions.get(cursor.session_idx))
+                    .and_then(|s| {
+                        s.clone_path
+                            .clone()
+                            .map(|cp| (cp, s.label.clone(), s.claude_session_id().to_string()))
+                    });
+                if let Some((clone_path, label, current)) = details {
+                    self.open_conversation_picker(cursor, &clone_path, &label, &current, cx);
+                }
+            }
             SessionAction::ResumeSession {
                 project_idx,
                 session_idx,

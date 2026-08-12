@@ -369,6 +369,17 @@ pub(crate) struct AppState {
     pub(crate) edit_session_modal: Option<Entity<new_session_modal::EditSessionModal>>,
     /// Interactive naming modal — shown when NamingMode::Interactive generates suggestions.
     pub(crate) naming_modal: Option<Entity<new_session_modal::NamingModal>>,
+    /// Conversation picker, shown when a resume is ambiguous because the
+    /// workspace holds several Claude conversations. See
+    /// [`crate::conversations::resume_is_ambiguous`].
+    pub(crate) conversation_picker:
+        Option<Entity<crate::conversation_picker::ConversationPickerModal>>,
+    /// The resume the picker is gating, replayed once the user has chosen.
+    pub(crate) pending_conversation_choice: Option<SessionCursor>,
+    /// One-shot bypass: set immediately before replaying a gated resume so the
+    /// picker doesn't reopen on the choice the user just made. Consumed by
+    /// `resume_session`.
+    pub(crate) conversation_choice_confirmed: Option<SessionCursor>,
     /// Remote-session browser (sync pull). `Some` while the overlay is visible.
     pub(crate) remote_browser: Option<Entity<crate::remote_browser::RemoteBrowser>>,
     /// Persistent Scratch Pad submission history across all projects.
