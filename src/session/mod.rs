@@ -235,6 +235,13 @@ pub struct Session {
     pub status: SessionStatus,
     /// Wall-clock time the session was originally started. Serialisable.
     pub started_at: SystemTime,
+    /// When `status` last changed. Not persisted — a rehydrated session's
+    /// state age starts at its resume, which is the only honest reading.
+    ///
+    /// Exists so a dispatch caller can be told "blocked for 40 minutes"
+    /// rather than "blocked": at twenty concurrent sessions the first is
+    /// actionable and the second is only a state. See DEV-415.
+    pub status_since: SystemTime,
     /// Updated whenever we observe activity on the session (or on rehydrate).
     pub last_active: SystemTime,
     /// APFS clone path for this session. `None` means the session runs
@@ -371,6 +378,7 @@ impl Session {
             terminal_view: Some(terminal_view),
             status: SessionStatus::Idle,
             started_at: now,
+            status_since: now,
             last_active: now,
             // Idle is a runtime-counting status, so the clock starts now.
             active_accumulated: Duration::ZERO,
@@ -426,6 +434,10 @@ impl Session {
             terminal_view: None,
             status: SessionStatus::Suspended,
             started_at,
+            // Not `started_at`: this session has just been rehydrated, so its
+            // state age is measured from the resume, not from its creation
+            // days ago.
+            status_since: SystemTime::now(),
             last_active,
             // Suspended is frozen, so the clock is not running; only the
             // banked runtime restored from disk carries over.
@@ -538,6 +550,9 @@ impl Session {
         } else if !was_counting && now_counting {
             // Entering a live state — start a fresh stretch.
             self.active_since = Some(SystemTime::now());
+        }
+        if self.status != new {
+            self.status_since = SystemTime::now();
         }
         self.status = new;
     }
