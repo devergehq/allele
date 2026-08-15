@@ -95,6 +95,11 @@ pub struct SessionBundleMeta {
     /// what would otherwise fire on the first resume after an import.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestration: Option<crate::session::Orchestration>,
+    /// Who started the session (DEV-415). Travels so the cap and depth limit
+    /// still hold after an import — a fleet that resets its own count by
+    /// syncing to another machine is not capped.
+    #[serde(default)]
+    pub origin: crate::session::SessionOrigin,
     /// Original creation time.
     pub started_at: SystemTime,
     /// Last observed activity time.
@@ -132,6 +137,7 @@ impl SessionBundleMeta {
             pinned: session.pinned,
             skip_orchestration: !session.orchestration().runs_startup(),
             orchestration: Some(session.orchestration()),
+            origin: session.origin.clone(),
             started_at: session.started_at,
             last_active: session.last_active,
             active_runtime_secs: session.active_runtime_secs,
@@ -175,6 +181,7 @@ impl SessionBundleMeta {
             branch_locked: false,
             skip_orchestration: self.skip_orchestration,
             orchestration: Some(self.orchestration()),
+            origin: self.origin.clone(),
         }
     }
 
@@ -262,6 +269,7 @@ mod tests {
             branch_locked: true,
             skip_orchestration: true,
             orchestration: Some(crate::session::Orchestration::Nothing),
+            origin: crate::session::SessionOrigin::Human,
         }
     }
 

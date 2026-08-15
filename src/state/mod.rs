@@ -105,6 +105,10 @@ pub struct PersistedSession {
     /// resolves those from `skip_orchestration`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestration: Option<crate::session::Orchestration>,
+    /// Who started this session (DEV-415). `serde(default)` — everything
+    /// written before dispatch existed was started by a human.
+    #[serde(default)]
+    pub origin: crate::session::SessionOrigin,
 }
 
 impl PersistedSession {
@@ -158,6 +162,7 @@ impl PersistedSession {
             // Derived, for older Allele versions reading this file.
             skip_orchestration: !session.orchestration.runs_startup(),
             orchestration: Some(session.orchestration),
+            origin: session.origin.clone(),
         }
     }
 }

@@ -959,6 +959,14 @@ pub(crate) fn build_sidebar_items(
                 .child({
                     let session_pinned = session.pinned;
                     let session_comment = session.comment.clone();
+                    // Attribution for agent-dispatched sessions (DEV-415).
+                    // The brief's non-goal is "anything the human cannot see":
+                    // an orchestrator quietly running a fleet is worse than the
+                    // manual version even when it is faster.
+                    let session_dispatched_by = session
+                        .origin
+                        .dispatched_by()
+                        .map(|by| SharedString::from(format!("dispatched by {by}")));
                     let session_startup_status = session.startup_status.clone();
                     let session_operation_error = session.operation_error.clone();
                     // Read through the accessor, not the field — transient
@@ -1056,6 +1064,21 @@ pub(crate) fn build_sidebar_items(
                                 .text_ellipsis()
                                 .whitespace_nowrap()
                                 .child(comment),
+                        );
+                    }
+                    // Rendered after the comment rather than instead of it —
+                    // who started a session and what it is for are different
+                    // facts, and a dispatched session usually has both.
+                    if let Some(by) = session_dispatched_by {
+                        info_col = info_col.child(
+                            div()
+                                .pl(px(16.0))
+                                .text_size(px(11.0))
+                                .text_color(theme().text_dim)
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(by),
                         );
                     }
                     if let Some(error) = session_operation_error {

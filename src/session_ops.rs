@@ -1889,6 +1889,7 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
     session.merge_strategy_override = persisted.merge_strategy_override;
     session.branch_locked = persisted.branch_locked;
     session.orchestration = persisted.orchestration();
+    session.origin = persisted.origin.clone();
     session
 }
 

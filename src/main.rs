@@ -3096,6 +3096,7 @@ fn main() {
                         session.branch_locked = persisted.branch_locked;
                         session.orchestration = persisted.orchestration();
                         conversations::repair_session_pointer(&mut session);
+                        session.origin = persisted.origin.clone();
                         project.sessions.push(session);
                     }
 

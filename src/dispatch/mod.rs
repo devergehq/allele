@@ -21,6 +21,7 @@
 //! [`update_in_main_window`], so no caller has to rediscover the
 //! distinction.
 
+pub(crate) mod admission;
 pub(crate) mod protocol;
 
 use gpui::{AsyncApp, Context, WeakEntity, Window};

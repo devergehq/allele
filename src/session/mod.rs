@@ -46,6 +46,65 @@ impl Orchestration {
     }
 }
 
+/// Who started a session (DEV-415).
+///
+/// Persisted, because the dispatched-session cap and the depth limit both key
+/// off it and both must survive a restart — an orchestrator that could reset
+/// the count by relaunching allele is not capped.
+///
+/// The brief's non-goal is "anything the human cannot see": an orchestrator
+/// quietly running a fleet is worse than the manual version even when it is
+/// faster. So this is rendered in the sidebar, not merely recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionOrigin {
+    /// Started by a human, through the UI.
+    #[default]
+    Human,
+    /// Started by another session, through the control socket.
+    Dispatched {
+        /// The creating session's stable allele id. Used for attribution and
+        /// the sidebar; deliberately *not* used to compute depth, since the
+        /// chain breaks as soon as an ancestor is deleted.
+        by_session_id: String,
+        /// The creating session's label at dispatch time, so the sidebar can
+        /// attribute without a lookup that may no longer resolve.
+        by_label: String,
+        /// Denormalised and immutable: 1 for a session dispatched by a
+        /// human's session, 2 for a child of that, and so on.
+        ///
+        /// Stored rather than walked because enforcement must keep working
+        /// when the ancestor is gone. Derived by allele from the creating
+        /// session — never accepted from a caller, because anything a
+        /// dispatched session can assert about its own depth is something it
+        /// can be wrong about, and the sessions doing the asserting are the
+        /// ones running the rule that causes the recursion.
+        depth: u8,
+    },
+}
+
+impl SessionOrigin {
+    /// 0 for a human-started session; the dispatch depth otherwise.
+    pub fn depth(&self) -> u8 {
+        match self {
+            SessionOrigin::Human => 0,
+            SessionOrigin::Dispatched { depth, .. } => *depth,
+        }
+    }
+
+    pub fn is_dispatched(&self) -> bool {
+        matches!(self, SessionOrigin::Dispatched { .. })
+    }
+
+    /// The creating session's label, for display.
+    pub fn dispatched_by(&self) -> Option<&str> {
+        match self {
+            SessionOrigin::Human => None,
+            SessionOrigin::Dispatched { by_label, .. } => Some(by_label.as_str()),
+        }
+    }
+}
+
 /// Cached context from the most recent PreToolUse hook event. PreToolUse
 /// fires before the permission Notification, so we stash it here and pull
 /// the tool details when the Notification arrives.
@@ -330,6 +389,8 @@ pub struct Session {
     /// the picker. Suppresses further unprompted asking: once they have decided,
     /// a newer sibling transcript is not news, it is the choice they made.
     pub conversation_choice_explicit: bool,
+    /// Who started this session. See [`SessionOrigin`].
+    pub origin: SessionOrigin,
     /// Transient: LLM-generated naming suggestions awaiting user selection
     /// (only populated in Interactive naming mode).
     pub naming_suggestions: Option<Vec<String>>,
@@ -404,6 +465,7 @@ impl Session {
             branch_locked: false,
             orchestration: Orchestration::default(),
             conversation_choice_explicit: false,
+            origin: SessionOrigin::default(),
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
@@ -464,6 +526,7 @@ impl Session {
             branch_locked: false,
             orchestration: Orchestration::default(),
             conversation_choice_explicit: false,
+            origin: SessionOrigin::default(),
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,

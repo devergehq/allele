@@ -149,6 +149,7 @@ mod tests {
             branch_locked: false,
             skip_orchestration: false,
             orchestration: None,
+            origin: Default::default(),
         }
     }
 
