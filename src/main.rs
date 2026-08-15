@@ -2785,6 +2785,8 @@ fn show_about_panel() {
 }
 
 fn main() {
+    // `--mcp-serve` never returns; it must claim stdout before anything logs.
+    dispatch::mcp::exit_if_serving();
     errors::init_tracing();
     install_panic_hook();
 

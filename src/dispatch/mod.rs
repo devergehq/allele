@@ -23,6 +23,7 @@
 
 pub(crate) mod admission;
 pub(crate) mod handler;
+pub(crate) mod mcp;
 pub(crate) mod protocol;
 pub(crate) mod server;
 

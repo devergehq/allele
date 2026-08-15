@@ -55,10 +55,28 @@ pub type Result<T> = std::result::Result<T, AlleleError>;
 ///   ALLELE_LOG=debug               — everything above debug
 ///   ALLELE_LOG=allele=debug,warn   — allele's spans at debug, everyone else warn
 pub(crate) fn init_tracing() {
+    init_tracing_to(false);
+}
+
+/// Log to **stderr** instead of stdout.
+///
+/// Required by `--mcp-serve`: stdout there carries newline-delimited JSON-RPC
+/// frames, and a single log line written into that stream desynchronises the
+/// client's parser. MCP servers conventionally log to stderr for exactly this
+/// reason.
+pub(crate) fn init_tracing_stderr() {
+    init_tracing_to(true);
+}
+
+fn init_tracing_to(stderr: bool) {
     let filter = EnvFilter::try_from_env("ALLELE_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = fmt()
+    let builder = fmt()
         .with_env_filter(filter)
         .with_target(false)
-        .with_level(true)
-        .try_init();
+        .with_level(true);
+    if stderr {
+        let _ = builder.with_writer(std::io::stderr).try_init();
+    } else {
+        let _ = builder.try_init();
+    }
 }
