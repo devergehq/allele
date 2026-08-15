@@ -45,6 +45,27 @@ use crate::{agents, config, git};
 const PROMPT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
+/// When to re-send the submit keystroke, as milliseconds after the initial
+/// send, if `user_prompt_submit` still has not been observed (DEV-426).
+///
+/// Allele types an initial prompt as a bracketed paste followed by a bare
+/// carriage return on an 80ms timer, racing the agent's TUI boot. That race
+/// has now been lost twice in production, in two different ways: once to
+/// first-run onboarding swallowing the paste, and once in a perfectly ordinary
+/// environment where the paste landed in the input box and the carriage return
+/// simply did not submit it. The timer is not fragile only under onboarding —
+/// it is fragile.
+///
+/// **Only the submit is retried, never the paste.** A duplicated carriage
+/// return on an empty input is a no-op; a duplicated paste would send the
+/// prompt twice. That asymmetry is the entire reason this is safe to do
+/// blindly, without reading the terminal back.
+///
+/// Backoff rather than a tight loop: if the TUI is still booting, hammering it
+/// achieves nothing, and the later attempts cover the slow-machine case that a
+/// short fixed retry would miss.
+const SUBMIT_RETRIES_MS: [u128; 7] = [1_000, 2_500, 5_000, 10_000, 20_000, 40_000, 80_000];
+
 /// Run a create request to completion and answer on `reply`.
 pub(crate) fn spawn(
     request: CreateRequest,
@@ -73,10 +94,24 @@ async fn run(request: CreateRequest, this: &WeakEntity<AppState>, cx: &mut Async
         Err((code, message)) => return error(code, message),
     };
 
-    // Wait for allele to observe the prompt being submitted.
+    // Wait for allele to observe the prompt being submitted, re-sending the
+    // submit keystroke on a backoff until it does. See `SUBMIT_RETRIES_MS`.
     let deadline = PROMPT_CONFIRM_TIMEOUT.as_millis() / POLL_INTERVAL.as_millis();
+    let mut retries = SUBMIT_RETRIES_MS.iter().peekable();
+    let mut elapsed_ms: u128 = 0;
+
     for _ in 0..deadline {
         cx.background_executor().timer(POLL_INTERVAL).await;
+        elapsed_ms += POLL_INTERVAL.as_millis();
+
+        if let Some(&&due) = retries.peek() {
+            if elapsed_ms >= due {
+                retries.next();
+                let _ = update_in_main_window(this, cx, |state, _window, cx| {
+                    resend_submit(state, &started.session_id, cx)
+                });
+            }
+        }
 
         let state = update_in_main_window(this, cx, |state, _window, _cx| {
             lookup_status(state, &started.session_id)
@@ -109,10 +144,13 @@ async fn run(request: CreateRequest, this: &WeakEntity<AppState>, cx: &mut Async
         ErrorCode::PromptDeliveryUnconfirmed,
         format!(
             "session {} started as \"{}\" but allele did not observe its prompt \
-             within {}s — it is alive and visible in the sidebar",
+             within {}s, after {} submit attempts. The session is alive and visible \
+             in the sidebar, and the prompt is most likely sitting unsent in its \
+             input box — pressing Enter in that session will start it.",
             started.session_id,
             started.name,
-            PROMPT_CONFIRM_TIMEOUT.as_secs()
+            PROMPT_CONFIRM_TIMEOUT.as_secs(),
+            SUBMIT_RETRIES_MS.len() + 1,
         ),
     )
 }
@@ -328,6 +366,27 @@ fn find_session_label(state: &AppState, session_id: &str) -> Option<String> {
         .map(|s| s.label.clone())
 }
 
+/// Re-send the submit keystroke to a session's terminal.
+///
+/// A no-op when the session has no PTY yet — it is still being cloned — which
+/// costs nothing, because the schedule keeps trying.
+fn resend_submit(state: &AppState, session_id: &str, cx: &gpui::Context<AppState>) {
+    let Some(session) = state
+        .projects
+        .iter()
+        .flat_map(|p| p.sessions.iter())
+        .find(|s| s.id == session_id)
+    else {
+        return;
+    };
+    let Some(view) = session.terminal_view.as_ref() else {
+        return;
+    };
+    if let Some(terminal) = view.read(cx).pty() {
+        terminal.write(b"\r");
+    }
+}
+
 fn lookup_status(state: &AppState, session_id: &str) -> Option<SessionStatus> {
     if state
         .projects
@@ -420,6 +479,37 @@ mod tests {
     /// A session already blocked on a permission prompt, or already finished a
     /// turn, has plainly read something — treating those as unconfirmed would
     /// report failure for a session further along than the one we waited for.
+    /// The schedule must fit inside the confirmation budget, or the last
+    /// attempts never fire and the constant lies about how many were made.
+    #[test]
+    fn every_retry_fits_within_the_confirmation_budget() {
+        let budget = PROMPT_CONFIRM_TIMEOUT.as_millis();
+        for due in SUBMIT_RETRIES_MS {
+            assert!(
+                due < budget,
+                "retry at {due}ms exceeds the {budget}ms budget"
+            );
+        }
+    }
+
+    /// Strictly increasing, so the backoff actually backs off: a schedule that
+    /// repeated or went backwards would hammer a booting TUI.
+    #[test]
+    fn the_retry_schedule_backs_off() {
+        for pair in SUBMIT_RETRIES_MS.windows(2) {
+            assert!(pair[1] > pair[0], "{:?} is not increasing", pair);
+        }
+    }
+
+    /// The first retry has to be soon enough to fix the common case quickly —
+    /// an orchestrator waiting 30s for a keystroke that failed at 80ms is a
+    /// bad trade — and late enough that a normally-booting TUI has drawn.
+    #[test]
+    fn the_first_retry_is_prompt_but_not_instant() {
+        let first = SUBMIT_RETRIES_MS[0];
+        assert!((500..=2_000).contains(&first), "first retry at {first}ms");
+    }
+
     #[test]
     fn states_past_the_prompt_all_count() {
         assert!(consumed_prompt(SessionStatus::Running));
