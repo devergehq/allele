@@ -757,6 +757,7 @@ impl AppState {
                 if let Some(origin) = this.pending_dispatch_origins.remove(&session.id) {
                     session.origin = origin;
                 }
+                let dispatched = session.origin.is_dispatched();
 
                 let Some(project) = this.projects.get_mut(project_idx) else {
                     return;
@@ -767,7 +768,17 @@ impl AppState {
                     project_idx,
                     session_idx,
                 };
-                this.active = Some(cursor);
+                // Selecting the new session is right when a human asked for
+                // it, and wrong when an agent did (DEV-425). Dispatch exists so
+                // a human keeps working while sessions start; yanking them out
+                // of the session they are typing in makes a fan-out of five
+                // *more* disruptive than starting them by hand, which defeats
+                // the point. The session still appears in the sidebar with its
+                // "dispatched by …" attribution, so it is announced without
+                // interrupting.
+                if !dispatched {
+                    this.active = Some(cursor);
+                }
                 this.apply_project_config(cursor, window, cx);
                 this.mark_state_dirty();
                 Self::schedule_operation_result_repaint(cx);
