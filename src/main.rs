@@ -3757,9 +3757,9 @@ fn main() {
                         repos: repositories::Repositories::production(),
                         platform: crate::platform::global().clone_arcs(),
                         capture_ui_requested: false,
-                        // Captured on the first render, once the root view
-                        // exists and the handle can be downcast.
+                        // Captured on the first render (see `Render`).
                         main_window: None,
+                        pending_dispatch_origins: Default::default(), // DEV-415
                     }
                 })
             },

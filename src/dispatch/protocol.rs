@@ -68,6 +68,22 @@ pub struct CreateRequest {
     /// bundler it will never look at.
     #[serde(default = "default_dispatch_orchestration")]
     pub orchestration: Orchestration,
+    /// The calling session's Claude session id, taken from
+    /// `CLAUDE_CODE_SESSION_ID` in the MCP server's own environment.
+    ///
+    /// An identity **claim**, resolved by allele against its own records. The
+    /// depth it implies is read from allele's record of that session, never
+    /// from the caller — so naming a session cannot grant a depth that
+    /// session does not have.
+    ///
+    /// The claim itself is unverified: a caller can omit or alter it, and an
+    /// unknown id is treated as depth 0. That bounds the *accident* case —
+    /// a session recursing because its own rules told it to — and nothing
+    /// more. It is not a security control; see DEV-419 for the enforceable
+    /// half, which cannot live here because allele cannot see processes it
+    /// did not spawn.
+    #[serde(default)]
+    pub caller_session_id: Option<String>,
 }
 
 fn default_dispatch_orchestration() -> Orchestration {
@@ -235,6 +251,7 @@ mod tests {
                 name: "Fix The Thing".into(),
                 prompt: "read https://example.test/brief".into(),
                 orchestration: Orchestration::StartupOnly,
+                caller_session_id: Some("caller".into()),
             }),
         ];
         for r in reqs {

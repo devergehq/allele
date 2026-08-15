@@ -752,6 +752,11 @@ impl AppState {
                 // Set before the session is pushed, so the
                 // `apply_project_config` call below already sees it.
                 session.orchestration = orchestration;
+                // Claim any dispatch attribution parked for this id while the
+                // workspace was being provisioned (DEV-415).
+                if let Some(origin) = this.pending_dispatch_origins.remove(&session.id) {
+                    session.origin = origin;
+                }
 
                 let Some(project) = this.projects.get_mut(project_idx) else {
                     return;

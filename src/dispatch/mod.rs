@@ -22,6 +22,7 @@
 //! distinction.
 
 pub(crate) mod admission;
+pub(crate) mod create;
 pub(crate) mod handler;
 pub(crate) mod mcp;
 pub(crate) mod protocol;
@@ -83,6 +84,14 @@ fn spawn_control_loop(rx: Receiver<server::ControlRequest>, cx: &mut Context<App
             // Drain everything queued rather than one per tick, so a burst of
             // dispatches is not paced at one request per interval.
             while let Ok(server::ControlRequest { request, reply }) = rx.try_recv() {
+                // Creation provisions a workspace and then waits to see the
+                // prompt land — seconds of work that must not hold up the
+                // drain. It answers on `reply` when it is done; the socket
+                // thread is already blocked waiting for exactly that.
+                if let protocol::Request::SessionsCreate(req) = request {
+                    create::spawn(req, reply, this.clone(), cx);
+                    continue;
+                }
                 let response = update_in_main_window(&this, cx, |state, window, cx| {
                     handler::handle(request, state, window, cx)
                 })

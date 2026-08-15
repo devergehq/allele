@@ -175,6 +175,15 @@ fn call_tool(params: &Value) -> Result<Value, String> {
         }),
         "allele_sessions_create" => {
             let mut v = json!({ "op": "sessions_create" });
+            // This process is a child of the calling Claude session, so its
+            // environment names that session. Allele resolves the id against
+            // its own records and reads the depth from there — the claim
+            // cannot grant a depth the named session does not have.
+            if let Ok(id) = std::env::var("CLAUDE_CODE_SESSION_ID") {
+                if let Some(obj) = v.as_object_mut() {
+                    obj.insert("caller_session_id".into(), json!(id));
+                }
+            }
             if let (Some(obj), Some(a)) = (v.as_object_mut(), args.as_object()) {
                 for (k, val) in a {
                     obj.insert(k.clone(), val.clone());

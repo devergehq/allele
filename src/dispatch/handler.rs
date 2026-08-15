@@ -27,9 +27,11 @@ pub fn handle(
         Request::ProjectsList => projects_list(state),
         Request::SessionsList => sessions_list(state),
         Request::SessionsStatus { session_id } => sessions_status(state, &session_id),
+        // Handled before this point — creation is asynchronous and answers
+        // on the socket's reply channel directly. See `dispatch::create`.
         Request::SessionsCreate(_) => Response::Error {
             code: ErrorCode::Internal,
-            message: "sessions.create is not implemented yet".to_string(),
+            message: "sessions.create must be routed to dispatch::create".to_string(),
         },
     }
 }
