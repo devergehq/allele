@@ -55,48 +55,6 @@ pub(crate) fn update_in_main_window<R>(
         .map_err(|e| AlleleError::Dispatch(format!("main window is gone: {e}")))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use gpui::{div, IntoElement, Render, TestAppContext, WindowHandle};
-
-    /// Stand-in for `AppState`: does the one thing the real `render` does.
-    struct Probe {
-        handle: Option<WindowHandle<Probe>>,
-    }
-
-    impl Render for Probe {
-        fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-            if self.handle.is_none() {
-                self.handle = window.window_handle().downcast::<Probe>();
-            }
-            div()
-        }
-    }
-
-    /// The assumption `AppState::render` relies on to stash `main_window`:
-    /// a root view can recover its own *typed* window handle mid-render.
-    /// `downcast` compares `TypeId`s against the window's recorded root-view
-    /// type, so this would silently yield `None` — leaving dispatch
-    /// permanently unavailable — if the type were not yet registered by the
-    /// time the first frame runs.
-    #[gpui::test]
-    fn root_view_recovers_its_typed_window_handle_during_render(cx: &mut TestAppContext) {
-        let window = cx.add_window(|_window, _cx| Probe { handle: None });
-        cx.run_until_parked();
-
-        let handle = window
-            .update(cx, |probe, _window, _cx| probe.handle)
-            .expect("window is live");
-
-        assert_eq!(
-            handle,
-            Some(window),
-            "render must recover the same typed handle the window was created with"
-        );
-    }
-}
-
 /// Bind the control socket and start answering on it (DEV-415).
 ///
 /// A no-op when the socket cannot be bound — another Allele already serves it,
@@ -147,4 +105,46 @@ fn spawn_control_loop(rx: Receiver<server::ControlRequest>, cx: &mut Context<App
         }
     })
     .detach();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::{div, IntoElement, Render, TestAppContext, WindowHandle};
+
+    /// Stand-in for `AppState`: does the one thing the real `render` does.
+    struct Probe {
+        handle: Option<WindowHandle<Probe>>,
+    }
+
+    impl Render for Probe {
+        fn render(&mut self, window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            if self.handle.is_none() {
+                self.handle = window.window_handle().downcast::<Probe>();
+            }
+            div()
+        }
+    }
+
+    /// The assumption `AppState::render` relies on to stash `main_window`:
+    /// a root view can recover its own *typed* window handle mid-render.
+    /// `downcast` compares `TypeId`s against the window's recorded root-view
+    /// type, so this would silently yield `None` — leaving dispatch
+    /// permanently unavailable — if the type were not yet registered by the
+    /// time the first frame runs.
+    #[gpui::test]
+    fn root_view_recovers_its_typed_window_handle_during_render(cx: &mut TestAppContext) {
+        let window = cx.add_window(|_window, _cx| Probe { handle: None });
+        cx.run_until_parked();
+
+        let handle = window
+            .update(cx, |probe, _window, _cx| probe.handle)
+            .expect("window is live");
+
+        assert_eq!(
+            handle,
+            Some(window),
+            "render must recover the same typed handle the window was created with"
+        );
+    }
 }
