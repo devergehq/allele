@@ -412,7 +412,7 @@ impl AppState {
         custom_branch_slug: Option<String>,
         explicit_agent_id: Option<String>,
         initial_prompt: Option<String>,
-        skip_orchestration: bool,
+        orchestration: crate::session::Orchestration,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -751,7 +751,12 @@ impl AppState {
                 session.branch_locked = branch_locked;
                 // Set before the session is pushed, so the
                 // `apply_project_config` call below already sees it.
-                session.skip_orchestration = skip_orchestration;
+                session.orchestration = orchestration;
+                // Claim any dispatch attribution parked for this id while the
+                // workspace was being provisioned (DEV-415).
+                if let Some(origin) = this.pending_dispatch_origins.remove(&session.id) {
+                    session.origin = origin;
+                }
 
                 let Some(project) = this.projects.get_mut(project_idx) else {
                     return;
@@ -1343,7 +1348,7 @@ impl AppState {
         let already_merged = removed.merged;
         let removed_session_id = removed.id.clone();
         let removed_browser_tab_id = removed.browser_tab_id;
-        let skip_orchestration = removed.skip_orchestration;
+        let runs_shutdown = removed.orchestration.runs_startup();
         // Captured before drop(removed) / end of &mut project borrow.
         let canonical_for_task = project.source_path.clone();
         let session_id_for_task = removed.id.clone();
@@ -1403,7 +1408,7 @@ impl AppState {
         // session is using. See DEV-400.
         let shutdown_cmd = clone_path
             .as_ref()
-            .filter(|_| !skip_orchestration)
+            .filter(|_| runs_shutdown)
             .and_then(|clone_path| {
                 let cfg = config::ProjectConfig::load(clone_path)
                     .or_else(|| config::ProjectConfig::from_settings(&project.settings))?;
@@ -1888,7 +1893,8 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
     session.branch_name = persisted.branch_name.clone();
     session.merge_strategy_override = persisted.merge_strategy_override;
     session.branch_locked = persisted.branch_locked;
-    session.skip_orchestration = persisted.skip_orchestration;
+    session.orchestration = persisted.orchestration();
+    session.origin = persisted.origin.clone();
     session
 }
 

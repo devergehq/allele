@@ -61,6 +61,15 @@ src/
 ├── app_state.rs            # AppState struct + 5 cohesive sub-structs
 ├── actions.rs              # PendingAction + 8 family enums (command pattern)
 ├── errors.rs               # AlleleError + Result<T> alias
+│
+├── dispatch/               # agent session dispatch over a control socket
+│   ├── mod.rs              # off-thread → foreground-with-Window primitive
+│   ├── protocol.rs         # wire types (deliberately not the internal ones)
+│   ├── server.rs           # ~/.allele/control.sock, 0600
+│   ├── handler.rs          # read-only ops, non-interactive by contract
+│   ├── create.rs           # sessions.create — the only async operation
+│   ├── admission.rs        # dispatched-session cap + depth limit
+│   └── mcp.rs              # `Allele --mcp-serve` stdio MCP server
 ├── repositories.rs         # SettingsRepository + StateRepository traits
 │
 ├── platform/               # OS-abstraction layer
@@ -516,12 +525,43 @@ directly (not inside a sub-struct), stop and ask whether a new
 sub-struct / entity is warranted. The god-object was removed once;
 it doesn't need to come back.
 
+### 7.8 Don't log to stdout in `--mcp-serve`
+
+In MCP mode **stdout is the JSON-RPC frame stream**. A single log line
+written there desynchronises the client's parser, and the symptom points
+at the wrong layer entirely — it presents as a malformed server, so the
+next person debugs the protocol code rather than the logging.
+
+`dispatch::mcp::exit_if_serving()` runs before anything else in `main`
+and installs `errors::init_tracing_stderr()`. Keep it first, and keep any
+new MCP-mode diagnostics on stderr. This applies to anything built over
+stdio, not just this server.
+
+Every unit test passed with the bug present. It was found by driving the
+server by hand.
+
+### 7.9 Don't let the control socket raise UI
+
+`dispatch::handler` and `dispatch::create` answer a caller that is not a
+person. Allele's normal creation path raises a Relocate modal on a missing
+source and a confirmation on a dirty worktree; both conditions are checked
+*first* so the modal is never reached, and a dirty tree is refused rather
+than proceeded with. A prompt nobody can answer is a hang, and a hang is
+the failure this whole surface exists to avoid — see
+`ErrorCode::AlleleNotRunning`, which allele can never send because a
+refused `connect()` is what makes "not running" legible.
+
 ---
 
 ## 8. Open follow-ups
 
 Known work not yet landed, in rough priority order:
 
+- **Split `main.rs`.** It sits at exactly the §7.7 5000-line ratchet, so
+  the next line added there fails the gate. It will present as *that
+  change* being wrong rather than as accumulated debt, which is what makes
+  it worth doing before someone loses an afternoon to it. Candidates: the
+  `Render` impl, the macOS app menu, and the startup task wiring.
 - Adopt `AlleleError` in the remaining `git::*` functions
   (`fetch_and_rebase_onto_remote_branch`, `auto_commit_if_dirty`,
   `delete_ref`, `list_archive_refs`, `prune_archive_refs`, etc.)

@@ -319,6 +319,24 @@ pub(crate) struct AppState {
     /// duplicates — when set, the action re-activates the existing window
     /// instead of opening a new one. Cleared when the window closes.
     pub(crate) settings_window: Option<WindowHandle<settings_window::SettingsWindowState>>,
+    /// Handle to the main window, captured on the first render (DEV-415).
+    ///
+    /// Background tasks reach `AppState` through `Entity::update`, which
+    /// yields a `Context` but *no* `Window` — see the hook-event poller in
+    /// `src/main.rs`. Session creation needs both, so off-thread callers go
+    /// through this handle instead; see `crate::dispatch`. `None` until the
+    /// first frame is rendered.
+    pub(crate) main_window: Option<WindowHandle<AppState>>,
+    /// Dispatch attribution for sessions still being provisioned (DEV-415).
+    ///
+    /// A dispatched session's clone lands asynchronously, so its `Session`
+    /// does not exist when `sessions.create` returns. Attribution is parked
+    /// here by session id and applied when the session materialises —
+    /// otherwise a dispatched session would appear human-started for the
+    /// several seconds it takes to clone, and would stay that way if allele
+    /// were quit in between.
+    pub(crate) pending_dispatch_origins:
+        std::collections::HashMap<String, crate::session::SessionOrigin>,
     /// Transient warning shown when `git pull` on the source root fails
     /// before session creation. Auto-dismissed after a few seconds.
     pub(crate) pull_warning: Option<String>,

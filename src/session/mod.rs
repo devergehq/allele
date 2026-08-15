@@ -5,6 +5,106 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::terminal::TerminalView;
 
+/// How much of the project's orchestration a session runs (DEV-415).
+///
+/// DEV-400 shipped this as a single `skip_orchestration` bool, which bundled
+/// two independent decisions. A dispatched — or hand-started — session often
+/// needs the `startup` command (provision a database so tests can run) while
+/// emphatically not wanting the drawer terminals (a server, a queue worker, a
+/// scheduler and a bundler it will never look at).
+///
+/// Deliberately three states rather than two independent flags: terminals
+/// without the startup command that prepares what they run against is not a
+/// shape anyone wants, so the type refuses to express it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Orchestration {
+    /// The project's whole setup: `startup`, drawer terminals, preview URL,
+    /// and `shutdown` when the session is discarded.
+    #[default]
+    Full,
+    /// `startup` (and `shutdown` on discard), but no drawer terminals and no
+    /// preview. The dispatched-session default.
+    StartupOnly,
+    /// None of it.
+    Nothing,
+}
+
+impl Orchestration {
+    /// Whether the project's `startup` command runs at creation and resume —
+    /// and, symmetrically, whether `shutdown` runs on discard.
+    pub fn runs_startup(self) -> bool {
+        !matches!(self, Orchestration::Nothing)
+    }
+
+    /// Whether the drawer terminals and the preview URL are set up. The
+    /// preview follows the terminals rather than the startup command: it
+    /// points at a dev server that only the terminals bring up, so a preview
+    /// without them would just be a broken link.
+    pub fn runs_terminals(self) -> bool {
+        matches!(self, Orchestration::Full)
+    }
+}
+
+/// Who started a session (DEV-415).
+///
+/// Persisted, because the dispatched-session cap and the depth limit both key
+/// off it and both must survive a restart — an orchestrator that could reset
+/// the count by relaunching allele is not capped.
+///
+/// The brief's non-goal is "anything the human cannot see": an orchestrator
+/// quietly running a fleet is worse than the manual version even when it is
+/// faster. So this is rendered in the sidebar, not merely recorded.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SessionOrigin {
+    /// Started by a human, through the UI.
+    #[default]
+    Human,
+    /// Started by another session, through the control socket.
+    Dispatched {
+        /// The creating session's stable allele id. Used for attribution and
+        /// the sidebar; deliberately *not* used to compute depth, since the
+        /// chain breaks as soon as an ancestor is deleted.
+        by_session_id: String,
+        /// The creating session's label at dispatch time, so the sidebar can
+        /// attribute without a lookup that may no longer resolve.
+        by_label: String,
+        /// Denormalised and immutable: 1 for a session dispatched by a
+        /// human's session, 2 for a child of that, and so on.
+        ///
+        /// Stored rather than walked because enforcement must keep working
+        /// when the ancestor is gone. Derived by allele from the creating
+        /// session — never accepted from a caller, because anything a
+        /// dispatched session can assert about its own depth is something it
+        /// can be wrong about, and the sessions doing the asserting are the
+        /// ones running the rule that causes the recursion.
+        depth: u8,
+    },
+}
+
+impl SessionOrigin {
+    /// 0 for a human-started session; the dispatch depth otherwise.
+    pub fn depth(&self) -> u8 {
+        match self {
+            SessionOrigin::Human => 0,
+            SessionOrigin::Dispatched { depth, .. } => *depth,
+        }
+    }
+
+    pub fn is_dispatched(&self) -> bool {
+        matches!(self, SessionOrigin::Dispatched { .. })
+    }
+
+    /// The creating session's label, for display.
+    pub fn dispatched_by(&self) -> Option<&str> {
+        match self {
+            SessionOrigin::Human => None,
+            SessionOrigin::Dispatched { by_label, .. } => Some(by_label.as_str()),
+        }
+    }
+}
+
 /// Cached context from the most recent PreToolUse hook event. PreToolUse
 /// fires before the permission Notification, so we stash it here and pull
 /// the tool details when the Notification arrives.
@@ -194,6 +294,13 @@ pub struct Session {
     pub status: SessionStatus,
     /// Wall-clock time the session was originally started. Serialisable.
     pub started_at: SystemTime,
+    /// When `status` last changed. Not persisted — a rehydrated session's
+    /// state age starts at its resume, which is the only honest reading.
+    ///
+    /// Exists so a dispatch caller can be told "blocked for 40 minutes"
+    /// rather than "blocked": at twenty concurrent sessions the first is
+    /// actionable and the second is only a state. See DEV-415.
+    pub status_since: SystemTime,
     /// Updated whenever we observe activity on the session (or on rehydrate).
     pub last_active: SystemTime,
     /// APFS clone path for this session. `None` means the session runs
@@ -267,21 +374,23 @@ pub struct Session {
     /// stays put until the user explicitly changes it. Persisted so a rehydrated
     /// session with a placeholder label can't re-fire the rename after restart.
     pub branch_locked: bool,
-    /// When `true`, this session deliberately skips the project's orchestration:
-    /// the `startup` command, the drawer `terminals[]`, the `preview` URL and its
-    /// linked browser tab, and the `shutdown` command on discard. The workspace
-    /// clone and its branch are unaffected — this is a lightweight session for a
-    /// question or a short investigation, not a degraded one.
+    /// How much of the project's setup this session runs — the `startup`
+    /// command, the drawer `terminals[]`, the `preview` URL and its linked
+    /// browser tab, and the `shutdown` command on discard. The workspace clone
+    /// and its branch are unaffected in every mode: a reduced session is
+    /// lightweight, not degraded.
     ///
     /// Persisted, and carried through sync, because `apply_project_config` runs
-    /// on every cold-resume as well as at creation. A non-persisted flag would
+    /// on every cold-resume as well as at creation. A non-persisted value would
     /// mean a suspended lightweight session spun the whole project up the next
-    /// time it was clicked. See DEV-400.
-    pub skip_orchestration: bool,
+    /// time it was clicked. See DEV-400 and DEV-415.
+    pub orchestration: Orchestration,
     /// The user has explicitly chosen which conversation backs this session via
     /// the picker. Suppresses further unprompted asking: once they have decided,
     /// a newer sibling transcript is not news, it is the choice they made.
     pub conversation_choice_explicit: bool,
+    /// Who started this session. See [`SessionOrigin`].
+    pub origin: SessionOrigin,
     /// Transient: LLM-generated naming suggestions awaiting user selection
     /// (only populated in Interactive naming mode).
     pub naming_suggestions: Option<Vec<String>>,
@@ -330,6 +439,7 @@ impl Session {
             terminal_view: Some(terminal_view),
             status: SessionStatus::Idle,
             started_at: now,
+            status_since: now,
             last_active: now,
             // Idle is a runtime-counting status, so the clock starts now.
             active_accumulated: Duration::ZERO,
@@ -353,8 +463,9 @@ impl Session {
             git_dirty_count: None,
             branch_name: None,
             branch_locked: false,
-            skip_orchestration: false,
+            orchestration: Orchestration::default(),
             conversation_choice_explicit: false,
+            origin: SessionOrigin::default(),
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
@@ -385,6 +496,10 @@ impl Session {
             terminal_view: None,
             status: SessionStatus::Suspended,
             started_at,
+            // Not `started_at`: this session has just been rehydrated, so its
+            // state age is measured from the resume, not from its creation
+            // days ago.
+            status_since: SystemTime::now(),
             last_active,
             // Suspended is frozen, so the clock is not running; only the
             // banked runtime restored from disk carries over.
@@ -409,8 +524,9 @@ impl Session {
             git_dirty_count: None,
             branch_name: None,
             branch_locked: false,
-            skip_orchestration: false,
+            orchestration: Orchestration::default(),
             conversation_choice_explicit: false,
+            origin: SessionOrigin::default(),
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
@@ -498,6 +614,9 @@ impl Session {
             // Entering a live state — start a fresh stretch.
             self.active_since = Some(SystemTime::now());
         }
+        if self.status != new {
+            self.status_since = SystemTime::now();
+        }
         self.status = new;
     }
 
@@ -545,6 +664,48 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
+    use super::Orchestration;
+
+    /// The middle state is the whole point of the split: the startup command
+    /// runs (so a database is provisioned and tests can run) while the drawer
+    /// terminals — a server, a queue worker, a scheduler, a bundler — do not.
+    #[test]
+    fn startup_only_runs_startup_but_not_terminals() {
+        assert!(Orchestration::StartupOnly.runs_startup());
+        assert!(!Orchestration::StartupOnly.runs_terminals());
+    }
+
+    #[test]
+    fn full_runs_everything_and_nothing_runs_nothing() {
+        assert!(Orchestration::Full.runs_startup());
+        assert!(Orchestration::Full.runs_terminals());
+        assert!(!Orchestration::Nothing.runs_startup());
+        assert!(!Orchestration::Nothing.runs_terminals());
+    }
+
+    /// Terminals imply startup in every mode — the type cannot express
+    /// "terminals without the command that prepares what they run against".
+    #[test]
+    fn terminals_always_imply_startup() {
+        for mode in [
+            Orchestration::Full,
+            Orchestration::StartupOnly,
+            Orchestration::Nothing,
+        ] {
+            assert!(
+                !mode.runs_terminals() || mode.runs_startup(),
+                "{mode:?} would spawn terminals without running startup"
+            );
+        }
+    }
+
+    /// Unspecified means the project's full setup — the behaviour every
+    /// session had before any of this existed.
+    #[test]
+    fn default_is_full() {
+        assert_eq!(Orchestration::default(), Orchestration::Full);
+    }
+
     // Import Session explicitly rather than `use super::*` — this module's
     // parent does `use gpui::*`, whose glob would shadow the standard
     // `#[test]` attribute with gpui's own `test` macro.

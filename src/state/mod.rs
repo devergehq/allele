@@ -91,11 +91,41 @@ pub struct PersistedSession {
     /// re-fire the rename after a restart.
     #[serde(default)]
     pub branch_locked: bool,
-    /// True when the session was created as lightweight — no project `startup`
-    /// command, drawer terminals, preview URL, or `shutdown` on discard.
-    /// `serde(default)` so state written before DEV-400 still loads.
+    /// Legacy DEV-400 flag: "run none of the project's orchestration".
+    ///
+    /// Superseded by `orchestration`, which splits the startup command from the
+    /// drawer terminals. Still *written*, derived from `orchestration`, so an
+    /// older Allele reading this file degrades sensibly rather than tripping on
+    /// a missing key — it sees `StartupOnly` as full orchestration, which is the
+    /// safe direction. `serde(default)` so state written before DEV-400 loads.
     #[serde(default)]
     pub skip_orchestration: bool,
+    /// How much of the project's setup this session runs (DEV-415). Absent in
+    /// files written before the split; [`PersistedSession::orchestration`]
+    /// resolves those from `skip_orchestration`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub orchestration: Option<crate::session::Orchestration>,
+    /// Who started this session (DEV-415). `serde(default)` — everything
+    /// written before dispatch existed was started by a human.
+    #[serde(default)]
+    pub origin: crate::session::SessionOrigin,
+}
+
+impl PersistedSession {
+    /// The session's orchestration mode, resolving pre-DEV-415 state files.
+    ///
+    /// Reading the legacy bool rather than defaulting is what stops every
+    /// lightweight session created under DEV-400 from silently spinning the
+    /// whole project up on the first resume after upgrading.
+    pub fn orchestration(&self) -> crate::session::Orchestration {
+        self.orchestration.unwrap_or({
+            if self.skip_orchestration {
+                crate::session::Orchestration::Nothing
+            } else {
+                crate::session::Orchestration::Full
+            }
+        })
+    }
 }
 
 impl PersistedSession {
@@ -129,7 +159,10 @@ impl PersistedSession {
             branch_name: session.branch_name.clone(),
             merge_strategy_override: session.merge_strategy_override,
             branch_locked: session.branch_locked,
-            skip_orchestration: session.skip_orchestration,
+            // Derived, for older Allele versions reading this file.
+            skip_orchestration: !session.orchestration.runs_startup(),
+            orchestration: Some(session.orchestration),
+            origin: session.origin.clone(),
         }
     }
 }
@@ -294,6 +327,110 @@ mod tests {
             serde_json::from_str(json).expect("legacy state.json must still deserialise");
         assert!(!session.skip_orchestration);
         assert_eq!(session.label, "Claude 1");
+    }
+
+    /// A DEV-400 session that opted out predates the `orchestration` key. It
+    /// must resolve to `Nothing`, not to the enum's `Full` default — otherwise
+    /// upgrading Allele silently re-arms the project's startup scripts on every
+    /// lightweight session the user has.
+    #[test]
+    fn legacy_skip_orchestration_resolves_to_nothing() {
+        let json = r#"{
+            "id": "4989c913-0000-0000-0000-000000000000",
+            "project_id": "proj-1",
+            "label": "Claude 1",
+            "clone_path": null,
+            "last_known_status": "Suspended",
+            "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "merged": false,
+            "drawer_tab_names": [],
+            "drawer_active_tab": 0,
+            "skip_orchestration": true
+        }"#;
+        let session: PersistedSession = serde_json::from_str(json).expect("parses");
+        assert_eq!(session.orchestration, None, "legacy files carry no enum");
+        assert_eq!(
+            session.orchestration(),
+            crate::session::Orchestration::Nothing
+        );
+    }
+
+    /// The other legacy case: no opt-out means the full project setup.
+    #[test]
+    fn legacy_without_skip_orchestration_resolves_to_full() {
+        let json = r#"{
+            "id": "4989c913-0000-0000-0000-000000000000",
+            "project_id": "proj-1",
+            "label": "Claude 1",
+            "clone_path": null,
+            "last_known_status": "Suspended",
+            "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "merged": false,
+            "drawer_tab_names": [],
+            "drawer_active_tab": 0
+        }"#;
+        let session: PersistedSession = serde_json::from_str(json).expect("parses");
+        assert_eq!(session.orchestration(), crate::session::Orchestration::Full);
+    }
+
+    /// The new middle state has no legacy representation, so it must survive a
+    /// round-trip on the enum — and must keep writing a legacy bool that an
+    /// older Allele reads as "run the project's setup", the safe direction.
+    #[test]
+    fn startup_only_round_trips_and_stays_readable_by_older_allele() {
+        let json = r#"{
+            "id": "4989c913-0000-0000-0000-000000000000",
+            "project_id": "proj-1",
+            "label": "Claude 1",
+            "clone_path": null,
+            "last_known_status": "Suspended",
+            "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "merged": false,
+            "drawer_tab_names": [],
+            "drawer_active_tab": 0,
+            "skip_orchestration": false,
+            "orchestration": "startup_only"
+        }"#;
+        let session: PersistedSession = serde_json::from_str(json).expect("parses");
+        assert_eq!(
+            session.orchestration(),
+            crate::session::Orchestration::StartupOnly
+        );
+
+        let encoded = serde_json::to_string(&session).expect("serialises");
+        let back: PersistedSession = serde_json::from_str(&encoded).expect("re-parses");
+        assert_eq!(
+            back.orchestration(),
+            crate::session::Orchestration::StartupOnly
+        );
+        assert!(
+            !back.skip_orchestration,
+            "an older Allele must read StartupOnly as running the project's setup"
+        );
+    }
+
+    /// And when the enum *is* present it wins over a stale legacy bool.
+    #[test]
+    fn explicit_orchestration_overrides_legacy_bool() {
+        let json = r#"{
+            "id": "4989c913-0000-0000-0000-000000000000",
+            "project_id": "proj-1",
+            "label": "Claude 1",
+            "clone_path": null,
+            "last_known_status": "Suspended",
+            "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "merged": false,
+            "drawer_tab_names": [],
+            "drawer_active_tab": 0,
+            "skip_orchestration": true,
+            "orchestration": "full"
+        }"#;
+        let session: PersistedSession = serde_json::from_str(json).expect("parses");
+        assert_eq!(session.orchestration(), crate::session::Orchestration::Full);
     }
 
     /// And a session that opted out round-trips through the file format.

@@ -123,7 +123,7 @@ impl AppState {
                 branch_slug,
                 agent_id,
                 initial_prompt,
-                skip_orchestration,
+                orchestration,
             } => {
                 self.add_session_to_project_with_details(
                     project_idx,
@@ -131,7 +131,7 @@ impl AppState {
                     branch_slug,
                     agent_id,
                     initial_prompt,
-                    skip_orchestration,
+                    orchestration,
                     window,
                     cx,
                 );
@@ -323,12 +323,12 @@ impl AppState {
                     // switched to lightweight from the Edit modal while it is
                     // still in flight. Dropping the pending state above means
                     // this simply lands nothing. See DEV-400.
-                    let skip = self
+                    let runs_terminals = self
                         .projects
                         .get(cursor.project_idx)
                         .and_then(|p| p.sessions.get(cursor.session_idx))
-                        .is_some_and(|s| s.skip_orchestration);
-                    if !skip {
+                        .is_some_and(|s| s.orchestration.runs_terminals());
+                    if runs_terminals {
                         self.spawn_terminals_and_preview(
                             cursor,
                             &cfg,
@@ -435,7 +435,7 @@ impl AppState {
                 branch_slug,
                 comment,
                 pinned,
-                skip_orchestration,
+                orchestration,
             } => {
                 if let Some(session) = self
                     .projects
@@ -448,7 +448,7 @@ impl AppState {
                     // Takes effect from the next resume: `apply_project_config`
                     // reads it there. Deliberately does not retroactively start
                     // or tear down anything for the running session.
-                    session.skip_orchestration = skip_orchestration;
+                    session.orchestration = orchestration;
                     session.auto_naming_fired = true;
 
                     // Rename the git branch if a name was provided.
@@ -497,9 +497,9 @@ impl AppState {
                 // Carried explicitly: the restore below rebuilds the session
                 // from a handful of fields, so anything not named here silently
                 // reverts to its default. Losing this one would quietly re-arm
-                // the project's startup scripts on a session the user created
-                // to skip them. See DEV-400.
-                let restore_skip_orchestration = session.skip_orchestration;
+                // the project's startup scripts, or its terminals, on a session
+                // the user created without them. See DEV-400 and DEV-415.
+                let restore_orchestration = session.orchestration;
 
                 let needs_git = clone_path.as_ref().map_or(false, |cp| *cp != canonical);
 
@@ -642,7 +642,7 @@ impl AppState {
                                 )
                                 .with_agent_id(restore_agent_id.clone());
                                 let mut restored = restored;
-                                restored.skip_orchestration = restore_skip_orchestration;
+                                restored.orchestration = restore_orchestration;
                                 restored.operation_error = Some(OperationError {
                                     kind: OperationErrorKind::MergeAndClose,
                                     message: e.to_string(),

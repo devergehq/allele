@@ -49,7 +49,9 @@ const MAX_FILE_LINES: usize = 5_000;
 const CFG_TARGET_OS_ALLOWLIST: &[&str] = &[
     "src/debug_capture.rs",
     "src/hooks/mod.rs",
-    "src/main.rs",
+    // Moved out of `src/main.rs` wholesale (DEV-415): the About panel's
+    // Obj-C block came with it. Same single violation, different file.
+    "src/mac_menu.rs",
     "src/memory_watchdog.rs",
     "src/scratch_pad/clipboard_image.rs",
     "src/sync/crypto.rs",
