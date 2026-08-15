@@ -3100,6 +3100,8 @@ fn main() {
                         project.sessions.push(session);
                     }
 
+                    dispatch::spawn_control_socket(cx);
+
                     // Spawn the hook-event polling task. Runs for the life
                     // of the app, reads ~/.allele/events/*.jsonl every
                     // 250ms, and routes each new event into apply_hook_event.
@@ -3285,6 +3287,11 @@ fn main() {
                                 })
                                 .unwrap_or(true);
                             if should_quit {
+                                // Remove the control socket so the next run
+                                // binds without having to reclaim a stale
+                                // file. Best-effort: a crash skips this, which
+                                // the reclaim path in `server` handles.
+                                dispatch::server::cleanup();
                                 cx.quit();
                             }
                         }

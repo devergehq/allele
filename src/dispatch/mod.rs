@@ -22,7 +22,11 @@
 //! distinction.
 
 pub(crate) mod admission;
+pub(crate) mod handler;
 pub(crate) mod protocol;
+pub(crate) mod server;
+
+use std::sync::mpsc::Receiver;
 
 use gpui::{AsyncApp, Context, WeakEntity, Window};
 
@@ -91,4 +95,56 @@ mod tests {
             "render must recover the same typed handle the window was created with"
         );
     }
+}
+
+/// Bind the control socket and start answering on it (DEV-415).
+///
+/// A no-op when the socket cannot be bound — another Allele already serves it,
+/// or the path is unusable. Dispatch is then unavailable and the app is
+/// otherwise unaffected, which is a better trade than refusing to launch over
+/// an optional automation surface.
+pub(crate) fn spawn_control_socket(cx: &mut Context<AppState>) {
+    if let Some(rx) = server::spawn_listener() {
+        spawn_control_loop(rx, cx);
+    }
+}
+
+/// Answer control-socket requests on the GPUI foreground thread.
+///
+/// Accept and per-connection reads happen on `server`'s own threads because
+/// `UnixListener` is blocking; this is the other end, where a `&mut Window`
+/// exists and session creation is therefore possible.
+fn spawn_control_loop(rx: Receiver<server::ControlRequest>, cx: &mut Context<AppState>) {
+    cx.spawn(async move |this, cx| {
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(20))
+                .await;
+
+            // Drain everything queued rather than one per tick, so a burst of
+            // dispatches is not paced at one request per interval.
+            while let Ok(server::ControlRequest { request, reply }) = rx.try_recv() {
+                let response = update_in_main_window(&this, cx, |state, window, cx| {
+                    handler::handle(request, state, window, cx)
+                })
+                .unwrap_or_else(|e| {
+                    // AppState or the window is gone. Answer anyway rather
+                    // than let the socket thread wait out its timeout —
+                    // a legible error beats a hang, which is the whole
+                    // reason this surface is a socket.
+                    protocol::Response::Error {
+                        code: protocol::ErrorCode::Internal,
+                        message: e.to_string(),
+                    }
+                });
+                // A client that hung up mid-request is normal, not an error.
+                let _ = reply.send(response);
+            }
+
+            if this.upgrade().is_none() {
+                break; // app is exiting
+            }
+        }
+    })
+    .detach();
 }

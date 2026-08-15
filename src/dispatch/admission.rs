@@ -27,6 +27,7 @@
 // The caller lands with the socket listener; the policy is testable now.
 #![allow(dead_code)]
 
+use crate::app_state::AppState;
 use crate::dispatch::protocol::ErrorCode;
 use crate::session::SessionOrigin;
 
@@ -61,6 +62,20 @@ pub fn admit(creator: &SessionOrigin, live_dispatched: usize) -> Result<u8, Erro
         return Err(ErrorCode::CapacityExceeded);
     }
     Ok(child_depth)
+}
+
+/// How many dispatched sessions are alive, across every project.
+///
+/// Counts dispatched sessions only — human-started ones are uncapped, because
+/// a human can see what they are doing and an orchestrator in a loop cannot.
+/// Aggregated globally rather than per dispatcher; see [`super::admission`].
+pub fn live_dispatched_count(state: &AppState) -> usize {
+    state
+        .projects
+        .iter()
+        .flat_map(|p| p.sessions.iter())
+        .filter(|s| s.origin.is_dispatched())
+        .count()
 }
 
 #[cfg(test)]
