@@ -256,12 +256,14 @@ impl Render for ConversationPickerModal {
             )
             .child(list)
             .child(
+                // Two rows, not one. Sharing a row with the hint let the text
+                // win the space fight and clipped the confirm button's label.
+                // Stacking keeps the buttons at their natural width whatever
+                // the hint says.
                 div()
                     .flex()
-                    .flex_row()
-                    .items_center()
-                    .justify_between()
-                    .gap(px(8.0))
+                    .flex_col()
+                    .gap(px(10.0))
                     .child(
                         div()
                             .text_size(px(10.0))
@@ -272,17 +274,20 @@ impl Render for ConversationPickerModal {
                         div()
                             .flex()
                             .flex_row()
+                            .justify_end()
                             .gap(px(8.0))
                             .child(
                                 div()
                                     .id("conversation-picker-cancel")
+                                    .flex_shrink_0()
                                     .cursor_pointer()
                                     .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
                                     .px(px(10.0))
                                     .py(px(5.0))
                                     .rounded(px(6.0))
-                                    .bg(theme().bg_hover)
-                                    .hover(|s| s.bg(theme().bg_active))
+                                    .border_1()
+                                    .border_color(theme().border_default)
+                                    .hover(|s| s.bg(theme().bg_hover))
                                     .text_size(px(11.0))
                                     .text_color(theme().text_secondary)
                                     .on_mouse_down(
@@ -297,15 +302,22 @@ impl Render for ConversationPickerModal {
                             .child(
                                 div()
                                     .id("conversation-picker-confirm")
+                                    .flex_shrink_0()
                                     .cursor_pointer()
                                     .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
                                     .px(px(10.0))
                                     .py(px(5.0))
                                     .rounded(px(6.0))
-                                    .bg(theme().bg_active)
-                                    .hover(|s| s.bg(theme().bg_hover))
+                                    // Solid accent fill, as elsewhere in the
+                                    // app: the primary action should read as
+                                    // the primary action without hunting for
+                                    // it. Cancel is a bordered ghost so the
+                                    // two never look interchangeable.
+                                    .bg(theme().accent)
+                                    .hover(|s| s.bg(theme().info))
                                     .text_size(px(11.0))
-                                    .text_color(theme().text_primary)
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme().text_on_accent)
                                     .on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(|this, _e, _w, cx| {

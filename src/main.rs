@@ -3066,7 +3066,8 @@ fn main() {
                         )
                         .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
                         .with_agent_id(persisted.agent_id.clone())
-                        .with_claude_session_id(persisted.claude_session_id.clone());
+                        .with_claude_session_id(persisted.claude_session_id.clone())
+                        .with_conversation_choice_explicit(persisted.conversation_choice_explicit);
                         session.pinned = persisted.pinned;
                         session.comment = persisted.comment.clone();
                         session.branch_name = persisted.branch_name.clone();

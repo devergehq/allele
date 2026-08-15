@@ -995,6 +995,8 @@ impl AppState {
                         // matching `with_claude_session_id`.
                         session.claude_session_id =
                             Some(conversation_id.clone()).filter(|c| c != &session.id);
+                        // The user has now decided. Stop asking on every resume.
+                        session.conversation_choice_explicit = true;
                         // Only a session with no live PTY can be resumed into
                         // the chosen conversation right now. Restarting a
                         // running one would kill the agent mid-turn and lose
@@ -1117,6 +1119,10 @@ impl AppState {
         let session_id = session.claude_session_id().to_string();
         let label = session.label.clone();
         let stored_agent_id = session.agent_id.clone();
+        // Whether Allele ever positively learned which conversation is live,
+        // and whether the user has already settled the question by hand.
+        let pointer_known = session.claude_session_id.is_some();
+        let choice_explicit = session.conversation_choice_explicit;
 
         // Resolve the agent. Prefer the session's stored agent_id so a
         // resume always uses whatever spawned the session originally,
@@ -1153,7 +1159,12 @@ impl AppState {
         if is_claude
             && !choice_confirmed
             && self.conversation_picker.is_none()
-            && conversations::resume_is_ambiguous(&clone_path, &session_id)
+            && conversations::resume_is_ambiguous(
+                &clone_path,
+                &session_id,
+                pointer_known,
+                choice_explicit,
+            )
         {
             self.open_conversation_picker(cursor, &clone_path, &label, &session_id, cx);
             return;
