@@ -32,6 +32,16 @@ Changes on `master` awaiting the next tagged release.
   outside Claude, a plan accepted, a queued message, and hook errors.
 
 ### Fixed
+- Tools installed outside the system directories are reachable again from sessions
+  started by an Allele you launched from Finder, the Dock, or Spotlight. Allele already
+  adopted the login shell's PATH when it detected launchd's stripped GUI environment,
+  but the detector counted `/usr/local/bin` as proof of a terminal launch — and that
+  directory is line 1 of stock `/etc/paths`, so launchd supplies it to every app. The
+  probe was therefore skipped in exactly the case it was written for, and only a
+  terminal launch (`cargo run`) appeared to work. Allele now treats a PATH as stripped
+  when every entry on it is one macOS supplies itself, so anything from Homebrew,
+  cargo, nvm, or `~/.local/bin` marks a genuine terminal launch. Agent hooks that
+  shell out to user-installed binaries no longer fail with "command not found".
 - Archive delete confirmations no longer survive a project reorder or removal. An armed
   prompt carries a project index, so it could reappear against a different project's
   archives once the indices shifted underneath it.
