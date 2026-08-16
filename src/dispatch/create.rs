@@ -42,7 +42,7 @@ use crate::{agents, config, git};
 /// confirming it. Generous: a cold agent on a busy machine can take a while to
 /// draw its first frame, and a false `prompt_delivery_unconfirmed` would send
 /// an orchestrator chasing a session that is fine.
-const PROMPT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
+pub(super) const PROMPT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// When to re-send the submit keystroke, as milliseconds after the initial
@@ -108,7 +108,7 @@ async fn run(request: CreateRequest, this: &WeakEntity<AppState>, cx: &mut Async
             if elapsed_ms >= due {
                 retries.next();
                 let _ = update_in_main_window(this, cx, |state, _window, cx| {
-                    resend_submit(state, &started.session_id, cx)
+                    crate::dispatch::pty::submit(state, &started.session_id, cx)
                 });
             }
         }
@@ -364,27 +364,6 @@ fn find_session_label(state: &AppState, session_id: &str) -> Option<String> {
         .flat_map(|p| p.sessions.iter())
         .find(|s| s.id == session_id || s.claude_session_id() == session_id)
         .map(|s| s.label.clone())
-}
-
-/// Re-send the submit keystroke to a session's terminal.
-///
-/// A no-op when the session has no PTY yet — it is still being cloned — which
-/// costs nothing, because the schedule keeps trying.
-fn resend_submit(state: &AppState, session_id: &str, cx: &gpui::Context<AppState>) {
-    let Some(session) = state
-        .projects
-        .iter()
-        .flat_map(|p| p.sessions.iter())
-        .find(|s| s.id == session_id)
-    else {
-        return;
-    };
-    let Some(view) = session.terminal_view.as_ref() else {
-        return;
-    };
-    if let Some(terminal) = view.read(cx).pty() {
-        terminal.write(b"\r");
-    }
 }
 
 fn lookup_status(state: &AppState, session_id: &str) -> Option<SessionStatus> {

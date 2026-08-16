@@ -35,6 +35,8 @@ pub enum Request {
     SessionsCreate(CreateRequest),
     /// Remove a dispatched session, archiving its work.
     SessionsDiscard { session_id: String },
+    /// Stop whatever a dispatched session is currently doing.
+    SessionsInterrupt { session_id: String },
 }
 
 /// Parameters for `sessions.create`.
@@ -103,6 +105,7 @@ pub enum Response {
     Status { session: SessionSummary },
     Created { session: CreatedSession },
     Discarded { session: DiscardedSession },
+    Interrupted { session: InterruptedSession },
     Error { code: ErrorCode, message: String },
 }
 
@@ -152,6 +155,20 @@ pub struct DiscardedSession {
     /// legitimate reason to reach for this — so the response says what was
     /// stopped rather than the request refusing to stop it.
     pub was_state: SessionState,
+}
+
+/// What `sessions.interrupt` returns.
+///
+/// Reports the state on both sides of the interrupt rather than asserting
+/// success, so a caller can see whether anything actually stopped. An
+/// interrupt sent to a session that was not running is a no-op, and this
+/// makes that visible instead of implying otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InterruptedSession {
+    pub session_id: String,
+    pub name: String,
+    pub was_state: SessionState,
+    pub now_state: SessionState,
 }
 
 /// A session's current state.
@@ -298,6 +315,16 @@ mod tests {
         };
         let line = serde_json::to_string(&r).expect("serialises");
         assert_eq!(line, r#"{"op":"sessions_discard","session_id":"b1413d28"}"#);
+        assert_eq!(serde_json::from_str::<Request>(&line).expect("parses"), r);
+    }
+
+    #[test]
+    fn interrupt_round_trips_over_the_wire() {
+        let r = Request::SessionsInterrupt {
+            session_id: "s1".into(),
+        };
+        let line = serde_json::to_string(&r).expect("serialises");
+        assert_eq!(line, r#"{"op":"sessions_interrupt","session_id":"s1"}"#);
         assert_eq!(serde_json::from_str::<Request>(&line).expect("parses"), r);
     }
 
