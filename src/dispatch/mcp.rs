@@ -156,6 +156,27 @@ fn tool_definitions() -> Value {
                 "additionalProperties": false,
             },
         },
+        {
+            "name": "allele_sessions_discard",
+            "description":
+                "Discard an allele session that was created by an agent, freeing a slot \
+                 against the dispatch cap. Non-destructive: uncommitted work is committed \
+                 and the session branch is archived before its workspace is removed, and \
+                 the project's shutdown command runs if its startup did. Refuses sessions \
+                 a human started — those are theirs to remove.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "The allele session id, as returned by \
+                                        sessions_create or sessions_list.",
+                    },
+                },
+                "required": ["session_id"],
+                "additionalProperties": false,
+            },
+        },
     ])
 }
 
@@ -171,6 +192,10 @@ fn call_tool(params: &Value) -> Result<Value, String> {
         "allele_sessions_list" => json!({ "op": "sessions_list" }),
         "allele_sessions_status" => json!({
             "op": "sessions_status",
+            "session_id": args.get("session_id").and_then(Value::as_str).unwrap_or_default(),
+        }),
+        "allele_sessions_discard" => json!({
+            "op": "sessions_discard",
             "session_id": args.get("session_id").and_then(Value::as_str).unwrap_or_default(),
         }),
         "allele_sessions_create" => {
@@ -254,7 +279,9 @@ mod tests {
         for tool in tools.as_array().expect("array") {
             let name = tool["name"].as_str().expect("name");
             let args = match name {
-                "allele_sessions_status" => json!({ "session_id": "x" }),
+                "allele_sessions_status" | "allele_sessions_discard" => {
+                    json!({ "session_id": "x" })
+                }
                 "allele_sessions_create" => {
                     json!({ "project": "p", "name": "n", "prompt": "go" })
                 }
@@ -269,6 +296,27 @@ mod tests {
                 "{name} is advertised but not routed"
             );
         }
+    }
+
+    /// The destructive tool must be advertised with a session id and nothing
+    /// else — no "all", no project-wide sweep. One session per call is what
+    /// keeps a confused caller's blast radius to one session.
+    #[test]
+    fn discard_takes_exactly_one_session_id() {
+        let tools = tool_definitions();
+        let discard = tools
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|t| t["name"] == "allele_sessions_discard")
+            .expect("discard is advertised");
+        let props = discard["inputSchema"]["properties"]
+            .as_object()
+            .expect("properties");
+        assert_eq!(props.len(), 1, "discard takes one argument");
+        assert!(props.contains_key("session_id"));
+        assert_eq!(discard["inputSchema"]["required"][0], "session_id");
+        assert_eq!(discard["inputSchema"]["additionalProperties"], false);
     }
 
     #[test]
