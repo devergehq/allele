@@ -155,10 +155,7 @@ mod tests {
 
         // Ciphertext must not be the plaintext (no leakage).
         assert_ne!(ciphertext.as_slice(), plaintext.as_slice());
-        assert!(
-            !ciphertext.windows(3).any(|w| w == b"fox"),
-            "plaintext leaked into ciphertext"
-        );
+        crate::sync::leak_check::assert_not_leaked(&ciphertext, b"quick brown fox", "plaintext");
 
         assert_eq!(key.decrypt(&ciphertext).unwrap(), plaintext);
     }
