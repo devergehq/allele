@@ -19,6 +19,7 @@ mod git;
 mod hook_events;
 mod hooks;
 mod icon;
+mod interrupted;
 mod keymap;
 mod mac_menu;
 mod memory_watchdog;
@@ -2976,12 +2977,18 @@ fn main() {
                     // with pre-existing events from a previous app session.
                     cx.spawn(async move |this, cx| {
                         let mut watcher = hooks::EventWatcher::new();
+                        let mut interrupts = interrupted::InterruptWatcher::default();
                         watcher.initialize_offsets();
 
                         loop {
                             cx.background_executor()
                                 .timer(std::time::Duration::from_millis(250))
                                 .await;
+
+                            // Claude Code emits no hook when a turn is
+                            // interrupted, so this is the only way a session
+                            // leaves `Running` after one. See DEV-432.
+                            interrupted::poll_once(&mut interrupts, &this, cx).await;
 
                             let events = watcher.poll();
                             if events.is_empty() {
