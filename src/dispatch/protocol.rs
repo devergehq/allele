@@ -33,6 +33,8 @@ pub enum Request {
     SessionsStatus { session_id: String },
     /// Provision a workspace and start a session in it.
     SessionsCreate(CreateRequest),
+    /// Remove a dispatched session, archiving its work.
+    SessionsDiscard { session_id: String },
 }
 
 /// Parameters for `sessions.create`.
@@ -100,6 +102,7 @@ pub enum Response {
     Sessions { sessions: Vec<SessionSummary> },
     Status { session: SessionSummary },
     Created { session: CreatedSession },
+    Discarded { session: DiscardedSession },
     Error { code: ErrorCode, message: String },
 }
 
@@ -134,6 +137,21 @@ pub struct CreatedSession {
     pub name: String,
     pub project: String,
     pub state: SessionState,
+}
+
+/// What `sessions.discard` returns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiscardedSession {
+    pub session_id: String,
+    pub name: String,
+    pub project: String,
+    /// The state the session was in when it was discarded.
+    ///
+    /// Reported so a caller that killed something mid-turn can notice.
+    /// Discarding a `running` session is allowed — stopping a runaway is a
+    /// legitimate reason to reach for this — so the response says what was
+    /// stopped rather than the request refusing to stop it.
+    pub was_state: SessionState,
 }
 
 /// A session's current state.
@@ -229,6 +247,12 @@ pub enum ErrorCode {
     /// session is recoverable by a human; a phantom success reported to an
     /// orchestrator is not.
     PromptDeliveryUnconfirmed,
+    /// The session exists but was started by a human, not by an agent.
+    ///
+    /// A caller may clean up what agents created; a human's session is not
+    /// the agent's to delete. Distinct from `bad_request` so a caller can
+    /// tell "you may not do that" from "that does not exist".
+    NotDispatched,
     /// Malformed request, unknown project field, etc.
     BadRequest,
     Internal,
@@ -262,6 +286,31 @@ mod tests {
             );
             assert_eq!(serde_json::from_str::<Request>(&line).expect("parses"), r);
         }
+    }
+
+    /// Discard must round-trip like every other op — it is the one that
+    /// removes a workspace, so a malformed request reaching the handler is
+    /// the worst case in this protocol.
+    #[test]
+    fn discard_round_trips_over_the_wire() {
+        let r = Request::SessionsDiscard {
+            session_id: "b1413d28".into(),
+        };
+        let line = serde_json::to_string(&r).expect("serialises");
+        assert_eq!(line, r#"{"op":"sessions_discard","session_id":"b1413d28"}"#);
+        assert_eq!(serde_json::from_str::<Request>(&line).expect("parses"), r);
+    }
+
+    /// `not_dispatched` has to be distinguishable on the wire from
+    /// `bad_request`: "you may not do that" and "that does not exist" want
+    /// different responses from a caller.
+    #[test]
+    fn refusing_a_human_session_is_its_own_code() {
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::NotDispatched).expect("serialises"),
+            "\"not_dispatched\""
+        );
+        assert_ne!(ErrorCode::NotDispatched, ErrorCode::BadRequest);
     }
 
     /// A dispatched session that isn't told otherwise gets the startup command

@@ -13,20 +13,21 @@ use gpui::{Context, Window};
 
 use crate::app_state::AppState;
 use crate::dispatch::protocol::{
-    ErrorCode, ProjectSummary, Request, Response, SessionState, SessionSummary,
+    DiscardedSession, ErrorCode, ProjectSummary, Request, Response, SessionState, SessionSummary,
 };
 use crate::session::Session;
 
 pub fn handle(
     request: Request,
     state: &mut AppState,
-    _window: &mut Window,
-    _cx: &mut Context<AppState>,
+    window: &mut Window,
+    cx: &mut Context<AppState>,
 ) -> Response {
     match request {
         Request::ProjectsList => projects_list(state),
         Request::SessionsList => sessions_list(state),
         Request::SessionsStatus { session_id } => sessions_status(state, &session_id),
+        Request::SessionsDiscard { session_id } => sessions_discard(state, &session_id, window, cx),
         // Handled before this point — creation is asynchronous and answers
         // on the socket's reply channel directly. See `dispatch::create`.
         Request::SessionsCreate(_) => Response::Error {
@@ -73,6 +74,70 @@ fn sessions_status(state: &AppState, session_id: &str) -> Response {
         code: ErrorCode::BadRequest,
         message: format!("no session with id {session_id}"),
     }
+}
+
+/// Remove a dispatched session, archiving its work (DEV-429).
+///
+/// Bypasses the sidebar's inline Confirm/Cancel gate deliberately: that is a
+/// UI affordance, and a confirmation nobody can answer is the hang this whole
+/// surface exists to avoid.
+///
+/// Non-destructive. `remove_session` auto-commits any uncommitted work and
+/// fetches the session branch into `refs/allele/archive/<id>` before deleting
+/// the clone, and keeps a labelled row in the archive browser. That is what
+/// makes this safe to expose to a caller that is not a person.
+fn sessions_discard(
+    state: &mut AppState,
+    session_id: &str,
+    window: &mut Window,
+    cx: &mut Context<AppState>,
+) -> Response {
+    let found = state.projects.iter().enumerate().find_map(|(p_idx, p)| {
+        p.sessions
+            .iter()
+            .position(|s| s.id == session_id)
+            .map(|s_idx| (p_idx, s_idx))
+    });
+    let Some((project_idx, session_idx)) = found else {
+        return Response::Error {
+            code: ErrorCode::BadRequest,
+            message: format!("no session with id {session_id}"),
+        };
+    };
+
+    let session = &state.projects[project_idx].sessions[session_idx];
+
+    // A caller may clean up what agents created. A human's session is not the
+    // agent's to delete, and a confused orchestrator must not be able to wipe
+    // work someone is in the middle of.
+    if !session.origin.is_dispatched() {
+        return Response::Error {
+            code: ErrorCode::NotDispatched,
+            message: format!(
+                "session {:?} was started by a human, not dispatched — \
+                 discard it from the sidebar",
+                session.label
+            ),
+        };
+    }
+
+    let discarded = DiscardedSession {
+        session_id: session.id.clone(),
+        name: session.label.clone(),
+        project: state.projects[project_idx].name.clone(),
+        was_state: SessionState::from(session.status),
+    };
+
+    state.remove_session(
+        crate::actions::SessionCursor {
+            project_idx,
+            session_idx,
+        },
+        window,
+        cx,
+    );
+
+    Response::Discarded { session: discarded }
 }
 
 fn summarise(session: &Session, project: &str) -> SessionSummary {
