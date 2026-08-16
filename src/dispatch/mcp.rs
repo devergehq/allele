@@ -177,6 +177,23 @@ fn tool_definitions() -> Value {
                 "additionalProperties": false,
             },
         },
+        {
+            "name": "allele_sessions_interrupt",
+            "description":
+                "Stop what a dispatched allele session is currently doing — the equivalent of \
+                 pressing Escape in it. \
+                 Reports the state before and after so you can see whether anything \
+                 actually stopped — interrupting a session that was not working is a \
+                 no-op. Refuses sessions a human started.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "The allele session id." },
+                },
+                "required": ["session_id"],
+                "additionalProperties": false,
+            },
+        },
     ])
 }
 
@@ -192,6 +209,10 @@ fn call_tool(params: &Value) -> Result<Value, String> {
         "allele_sessions_list" => json!({ "op": "sessions_list" }),
         "allele_sessions_status" => json!({
             "op": "sessions_status",
+            "session_id": args.get("session_id").and_then(Value::as_str).unwrap_or_default(),
+        }),
+        "allele_sessions_interrupt" => json!({
+            "op": "sessions_interrupt",
             "session_id": args.get("session_id").and_then(Value::as_str).unwrap_or_default(),
         }),
         "allele_sessions_discard" => json!({
@@ -279,9 +300,9 @@ mod tests {
         for tool in tools.as_array().expect("array") {
             let name = tool["name"].as_str().expect("name");
             let args = match name {
-                "allele_sessions_status" | "allele_sessions_discard" => {
-                    json!({ "session_id": "x" })
-                }
+                "allele_sessions_status"
+                | "allele_sessions_discard"
+                | "allele_sessions_interrupt" => json!({ "session_id": "x" }),
                 "allele_sessions_create" => {
                     json!({ "project": "p", "name": "n", "prompt": "go" })
                 }

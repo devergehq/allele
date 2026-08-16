@@ -28,11 +28,13 @@ pub fn handle(
         Request::SessionsList => sessions_list(state),
         Request::SessionsStatus { session_id } => sessions_status(state, &session_id),
         Request::SessionsDiscard { session_id } => sessions_discard(state, &session_id, window, cx),
-        // Handled before this point — creation is asynchronous and answers
-        // on the socket's reply channel directly. See `dispatch::create`.
-        Request::SessionsCreate(_) => Response::Error {
+        // Handled before this point — these wait on the session to react,
+        // which takes seconds, so they answer on the socket's reply channel
+        // directly rather than blocking the drain. See `dispatch::create`
+        // and `dispatch::manage`.
+        Request::SessionsCreate(_) | Request::SessionsInterrupt { .. } => Response::Error {
             code: ErrorCode::Internal,
-            message: "sessions.create must be routed to dispatch::create".to_string(),
+            message: "this op must be routed to dispatch::create or dispatch::manage".to_string(),
         },
     }
 }
