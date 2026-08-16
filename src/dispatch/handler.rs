@@ -12,6 +12,7 @@
 use gpui::{Context, Window};
 
 use crate::app_state::AppState;
+use crate::dispatch::address;
 use crate::dispatch::protocol::{
     DiscardedSession, ErrorCode, ProjectSummary, Request, Response, SessionState, SessionSummary,
 };
@@ -25,8 +26,8 @@ pub fn handle(
 ) -> Response {
     match request {
         Request::ProjectsList => projects_list(state),
-        Request::SessionsList => sessions_list(state),
-        Request::SessionsStatus { session_id } => sessions_status(state, &session_id),
+        Request::SessionsList => sessions_list(state, cx),
+        Request::SessionsStatus { session_id } => sessions_status(state, &session_id, cx),
         Request::SessionsDiscard { session_id } => sessions_discard(state, &session_id, window, cx),
         // Handled before this point — these wait on the session to react,
         // which takes seconds, so they answer on the socket's reply channel
@@ -54,21 +55,21 @@ fn projects_list(state: &AppState) -> Response {
     }
 }
 
-fn sessions_list(state: &AppState) -> Response {
+fn sessions_list(state: &AppState, cx: &gpui::App) -> Response {
     Response::Sessions {
         sessions: state
             .projects
             .iter()
-            .flat_map(|p| p.sessions.iter().map(|s| summarise(s, &p.name)))
+            .flat_map(|p| p.sessions.iter().map(|s| summarise(s, &p.name, cx)))
             .collect(),
     }
 }
 
-fn sessions_status(state: &AppState, session_id: &str) -> Response {
+fn sessions_status(state: &AppState, session_id: &str, cx: &gpui::App) -> Response {
     for project in state.projects.iter() {
         if let Some(session) = project.sessions.iter().find(|s| s.id == session_id) {
             return Response::Status {
-                session: summarise(session, &project.name),
+                session: summarise(session, &project.name, cx),
             };
         }
     }
@@ -142,7 +143,7 @@ fn sessions_discard(
     Response::Discarded { session: discarded }
 }
 
-fn summarise(session: &Session, project: &str) -> SessionSummary {
+fn summarise(session: &Session, project: &str, cx: &gpui::App) -> SessionSummary {
     SessionSummary {
         session_id: session.id.clone(),
         name: session.label.clone(),
@@ -155,5 +156,9 @@ fn summarise(session: &Session, project: &str) -> SessionSummary {
             .unwrap_or(0),
         dispatched: session.origin.is_dispatched(),
         depth: session.origin.depth(),
+        // Resolved per call, never cached: `/clear` and a cold resume both
+        // replace the agent process, and a remembered address would then name
+        // a socket that is gone. See DEV-440.
+        reply_to: address::for_session(session, cx),
     }
 }

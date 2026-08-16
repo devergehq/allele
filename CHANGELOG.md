@@ -13,6 +13,17 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Fixed
+- Dispatched sessions can now reach the session that dispatched them. A session has
+  two names — allele's label, which the sidebar and auto-naming both rewrite, and the
+  Claude Code process name, fixed at spawn — and messaging resolves against the second.
+  A worker handed the first found it resolved to nothing and stalled holding finished
+  work. Allele now derives a durable `uds:` address from each session's agent process,
+  injects the dispatcher's address into the worker's first prompt automatically, and
+  reports a `reply_to` for every session from `sessions_list`, `sessions_status` and
+  `sessions_create`. Renaming a session no longer affects messaging, and a worker with
+  no reachable dispatcher is told so up front instead of discovering it at send time.
+
 ### Added
 - "Skip startup procedures" on the New Session dialog — creates a session with its own
   workspace clone and branch but runs none of the project's orchestration: no startup

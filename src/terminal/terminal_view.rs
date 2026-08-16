@@ -481,6 +481,13 @@ impl TerminalView {
         }
     }
 
+    /// Pid of the agent process running in this terminal, if it spawned.
+    /// See [`crate::dispatch::address`] — it is what a durable session
+    /// address is derived from.
+    pub fn agent_pid(&self) -> Option<u32> {
+        self.terminal.as_ref().and_then(|t| t.child_pid())
+    }
+
     /// Get the current terminal title set by the shell via OSC sequences.
     pub fn title(&self) -> Option<String> {
         self.terminal.as_ref().and_then(|t| t.title.clone())

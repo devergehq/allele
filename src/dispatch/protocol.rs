@@ -88,6 +88,20 @@ pub struct CreateRequest {
     /// did not spawn.
     #[serde(default)]
     pub caller_session_id: Option<String>,
+    /// The calling session's messaging address, taken from
+    /// `CLAUDE_CODE_MESSAGING_SOCKET` in the MCP server's own environment and
+    /// prefixed `uds:` (DEV-440).
+    ///
+    /// Prepended to the dispatched session's prompt so it can reply without
+    /// the dispatcher having to state an address — which it cannot do
+    /// correctly, because `ListAgents` does not list self and the name in its
+    /// sidebar is not the name its process answers to.
+    ///
+    /// Absent means "the caller has no reachable address". That is reported to
+    /// the worker explicitly rather than dropped; see
+    /// [`crate::dispatch::address::dispatch_preamble`].
+    #[serde(default)]
+    pub caller_reply_to: Option<String>,
 }
 
 fn default_dispatch_orchestration() -> Orchestration {
@@ -120,13 +134,13 @@ pub struct ProjectSummary {
 
 /// What `sessions.create` returns.
 ///
-/// **This is not an address.** `SendMessage` needs `name [ref]`, and the ref
-/// is minted inside Claude Code — allele has no route to it, so none of these
-/// fields can be handed straight to a send. The caller must call `ListAgents`
-/// and resolve `name` to `name [ref]` itself, **fresh at every send**: refs
-/// rotate, and a name amortised against an old ref re-gates when it changes.
+/// **`name` is not an address.** `SendMessage` resolves names against the
+/// Claude Code *process* name, which is fixed at spawn, while this one is
+/// allele's mutable label — auto-naming rewrites it seconds after the first
+/// prompt lands. Resolving it via `ListAgents` may find nothing, or may find
+/// a different session carrying the same string.
 ///
-/// There is deliberately no convenience field that looks like an address.
+/// `reply_to` is an address, and is the one to use. See DEV-440.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreatedSession {
     /// Allele's stable session id — the **only durable identity** here.
@@ -140,6 +154,16 @@ pub struct CreatedSession {
     pub name: String,
     pub project: String,
     pub state: SessionState,
+    /// The new session's own messaging address, as `uds:<path>` (DEV-440).
+    ///
+    /// Derived from the agent process, so it survives every rename and can
+    /// never collide with another session's. Use it to send follow-ups
+    /// instead of resolving `name`.
+    ///
+    /// `None` means allele could not find a bound socket for the process —
+    /// reported honestly rather than guessed, because a plausible-looking
+    /// wrong address is worse than an absent one.
+    pub reply_to: Option<String>,
 }
 
 /// What `sessions.discard` returns.
@@ -228,6 +252,17 @@ pub struct SessionSummary {
     /// Dispatch depth: 0 for human-started, 1 for dispatched by a human's
     /// session, and so on. Derived by allele; never accepted from a caller.
     pub depth: u8,
+    /// This session's messaging address, as `uds:<path>` (DEV-440).
+    ///
+    /// The durable way to reach it: derived from the agent process rather than
+    /// from `name`, so renaming cannot break it and two sessions sharing a
+    /// name cannot share it. This is also how a session discovers **its own**
+    /// address to hand out — `ListAgents` does not list self, so looking up
+    /// its own `session_id` here is the only route.
+    ///
+    /// `None` for a suspended session, or one whose socket allele cannot find.
+    #[serde(default)]
+    pub reply_to: Option<String>,
 }
 
 /// Why a request failed.
@@ -293,6 +328,7 @@ mod tests {
                 prompt: "read https://example.test/brief".into(),
                 orchestration: Orchestration::StartupOnly,
                 caller_session_id: Some("caller".into()),
+                caller_reply_to: Some("uds:/tmp/cc-socks/65452.sock".into()),
             }),
         ];
         for r in reqs {
@@ -347,6 +383,17 @@ mod tests {
         let r: CreateRequest =
             serde_json::from_str(r#"{"project":"p","name":"n","prompt":"go"}"#).expect("parses");
         assert_eq!(r.orchestration, Orchestration::StartupOnly);
+    }
+
+    /// An MCP client from before DEV-440 sends no `caller_reply_to`. It must
+    /// still parse: the field is a strict addition, and a create that arrives
+    /// without one is a dispatch whose worker is told it has no way back —
+    /// which is the honest answer, not a protocol error.
+    #[test]
+    fn create_without_a_reply_address_still_parses() {
+        let r: CreateRequest =
+            serde_json::from_str(r#"{"project":"p","name":"n","prompt":"go"}"#).expect("parses");
+        assert_eq!(r.caller_reply_to, None);
     }
 
     /// The wire vocabulary is snake_case and must stay stable independently of

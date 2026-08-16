@@ -21,6 +21,7 @@
 //! [`update_in_main_window`], so no caller has to rediscover the
 //! distinction.
 
+pub(crate) mod address;
 pub(crate) mod admission;
 pub(crate) mod create;
 pub(crate) mod handler;

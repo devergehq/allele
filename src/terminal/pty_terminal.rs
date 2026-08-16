@@ -217,6 +217,16 @@ impl PtyTerminal {
         })
     }
 
+    /// Pid of the agent process this terminal is running.
+    ///
+    /// alacritty execs the agent binary directly — there is no wrapping shell —
+    /// so this is the agent's own pid, which is what names its messaging socket.
+    /// See [`crate::dispatch::address`]: it is the basis of the only session
+    /// address that a rename cannot break.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child_pid
+    }
+
     /// Register a callback to run when this terminal is dropped. Hooks
     /// fire in LIFO order (latest registration runs first) before the
     /// PTY is killed, so they can still observe app state. Panics in a
