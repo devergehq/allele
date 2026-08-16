@@ -192,7 +192,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(!at_rest.windows(2).any(|w| w == b"My"));
+        crate::sync::leak_check::assert_not_leaked(&at_rest, b"My session", "session label");
 
         // Decodes to the expected bundle.
         let bytes = store.get(&meta_key("sess-1")).await.unwrap().unwrap();
