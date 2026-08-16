@@ -32,6 +32,7 @@ use std::time::Duration;
 use gpui::{AsyncApp, WeakEntity};
 
 use crate::app_state::AppState;
+use crate::dispatch::address;
 use crate::dispatch::admission;
 use crate::dispatch::protocol::{CreateRequest, CreatedSession, ErrorCode, Response, SessionState};
 use crate::dispatch::update_in_main_window;
@@ -113,17 +114,21 @@ async fn run(request: CreateRequest, this: &WeakEntity<AppState>, cx: &mut Async
             }
         }
 
-        let state = update_in_main_window(this, cx, |state, _window, _cx| {
-            lookup_status(state, &started.session_id)
+        let state = update_in_main_window(this, cx, |state, _window, cx| {
+            observe(state, &started.session_id, cx)
         });
         match state {
-            Ok(Some(status)) if consumed_prompt(status) => {
+            Ok(Some(observed)) if consumed_prompt(observed.status) => {
                 return Response::Created {
                     session: CreatedSession {
                         session_id: started.session_id,
                         name: started.name,
                         project: started.project,
-                        state: SessionState::from(status),
+                        state: SessionState::from(observed.status),
+                        // Resolved here rather than at launch: the socket does
+                        // not exist until the agent has booted, and by now
+                        // allele has watched it consume a prompt, so it has.
+                        reply_to: observed.reply_to,
                     },
                 };
             }
@@ -159,6 +164,16 @@ struct Started {
     session_id: String,
     name: String,
     project: String,
+}
+
+/// What the poll loop needs to see each tick: the session's status, and — once
+/// its agent has booted far enough to bind a socket — its address.
+///
+/// Read together in one foreground hop rather than two, so the address can
+/// never describe a different moment than the status it is reported beside.
+struct Observed {
+    status: SessionStatus,
+    reply_to: Option<String>,
 }
 
 /// Validate and launch, on the foreground thread.
@@ -259,6 +274,14 @@ fn begin(
         depth,
     };
 
+    // The reply address goes into the prompt rather than being left to the
+    // dispatcher to state, because a dispatcher cannot state it correctly:
+    // `ListAgents` does not list self, and its sidebar name is not the name
+    // its process answers to. When there is no address, the worker is told
+    // that in its first line — see `dispatch_preamble`. See DEV-440.
+    let prompt =
+        address::compose_dispatch_prompt(request.caller_reply_to.as_deref(), &request.prompt);
+
     let before: Vec<String> = state.projects[project_idx]
         .sessions
         .iter()
@@ -270,7 +293,7 @@ fn begin(
         name.clone(),
         None,
         None,
-        Some(request.prompt.clone()),
+        Some(prompt),
         request.orchestration,
         window,
         cx,
@@ -366,21 +389,28 @@ fn find_session_label(state: &AppState, session_id: &str) -> Option<String> {
         .map(|s| s.label.clone())
 }
 
-fn lookup_status(state: &AppState, session_id: &str) -> Option<SessionStatus> {
+fn observe(state: &AppState, session_id: &str, cx: &gpui::App) -> Option<Observed> {
     if state
         .projects
         .iter()
         .any(|p| p.loading_sessions.iter().any(|l| l.id == session_id))
     {
-        // Still cloning. Not a status yet, but not gone either.
-        return Some(SessionStatus::Suspended);
+        // Still cloning. Not a status yet, but not gone either — and with no
+        // process there is nothing to address.
+        return Some(Observed {
+            status: SessionStatus::Suspended,
+            reply_to: None,
+        });
     }
     state
         .projects
         .iter()
         .flat_map(|p| p.sessions.iter())
         .find(|s| s.id == session_id)
-        .map(|s| s.status)
+        .map(|s| Observed {
+            status: s.status,
+            reply_to: address::for_session(s, cx),
+        })
 }
 
 /// Whether a status implies the agent consumed its prompt.

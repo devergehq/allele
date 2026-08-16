@@ -69,6 +69,7 @@ src/
 │   ├── handler.rs          # read-only ops, non-interactive by contract
 │   ├── create.rs           # sessions.create — the only async operation
 │   ├── admission.rs        # dispatched-session cap + depth limit
+│   ├── address.rs          # durable session addresses (never name-derived)
 │   └── mcp.rs              # `Allele --mcp-serve` stdio MCP server
 ├── repositories.rs         # SettingsRepository + StateRepository traits
 │
@@ -550,6 +551,39 @@ than proceeded with. A prompt nobody can answer is a hang, and a hang is
 the failure this whole surface exists to avoid — see
 `ErrorCode::AlleleNotRunning`, which allele can never send because a
 refused `connect()` is what makes "not running" legible.
+
+### 7.10 A session address is never derived from its name
+
+A session carries two names. Allele's label is mutable — the sidebar renames
+it, and auto-naming rewrites it seconds after the first prompt lands. The
+Claude Code process name is whatever `--name` said at spawn and is immutable
+for the life of that process. `SendMessage` and `ListAgents` resolve against
+the *process* name.
+
+Allele cannot reconcile them. It cannot rename a live agent process and it
+does not own the resolver, so every design that keeps the two names in sync
+is unbuildable from here. It also should not want to: auto-naming exists
+precisely to change the label after the fact.
+
+So `dispatch::address` derives an address from process identity instead —
+the `uds:` messaging socket the agent binds for itself. **Nothing on the
+addressing path reads a label.** A rename touches `Session::label` and only
+`Session::label`, so it cannot break messaging; and two sessions can share a
+name but cannot share a pid, so an address cannot silently reach the wrong
+session.
+
+Two corollaries worth keeping:
+
+- **Verified or null, never guessed.** The socket directory is a Claude Code
+  implementation detail. A path is only handed out when something is bound
+  there, so a moved directory degrades to "I don't know" — which a caller can
+  act on — rather than to a confident wrong address, which it cannot.
+- **Resolve at read time, never cache.** A `/clear` or a cold resume replaces
+  the process and therefore the socket.
+
+Found in production (DEV-440): three sessions finished substantial work and
+stalled holding it, because each had been handed an address that was a
+display string.
 
 ---
 
