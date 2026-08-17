@@ -158,8 +158,12 @@ fn tool_definitions() -> Value {
                         "type": "string",
                         "enum": ["full", "startup_only", "nothing"],
                         "description": "How much of the project's setup to run. Defaults to \
-                                        startup_only: run the startup command so tests have \
-                                        what they need, without opening drawer terminals.",
+                                        nothing: the session gets its own workspace and branch \
+                                        and starts no startup command, no drawer terminals and \
+                                        no preview. Pass startup_only when the work needs the \
+                                        project's startup command — a provisioned database, \
+                                        say — before its tests will run, or full to also open \
+                                        the drawer terminals and preview.",
                     },
                 },
                 "required": ["project", "name", "prompt"],

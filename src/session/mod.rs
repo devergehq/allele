@@ -24,9 +24,12 @@ pub enum Orchestration {
     #[default]
     Full,
     /// `startup` (and `shutdown` on discard), but no drawer terminals and no
-    /// preview. The dispatched-session default.
+    /// preview. What a dispatched session asks for when its tests need the
+    /// project's services standing up first.
     StartupOnly,
-    /// None of it.
+    /// None of it. The dispatched-session default: a worker gets a workspace
+    /// and a branch, and nothing of the project's runs behind it unless it
+    /// asked.
     Nothing,
 }
 
