@@ -389,10 +389,10 @@ mod tests {
         // After the last → wraps back to the first.
         let wrapped = idx.jump_after(Some(6), is_phase).unwrap();
         assert_eq!(wrapped.seq, 1);
-        // A category with no targets → None.
-        assert!(idx
-            .jump_after(None, |k| matches!(k, JumpKind::Outcome) && false)
-            .is_none());
+        // A category with no targets → None. The predicate deliberately
+        // matches nothing; `|_| false` says that outright, where the previous
+        // `matches!(..) && false` only looked like it was testing a category.
+        assert!(idx.jump_after(None, |_| false).is_none());
     }
 
     #[test]

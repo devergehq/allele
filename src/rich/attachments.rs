@@ -155,7 +155,7 @@ pub fn copy_file(src: &Path, session_id: &str) -> std::io::Result<Attachment> {
         .and_then(|n| n.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| filename.clone());
-    let is_image = IMAGE_EXTS.iter().any(|e| *e == ext.as_str());
+    let is_image = IMAGE_EXTS.contains(&ext.as_str());
     Ok(Attachment {
         id,
         original_name,

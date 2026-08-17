@@ -613,17 +613,17 @@ fn summarise_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
         "Read" | "read_file" => input
             .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|p| short_path(p))
+            .map(short_path)
             .unwrap_or_else(|| "?".into()),
         "Edit" | "edit_file" => input
             .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|p| short_path(p))
+            .map(short_path)
             .unwrap_or_else(|| "?".into()),
         "Write" | "write_file" => input
             .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|p| short_path(p))
+            .map(short_path)
             .unwrap_or_else(|| "?".into()),
         "Bash" => input
             .get("command")
@@ -641,7 +641,7 @@ fn summarise_tool_input(tool_name: &str, input: &serde_json::Value) -> String {
             let path = input
                 .get("path")
                 .and_then(|v| v.as_str())
-                .map(|p| short_path(p))
+                .map(short_path)
                 .unwrap_or_default();
             format!("/{pattern}/ {path}")
         }

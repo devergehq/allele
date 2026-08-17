@@ -611,7 +611,7 @@ impl AppState {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(80))
                 .await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 if let Some(tv) = tv_weak.upgrade() {
                     if let Some(terminal) = tv.read(cx).pty() {
                         terminal.write(b"\r");
@@ -2258,14 +2258,20 @@ impl AppState {
                                     let stderr_drain = child.stderr.take().map(|stderr| {
                                         std::thread::spawn(move || {
                                             use std::io::BufRead;
-                                            for line in std::io::BufReader::new(stderr).lines().flatten() {
+                                            for line in std::io::BufReader::new(stderr)
+                        .lines()
+                        .map_while(Result::ok)
+                    {
                                                 warn!("allele: startup command (stderr): {line}");
                                             }
                                         })
                                     });
                                     if let Some(stdout) = child.stdout.take() {
                                         use std::io::BufRead;
-                                        for line in std::io::BufReader::new(stdout).lines().flatten() {
+                                        for line in std::io::BufReader::new(stdout)
+                        .lines()
+                        .map_while(Result::ok)
+                    {
                                             let _ = tx.send(line);
                                         }
                                     }

@@ -196,6 +196,11 @@ impl ScratchPad {
             Some((start_col, end_col))
         });
 
+        // The index is the column number, compared against the cursor and the
+        // selection range — not just a way to reach `chars[i]`. The range is
+        // inclusive so the cursor can render after the final character, which
+        // is why this cannot become a plain iterator.
+        #[allow(clippy::needless_range_loop)]
         for i in 0..=len {
             // Cursor bar at column i (before char i)
             if is_cursor_line && cursor.col == i {
@@ -609,12 +614,14 @@ impl Render for ScratchPad {
                             // data before GPUI's text-only clipboard is read.
                             let key = event.keystroke.key.as_str();
                             let mods = &event.keystroke.modifiers;
-                            if key == "v" && mods.platform && !mods.alt && !mods.shift {
-                                if this.try_paste_image(cx) {
-                                    return;
-                                }
-                                // Fall through to editor for text paste.
+                            let is_image_paste =
+                                key == "v" && mods.platform && !mods.alt && !mods.shift;
+                            // Only an image paste is handled here; text paste
+                            // falls through to the editor below.
+                            if is_image_paste && this.try_paste_image(cx) {
+                                return;
                             }
+                            // Fall through to editor for text paste.
                             match this.editor.handle_key(event, cx) {
                                 KeyOutcome::Handled => cx.notify(),
                                 KeyOutcome::Send => this.submit(cx),

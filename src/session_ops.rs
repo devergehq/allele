@@ -795,7 +795,7 @@ impl AppState {
                         cx.background_executor()
                             .timer(std::time::Duration::from_millis(80))
                             .await;
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             if let Some(tv) = tv_weak.upgrade() {
                                 if let Some(terminal) = tv.read(cx).pty() {
                                     terminal.write(b"\r");

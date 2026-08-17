@@ -80,6 +80,12 @@ pub async fn fetch_bundle(
 }
 
 /// Outcome of resolving a pulled bundle against local projects (the sync gate).
+///
+/// `Ready` is much larger than `ProjectMissing`, which Clippy flags. Boxing it
+/// would push an indirection through every construction and match site to
+/// optimise a path that runs once per pulled session and drops the value
+/// immediately — the size difference never costs anything here.
+#[allow(clippy::large_enum_variant)]
 pub enum PullResolution {
     /// Matched a local project; ready to upsert as this `PersistedSession`.
     Ready(PersistedSession),

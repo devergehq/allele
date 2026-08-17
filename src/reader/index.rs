@@ -54,9 +54,7 @@ impl AppState {
     /// Cheap no-op when the cache is already fresh.
     pub(crate) fn ensure_file_index(&mut self, cx: &mut Context<Self>) {
         let root = self.reader_workspace_root();
-        if root != self.file_index.root {
-            self.refresh_file_index(cx);
-        } else if self.file_index.status == IndexStatus::Idle {
+        if root != self.file_index.root || self.file_index.status == IndexStatus::Idle {
             self.refresh_file_index(cx);
         }
     }

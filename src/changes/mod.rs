@@ -506,12 +506,7 @@ impl AppState {
                 diff_body = diff_body.child(centered_note("Binary file — no diff"));
             }
             Some(diff) => {
-                let mut shown = 0usize;
-                for line in diff.text.lines() {
-                    if shown >= DIFF_LINE_CAP {
-                        break;
-                    }
-                    shown += 1;
+                for line in diff.text.lines().take(DIFF_LINE_CAP) {
                     let (color, bg) = match line.as_bytes().first() {
                         Some(b'+') => (theme().success, Some(theme().diff_add_bg)),
                         Some(b'-') => (theme().danger, Some(theme().diff_del_bg)),

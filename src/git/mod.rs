@@ -1813,7 +1813,7 @@ pub fn sanitise_branch_name(input: &str, max_len: usize) -> String {
         .replace(".lock", "-lock");
     if collapsed.len() > max_len {
         collapsed[..max_len]
-            .trim_end_matches(|c: char| c == '-' || c == '/')
+            .trim_end_matches(['-', '/'])
             .to_string()
     } else {
         collapsed

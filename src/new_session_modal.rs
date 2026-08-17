@@ -79,7 +79,7 @@ impl NewSessionModal {
         default_label: String,
         existing_branches: Vec<String>,
     ) -> Self {
-        let name_input = cx.new(|cx| TextInput::new(cx, "", format!("{default_label}")));
+        let name_input = cx.new(|cx| TextInput::new(cx, "", default_label.to_string()));
         let branch_input =
             cx.new(|cx| TextInput::new(cx, "", "auto-generated, or type an existing branch"));
         let prompt_input = cx.new(|cx| TextInput::new(cx, "", "optional"));

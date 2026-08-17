@@ -157,14 +157,14 @@ impl SyncSection {
     /// Build the S3 config from the current inputs, or `None` if profile/bucket
     /// aren't both set.
     fn s3_config(&self, cx: &Context<SettingsWindowState>) -> Option<S3Config> {
-        let profile = non_empty(&self.profile_input.read(cx).text())?;
-        let bucket = non_empty(&self.bucket_input.read(cx).text())?;
-        let region = non_empty(&self.region_input.read(cx).text())?;
+        let profile = non_empty(self.profile_input.read(cx).text())?;
+        let bucket = non_empty(self.bucket_input.read(cx).text())?;
+        let region = non_empty(self.region_input.read(cx).text())?;
         Some(S3Config {
             bucket_name: bucket,
             region,
             profile,
-            endpoint: non_empty(&self.endpoint_input.read(cx).text()),
+            endpoint: non_empty(self.endpoint_input.read(cx).text()),
         })
     }
 
@@ -174,10 +174,10 @@ impl SyncSection {
         };
         let device_id = app_entity.read(cx).user_settings.sync.device_id.clone();
         let sync = SyncSettings {
-            bucket: non_empty(&self.bucket_input.read(cx).text()),
-            region: non_empty(&self.region_input.read(cx).text()),
-            profile: non_empty(&self.profile_input.read(cx).text()),
-            endpoint: non_empty(&self.endpoint_input.read(cx).text()),
+            bucket: non_empty(self.bucket_input.read(cx).text()),
+            region: non_empty(self.region_input.read(cx).text()),
+            profile: non_empty(self.profile_input.read(cx).text()),
+            endpoint: non_empty(self.endpoint_input.read(cx).text()),
             device_id,
         };
         // Apply + persist directly in the update closure. Routing through
