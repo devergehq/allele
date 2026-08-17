@@ -66,10 +66,16 @@ pub struct CreateRequest {
     /// failure mode of a truncated brief is a session starting confidently
     /// on half a specification.
     pub prompt: String,
-    /// How much of the project's setup to run. Defaults to `StartupOnly` for
-    /// dispatched sessions — a session that needs a database provisioned to
-    /// run tests does not need a server, a queue worker, a scheduler and a
-    /// bundler it will never look at.
+    /// How much of the project's setup to run. Defaults to `Nothing` for
+    /// dispatched sessions — a worker clones a workspace, does one job and is
+    /// discarded, and most of them never touch the project's services: they
+    /// run the test binary directly, or against SQLite. Provisioning a
+    /// database, a server, a queue worker and a bundler for that is overhead
+    /// paid on every dispatch to be used by few.
+    ///
+    /// A dispatcher whose work genuinely needs them asks for `StartupOnly`
+    /// (or `Full`) explicitly, so the cost lands on the dispatch that wanted
+    /// it rather than on all of them.
     #[serde(default = "default_dispatch_orchestration")]
     pub orchestration: Orchestration,
     /// The calling session's Claude session id, taken from
@@ -104,8 +110,14 @@ pub struct CreateRequest {
     pub caller_reply_to: Option<String>,
 }
 
+/// Dispatched sessions start bare unless they ask for more (DEV-441).
+///
+/// Deliberately *not* [`Orchestration::default()`], which is `Full`: that is
+/// the right answer for a human opening the New Session dialog in a project
+/// they are about to work in, and the wrong one for an agent that wants a
+/// workspace, a branch, and nothing else running behind it.
 fn default_dispatch_orchestration() -> Orchestration {
-    Orchestration::StartupOnly
+    Orchestration::Nothing
 }
 
 // ── Responses ───────────────────────────────────────────────────────────
@@ -376,13 +388,24 @@ mod tests {
         assert_ne!(ErrorCode::NotDispatched, ErrorCode::BadRequest);
     }
 
-    /// A dispatched session that isn't told otherwise gets the startup command
-    /// without the terminals — the shape dispatch exists to produce.
+    /// A dispatched session that isn't told otherwise starts bare: a
+    /// workspace and a branch, and none of the project's setup behind them.
     #[test]
-    fn create_defaults_to_startup_only() {
+    fn create_defaults_to_nothing() {
         let r: CreateRequest =
             serde_json::from_str(r#"{"project":"p","name":"n","prompt":"go"}"#).expect("parses");
-        assert_eq!(r.orchestration, Orchestration::StartupOnly);
+        assert_eq!(r.orchestration, Orchestration::Nothing);
+    }
+
+    /// The dispatch default is a separate decision from the type's `Default`,
+    /// and they deliberately disagree: `Full` is right for a human opening the
+    /// New Session dialog, `Nothing` for an agent that wants a workspace. A
+    /// refactor collapsing the two would silently start a project's whole
+    /// stack behind every dispatched session.
+    #[test]
+    fn dispatch_default_is_not_the_human_default() {
+        assert_ne!(default_dispatch_orchestration(), Orchestration::default());
+        assert_eq!(Orchestration::default(), Orchestration::Full);
     }
 
     /// An MCP client from before DEV-440 sends no `caller_reply_to`. It must

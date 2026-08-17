@@ -42,6 +42,17 @@ Changes on `master` awaiting the next tagged release.
   one-line notices: a pull request opened, an artifact published, a file edited
   outside Claude, a plan accepted, a queued message, and hook errors.
 
+### Changed
+- Sessions dispatched over the MCP (`allele_sessions_create`) now run **none** of the
+  project's orchestration by default, where they previously ran its `startup` command.
+  A worker clones a workspace, does one job and is discarded, and most never touch the
+  project's services — they run the test binary directly, or against SQLite — so
+  provisioning a database, a server and a bundler on every dispatch was a cost paid by
+  all of them to be used by few. A dispatcher whose work does need them now says so:
+  `orchestration: "startup_only"` for the startup command without the drawer terminals,
+  `"full"` for the whole setup. The New Session dialog is unaffected — a human still
+  gets the project's full setup unless they choose otherwise.
+
 ### Fixed
 - Archive delete confirmations no longer survive a project reorder or removal. An armed
   prompt carries a project index, so it could reappear against a different project's
