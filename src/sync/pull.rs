@@ -144,6 +144,7 @@ mod tests {
             active_runtime_secs: 0,
             merged: false,
             drawer_tab_names: Vec::new(),
+            drawer_tabs: Vec::new(),
             drawer_active_tab: 0,
             browser_tab_id: None,
             browser_last_url: None,

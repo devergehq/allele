@@ -940,7 +940,7 @@ impl AppState {
             DrawerAction::NewDrawerTab => {
                 *skip_refocus = true;
                 if let Some(cursor) = self.active {
-                    self.spawn_drawer_tab(cursor, None, None, window, cx);
+                    self.spawn_drawer_tab(cursor, None, None, None, window, cx);
                     if let Some(session) = self
                         .projects
                         .get_mut(cursor.project_idx)

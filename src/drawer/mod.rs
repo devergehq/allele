@@ -10,6 +10,8 @@
 //! UI lives here; the caller just asks for the list of elements to drop into
 //! the content column plus the optional drag overlay sibling.
 
+use std::path::Path;
+
 use crate::icon::{icon, name as icons};
 use crate::theme::theme;
 use gpui::*;
@@ -27,19 +29,47 @@ impl AppState {
     /// pre-chosen name and optional shell command. Default name is
     /// "Terminal N" where N is 1-based; default command drops into the
     /// user's shell.
+    ///
+    /// `replay` is the project-configured command line for this tab. It is
+    /// pushed into the fresh shell's stdin — the shell executes it once its rc
+    /// files finish loading and stays interactive afterwards — and retained on
+    /// the tab so the same tab can be parked and brought back running the same
+    /// thing (DEV-445).
     pub(crate) fn spawn_drawer_tab(
         &mut self,
         cursor: SessionCursor,
         name: Option<String>,
         command: Option<ShellCommand>,
+        replay: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let working_dir = self
+        let session_ref = self
             .projects
             .get(cursor.project_idx)
-            .and_then(|p| p.sessions.get(cursor.session_idx))
-            .and_then(|s| s.clone_path.clone());
+            .and_then(|p| p.sessions.get(cursor.session_idx));
+        let working_dir = session_ref.and_then(|s| s.clone_path.clone());
+        let port = session_ref.and_then(|s| s.allocated_port);
+
+        // Blank commands are configuration noise, not something to replay — a
+        // tab declared with an empty command is just a named shell, and giving
+        // it a `Some("")` replay would make it look parkable when there is
+        // nothing to bring back.
+        let replay = replay.filter(|r| !r.trim().is_empty());
+
+        // `replay` is stored UNSUBSTITUTED and re-substituted on every spawn.
+        // Storing the substituted text instead would bake this materialisation's
+        // `{{unique_port}}` into the tab, and a session's port is re-allocated on
+        // every materialisation — so an unpark would replay a claim on a port
+        // that may since have gone to somebody else, and fail as a dead server
+        // in a tab that looks restored.
+        let substituted = replay.as_ref().map(|raw| {
+            crate::config::substitute(
+                raw,
+                port,
+                working_dir.as_deref().unwrap_or_else(|| Path::new(".")),
+            )
+        });
         let initial_font_size = self.user_settings.font_size;
         let drawer_tv =
             cx.new(|cx| TerminalView::new(window, cx, command, working_dir, initial_font_size));
@@ -91,6 +121,8 @@ impl AppState {
         )
         .detach();
 
+        let user_typed = drawer_tv.read(cx).user_typed_handle();
+
         if let Some(session) = self
             .projects
             .get_mut(cursor.project_idx)
@@ -99,56 +131,185 @@ impl AppState {
             let tab_name =
                 name.unwrap_or_else(|| format!("Terminal {}", session.drawer_tabs.len() + 1));
             session.drawer_tabs.push(DrawerTab {
-                view: drawer_tv,
+                view: drawer_tv.clone(),
                 name: tab_name,
+                replay: replay.clone(),
+                user_typed,
             });
+        } else {
+            // No session to attach to — drop the terminal rather than leaking
+            // a PTY nothing owns.
+            return;
+        }
+
+        if let Some(cmd) = substituted {
+            let mut line = cmd.into_bytes();
+            line.push(b'\n');
+            drawer_tv.read(cx).send_input(&line);
         }
     }
 
-    /// Materialise drawer tabs for a session that has none yet. Uses saved
-    /// names from `pending_drawer_tab_names` if present, else creates one
-    /// default "Terminal 1" tab.
+    /// Materialise drawer tabs for a session that has none live. Restores from
+    /// `parked_drawer_tabs` if present — replaying each tab's command — else
+    /// creates one default "Terminal 1" tab.
+    ///
+    /// This is the unpark path as well as the first-open path: a drawer parked
+    /// by the idle reaper (DEV-445) and one rehydrated from `state.json` are
+    /// the same state, and come back the same way.
     pub(crate) fn ensure_drawer_tabs(
         &mut self,
         cursor: SessionCursor,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (needs_default, pending) = {
+        let (needs_default, parked, active_tab) = {
             let session = self
                 .projects
                 .get(cursor.project_idx)
                 .and_then(|p| p.sessions.get(cursor.session_idx));
             match session {
-                Some(s) if !s.drawer_tabs.is_empty() => (false, Vec::new()),
+                // Tabs are already live. Historically this returned without
+                // touching the parked list, so a session that ended up with
+                // both kept both forever — and the parked copy persisted to
+                // `state.json` and came back as phantom tabs. Clearing here
+                // makes "live wins" an enforced outcome rather than a
+                // convention (see the invariant on `parked_drawer_tabs`).
+                Some(s) if !s.drawer_tabs.is_empty() => (false, Vec::new(), 0),
                 Some(s) => {
-                    if s.pending_drawer_tab_names.is_empty() {
-                        (true, Vec::new())
+                    if s.parked_drawer_tabs.is_empty() {
+                        (true, Vec::new(), 0)
                     } else {
-                        (false, s.pending_drawer_tab_names.clone())
+                        (false, s.parked_drawer_tabs.clone(), s.drawer_active_tab)
                     }
                 }
                 None => return,
             }
         };
 
+        if !needs_default && parked.is_empty() {
+            if let Some(session) = self
+                .projects
+                .get_mut(cursor.project_idx)
+                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+            {
+                session.parked_drawer_tabs.clear();
+                session.drawer_parked_at = None;
+            }
+            return;
+        }
+
         if needs_default {
-            self.spawn_drawer_tab(cursor, None, None, window, cx);
-        } else if !pending.is_empty() {
-            for name in pending {
-                self.spawn_drawer_tab(cursor, Some(name), None, window, cx);
+            self.spawn_drawer_tab(cursor, None, None, None, window, cx);
+        } else if !parked.is_empty() {
+            for tab in parked {
+                self.spawn_drawer_tab(cursor, Some(tab.name), None, tab.replay, window, cx);
             }
             if let Some(session) = self
                 .projects
                 .get_mut(cursor.project_idx)
                 .and_then(|p| p.sessions.get_mut(cursor.session_idx))
             {
-                session.pending_drawer_tab_names.clear();
-                if session.drawer_active_tab >= session.drawer_tabs.len() {
-                    session.drawer_active_tab = session.drawer_tabs.len().saturating_sub(1);
+                session.parked_drawer_tabs.clear();
+                session.drawer_parked_at = None;
+                // Restore the tab the user was last on. Spawning does not touch
+                // `drawer_active_tab`, but a park that raced a tab close could
+                // leave it past the end.
+                session.drawer_active_tab =
+                    active_tab.min(session.drawer_tabs.len().saturating_sub(1));
+            }
+        }
+    }
+
+    /// Park the drawer terminals of sessions that have sat unfocused past the
+    /// configured threshold, reclaiming the memory their dev servers hold
+    /// (DEV-445).
+    ///
+    /// Disabled unless the user sets `drawer_park_idle_mins`. Even then this is
+    /// deliberately conservative: see [`crate::session::should_park_drawer`] for
+    /// what disqualifies a session, and note that a drawer is parked only when
+    /// *every* tab in it can be faithfully restored.
+    pub(crate) fn reap_idle_drawers(&mut self, cx: &mut Context<Self>) {
+        let now = std::time::SystemTime::now();
+        let active = self.active;
+
+        // Refresh the focused session's stamp first, and unconditionally —
+        // before the disabled check, so that turning parking on does not
+        // immediately park whatever the user is looking at on the strength of a
+        // stamp that stopped being maintained. Doing it here rather than at the
+        // several places that assign `self.active` is what keeps the stamp from
+        // drifting out of sync with what is actually on screen.
+        if let Some(cursor) = active {
+            if let Some(session) = self
+                .projects
+                .get_mut(cursor.project_idx)
+                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+            {
+                session.last_focused_at = now;
+            }
+        }
+
+        let Some(threshold) = self.user_settings.drawer_park_idle() else {
+            return;
+        };
+
+        let mut to_park: Vec<SessionCursor> = Vec::new();
+        for (project_idx, project) in self.projects.iter().enumerate() {
+            for (session_idx, session) in project.sessions.iter().enumerate() {
+                let cursor = SessionCursor {
+                    project_idx,
+                    session_idx,
+                };
+                if Some(cursor) == active {
+                    continue;
+                }
+                if crate::session::should_park_drawer(
+                    session.status,
+                    session.startup_in_flight(),
+                    &session.tab_parkability(),
+                    session.unfocused_for(now),
+                    Some(threshold),
+                ) {
+                    to_park.push(cursor);
                 }
             }
         }
+
+        if to_park.is_empty() {
+            return;
+        }
+
+        for cursor in &to_park {
+            // A rename in flight holds a raw tab index into a list we are about
+            // to empty. Committing it afterwards would write into an index that
+            // no longer exists — and after an unpark, into a different tab.
+            if self
+                .drawer
+                .rename
+                .as_ref()
+                .is_some_and(|(c, _, _)| c == cursor)
+            {
+                self.drawer.rename = None;
+            }
+
+            if let Some(session) = self
+                .projects
+                .get_mut(cursor.project_idx)
+                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+            {
+                session.park_drawer_tabs();
+                session.drawer_parked_at = Some(now);
+                // Hide the drawer, matching every other path that empties it.
+                // `ensure_drawer_tabs` — the unpark path — is only reached by
+                // toggling the drawer open, so a parked session left with
+                // `drawer_visible == true` would render an empty drawer forever
+                // and need two toggles to come back.
+                session.drawer_visible = false;
+                tracing::info!(session = %session.label, "parked idle drawer");
+            }
+        }
+
+        self.mark_state_dirty();
+        cx.notify();
     }
 
     /// Focus the currently active drawer tab's terminal view (if any).

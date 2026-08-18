@@ -165,6 +165,19 @@ pub struct Settings {
     #[serde(default)]
     pub drawer_visible: bool,
 
+    /// Minutes a session must sit unfocused before its drawer terminals are
+    /// killed to reclaim memory (DEV-445). `0` — the default — disables
+    /// parking entirely.
+    ///
+    /// Off by default deliberately. Parking kills real processes: a dev
+    /// server, a queue worker, a bundler. The memory it buys back is only
+    /// worth having on a machine that is actually short of it, and opting in
+    /// is the user saying their fleet has outgrown their RAM. A destructive
+    /// default that most users never asked for is how a session manager loses
+    /// someone's afternoon.
+    #[serde(default)]
+    pub drawer_park_idle_mins: u64,
+
     // --- right sidebar --------------------------------------------------------
     #[serde(default)]
     pub right_sidebar_visible: bool,
@@ -413,9 +426,19 @@ pub fn spawn_external_editor(
     }
 }
 
+impl Settings {
+    /// How long a session must sit unfocused before its drawer is parked, or
+    /// `None` when parking is off (the default).
+    pub fn drawer_park_idle(&self) -> Option<std::time::Duration> {
+        (self.drawer_park_idle_mins > 0)
+            .then(|| std::time::Duration::from_secs(self.drawer_park_idle_mins * 60))
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            drawer_park_idle_mins: 0,
             sidebar_width: default_sidebar_width(),
             sidebar_visible: true,
             font_size: default_font_size(),
