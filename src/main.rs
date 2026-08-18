@@ -6,6 +6,7 @@ mod assets;
 mod base_infra;
 mod browser;
 mod changes;
+mod cli;
 mod clone;
 mod config;
 mod conversation_picker;
@@ -2652,6 +2653,19 @@ fn install_panic_hook() {
 fn main() {
     // `--mcp-serve` never returns; it must claim stdout before anything logs.
     dispatch::mcp::exit_if_serving();
+
+    // Refuse unrecognised arguments before anything with a side effect runs.
+    // Allele has no CLI, and everything below this point — tracing, the
+    // descriptor ceiling, the orphan sweep, `state.json` — assumes it is the
+    // app. `allele sessions status <id>` used to reach all of it and open a
+    // second window. See `cli` for why that is worse than it looks.
+    if let cli::Launch::Usage { code } =
+        cli::classify(&std::env::args().skip(1).collect::<Vec<_>>())
+    {
+        eprintln!("{}", cli::USAGE);
+        std::process::exit(code);
+    }
+
     errors::init_tracing();
     install_panic_hook();
 
