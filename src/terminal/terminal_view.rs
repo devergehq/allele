@@ -357,7 +357,7 @@ impl TerminalView {
                         }
 
                         // Signal whether the PTY has exited and all animations settled
-                        let pty_done = this.terminal.as_ref().map_or(true, |t| t.exited);
+                        let pty_done = this.terminal.as_ref().is_none_or(|t| t.exited);
                         let animations_done = !bell_expired
                             && this.bell_flash_start.is_none()
                             && this.pending_resize.is_none()
@@ -370,9 +370,11 @@ impl TerminalView {
                 match result {
                     Ok((should_redraw, settled)) => {
                         if should_redraw {
-                            if this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
-                                cx.notify();
-                            }).is_err() {
+                            let redrawn =
+                                this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
+                                    cx.notify();
+                                });
+                            if redrawn.is_err() {
                                 break; // entity dropped
                             }
                         }
@@ -467,7 +469,7 @@ impl TerminalView {
 
     /// Check if the PTY process has exited
     pub fn has_exited(&self) -> bool {
-        self.terminal.as_ref().map_or(true, |t| t.exited)
+        self.terminal.as_ref().is_none_or(|t| t.exited)
     }
 
     /// Write bytes directly to the PTY, as if the user had typed them.

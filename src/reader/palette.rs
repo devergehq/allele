@@ -210,7 +210,7 @@ pub(crate) fn collect_files_result(root: &Path) -> Result<Vec<PathBuf>, String> 
         return Ok(files);
     }
     let mut out = Vec::new();
-    walk(root, root, &mut out);
+    walk(root, &mut out);
     out.truncate(MAX_FILES);
     Ok(out)
 }
@@ -243,7 +243,7 @@ fn git_ls_files(root: &Path) -> Option<Vec<PathBuf>> {
 }
 
 /// Bounded fallback walk that skips the usual heavyweight/noise directories.
-fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
     const SKIP: &[&str] = &[
         ".git",
         "node_modules",
@@ -271,7 +271,7 @@ fn walk(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
         }
         let path = entry.path();
         match entry.file_type() {
-            Ok(ft) if ft.is_dir() => walk(root, &path, out),
+            Ok(ft) if ft.is_dir() => walk(&path, out),
             Ok(ft) if ft.is_file() => out.push(path),
             _ => {}
         }

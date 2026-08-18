@@ -8,18 +8,13 @@ use crate::naming::NamingConfig;
 /// Which built-in adapter drives an agent's command building. `Generic`
 /// is used for custom user-added entries that just run a binary with the
 /// configured extra args.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     Claude,
     Opencode,
+    #[default]
     Generic,
-}
-
-impl Default for AgentKind {
-    fn default() -> Self {
-        AgentKind::Generic
-    }
 }
 
 /// One entry in the user's configured coding-agent list. Paths are
@@ -48,9 +43,10 @@ pub struct AgentConfig {
 }
 
 /// How session work gets integrated back into the canonical branch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MergeStrategy {
     /// `git merge --no-ff --no-edit` — preserves merge commit (default).
+    #[default]
     Merge,
     /// `git merge --squash` + explicit commit — collapses session into one commit.
     Squash,
@@ -65,12 +61,6 @@ impl MergeStrategy {
             MergeStrategy::Squash => "Squash",
             MergeStrategy::RebaseThenMerge => "Rebase + merge",
         }
-    }
-}
-
-impl Default for MergeStrategy {
-    fn default() -> Self {
-        Self::Merge
     }
 }
 

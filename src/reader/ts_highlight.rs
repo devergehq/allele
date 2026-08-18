@@ -235,6 +235,27 @@ fn build_lines(
     lines
 }
 
+/// Map a tree-sitter capture name to a theme colour.
+fn color_for(name: &str, c: &TokenColors) -> Hsla {
+    // Match on the first segment so `function.builtin` → `function`, etc.
+    let base = name.split('.').next().unwrap_or(name);
+    match base {
+        "comment" => c.comment,
+        "string" => c.string,
+        "keyword" => c.keyword,
+        "number" => c.number,
+        "function" => c.function,
+        "constructor" => c.function,
+        "type" | "module" => c.type_,
+        "constant" => c.constant,
+        "property" | "attribute" | "tag" | "label" => c.property,
+        "operator" => c.operator,
+        "punctuation" => c.punctuation,
+        "variable" => c.variable,
+        _ => c.text,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -273,26 +294,5 @@ mod tests {
     #[test]
     fn unknown_extension_falls_back() {
         assert!(super::highlight("x = 1", "zig", &colors()).is_none());
-    }
-}
-
-/// Map a tree-sitter capture name to a theme colour.
-fn color_for(name: &str, c: &TokenColors) -> Hsla {
-    // Match on the first segment so `function.builtin` → `function`, etc.
-    let base = name.split('.').next().unwrap_or(name);
-    match base {
-        "comment" => c.comment,
-        "string" => c.string,
-        "keyword" => c.keyword,
-        "number" => c.number,
-        "function" => c.function,
-        "constructor" => c.function,
-        "type" | "module" => c.type_,
-        "constant" => c.constant,
-        "property" | "attribute" | "tag" | "label" => c.property,
-        "operator" => c.operator,
-        "punctuation" => c.punctuation,
-        "variable" => c.variable,
-        _ => c.text,
     }
 }

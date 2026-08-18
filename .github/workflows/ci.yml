@@ -3,13 +3,15 @@ name: CI
 # Fast, per-PR checks. Kept separate from release.yml (which only runs on
 # `v*` tags).
 #
-# `rustfmt`, `test`, and `architecture` are all green on the current tree —
-# mark all three as required status checks in the branch-protection rule for
-# `master` (see CONTRIBUTING.md). Without that rule none of this blocks a merge.
+# `rustfmt`, `test`, `architecture`, and `clippy` are all green on the current
+# tree — mark all four as required status checks in the branch-protection rule
+# for `master` (see CONTRIBUTING.md). Without that rule none of this blocks a
+# merge.
 #
-# `clippy` is the one exception: it carries 47 pre-existing warnings plus one
-# deny-by-default error, so it runs advisory-only until DEV-349 clears them. A
-# permanently-red required check is one everyone learns to ignore.
+# `clippy` ran advisory-only until DEV-349 cleared its 47 warnings and the
+# deny-level error. It is now blocking, which is the only state in which a
+# check means anything: a permanently-red one is a check everyone learns to
+# ignore.
 
 on:
   pull_request:
@@ -80,10 +82,7 @@ jobs:
         run: cargo test --test architecture -- --nocapture
 
   clippy:
-    name: clippy (advisory)
-    # TODO(DEV-349): drop continue-on-error and add -D warnings once the 47
-    # warnings and the deny-level `overly_complex_bool_expr` error are cleared.
-    continue-on-error: true
+    name: clippy
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -98,4 +97,4 @@ jobs:
           key: clippy
 
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features
+        run: cargo clippy --all-targets --all-features -- -D warnings

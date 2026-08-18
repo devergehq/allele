@@ -669,15 +669,15 @@ fn summarise_tool_input(tool_name: &str, input: Option<&serde_json::Value>) -> O
         "Read" => obj
             .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|p| short_path(p)),
+            .map(short_path),
         "Edit" => obj
             .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|p| short_path(p)),
+            .map(short_path),
         "Write" => obj
             .get("file_path")
             .and_then(|v| v.as_str())
-            .map(|p| short_path(p)),
+            .map(short_path),
         _ => {
             // MCP tools and others — try description, then first string field
             obj.get("description")

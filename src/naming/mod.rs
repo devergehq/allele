@@ -35,18 +35,13 @@ impl Default for NamingConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NamingMode {
+    #[default]
     Auto,
     Interactive,
     Legacy,
-}
-
-impl Default for NamingMode {
-    fn default() -> Self {
-        Self::Auto
-    }
 }
 
 impl NamingMode {
