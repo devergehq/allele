@@ -93,6 +93,16 @@ pub struct TerminalView {
     element_origin_x: std::sync::Arc<std::sync::atomic::AtomicI32>,
     element_origin_y: std::sync::Arc<std::sync::atomic::AtomicI32>,
     scrollbar_dragging: bool,
+    /// Set the first time a keystroke reaches this terminal, and never
+    /// cleared. Shared with the owning `DrawerTab` so the DEV-445 idle
+    /// reaper can tell a tab still running exactly what we launched from
+    /// one the user has since taken over — only the former can be killed
+    /// and faithfully restored.
+    ///
+    /// Deliberately not fed by `send_input`: that is how we replay a
+    /// configured command, and a tab must not disqualify itself from
+    /// parking merely by being unparked.
+    user_typed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // Cursor blink
     cursor_visible: bool,
     last_keypress: Instant,
@@ -201,6 +211,7 @@ impl TerminalView {
                     element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
                     element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
                     scrollbar_dragging: false,
+                    user_typed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                     cursor_visible: true,
                     last_keypress: Instant::now(),
                     last_blink_toggle: Instant::now(),
@@ -410,6 +421,7 @@ impl TerminalView {
             element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             scrollbar_dragging: false,
+            user_typed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cursor_visible: true,
             last_keypress: Instant::now(),
             last_blink_toggle: Instant::now(),
@@ -477,6 +489,16 @@ impl TerminalView {
     /// `allele.json` — the shell reads them from its stdin buffer once the
     /// rc files finish loading, so the command runs but the shell stays
     /// interactive afterwards.
+    /// Handle to this terminal's "the user has typed here" flag.
+    ///
+    /// Cloned into the owning `DrawerTab` so parkability can be evaluated
+    /// without a `Context` — which is what keeps the DEV-445 policy a pure
+    /// function over plain data rather than something only reachable from a
+    /// render tick.
+    pub fn user_typed_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.user_typed.clone()
+    }
+
     pub fn send_input(&self, bytes: &[u8]) {
         if let Some(ref t) = self.terminal {
             t.write(bytes);
@@ -1600,6 +1622,8 @@ impl Render for TerminalView {
             .on_key_down(
                 cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
                     this.last_keypress = Instant::now();
+                    this.user_typed
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     this.cursor_visible = true;
 
                     let key = event.keystroke.key.as_str();

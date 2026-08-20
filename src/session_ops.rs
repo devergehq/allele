@@ -890,11 +890,11 @@ impl AppState {
         // Drop the terminal_view and drawer — Drop impl on PtyTerminal sends
         // Msg::Shutdown, killing the subprocesses. The clone on disk is untouched.
         session.terminal_view = None;
-        // Drop the drawer PTYs but preserve the names so the next open
-        // restores the same tab layout (matches the rehydration path).
-        let names: Vec<String> = session.drawer_tabs.iter().map(|t| t.name.clone()).collect();
-        session.drawer_tabs.clear();
-        session.pending_drawer_tab_names = names;
+        // Drop the drawer PTYs but preserve the tabs so the next open restores
+        // the same layout — and, since DEV-445, the same commands. Before that
+        // this kept names only, so resuming a suspended session gave you four
+        // bare shells where a server, a queue, a scheduler and a bundler had been.
+        session.park_drawer_tabs();
         session.drawer_visible = false;
         session.set_status(SessionStatus::Suspended);
         session.last_active = std::time::SystemTime::now();
@@ -1892,10 +1892,7 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
         persisted.clone_path.clone(),
         persisted.merged,
     )
-    .with_drawer_tabs(
-        persisted.drawer_tab_names.clone(),
-        persisted.drawer_active_tab,
-    )
+    .with_drawer_tabs(persisted.drawer_tabs(), persisted.drawer_active_tab)
     .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
     .with_agent_id(persisted.agent_id.clone())
     .with_claude_session_id(persisted.claude_session_id.clone());

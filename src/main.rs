@@ -2185,7 +2185,8 @@ impl AppState {
             .and_then(|p| p.sessions.get_mut(cursor.session_idx))
         {
             session.drawer_tabs.clear();
-            session.pending_drawer_tab_names.clear();
+            session.parked_drawer_tabs.clear();
+            session.drawer_parked_at = None;
             session.drawer_active_tab = 0;
             session.allocated_port = port;
         }
@@ -2439,20 +2440,14 @@ impl AppState {
             // it as if the user had typed it. When the command exits or is
             // interrupted (Ctrl+C), the shell is still there for the user
             // to restart or run anything else.
-            self.spawn_drawer_tab(cursor, Some(term.label.clone()), None, window, cx);
-            if !substituted.trim().is_empty() {
-                if let Some(session) = self
-                    .projects
-                    .get(cursor.project_idx)
-                    .and_then(|p| p.sessions.get(cursor.session_idx))
-                {
-                    if let Some(tab) = session.drawer_tabs.last() {
-                        let mut line = substituted.into_bytes();
-                        line.push(b'\n');
-                        tab.view.read(cx).send_input(&line);
-                    }
-                }
-            }
+            self.spawn_drawer_tab(
+                cursor,
+                Some(term.label.clone()),
+                None,
+                Some(substituted),
+                window,
+                cx,
+            );
         }
 
         if !cfg.terminals.is_empty() {
@@ -2968,10 +2963,7 @@ fn main() {
                             persisted.clone_path.clone(),
                             persisted.merged,
                         )
-                        .with_drawer_tabs(
-                            persisted.drawer_tab_names.clone(),
-                            persisted.drawer_active_tab,
-                        )
+                        .with_drawer_tabs(persisted.drawer_tabs(), persisted.drawer_active_tab)
                         .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
                         .with_agent_id(persisted.agent_id.clone())
                         .with_claude_session_id(persisted.claude_session_id.clone())
@@ -3042,7 +3034,13 @@ fn main() {
                             // status runs across an await during which the
                             // user can reorder or remove sessions, which would
                             // land a result on the wrong session's row.
-                            let Ok(targets) = this.update(cx, |this: &mut AppState, _cx| {
+                            let Ok(targets) = this.update(cx, |this: &mut AppState, cx| {
+                                // Idle-drawer parking rides this tick rather than
+                                // adding a loop of its own: the threshold is
+                                // minutes, so 15s is ample resolution, and one
+                                // timer is one thing to reason about (DEV-445).
+                                this.reap_idle_drawers(cx);
+
                                 let mut t = Vec::new();
                                 for project in this.projects.iter() {
                                     for session in project.sessions.iter() {

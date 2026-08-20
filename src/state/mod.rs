@@ -12,6 +12,17 @@ use tracing::warn;
 
 use crate::session::{Session, SessionStatus};
 
+/// One persisted drawer tab: its name and the command it was running.
+///
+/// The command is what makes a rehydrated — or parked — drawer come back as
+/// the thing it was rather than as a bare shell (DEV-445).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PersistedDrawerTab {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay: Option<String>,
+}
+
 /// One persisted session row — everything we need to rehydrate a sidebar
 /// entry and later cold-resume the Claude conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,10 +67,22 @@ pub struct PersistedSession {
     /// merge-and-close. When set, discard skips creating an archive entry.
     #[serde(default)]
     pub merged: bool,
-    /// Drawer terminal tab names at save time. Tabs are re-spawned with
-    /// these names when the drawer is first opened on the rehydrated session.
+    /// Drawer terminal tab names at save time.
+    ///
+    /// Superseded by `drawer_tabs`, which also carries each tab's command.
+    /// Still *written*, so an older Allele reading this file restores the tab
+    /// layout rather than tripping on a missing key — it gets bare shells,
+    /// which is exactly what it did before DEV-445. Same degrade-forwards
+    /// contract as `skip_orchestration` above.
     #[serde(default)]
     pub drawer_tab_names: Vec<String>,
+    /// Drawer tabs at save time, each with the command it was running (DEV-445).
+    ///
+    /// Absent in files written before DEV-445; [`PersistedSession::drawer_tabs`]
+    /// falls back to `drawer_tab_names` for those. Skipped when empty so a
+    /// session with no drawer does not grow the file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub drawer_tabs: Vec<PersistedDrawerTab>,
     /// Index of the active drawer tab at save time.
     #[serde(default)]
     pub drawer_active_tab: usize,
@@ -128,6 +151,51 @@ impl PersistedSession {
     }
 }
 
+/// The session's drawer tabs, wherever they currently live.
+///
+/// Live tabs and parked tabs are the same list in two representations, and the
+/// [`Session`] invariant is that only one of them is ever populated.
+fn drawer_snapshot(session: &Session) -> Vec<crate::session::ParkedTab> {
+    if session.drawer_tabs.is_empty() {
+        session.parked_drawer_tabs.clone()
+    } else {
+        session
+            .drawer_tabs
+            .iter()
+            .map(|t| crate::session::ParkedTab {
+                name: t.name.clone(),
+                replay: t.replay.clone(),
+            })
+            .collect()
+    }
+}
+
+impl PersistedSession {
+    /// The session's drawer tabs, resolving pre-DEV-445 state files.
+    ///
+    /// Files written before DEV-445 carry names only; those tabs come back as
+    /// bare shells, which is all the file can tell us. Reading the richer field
+    /// first is what stops an upgrade from silently downgrading every restored
+    /// drawer to a shell prompt.
+    pub fn drawer_tabs(&self) -> Vec<crate::session::ParkedTab> {
+        if !self.drawer_tabs.is_empty() {
+            return self
+                .drawer_tabs
+                .iter()
+                .map(|t| crate::session::ParkedTab {
+                    name: t.name.clone(),
+                    replay: t.replay.clone(),
+                })
+                .collect();
+        }
+        self.drawer_tab_names
+            .iter()
+            .cloned()
+            .map(crate::session::ParkedTab::bare)
+            .collect()
+    }
+}
+
 impl PersistedSession {
     pub fn from_session(session: &Session, project_id: &str) -> Self {
         Self {
@@ -144,12 +212,21 @@ impl PersistedSession {
             // survives a save/quit (it rehydrates Suspended with this banked).
             active_runtime_secs: session.active_runtime().as_secs(),
             merged: session.merged,
-            drawer_tab_names: if session.drawer_tabs.is_empty() {
-                // Tabs not yet materialised — preserve pending names from disk.
-                session.pending_drawer_tab_names.clone()
-            } else {
-                session.drawer_tabs.iter().map(|t| t.name.clone()).collect()
-            },
+            // A session's tabs live in exactly one of these two places — live
+            // in `drawer_tabs`, or parked (rehydrated-but-unopened, or killed
+            // by the idle reaper) in `parked_drawer_tabs`. Read whichever holds
+            // them, and write both the rich and the legacy shape.
+            drawer_tab_names: drawer_snapshot(session)
+                .iter()
+                .map(|t| t.name.clone())
+                .collect(),
+            drawer_tabs: drawer_snapshot(session)
+                .into_iter()
+                .map(|t| PersistedDrawerTab {
+                    name: t.name,
+                    replay: t.replay,
+                })
+                .collect(),
             drawer_active_tab: session.drawer_active_tab,
             browser_tab_id: session.browser_tab_id,
             browser_last_url: session.browser_last_url.clone(),
@@ -305,6 +382,78 @@ fn canonical_or_raw(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const LEGACY_TABS: &str = r#"{
+        "id": "4989c913-0000-0000-0000-000000000000",
+        "project_id": "proj-1",
+        "label": "Claude 1",
+        "clone_path": null,
+        "last_known_status": "Suspended",
+        "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+        "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+        "merged": false,
+        "drawer_tab_names": ["Serve", "Vite"],
+        "drawer_active_tab": 1
+    }"#;
+
+    /// `state.json` written before DEV-445 carries names only. Those tabs come
+    /// back as bare shells — all the file can tell us — rather than failing to
+    /// load.
+    #[test]
+    fn pre_dev_445_state_rehydrates_tabs_without_commands() {
+        let session: PersistedSession = serde_json::from_str(LEGACY_TABS).unwrap();
+        let tabs = session.drawer_tabs();
+        assert_eq!(tabs.len(), 2);
+        assert_eq!(tabs[0].name, "Serve");
+        assert!(
+            tabs.iter().all(|t| t.replay.is_none()),
+            "a legacy file has no commands to give"
+        );
+    }
+
+    /// The richer field wins when present. Reading `drawer_tab_names` first
+    /// would silently downgrade every restored drawer to a shell prompt.
+    #[test]
+    fn drawer_commands_survive_a_round_trip() {
+        let json = r#"{
+            "id": "4989c913-0000-0000-0000-000000000000",
+            "project_id": "proj-1",
+            "label": "Claude 1",
+            "clone_path": null,
+            "last_known_status": "Suspended",
+            "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "merged": false,
+            "drawer_tab_names": ["Serve"],
+            "drawer_tabs": [{ "name": "Serve", "replay": "php artisan serve --port={{unique_port}}" }],
+            "drawer_active_tab": 0
+        }"#;
+        let session: PersistedSession = serde_json::from_str(json).unwrap();
+        let tabs = session.drawer_tabs();
+        assert_eq!(tabs.len(), 1);
+        assert_eq!(
+            tabs[0].replay.as_deref(),
+            Some("php artisan serve --port={{unique_port}}"),
+            "the command is stored unsubstituted so unpark re-resolves the port"
+        );
+
+        let round_tripped: PersistedSession =
+            serde_json::from_str(&serde_json::to_string(&session).unwrap()).unwrap();
+        assert_eq!(round_tripped.drawer_tabs(), session.drawer_tabs());
+    }
+
+    /// The legacy key keeps being written so an older Allele reading a newer
+    /// file still restores the tab layout, exactly as `skip_orchestration` does
+    /// for orchestration.
+    #[test]
+    fn legacy_tab_names_are_still_written_for_older_allele() {
+        let session: PersistedSession = serde_json::from_str(LEGACY_TABS).unwrap();
+        let encoded = serde_json::to_value(&session).unwrap();
+        assert_eq!(
+            encoded["drawer_tab_names"],
+            serde_json::json!(["Serve", "Vite"])
+        );
+    }
 
     /// `state.json` written before DEV-400 has no `skip_orchestration` key.
     /// It must still load, defaulting to "run the project's orchestration" —
