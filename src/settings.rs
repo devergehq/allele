@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tracing::warn;
 
@@ -106,6 +107,28 @@ pub struct ProjectSettings {
     /// paths resolve the same way as `startup`.
     #[serde(default)]
     pub shutdown: Option<String>,
+
+    // --- session environment -------------------------------------------------
+    /// Literal environment variables exported into every process this
+    /// project's sessions spawn: the agent PTY, drawer terminals, and the
+    /// `startup`/`shutdown` commands. Values support `{{unique_port}}` and
+    /// `{{folder}}` substitution. `BTreeMap` so the order is stable across
+    /// writes and a settings.json diff stays readable.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+
+    /// Directories pushed onto the FRONT of `PATH`, in declared order.
+    /// Separate from `env` because a map value can only *replace* PATH,
+    /// while what a project actually needs is to take precedence over the
+    /// machine default — pinning a toolchain (say `php@8.3`) without any
+    /// global switch. Same substitution as `env`.
+    ///
+    /// Caveat worth knowing: drawer terminals run the user's rc files after
+    /// this environment is set, so an rc line that unconditionally prepends
+    /// to PATH still outranks these. The tool must not also sit on a
+    /// globally-linked path. See DEV-485.
+    #[serde(default)]
+    pub path_prepend: Vec<String>,
 }
 
 impl Default for ProjectSettings {
@@ -118,6 +141,8 @@ impl Default for ProjectSettings {
             terminals: Vec::new(),
             startup: None,
             shutdown: None,
+            env: BTreeMap::new(),
+            path_prepend: Vec::new(),
         }
     }
 }

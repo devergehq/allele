@@ -102,6 +102,9 @@ impl AppState {
         // available" — the PTY drops into the user's default shell.
         let project_override =
             config::ProjectConfig::load(&project.source_path).and_then(|c| c.agent);
+        // The project's declared environment (DEV-485). Resolved here, from the
+        // source repo, because the clone does not exist yet.
+        let project_env = config::ProjectEnv::resolve(&project.source_path, &project.settings);
         let agent = agents::resolve(
             &self.user_settings.agents,
             self.user_settings.default_agent.as_deref(),
@@ -260,6 +263,14 @@ impl AppState {
                 }
 
                 // Create the terminal view with the clone as PWD
+                // Materialise the project environment against the clone. `{{unique_port}}`
+                // is not available here — the port is allocated later, in
+                // `apply_project_config` — so it resolves for drawer terminals and the
+                // startup command but not for the agent PTY. PATH pinning, the reason
+                // this exists, does not depend on it. See DEV-485.
+                let inherited_path = std::env::var("PATH").ok();
+                let agent_env =
+                    project_env.materialise(None, &clone_path, inherited_path.as_deref());
                 let initial_font_size = this.user_settings.font_size;
                 let terminal_view = cx.new(|cx| {
                     TerminalView::new(
@@ -268,6 +279,7 @@ impl AppState {
                         command,
                         Some(clone_path.clone()),
                         initial_font_size,
+                        agent_env,
                     )
                 });
 
@@ -435,6 +447,9 @@ impl AppState {
 
         let project_override =
             config::ProjectConfig::load(&project.source_path).and_then(|c| c.agent);
+        // The project's declared environment (DEV-485). Resolved here, from the
+        // source repo, because the clone does not exist yet.
+        let project_env = config::ProjectEnv::resolve(&project.source_path, &project.settings);
         let agent = agents::resolve(
             &self.user_settings.agents,
             self.user_settings.default_agent.as_deref(),
@@ -638,6 +653,14 @@ impl AppState {
                     crate::git::exclude_pattern_in_clone(&clone_path, ".allele-session");
                 }
 
+                // Materialise the project environment against the clone. `{{unique_port}}`
+                // is not available here — the port is allocated later, in
+                // `apply_project_config` — so it resolves for drawer terminals and the
+                // startup command but not for the agent PTY. PATH pinning, the reason
+                // this exists, does not depend on it. See DEV-485.
+                let inherited_path = std::env::var("PATH").ok();
+                let agent_env =
+                    project_env.materialise(None, &clone_path, inherited_path.as_deref());
                 let initial_font_size = this.user_settings.font_size;
                 let terminal_view = cx.new(|cx| {
                     TerminalView::new(
@@ -646,6 +669,7 @@ impl AppState {
                         command,
                         Some(clone_path.clone()),
                         initial_font_size,
+                        agent_env,
                     )
                 });
 
@@ -1146,6 +1170,9 @@ impl AppState {
         // Falls back to allele.json → global default → first enabled.
         let project_override =
             config::ProjectConfig::load(&project.source_path).and_then(|c| c.agent);
+        // The project's declared environment (DEV-485). Resolved here, from the
+        // source repo, because the clone does not exist yet.
+        let project_env = config::ProjectEnv::resolve(&project.source_path, &project.settings);
         let agent = agents::resolve(
             &self.user_settings.agents,
             self.user_settings.default_agent.as_deref(),
@@ -1204,6 +1231,13 @@ impl AppState {
             .and_then(|a| agents::build_command(a, &ctx, true));
 
         // Build the new TerminalView on the main thread with window access.
+        // Materialise the project environment against the clone. `{{unique_port}}`
+        // is not available here — the port is allocated later, in
+        // `apply_project_config` — so it resolves for drawer terminals and the
+        // startup command but not for the agent PTY. PATH pinning, the reason
+        // this exists, does not depend on it. See DEV-485.
+        let inherited_path = std::env::var("PATH").ok();
+        let agent_env = project_env.materialise(None, &clone_path, inherited_path.as_deref());
         let initial_font_size = self.user_settings.font_size;
         let terminal_view = cx.new(|cx| {
             TerminalView::new(
@@ -1212,6 +1246,7 @@ impl AppState {
                 command,
                 Some(clone_path.clone()),
                 initial_font_size,
+                agent_env,
             )
         });
 
@@ -1423,11 +1458,21 @@ impl AppState {
             .and_then(|clone_path| {
                 let cfg = config::ProjectConfig::load(clone_path)
                     .or_else(|| config::ProjectConfig::from_settings(&project.settings))?;
-                cfg.shutdown
+                let cmd = cfg
+                    .shutdown
                     .as_ref()
                     .map(|s| config::resolve_script_command(s, &project.name))
                     .map(|s| config::substitute(&s, removed.allocated_port, clone_path))
-                    .filter(|s| !s.trim().is_empty())
+                    .filter(|s| !s.trim().is_empty())?;
+                // Same environment the session ran under, so a teardown script
+                // resolves the same toolchain its startup counterpart did.
+                let inherited_path = std::env::var("PATH").ok();
+                let env = config::ProjectEnv::from_config(&cfg).materialise(
+                    removed.allocated_port,
+                    clone_path,
+                    inherited_path.as_deref(),
+                );
+                Some((cmd, env))
             });
 
         // Drop the Session — this frees the terminal_view entity (if any),
@@ -1503,11 +1548,12 @@ impl AppState {
                         // hook can't freeze the app. Failure is logged and
                         // teardown continues so a broken hook can't strand
                         // the clone on disk.
-                        if let Some(cmd) = shutdown_cmd {
+                        if let Some((cmd, env)) = shutdown_cmd {
                             match std::process::Command::new("sh")
                                 .arg("-c")
                                 .arg(&cmd)
                                 .current_dir(&clone_path)
+                                .envs(env)
                                 .status()
                             {
                                 Ok(s) if !s.success() => {

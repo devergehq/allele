@@ -41,8 +41,10 @@ Each project carries a `ProjectSettings` (`src/settings.rs`), persisted in
 | `terminals`           | Drawer terminals spawned for each session (see below).                    |
 | `startup`             | Session-start hook command (see below).                                   |
 | `shutdown`            | Session-end hook command (see below).                                     |
+| `env`                 | Environment variables for every process a session spawns (see below).     |
+| `path_prepend`        | Directories pushed onto the front of `PATH` (see below).                  |
 
-The bottom three (`terminals`, `startup`, `shutdown`) are the **session
+The middle three (`terminals`, `startup`, `shutdown`) are the **session
 orchestration** fields. They moved here from `allele.json` in the June 2026
 work — `allele.json` predates this and still works as an override.
 
@@ -103,14 +105,17 @@ per-project agent, use `allele.json`.
   "preview": { "url": "http://127.0.0.1:{{unique_port}}" },
   "agent":   "claude",
   "startup":  "bin/setup",
-  "shutdown": "docker compose down"
+  "shutdown": "docker compose down",
+  "env":      { "APP_ENV": "local" },
+  "path_prepend": ["/opt/homebrew/opt/php@8.3/bin"]
 }
 ```
 
 ### Placeholders
 
-Substituted in every terminal `command`, the `startup`/`shutdown` commands, and
-`preview.url` (`config::substitute`):
+Substituted in every terminal `command`, the `startup`/`shutdown` commands,
+`preview.url`, and every `env` value and `path_prepend` entry
+(`config::substitute`):
 
 - `{{unique_port}}` — a free TCP port (see [Port allocation](#port-allocation)),
   allocated once per session and shared by every occurrence, so the server tab
@@ -118,6 +123,49 @@ Substituted in every terminal `command`, the `startup`/`shutdown` commands, and
 - `{{folder}}` — the session's **clone path** (the APFS workspace for that
   session, not the original source). Use it for absolute paths in log/subprocess
   commands.
+
+One exception: the **agent PTY** is created before the port is allocated, so
+`{{unique_port}}` in `env` does not resolve there. It resolves normally in
+drawer terminals and in `startup`/`shutdown`.
+
+---
+
+## Session environment (`env`, `path_prepend`)
+
+Unlike the orchestration fields, these apply to **every** process a session
+spawns — the agent PTY, each drawer terminal, and the `startup`/`shutdown`
+commands — and they apply even to sessions created with orchestration disabled,
+because a bare session still needs its toolchain resolved.
+
+- `env` — literal key/value pairs. No `${VAR}` expansion; values are used as
+  written (after placeholder substitution).
+- `path_prepend` — directories pushed onto the **front** of `PATH`, in declared
+  order. It is a separate field because a map value can only *replace* `PATH`,
+  whereas what a project needs is to take precedence over the machine default.
+  Blank entries are dropped and exact duplicates collapse.
+
+Declaring both `env.PATH` and `path_prepend` is safe: the explicit `PATH` becomes
+the base that `path_prepend` is prepended onto, so neither is silently discarded.
+
+### Pinning a toolchain — and the one caveat
+
+The motivating case is a project that needs a specific language runtime while
+another session, running at the same time, needs a different one:
+
+```json
+{ "path_prepend": ["/opt/homebrew/opt/php@8.3/bin"] }
+```
+
+**The tool must not also sit on a globally-linked path.** Drawer terminals run
+your rc files *after* this environment is set (they are interactive shells — see
+[Drawer terminals](#drawer-terminals)), so an rc line like
+`export PATH="/opt/homebrew/bin:$PATH"` still outranks `path_prepend`. That is
+how interactive shells work, not something Allele can override.
+
+For Homebrew-managed runtimes the fix is to stop linking them
+(`brew unlink php@8.4`) and select purely by `PATH`. Every version stays usable
+at its versioned `opt` path, and nothing is left on the global one to win the
+race.
 
 ---
 

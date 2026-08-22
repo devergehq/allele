@@ -2209,6 +2209,16 @@ impl AppState {
         // seconds.
         const STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
+        // The project's declared environment reaches `startup` too, so a
+        // migrate/seed script resolves the same toolchain the session will
+        // (DEV-485). `cfg` is already loaded, so no second config read.
+        let inherited_path = std::env::var("PATH").ok();
+        let startup_env = config::ProjectEnv::from_config(&cfg).materialise(
+            port,
+            &clone_path,
+            inherited_path.as_deref(),
+        );
+
         if let Some(startup_cmd) = startup {
             // Show initial status in sidebar while startup runs.
             if let Some(session) = self
@@ -2235,12 +2245,14 @@ impl AppState {
                     .spawn({
                         let cmd = startup_cmd.clone();
                         let cwd = clone_for_task.clone();
+                        let env = startup_env.clone();
                         async move {
                             use std::os::unix::process::CommandExt;
                             let child = std::process::Command::new("sh")
                                 .arg("-c")
                                 .arg(&cmd)
                                 .current_dir(&cwd)
+                                .envs(env)
                                 .stdout(std::process::Stdio::piped())
                                 .stderr(std::process::Stdio::piped())
                                 // New process group (pgid == child pid) so a
