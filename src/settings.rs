@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tracing::warn;
 
@@ -106,6 +107,28 @@ pub struct ProjectSettings {
     /// paths resolve the same way as `startup`.
     #[serde(default)]
     pub shutdown: Option<String>,
+
+    // --- session environment -------------------------------------------------
+    /// Literal environment variables exported into every process this
+    /// project's sessions spawn: the agent PTY, drawer terminals, and the
+    /// `startup`/`shutdown` commands. Values support `{{unique_port}}` and
+    /// `{{folder}}` substitution. `BTreeMap` so the order is stable across
+    /// writes and a settings.json diff stays readable.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+
+    /// Directories pushed onto the FRONT of `PATH`, in declared order.
+    /// Separate from `env` because a map value can only *replace* PATH,
+    /// while what a project actually needs is to take precedence over the
+    /// machine default — pinning a toolchain (say `php@8.3`) without any
+    /// global switch. Same substitution as `env`.
+    ///
+    /// Caveat worth knowing: drawer terminals run the user's rc files after
+    /// this environment is set, so an rc line that unconditionally prepends
+    /// to PATH still outranks these. The tool must not also sit on a
+    /// globally-linked path. See DEV-485.
+    #[serde(default)]
+    pub path_prepend: Vec<String>,
 }
 
 impl Default for ProjectSettings {
@@ -118,6 +141,8 @@ impl Default for ProjectSettings {
             terminals: Vec::new(),
             startup: None,
             shutdown: None,
+            env: BTreeMap::new(),
+            path_prepend: Vec::new(),
         }
     }
 }
@@ -568,5 +593,30 @@ mod tests {
         let json = r#"{ "session_cleanup_paths": [] }"#;
         let s: Settings = serde_json::from_str(json).unwrap();
         assert!(s.session_cleanup_paths.is_empty());
+    }
+
+    #[test]
+    fn legacy_project_settings_without_env_gets_empty_defaults() {
+        // A settings.json written before DEV-485 must still load, with both
+        // new fields empty so nothing about the spawn path changes.
+        let legacy = r#"{ "merge_strategy": "Merge", "rebase_before_merge": true }"#;
+        let p: ProjectSettings = serde_json::from_str(legacy).expect("should deserialize");
+        assert!(p.env.is_empty());
+        assert!(p.path_prepend.is_empty());
+    }
+
+    #[test]
+    fn project_settings_env_round_trips() {
+        let mut env = BTreeMap::new();
+        env.insert("APP_ENV".to_string(), "local".to_string());
+        let original = ProjectSettings {
+            env,
+            path_prepend: vec!["/opt/homebrew/opt/php@8.3/bin".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).expect("should serialize");
+        let back: ProjectSettings = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(back.env, original.env);
+        assert_eq!(back.path_prepend, original.path_prepend);
     }
 }

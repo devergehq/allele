@@ -153,10 +153,16 @@ pub struct PtyTerminal {
 
 impl PtyTerminal {
     /// Create a terminal running a specific command in a specific directory
+    /// `extra_env` is applied on top of the inherited environment before the
+    /// command's own vars. It is a separate parameter rather than part of
+    /// `ShellCommand` because the drawer spawns bare shells with no command at
+    /// all, and those are exactly the terminals a project most needs to
+    /// configure. See DEV-485.
     pub fn spawn(
         size: TermSize,
         command: Option<ShellCommand>,
         working_dir: Option<PathBuf>,
+        extra_env: Vec<(String, String)>,
     ) -> anyhow::Result<Self> {
         let (events_tx, events_rx) = flume::unbounded();
         let listener = JsonEventListener::new(events_tx);
@@ -183,6 +189,12 @@ impl PtyTerminal {
         // don't duplicate viewport content into our terminal scrollback.
         // Harmless for non-CC processes that ignore the variable.
         env.insert("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string());
+
+        // Project-declared vars land before the command's own, so an adapter
+        // integration var always wins a collision with project config.
+        for (k, v) in extra_env {
+            env.insert(k, v);
+        }
 
         // Build the shell configuration. Adapter-supplied env vars are
         // merged into the PTY environment here so agent event integrations

@@ -51,6 +51,21 @@ impl AppState {
         let working_dir = session_ref.and_then(|s| s.clone_path.clone());
         let port = session_ref.and_then(|s| s.allocated_port);
 
+        // The project's declared environment (DEV-485). Resolved per spawn so
+        // an edit to allele.json or project settings is picked up by the next
+        // tab without restarting the app, matching how `replay` is handled.
+        let project_env = self
+            .projects
+            .get(cursor.project_idx)
+            .map(|p| crate::config::ProjectEnv::resolve(&p.source_path, &p.settings))
+            .unwrap_or_default();
+        let inherited_path = std::env::var("PATH").ok();
+        let extra_env = project_env.materialise(
+            port,
+            working_dir.as_deref().unwrap_or_else(|| Path::new(".")),
+            inherited_path.as_deref(),
+        );
+
         // Blank commands are configuration noise, not something to replay — a
         // tab declared with an empty command is just a named shell, and giving
         // it a `Some("")` replay would make it look parkable when there is
@@ -71,8 +86,16 @@ impl AppState {
             )
         });
         let initial_font_size = self.user_settings.font_size;
-        let drawer_tv =
-            cx.new(|cx| TerminalView::new(window, cx, command, working_dir, initial_font_size));
+        let drawer_tv = cx.new(|cx| {
+            TerminalView::new(
+                window,
+                cx,
+                command,
+                working_dir,
+                initial_font_size,
+                extra_env,
+            )
+        });
         cx.subscribe(
             &drawer_tv,
             |this: &mut Self,

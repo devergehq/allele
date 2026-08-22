@@ -13,6 +13,15 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Added
+- Projects can declare their own environment. `env` sets literal variables and
+  `path_prepend` pushes directories onto the front of `PATH`, and both reach
+  every process a session spawns — the agent PTY, each drawer terminal, and the
+  `startup`/`shutdown` hooks — including sessions created with orchestration
+  disabled. This lets two sessions running at the same time use different
+  toolchain versions, which a machine-global switch like `brew link` cannot do.
+  See `docs/projects-and-sessions.md` for the one caveat about rc files.
+
 ### Fixed
 - Dispatched sessions can now reach the session that dispatched them. A session has
   two names — allele's label, which the sidebar and auto-naming both rewrite, and the

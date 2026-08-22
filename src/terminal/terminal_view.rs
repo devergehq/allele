@@ -165,12 +165,15 @@ impl TerminalView {
     }
 
     /// Create a terminal view running a specific command, or default shell if None
+    /// `extra_env` carries the project's declared environment (DEV-485) —
+    /// empty for terminals that belong to no project.
     pub fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
         command: Option<ShellCommand>,
         working_dir: Option<PathBuf>,
         initial_font_size: f32,
+        extra_env: Vec<(String, String)>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let font_size = clamp_font_size(initial_font_size);
@@ -191,56 +194,63 @@ impl TerminalView {
         let cell_height = f32::from(measured_h);
 
         let saved_working_dir = working_dir.clone();
-        let terminal = match PtyTerminal::spawn(TermSize::default(), command, working_dir) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                warn!("Failed to create PTY: {e}");
-                return Self {
-                    terminal: None,
-                    error: Some(format!("Failed to create PTY: {e}")),
-                    last_cols: 80,
-                    last_rows: 24,
-                    focus_handle,
-                    font_size,
-                    cell_width,
-                    cell_height,
-                    scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    scroll_pixel_accumulator: std::sync::Arc::new(std::sync::Mutex::new(0.0)),
-                    // -1 = "not yet painted" sentinel. A real origin can be
-                    // exactly 0 (left sidebar hidden), so 0 must stay valid.
-                    element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
-                    element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
-                    scrollbar_dragging: false,
-                    user_typed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    cursor_visible: true,
-                    last_keypress: Instant::now(),
-                    last_blink_toggle: Instant::now(),
-                    scrollbar_opacity: 0.0,
-                    last_scroll_time: Instant::now() - Duration::from_secs(10),
-                    selection_anchor: None,
-                    selection_extent: None,
-                    selecting: false,
-                    search_active: false,
-                    search_query: String::new(),
-                    search_matches: Vec::new(),
-                    search_current_idx: 0,
-                    hovered_url: None,
-                    hovered_path: None,
-                    working_dir: saved_working_dir.clone(),
-                    visible_url_spans: Vec::new(),
-                    visible_path_spans: Vec::new(),
-                    terminal_context_menu: None,
-                    bottom_inset: 0.0,
-                    right_inset: 0.0,
-                    pending_resize: None,
-                    bell_flash_start: None,
-                    frame_count: 0,
-                    last_fps_time: Instant::now(),
-                    current_fps: 0,
-                    keymap: KeymapConfig::default(),
-                };
-            }
-        };
+        let terminal =
+            match PtyTerminal::spawn(TermSize::default(), command, working_dir, extra_env) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    warn!("Failed to create PTY: {e}");
+                    return Self {
+                        terminal: None,
+                        error: Some(format!("Failed to create PTY: {e}")),
+                        last_cols: 80,
+                        last_rows: 24,
+                        focus_handle,
+                        font_size,
+                        cell_width,
+                        cell_height,
+                        scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                            false,
+                        )),
+                        scroll_pixel_accumulator: std::sync::Arc::new(std::sync::Mutex::new(0.0)),
+                        // -1 = "not yet painted" sentinel. A real origin can be
+                        // exactly 0 (left sidebar hidden), so 0 must stay valid.
+                        element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(
+                            -1,
+                        )),
+                        element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(
+                            -1,
+                        )),
+                        scrollbar_dragging: false,
+                        user_typed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        cursor_visible: true,
+                        last_keypress: Instant::now(),
+                        last_blink_toggle: Instant::now(),
+                        scrollbar_opacity: 0.0,
+                        last_scroll_time: Instant::now() - Duration::from_secs(10),
+                        selection_anchor: None,
+                        selection_extent: None,
+                        selecting: false,
+                        search_active: false,
+                        search_query: String::new(),
+                        search_matches: Vec::new(),
+                        search_current_idx: 0,
+                        hovered_url: None,
+                        hovered_path: None,
+                        working_dir: saved_working_dir.clone(),
+                        visible_url_spans: Vec::new(),
+                        visible_path_spans: Vec::new(),
+                        terminal_context_menu: None,
+                        bottom_inset: 0.0,
+                        right_inset: 0.0,
+                        pending_resize: None,
+                        bell_flash_start: None,
+                        frame_count: 0,
+                        last_fps_time: Instant::now(),
+                        current_fps: 0,
+                        keymap: KeymapConfig::default(),
+                    };
+                }
+            };
 
         // Auto-focus this terminal on creation
         focus_handle.focus(window, cx);
