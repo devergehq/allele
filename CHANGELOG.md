@@ -21,6 +21,8 @@ Changes on `master` awaiting the next tagged release.
   disabled. This lets two sessions running at the same time use different
   toolchain versions, which a machine-global switch like `brew link` cannot do.
   See `docs/projects-and-sessions.md` for the one caveat about rc files.
+  Both are editable from the project settings pane, alongside the existing
+  terminals and startup/shutdown fields.
 
 ### Fixed
 - Dispatched sessions can now reach the session that dispatched them. A session has

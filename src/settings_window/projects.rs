@@ -1,5 +1,6 @@
 //! Projects settings section — per-project orchestration (startup/shutdown
-//! commands + drawer terminals), driven by a project selector.
+//! commands + drawer terminals) and session environment (env vars + PATH
+//! prepends), driven by a project selector.
 
 use gpui::*;
 
@@ -10,6 +11,40 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::theme;
 use crate::AppState;
 
+/// Add an environment pair. A blank key is a no-op — the same way the terminals
+/// editor treats a blank label — and returns `false` so the caller knows not to
+/// clear the draft inputs. Keys are trimmed; values are stored verbatim, since
+/// a trailing space can be meaningful in a value and never is in a name.
+fn add_env_var(settings: &mut crate::settings::ProjectSettings, key: &str, value: &str) -> bool {
+    if key.trim().is_empty() {
+        return false;
+    }
+    settings
+        .env
+        .insert(key.trim().to_string(), value.to_string());
+    true
+}
+
+/// Append a PATH prepend entry, preserving declaration order. Duplicates are
+/// allowed through: `ProjectEnv::materialise` collapses them, and rejecting one
+/// here would mean silently ignoring a click the user meant.
+fn add_path_prepend(settings: &mut crate::settings::ProjectSettings, dir: &str) -> bool {
+    if dir.trim().is_empty() {
+        return false;
+    }
+    settings.path_prepend.push(dir.trim().to_string());
+    true
+}
+
+/// Remove a PATH entry by its position in the rendered list, tolerating an
+/// index that no longer exists — the list is built from a snapshot, so a
+/// concurrent edit can leave a stale row on screen.
+fn remove_path_prepend(settings: &mut crate::settings::ProjectSettings, idx: usize) {
+    if idx < settings.path_prepend.len() {
+        settings.path_prepend.remove(idx);
+    }
+}
+
 /// Owns the project selection + the startup/shutdown/terminal draft inputs.
 pub(super) struct ProjectsSection {
     selected: Option<usize>,
@@ -17,6 +52,9 @@ pub(super) struct ProjectsSection {
     shutdown_input: Entity<TextInput>,
     terminal_label_input: Entity<TextInput>,
     terminal_command_input: Entity<TextInput>,
+    env_key_input: Entity<TextInput>,
+    env_value_input: Entity<TextInput>,
+    path_prepend_input: Entity<TextInput>,
 }
 
 impl ProjectsSection {
@@ -46,12 +84,20 @@ impl ProjectsSection {
         let terminal_label_input = cx.new(|cx| TextInput::new(cx, "", "Label"));
         let terminal_command_input = cx.new(|cx| TextInput::new(cx, "", "Command"));
 
+        let env_key_input = cx.new(|cx| TextInput::new(cx, "", "NAME"));
+        let env_value_input = cx.new(|cx| TextInput::new(cx, "", "value"));
+        let path_prepend_input =
+            cx.new(|cx| TextInput::new(cx, "", "e.g. /opt/homebrew/opt/php@8.3/bin"));
+
         Self {
             selected: None,
             startup_input,
             shutdown_input,
             terminal_label_input,
             terminal_command_input,
+            env_key_input,
+            env_value_input,
+            path_prepend_input,
         }
     }
 
@@ -422,6 +468,273 @@ impl ProjectsSection {
                         ),
                 );
 
+            // --- Session environment (DEV-486) --------------------------------
+            let (env_vars, path_prepend): (Vec<(String, String)>, Vec<String>) = app
+                .upgrade()
+                .and_then(|app| {
+                    app.read(cx).projects.get(sel_idx).map(|p| {
+                        (
+                            p.settings
+                                .env
+                                .iter()
+                                .map(|(k, v)| (k.clone(), v.clone()))
+                                .collect(),
+                            p.settings.path_prepend.clone(),
+                        )
+                    })
+                })
+                .unwrap_or_default();
+
+            let mut env_list = div().flex().flex_col().gap(px(4.0));
+            for (key, value) in &env_vars {
+                // Removal is by key, not index: `env` is a BTreeMap, so an
+                // index into the rendered list means nothing to the model.
+                let remove_key = key.clone();
+                env_list = env_list.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(10.0))
+                        .py(px(5.0))
+                        .rounded(px(6.0))
+                        .bg(theme().bg_surface)
+                        .child(
+                            div()
+                                .w(px(120.0))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_size(px(11.0))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(theme().accent)
+                                .child(key.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_size(px(11.0))
+                                .text_color(theme().text_secondary)
+                                .child(value.clone()),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("env-remove-{key}")))
+                                .cursor_pointer()
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded(px(6.0))
+                                .hover(|s| s.bg(theme().bg_raised))
+                                .child(icon(icons::X, 12.0, theme().text_faint))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        let Some(sel) = this.projects.selected else {
+                                            return;
+                                        };
+                                        this.app
+                                            .update(cx, |state: &mut AppState, _cx| {
+                                                if let Some(project) = state.projects.get_mut(sel) {
+                                                    project.settings.env.remove(&remove_key);
+                                                }
+                                            })
+                                            .ok();
+                                        this.projects.push_settings(&this.app, cx);
+                                        cx.notify();
+                                    }),
+                                ),
+                        ),
+                );
+            }
+
+            let env_add_row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .w(px(120.0))
+                        .child(input_frame(self.env_key_input.clone())),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(input_frame(self.env_value_input.clone())),
+                )
+                .child(
+                    div()
+                        .id("add-env")
+                        .cursor_pointer()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
+                        .bg(theme().bg_raised)
+                        .hover(|s| s.bg(theme().bg_hover))
+                        .text_size(px(11.0))
+                        .text_color(theme().success)
+                        .child("+ Add")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, _window, cx| {
+                                cx.stop_propagation();
+                                let key = this.projects.env_key_input.read(cx).text().to_string();
+                                let value =
+                                    this.projects.env_value_input.read(cx).text().to_string();
+                                // Blank key is a no-op add, matching the
+                                // blank-label behaviour of the terminals editor.
+                                let Some(sel) = this.projects.selected else {
+                                    return;
+                                };
+                                let mut added = false;
+                                this.app
+                                    .update(cx, |state: &mut AppState, _cx| {
+                                        if let Some(project) = state.projects.get_mut(sel) {
+                                            added =
+                                                add_env_var(&mut project.settings, &key, &value);
+                                        }
+                                    })
+                                    .ok();
+                                if !added {
+                                    return;
+                                }
+                                this.projects
+                                    .env_key_input
+                                    .update(cx, |i, cx| i.set_text_silent("", cx));
+                                this.projects
+                                    .env_value_input
+                                    .update(cx, |i, cx| i.set_text_silent("", cx));
+                                this.projects.push_settings(&this.app, cx);
+                                cx.notify();
+                            }),
+                        ),
+                );
+
+            let mut path_list = div().flex().flex_col().gap(px(4.0));
+            for (p_idx, dir) in path_prepend.iter().enumerate() {
+                path_list = path_list.child(
+                    div()
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap(px(8.0))
+                        .px(px(10.0))
+                        .py(px(5.0))
+                        .rounded(px(6.0))
+                        .bg(theme().bg_surface)
+                        // Order is meaningful — the first entry wins — so the
+                        // position is shown rather than left to be inferred.
+                        .child(
+                            div()
+                                .w(px(20.0))
+                                .text_size(px(11.0))
+                                .text_color(theme().text_faint)
+                                .child(format!("{}", p_idx + 1)),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.0))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .text_size(px(11.0))
+                                .text_color(theme().text_secondary)
+                                .child(dir.clone()),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("path-remove-{p_idx}")))
+                                .cursor_pointer()
+                                .px(px(6.0))
+                                .py(px(2.0))
+                                .rounded(px(6.0))
+                                .hover(|s| s.bg(theme().bg_raised))
+                                .child(icon(icons::X, 12.0, theme().text_faint))
+                                .on_mouse_down(
+                                    MouseButton::Left,
+                                    cx.listener(move |this, _event, _window, cx| {
+                                        cx.stop_propagation();
+                                        let Some(sel) = this.projects.selected else {
+                                            return;
+                                        };
+                                        this.app
+                                            .update(cx, |state: &mut AppState, _cx| {
+                                                if let Some(project) = state.projects.get_mut(sel) {
+                                                    remove_path_prepend(
+                                                        &mut project.settings,
+                                                        p_idx,
+                                                    );
+                                                }
+                                            })
+                                            .ok();
+                                        this.projects.push_settings(&this.app, cx);
+                                        cx.notify();
+                                    }),
+                                ),
+                        ),
+                );
+            }
+
+            let path_add_row = div()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(input_frame(self.path_prepend_input.clone())),
+                )
+                .child(
+                    div()
+                        .id("add-path-prepend")
+                        .cursor_pointer()
+                        .px(px(8.0))
+                        .py(px(4.0))
+                        .rounded(px(6.0))
+                        .bg(theme().bg_raised)
+                        .hover(|s| s.bg(theme().bg_hover))
+                        .text_size(px(11.0))
+                        .text_color(theme().success)
+                        .child("+ Add")
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _event, _window, cx| {
+                                cx.stop_propagation();
+                                let dir =
+                                    this.projects.path_prepend_input.read(cx).text().to_string();
+                                let Some(sel) = this.projects.selected else {
+                                    return;
+                                };
+                                let mut added = false;
+                                this.app
+                                    .update(cx, |state: &mut AppState, _cx| {
+                                        if let Some(project) = state.projects.get_mut(sel) {
+                                            added = add_path_prepend(&mut project.settings, &dir);
+                                        }
+                                    })
+                                    .ok();
+                                if !added {
+                                    return;
+                                }
+                                this.projects
+                                    .path_prepend_input
+                                    .update(cx, |i, cx| i.set_text_silent("", cx));
+                                this.projects.push_settings(&this.app, cx);
+                                cx.notify();
+                            }),
+                        ),
+                );
+
             div()
                 .flex_1()
                 .flex()
@@ -469,6 +782,30 @@ impl ProjectsSection {
                 .child(section_header("Drawer terminals"))
                 .child(terminal_list)
                 .child(add_row)
+                .child(section_header("Environment"))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme().text_secondary)
+                        .child("Exported into every process this project's sessions spawn: the agent, drawer terminals, and the startup/shutdown commands. Values support {{unique_port}} and {{folder}}."),
+                )
+                .child(env_list)
+                .child(env_add_row)
+                .child(section_header("PATH prepend"))
+                .child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme().text_secondary)
+                        .child("Directories added to the front of PATH, first entry winning — use it to pin a toolchain version per project."),
+                )
+                .child(
+                    div()
+                        .text_size(px(10.0))
+                        .text_color(theme().text_faint)
+                        .child("Drawer terminals run your shell's rc files after this, so a line like 'export PATH=\"/opt/homebrew/bin:$PATH\"' still takes precedence. Keep the pinned tool off globally-linked paths."),
+                )
+                .child(path_list)
+                .child(path_add_row)
                 .into_any_element()
         } else {
             div()
@@ -529,5 +866,83 @@ impl ProjectsSection {
                     )
                     .child(card().flex_1().child(detail)),
             )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // Named imports, not a glob: this module does `use gpui::*`, and gpui
+    // exports its own `test` attribute macro. Re-exporting it through
+    // `super::*` shadows the built-in one and blows the macro recursion limit.
+    use super::{add_env_var, add_path_prepend, remove_path_prepend};
+    use crate::settings::ProjectSettings;
+
+    #[test]
+    fn add_env_var_stores_a_trimmed_key() {
+        let mut s = ProjectSettings::default();
+        assert!(add_env_var(&mut s, "  APP_ENV  ", "local"));
+        assert_eq!(s.env.get("APP_ENV").map(String::as_str), Some("local"));
+    }
+
+    #[test]
+    fn add_env_var_keeps_the_value_verbatim() {
+        // Trailing space is never meaningful in a name and sometimes is in a
+        // value, so only the key gets trimmed.
+        let mut s = ProjectSettings::default();
+        add_env_var(&mut s, "GREETING", " hello ");
+        assert_eq!(s.env.get("GREETING").map(String::as_str), Some(" hello "));
+    }
+
+    #[test]
+    fn add_env_var_rejects_a_blank_key() {
+        let mut s = ProjectSettings::default();
+        assert!(!add_env_var(&mut s, "   ", "orphan"));
+        assert!(s.env.is_empty());
+    }
+
+    #[test]
+    fn add_env_var_overwrites_an_existing_key() {
+        let mut s = ProjectSettings::default();
+        add_env_var(&mut s, "APP_ENV", "local");
+        add_env_var(&mut s, "APP_ENV", "testing");
+        assert_eq!(s.env.len(), 1);
+        assert_eq!(s.env.get("APP_ENV").map(String::as_str), Some("testing"));
+    }
+
+    #[test]
+    fn add_path_prepend_preserves_declaration_order() {
+        let mut s = ProjectSettings::default();
+        add_path_prepend(&mut s, "/first");
+        add_path_prepend(&mut s, "/second");
+        assert_eq!(
+            s.path_prepend,
+            vec!["/first".to_string(), "/second".to_string()]
+        );
+    }
+
+    #[test]
+    fn add_path_prepend_rejects_blank() {
+        let mut s = ProjectSettings::default();
+        assert!(!add_path_prepend(&mut s, "  "));
+        assert!(s.path_prepend.is_empty());
+    }
+
+    #[test]
+    fn remove_path_prepend_removes_the_right_entry() {
+        let mut s = ProjectSettings::default();
+        for dir in ["/a", "/b", "/c"] {
+            add_path_prepend(&mut s, dir);
+        }
+        remove_path_prepend(&mut s, 1);
+        assert_eq!(s.path_prepend, vec!["/a".to_string(), "/c".to_string()]);
+    }
+
+    #[test]
+    fn remove_path_prepend_ignores_a_stale_index() {
+        // The list is rendered from a snapshot, so a row can outlive its entry.
+        let mut s = ProjectSettings::default();
+        add_path_prepend(&mut s, "/only");
+        remove_path_prepend(&mut s, 7);
+        assert_eq!(s.path_prepend, vec!["/only".to_string()]);
     }
 }
