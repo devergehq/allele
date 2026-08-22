@@ -594,4 +594,29 @@ mod tests {
         let s: Settings = serde_json::from_str(json).unwrap();
         assert!(s.session_cleanup_paths.is_empty());
     }
+
+    #[test]
+    fn legacy_project_settings_without_env_gets_empty_defaults() {
+        // A settings.json written before DEV-485 must still load, with both
+        // new fields empty so nothing about the spawn path changes.
+        let legacy = r#"{ "merge_strategy": "Merge", "rebase_before_merge": true }"#;
+        let p: ProjectSettings = serde_json::from_str(legacy).expect("should deserialize");
+        assert!(p.env.is_empty());
+        assert!(p.path_prepend.is_empty());
+    }
+
+    #[test]
+    fn project_settings_env_round_trips() {
+        let mut env = BTreeMap::new();
+        env.insert("APP_ENV".to_string(), "local".to_string());
+        let original = ProjectSettings {
+            env,
+            path_prepend: vec!["/opt/homebrew/opt/php@8.3/bin".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).expect("should serialize");
+        let back: ProjectSettings = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(back.env, original.env);
+        assert_eq!(back.path_prepend, original.path_prepend);
+    }
 }
