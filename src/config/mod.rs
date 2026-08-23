@@ -125,29 +125,50 @@ pub struct ProjectEnv {
 }
 
 impl ProjectEnv {
-    /// Resolve from a per-repo `allele.json` if present, else from the
-    /// project's settings — the same precedence the `agent` override uses,
-    /// so a repo can pin its own toolchain for everyone who clones it.
-    pub fn resolve(source_path: &Path, settings: &ProjectSettings) -> Self {
-        match ProjectConfig::load(source_path) {
-            Some(cfg) => Self {
-                vars: cfg.env,
-                path_prepend: cfg.path_prepend,
+    /// Choose each field independently: a value declared in `allele.json` wins,
+    /// and anything it leaves undeclared falls back to project settings. This
+    /// is the field-level precedence the `agent` override uses, where an
+    /// `allele.json` carrying no `agent` key falls through to the global
+    /// default rather than forcing "no agent".
+    ///
+    /// The first version of this switched on the *presence* of `allele.json`,
+    /// so a file pinning only terminals silently discarded env configured in
+    /// the settings pane — no error, values still shown in the UI and still
+    /// written to settings.json, just never applied (DEV-488).
+    ///
+    /// Consequence worth knowing: an empty declaration cannot *clear* an
+    /// inherited value, because empty is how "undeclared" is spelled in JSON
+    /// for a map and a list. `agent: null` behaves the same way.
+    fn pick(cfg: Option<&ProjectConfig>, settings: &ProjectSettings) -> Self {
+        let declared_vars = cfg.map(|c| c.env.clone()).unwrap_or_default();
+        let declared_paths = cfg.map(|c| c.path_prepend.clone()).unwrap_or_default();
+        Self {
+            vars: if declared_vars.is_empty() {
+                settings.env.clone()
+            } else {
+                declared_vars
             },
-            None => Self {
-                vars: settings.env.clone(),
-                path_prepend: settings.path_prepend.clone(),
+            path_prepend: if declared_paths.is_empty() {
+                settings.path_prepend.clone()
+            } else {
+                declared_paths
             },
         }
     }
 
-    /// Take the environment out of an already-loaded config, for the call
-    /// sites that resolve `ProjectConfig` for other reasons anyway.
-    pub fn from_config(cfg: &ProjectConfig) -> Self {
-        Self {
-            vars: cfg.env.clone(),
-            path_prepend: cfg.path_prepend.clone(),
-        }
+    /// Resolve from a per-repo `allele.json` layered over the project's
+    /// settings, so a repo can pin its own toolchain for everyone who clones
+    /// it. See [`Self::pick`] for the precedence.
+    pub fn resolve(source_path: &Path, settings: &ProjectSettings) -> Self {
+        Self::pick(ProjectConfig::load(source_path).as_ref(), settings)
+    }
+
+    /// Same precedence as [`Self::resolve`], for the call sites that have
+    /// already loaded a `ProjectConfig` for other reasons. `settings` is still
+    /// required: the loaded config may be a per-repo `allele.json` that
+    /// declares no environment at all.
+    pub fn from_config(cfg: &ProjectConfig, settings: &ProjectSettings) -> Self {
+        Self::pick(Some(cfg), settings)
     }
 
     /// Materialise into `(key, value)` pairs ready for a PTY or `Command`.
@@ -510,5 +531,91 @@ mod tests {
     #[test]
     fn from_settings_still_none_when_truly_empty() {
         assert!(ProjectConfig::from_settings(&ProjectSettings::default()).is_none());
+    }
+
+    /// Write an `allele.json` into a fresh dir and hand back the dir.
+    fn project_with_allele_json(name: &str, body: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("allele.json"), body).unwrap();
+        tmp
+    }
+
+    fn settings_with_env() -> ProjectSettings {
+        let mut env = BTreeMap::new();
+        env.insert("FROM".to_string(), "settings".to_string());
+        ProjectSettings {
+            env,
+            path_prepend: vec!["/from/settings".to_string()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_uses_settings_when_no_allele_json() {
+        let tmp = std::env::temp_dir().join("allele-test-resolve-none");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let env = ProjectEnv::resolve(&tmp, &settings_with_env());
+        assert_eq!(env.vars.get("FROM").map(String::as_str), Some("settings"));
+        assert_eq!(env.path_prepend, vec!["/from/settings".to_string()]);
+    }
+
+    #[test]
+    fn resolve_keeps_settings_when_allele_json_declares_no_env() {
+        // DEV-488: an allele.json present for other reasons — here, terminals —
+        // must not silently discard environment configured in the settings pane.
+        let tmp = project_with_allele_json(
+            "allele-test-resolve-silent",
+            r#"{"terminals":[{"label":"Serve","command":"bin/dev"}]}"#,
+        );
+        let env = ProjectEnv::resolve(&tmp, &settings_with_env());
+        assert_eq!(env.vars.get("FROM").map(String::as_str), Some("settings"));
+        assert_eq!(env.path_prepend, vec!["/from/settings".to_string()]);
+    }
+
+    #[test]
+    fn resolve_prefers_allele_json_when_it_declares_env() {
+        let tmp = project_with_allele_json(
+            "allele-test-resolve-declared",
+            r#"{"env":{"FROM":"allele.json"},"path_prepend":["/from/allele-json"]}"#,
+        );
+        let env = ProjectEnv::resolve(&tmp, &settings_with_env());
+        assert_eq!(
+            env.vars.get("FROM").map(String::as_str),
+            Some("allele.json")
+        );
+        assert_eq!(env.path_prepend, vec!["/from/allele-json".to_string()]);
+    }
+
+    #[test]
+    fn resolve_falls_back_per_field_not_wholesale() {
+        // allele.json pins the PATH but says nothing about vars, so the vars
+        // still come from settings. The two fields are independent.
+        let tmp = project_with_allele_json(
+            "allele-test-resolve-partial",
+            r#"{"path_prepend":["/from/allele-json"]}"#,
+        );
+        let env = ProjectEnv::resolve(&tmp, &settings_with_env());
+        assert_eq!(env.vars.get("FROM").map(String::as_str), Some("settings"));
+        assert_eq!(env.path_prepend, vec!["/from/allele-json".to_string()]);
+    }
+
+    #[test]
+    fn from_config_applies_the_same_fallback() {
+        // The startup/shutdown sites reach ProjectEnv this way, and were
+        // affected by the same bug.
+        let cfg = ProjectConfig::from_settings(&ProjectSettings {
+            terminals: vec![TerminalCfg {
+                label: "Serve".to_string(),
+                command: "bin/dev".to_string(),
+            }],
+            ..Default::default()
+        })
+        .expect("terminals alone produce a config");
+        let env = ProjectEnv::from_config(&cfg, &settings_with_env());
+        assert_eq!(env.vars.get("FROM").map(String::as_str), Some("settings"));
+        assert_eq!(env.path_prepend, vec!["/from/settings".to_string()]);
     }
 }

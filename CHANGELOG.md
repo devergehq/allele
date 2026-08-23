@@ -25,6 +25,11 @@ Changes on `master` awaiting the next tagged release.
   terminals and startup/shutdown fields.
 
 ### Fixed
+- A project's `allele.json` no longer silently discards `env` and `path_prepend`
+  configured in the settings pane. Presence of the file used to switch the whole
+  environment over to it, so a file pinning only terminals left the settings-pane
+  values written to disk, shown in the UI, and never applied. Each field now
+  falls back on its own, matching how the `agent` override already worked.
 - Dispatched sessions can now reach the session that dispatched them. A session has
   two names — allele's label, which the sidebar and auto-naming both rewrite, and the
   Claude Code process name, fixed at spawn — and messaging resolves against the second.

@@ -2213,7 +2213,7 @@ impl AppState {
         // migrate/seed script resolves the same toolchain the session will
         // (DEV-485). `cfg` is already loaded, so no second config read.
         let inherited_path = std::env::var("PATH").ok();
-        let startup_env = config::ProjectEnv::from_config(&cfg).materialise(
+        let startup_env = config::ProjectEnv::from_config(&cfg, &project_settings).materialise(
             port,
             &clone_path,
             inherited_path.as_deref(),

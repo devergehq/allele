@@ -1467,7 +1467,7 @@ impl AppState {
                 // Same environment the session ran under, so a teardown script
                 // resolves the same toolchain its startup counterpart did.
                 let inherited_path = std::env::var("PATH").ok();
-                let env = config::ProjectEnv::from_config(&cfg).materialise(
+                let env = config::ProjectEnv::from_config(&cfg, &project.settings).materialise(
                     removed.allocated_port,
                     clone_path,
                     inherited_path.as_deref(),

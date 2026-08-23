@@ -147,6 +147,22 @@ because a bare session still needs its toolchain resolved.
 Declaring both `env.PATH` and `path_prepend` is safe: the explicit `PATH` becomes
 the base that `path_prepend` is prepended onto, so neither is silently discarded.
 
+### Precedence is per field
+
+`allele.json` and project settings are layered, not chosen between. Each field
+is resolved on its own: `env` declared in `allele.json` wins for `env`,
+`path_prepend` declared there wins for `path_prepend`, and whatever the file
+leaves out falls back to the settings pane. This matches how the `agent`
+override behaves — an `allele.json` with no `agent` key falls through to the
+global default rather than meaning "no agent".
+
+So an `allele.json` that exists only to pin terminals does not disturb
+environment configured in the settings pane. (It did before DEV-488, silently.)
+
+One consequence: an empty declaration cannot *clear* an inherited value, because
+empty is how "undeclared" is spelled for a JSON map or list. To drop a variable,
+remove it from project settings rather than writing `"env": {}`.
+
 ### Pinning a toolchain — and the one caveat
 
 The motivating case is a project that needs a specific language runtime while
