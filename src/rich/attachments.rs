@@ -120,7 +120,7 @@ const READABLE_EXTS: &[&str] = &[
 /// `~/.allele/attachments/`. Returns `None` if the user has no home dir
 /// (in which case attachments are disabled — not fatal).
 pub fn attachments_root() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".allele").join("attachments"))
+    crate::paths::attachments_dir()
 }
 
 /// Per-session attachments directory.

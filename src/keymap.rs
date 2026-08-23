@@ -219,7 +219,7 @@ fn build_binding(
 // ── User override file ────────────────────────────────────────────
 
 fn user_keymap_path() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".allele").join("keymap.json"))
+    crate::paths::keymap_file()
 }
 
 /// Read `~/.allele/keymap.json` if it exists. Returns an empty Vec on

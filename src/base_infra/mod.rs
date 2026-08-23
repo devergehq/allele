@@ -94,7 +94,7 @@ http:
 
 /// Root of the base-infra tree: `~/.allele/base-infra/`.
 pub fn base_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".allele").join("base-infra"))
+    crate::paths::base_infra_dir()
 }
 
 /// Watched dynamic-config dir. Session-start scripts write route files here.
