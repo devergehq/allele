@@ -13,6 +13,8 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+## [0.4.0] - 2026-08-30
+
 ### Added
 - `script/cut-release.sh` automates the release prep from `RELEASING.md`: it bumps
   `Cargo.toml`, `Cargo.lock` and `Info.plist` together, rolls `[Unreleased]` into a
@@ -182,7 +184,8 @@ merge batch. Core proof-of-concept complete and runnable.
   browser with merge/delete actions.
 - Per-session drawer terminal panel and auto-naming of sessions from the first prompt.
 
-[Unreleased]: https://github.com/devergehq/allele/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/devergehq/allele/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/devergehq/allele/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/devergehq/allele/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/devergehq/allele/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/devergehq/allele/releases/tag/v0.1.0
