@@ -600,11 +600,12 @@ Known work not yet landed, in rough priority order:
   dispatches pending actions and checkpoints persistence — and that finer
   extraction runs into borrow conflicts between `&mut AppState`, `Window`
   and the `'static` listener closures.
-- **The 5000 → 1500 → 800 ratchet.** Reaching 1,500 means decomposing eight
-  files totalling ~20,000 lines (`git/mod.rs` 3,315, `terminal_view.rs`
-  2,450, `rich_view.rs` 2,320, `session_ops.rs` 2,149, `sidebar/render.rs`
-  1,852, `compose_bar.rs` 1,627, `pending_actions.rs` 1,506). A separate
-  decision, not a continuation of any one cleanup.
+- **The 5000 → 1500 → 800 ratchet.** Reaching 1,500 means decomposing
+  `main.rs` (3,694) plus seven other files — 18,913 lines between them:
+  `git/mod.rs` 3,315, `terminal_view.rs` 2,450, `rich_view.rs` 2,320,
+  `session_ops.rs` 2,149, `sidebar/render.rs` 1,852, `compose_bar.rs` 1,627,
+  `pending_actions.rs` 1,506. A separate decision, not a continuation of any
+  one cleanup.
 - Adopt `AlleleError` in the remaining `git::*` functions
   (`fetch_and_rebase_onto_remote_branch`, `auto_commit_if_dirty`,
   `delete_ref`, `list_archive_refs`, `prune_archive_refs`, etc.)

@@ -38,9 +38,10 @@ use walkdir::WalkDir;
 /// [`PER_FILE_LINE_LIMITS`] (DEV-105).
 ///
 /// Ratchet plan: 5000 → 1500 → 800 as the oversized files (DEV-111) are
-/// decomposed. Reaching 1,500 means splitting eight files totalling ~20,000
-/// lines, so it is a separate decision rather than a continuation of any one
-/// cleanup. The largest file governed by *this* limit is `src/git/mod.rs`.
+/// decomposed. Reaching 1,500 means splitting `main.rs` plus seven other files
+/// — 18,913 lines between them — so it is a separate decision rather than a
+/// continuation of any one cleanup. See ARCHITECTURE.md §8 for the list. The
+/// largest file governed by *this* limit is `src/git/mod.rs`.
 const MAX_FILE_LINES: usize = 5_000;
 
 /// Per-file limits that override [`MAX_FILE_LINES`], so a file that has been
@@ -61,8 +62,19 @@ const MAX_FILE_LINES: usize = 5_000;
 const PER_FILE_LINE_LIMITS: &[(&str, usize)] = &[("src/main.rs", 3_800)];
 
 /// How much slack a [`PER_FILE_LINE_LIMITS`] entry may carry before it stops
-/// applying pressure and has to be lowered.
-const PER_FILE_HEADROOM: usize = 250;
+/// applying pressure and has to be lowered, as a percentage of the file's
+/// actual size.
+///
+/// Proportional rather than a flat line count, to match how the global
+/// [`size_ratchet_is_still_tight`] behaves (it allows the largest file to sit
+/// anywhere above half the limit). A flat allowance is harsh on exactly the
+/// change this whole ticket exists to protect: with a 250-line allowance,
+/// `main.rs` at 3,694 against a 3,800 entry would fail this test the moment an
+/// unrelated PR deleted ~145 lines from it — presenting as *that change* being
+/// wrong rather than as an entry needing to come down. 20% leaves an ordinary
+/// cleanup room to land and still forces the entry down after a real
+/// decomposition.
+const PER_FILE_SLACK_PERCENT: usize = 20;
 
 /// The limit governing `rel`, and whether it came from the per-file table.
 fn limit_for(rel: &str) -> (usize, bool) {
@@ -276,9 +288,9 @@ fn per_file_ratchets_are_still_tight() {
 
         let lines = read(path).lines().count();
         assert!(
-            lines + PER_FILE_HEADROOM > *limit,
-            "\n{rel} is {lines} lines, well under its {limit}-line entry in \
-             PER_FILE_LINE_LIMITS.\n\
+            limit * 100 <= lines * (100 + PER_FILE_SLACK_PERCENT),
+            "\n{rel} is {lines} lines, more than {PER_FILE_SLACK_PERCENT}% under its \
+             {limit}-line entry in PER_FILE_LINE_LIMITS.\n\
              Lower the entry to lock the improvement in — it only ever goes down.\n",
         );
     }
