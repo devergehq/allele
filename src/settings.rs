@@ -500,8 +500,7 @@ impl Default for Settings {
 impl Settings {
     /// Path to the settings file.
     pub fn path() -> Option<PathBuf> {
-        let home = dirs::home_dir()?;
-        Some(home.join(".config").join("allele").join("settings.json"))
+        crate::paths::settings_file()
     }
 
     /// Load settings from disk. Returns default if file doesn't exist or is invalid.

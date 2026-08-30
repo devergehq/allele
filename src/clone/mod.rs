@@ -9,13 +9,6 @@ use tracing::{info, warn};
 use crate::errors::AlleleError;
 use crate::git;
 
-/// Base directory for all workspace clones
-const CLONE_BASE: &str = ".allele/workspaces";
-
-/// Base directory for the trash — orphaned clones are moved here rather
-/// than deleted outright, so accidental sweeps are recoverable.
-const TRASH_BASE: &str = ".allele/trash";
-
 /// Number of days a trashed clone may sit before being purged on startup.
 /// Single source of truth — do not scatter copies of this value.
 pub const TRASH_TTL_DAYS: u64 = 14;
@@ -24,7 +17,7 @@ pub const TRASH_TTL_DAYS: u64 = 14;
 /// directory of every session clone. Single source of truth for the base that
 /// session-sync path normalization strips to / rebases from (see `crate::sync`).
 pub fn clones_root() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(CLONE_BASE))
+    crate::paths::workspaces_root()
 }
 
 /// Create a clone for a session: uses a short unique session ID as the workspace name.
@@ -37,9 +30,9 @@ pub fn create_session_clone(
     session_id: &str,
     exclude: &[String],
 ) -> crate::errors::Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
-    let clone_dir = home.join(CLONE_BASE).join(project_name);
+    let clone_dir = crate::paths::workspaces_root()
+        .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?
+        .join(project_name);
     fs::create_dir_all(&clone_dir)?;
 
     let short_id: String = session_id.chars().take(8).collect();
@@ -234,9 +227,8 @@ pub fn delete_clone(clone_path: &Path) -> crate::errors::Result<()> {
     }
 
     // Safety check — only delete paths under our workspace directory
-    let home = dirs::home_dir()
+    let workspace_base = crate::paths::workspaces_root()
         .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
-    let workspace_base = home.join(CLONE_BASE);
 
     if !clone_path.starts_with(&workspace_base) {
         return Err(AlleleError::Clone(format!(
@@ -251,9 +243,8 @@ pub fn delete_clone(clone_path: &Path) -> crate::errors::Result<()> {
 
 /// Return the trash base directory, creating it if necessary.
 pub fn trash_base() -> crate::errors::Result<PathBuf> {
-    let home = dirs::home_dir()
+    let path = crate::paths::trash_root()
         .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
-    let path = home.join(TRASH_BASE);
     fs::create_dir_all(&path)?;
     Ok(path)
 }
@@ -274,9 +265,8 @@ pub fn trash_clone(clone_path: &Path) -> crate::errors::Result<PathBuf> {
         )));
     }
 
-    let home = dirs::home_dir()
+    let workspace_base = crate::paths::workspaces_root()
         .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
-    let workspace_base = home.join(CLONE_BASE);
 
     if !clone_path.starts_with(&workspace_base) {
         return Err(AlleleError::Clone(format!(
@@ -417,9 +407,8 @@ pub fn sweep_orphans(
     referenced: &HashSet<PathBuf>,
     project_sources: &HashMap<String, PathBuf>,
 ) -> crate::errors::Result<usize> {
-    let home = dirs::home_dir()
+    let workspace_base = crate::paths::workspaces_root()
         .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
-    let workspace_base = home.join(CLONE_BASE);
 
     if !workspace_base.exists() {
         return Ok(0);

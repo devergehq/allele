@@ -303,8 +303,7 @@ impl PersistedState {
     /// directory so a single `.allele/` folder owns everything session-
     /// related (workspaces, trash, state).
     pub fn path() -> Option<PathBuf> {
-        let home = dirs::home_dir()?;
-        Some(home.join(".allele").join("state.json"))
+        crate::paths::state_file()
     }
 
     /// Load state from disk. Returns an empty state if:
