@@ -36,8 +36,8 @@ Three properties fix that, and nothing less does:
 ## Transport
 
 The producer emits the frame as **an additional top-level key in the JSON object it already
-writes to hook stdout**, from any Claude Code hook it already registers (`SessionStart`,
-`PostToolUse`, `Stop`, …). Claude Code surfaces hook stdout on the `system` / `hook_response`
+writes to hook stdout**, from any Claude Code hook it already registers (see *Emission
+points* for the recommended set). Claude Code surfaces hook stdout on the `system` / `hook_response`
 stream line, which Allele already parses (`SystemEvent.stdout`, `src/stream/types.rs`). No new
 IPC, no daemon, no polling, no filesystem contact, and no change required in Claude Code.
 
@@ -69,6 +69,29 @@ without parsing, and a producer emitting frames faster than roughly **one per se
 expect the consumer to coalesce them — only the newest is rendered. Consumers must also be
 **idempotent on identical consecutive frames**: a hook registered more than once delivers the
 same frame twice, and re-rendering must be a no-op rather than a flicker.
+
+## Emission points
+
+A producer emits from hooks it already registers. Which ones is a producer's choice — adding
+or dropping an emission point is **not a contract change** — but the recommended set is:
+
+| Hook | Emit | Why |
+|---|---|---|
+| `SessionStart` | **Yes** | Establishes producer-alive and contract version before anything else can be misread. |
+| `PreCompact` | **Yes** | The one moment context pressure is *actionable* rather than merely observable: the context is about to be compacted and the user may still intervene, hand off, or let it ride. A frame here carrying `usage.context` is the most decision-shaped signal in the contract. |
+| `PostToolUse` | **On change** | See below. |
+| `Stop` | **Yes** | Final state. |
+| `UserPromptSubmit` | Optional | Only if a turn boundary in the indicator is wanted. Deliberately left out of the recommended set; a producer can add it at any time. |
+
+**`PostToolUse` producers SHOULD emit only on delta** — when `run.stage`, `run.progress` or
+`run.status` actually changed since the frame last emitted. It is the hottest path in the
+system and often already carries a `hookSpecificOutput` payload, so an unconditional frame is
+pure overhead.
+
+This is a **SHOULD, not a MUST**, and the split matters: a naive producer that emits on every
+tool call must still be *correct*. Consumer-side idempotence on identical consecutive frames
+is the correctness guarantee; producer-side delta emission is its efficiency partner. Neither
+substitutes for the other.
 
 ## Envelope
 
@@ -118,7 +141,7 @@ is valid and means "producer alive, nothing further to report".
 | `run.stage.label` | string | **Human label the consumer displays verbatim.** Free-form. |
 | `run.stage.ordinal` | integer | 1-based position, when the producer has ordered stages. |
 | `run.stage.total` | integer | Total stage count, when known and fixed. |
-| `run.progress.done` / `.total` | integer | Generic counter. |
+| `run.progress.done` / `.total` | integer | Generic counter, deliberately unstructured — see below. |
 | `run.progress.label` | string | What is being counted, e.g. `"ISC"`, `"tests"`, `"files"`. |
 | `run.detail` | string | One short free-form line, e.g. an effort tier. |
 | `usage.tokens.input` / `.output` | integer | **Cumulative** session totals, not deltas. Consumers must not sum successive frames. |
@@ -132,6 +155,15 @@ consumer keeps working, because it never enumerated them. Consumers **must not**
 
 Producers should keep `label` under 24 characters; consumers must truncate rather than let a
 long label break layout.
+
+**`run.progress` is deliberately a single flat counter**, for the same reason. `{done, total,
+label}` renders as "4/18 ISC" without the consumer knowing what an ISC is, exactly as
+`stage.label` renders without it knowing what OBSERVE means. Anything richer — nested
+criteria, per-phase breakdowns, typed progress kinds — would be the coupling returning in a
+new syntax, and would be the first thing to break when the producer changes its mind about
+what it counts. A richer shape can arrive later *additively* under `agent.status/1`, once
+something concrete needs it; starting minimal costs nothing, and starting rich cannot be
+undone.
 
 ## Untrusted values
 
@@ -201,6 +233,7 @@ used before — for Allele, prose phase-header parsing. The fallback:
 ## Producer checklist
 
 - [ ] Emit the frame from an existing hook; do not add a daemon or a file.
+- [ ] Emit at least at `SessionStart`, `PreCompact` and `Stop`; at `PostToolUse`, only on change.
 - [ ] Include `contract`; treat everything else as best-effort.
 - [ ] Never include credentials, tokens, or absolute paths.
 - [ ] Bump the major only for removals, retypes, or framing changes.
