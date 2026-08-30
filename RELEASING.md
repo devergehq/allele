@@ -27,6 +27,21 @@ over rare, giant ones so the auto-generated notes stay readable.
 
 ## Cutting a release (normal path)
 
+> **Shortcut:** [`script/cut-release.sh`](script/cut-release.sh) automates steps 2-4 —
+> it bumps all three version files, rolls `CHANGELOG.md`'s `[Unreleased]` into a dated
+> section (merging the duplicate `### Added` / `### Fixed` headings that accumulate on
+> master), refreshes the compare links, and commits.
+>
+> ```sh
+> ./script/cut-release.sh minor --dry-run   # show the diff, change nothing
+> ./script/cut-release.sh minor --pr        # push a branch and open the prep PR
+> ./script/cut-release.sh minor --tag       # on master: commit, tag, push
+> ```
+>
+> It refuses to run on a dirty tree, on a `master` out of sync with `origin`, when the
+> tag already exists, or when `[Unreleased]` is empty, and `--tag` re-checks the
+> invariant below before tagging. The manual steps remain the reference for what it does.
+
 > **Invariant:** the commit a release tag points at must have its `Cargo.toml`
 > `version` equal to the tag without the `v` (e.g. tag `v0.2.0` → `version = "0.2.0"`).
 > The version bump and the tag therefore live on the **same commit** — never bump
