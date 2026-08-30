@@ -237,20 +237,33 @@ impl StreamParser {
                 )
             }
             "hook_response" => {
+                // A hook response may carry a producer status frame as an
+                // `agent.status` key alongside its own payload (DEV-514). That
+                // typed channel is what replaced parsing phase names out of
+                // prose, so it is read before the coarse status classification.
+                let mut events = Vec::new();
+                if let Some(outcome) = sys
+                    .stdout
+                    .as_deref()
+                    .and_then(crate::rich::locus_status::parse_stdout)
+                {
+                    events.push(RichEvent::AgentStatus { outcome });
+                }
+
                 // Surface hook events that indicate status changes
                 if let (Some(event), Some(name)) = (sys.hook_event, sys.hook_name) {
                     match event.as_str() {
-                        "PreToolUse" | "PostToolUse" | "Notification" | "Stop" => ParsedLine::new(
-                            vec![RichEvent::HookStatus {
+                        "PreToolUse" | "PostToolUse" | "Notification" | "Stop" => {
+                            events.push(RichEvent::HookStatus {
                                 hook_event: event,
                                 hook_name: name,
-                            }],
-                            Coverage::Full,
-                        ),
-                        _ => ParsedLine::new(Vec::new(), Coverage::Ignored),
+                            });
+                            ParsedLine::new(events, Coverage::Full)
+                        }
+                        _ => coverage_for_status_only(events),
                     }
                 } else {
-                    ParsedLine::new(Vec::new(), Coverage::Ignored)
+                    coverage_for_status_only(events)
                 }
             }
             _ => ParsedLine::new(Vec::new(), Coverage::Ignored),
@@ -458,6 +471,16 @@ fn hook_error_detail(value: Option<&serde_json::Value>) -> Option<String> {
 }
 
 /// Extract structured diff data from an Edit tool_use input.
+/// A hook response that carried nothing but a status frame is still covered —
+/// returning `Ignored` would count the line as unhandled.
+fn coverage_for_status_only(events: Vec<RichEvent>) -> ParsedLine {
+    if events.is_empty() {
+        ParsedLine::new(Vec::new(), Coverage::Ignored)
+    } else {
+        ParsedLine::new(events, Coverage::Full)
+    }
+}
+
 fn extract_edit_diff(
     tool_use_id: &str,
     input: &serde_json::Value,
@@ -479,6 +502,90 @@ fn extract_edit_diff(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rich::locus_status::{FrameOutcome, RejectReason};
+
+    #[test]
+    fn hook_stdout_yields_a_typed_status_frame() {
+        // The end-to-end seam: a Locus PreToolUse response carrying its
+        // delegation-guardrail `decision` object AND an `agent.status` key in
+        // the same JSON object, as the contract requires (DEV-514).
+        let stdout = r#"{"decision":{"permissionDecision":"deny"},"agent.status":{"contract":"agent.status/1","run":{"stage":{"label":"BUILD","ordinal":4,"total":7}},"usage":{"cost_usd":0.42}}}"#;
+        let line = serde_json::json!({
+            "type": "system",
+            "subtype": "hook_response",
+            "hook_event": "PreToolUse",
+            "hook_name": "locus-guardrail",
+            "stdout": stdout,
+        })
+        .to_string();
+
+        let mut parser = StreamParser::new();
+        let events = parser.feed_line(&line);
+        let frame = events
+            .iter()
+            .find_map(|e| match e {
+                RichEvent::AgentStatus {
+                    outcome: FrameOutcome::Accepted(f),
+                } => Some(f),
+                _ => None,
+            })
+            .expect("a status frame among the emitted events");
+        assert_eq!(
+            frame
+                .run
+                .stage
+                .as_ref()
+                .and_then(|s| s.display_label())
+                .as_deref(),
+            Some("BUILD")
+        );
+        assert_eq!(frame.usage.cost_usd, Some(0.42));
+        // The hook's own status classification is not displaced by the frame.
+        assert!(events
+            .iter()
+            .any(|e| matches!(e, RichEvent::HookStatus { .. })));
+    }
+
+    #[test]
+    fn hook_stdout_with_a_future_contract_degrades_visibly() {
+        let stdout = r#"{"agent.status":{"contract":"agent.status/2"}}"#;
+        let line = serde_json::json!({
+            "type": "system",
+            "subtype": "hook_response",
+            "hook_event": "SessionStart",
+            "hook_name": "locus",
+            "stdout": stdout,
+        })
+        .to_string();
+
+        let mut parser = StreamParser::new();
+        let events = parser.feed_line(&line);
+        // SessionStart isn't a status-change hook, so the frame is the ONLY
+        // reason this line produces anything — it must still get through.
+        assert!(matches!(
+            events.as_slice(),
+            [RichEvent::AgentStatus {
+                outcome: FrameOutcome::Unsupported(RejectReason::UnsupportedMajor { .. })
+            }]
+        ));
+    }
+
+    #[test]
+    fn hook_response_without_a_frame_is_unaffected() {
+        let line = serde_json::json!({
+            "type": "system",
+            "subtype": "hook_response",
+            "hook_event": "PostToolUse",
+            "hook_name": "locus",
+            "stdout": r#"{"hookSpecificOutput":{"hookEventName":"PostToolUse"}}"#,
+        })
+        .to_string();
+        let mut parser = StreamParser::new();
+        let events = parser.feed_line(&line);
+        assert!(events
+            .iter()
+            .all(|e| !matches!(e, RichEvent::AgentStatus { .. })));
+    }
 
     #[test]
     fn parse_assistant_with_edit() {

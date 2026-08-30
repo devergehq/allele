@@ -560,6 +560,32 @@ impl RichDocument {
                 Some(id)
             }
 
+            // An accepted frame drives the sticky stage indicator via the
+            // narrative projector and produces no block of its own. A frame
+            // Allele *cannot* read becomes a visible notice instead — silence
+            // here would look exactly like "no producer running" (DEV-514).
+            RichEvent::AgentStatus { outcome } => match outcome {
+                crate::rich::locus_status::FrameOutcome::Accepted(_) => None,
+                crate::rich::locus_status::FrameOutcome::Unsupported(reason) => {
+                    self.close_text_stream();
+                    let id = self.push_block(Block {
+                        id: self.next_id,
+                        kind: BlockKind::Notice {
+                            kind: NoticeKind::StatusUnsupported,
+                            content: format!(
+                                "Locus status frame not understood: {}. Update Allele, \
+                                 or the producer, to a matching contract version.",
+                                reason.badge_text()
+                            ),
+                            link: None,
+                        },
+                        parent_agent_id: None,
+                        collapsed: false,
+                        cached_height: None,
+                    });
+                    Some(id)
+                }
+            },
             RichEvent::Init { .. } | RichEvent::HookStatus { .. } => None,
         };
 
@@ -788,7 +814,7 @@ mod permission_wiring_tests {
 #[cfg(test)]
 mod narrative_wiring_tests {
     use super::*;
-    use crate::rich::narrative::{LocusPhase, NarrativeRole};
+    use crate::rich::narrative::NarrativeRole;
 
     #[test]
     fn phase_header_block_is_annotated() {
@@ -800,7 +826,10 @@ mod narrative_wiring_tests {
             })
             .unwrap();
         let ann = doc.annotation(id).expect("annotation attached");
-        assert_eq!(ann.role, NarrativeRole::PhaseHeader(LocusPhase::Observe));
+        let NarrativeRole::PhaseHeader(stage) = &ann.role else {
+            panic!("expected a stage header, got {:?}", ann.role);
+        };
+        assert_eq!(stage.display_label().as_deref(), Some("OBSERVE"));
     }
 
     #[test]
@@ -821,7 +850,13 @@ mod narrative_wiring_tests {
             })
             .unwrap();
         let ann = doc.annotation(prose).unwrap();
-        assert_eq!(ann.phase, Some(LocusPhase::Plan));
+        assert_eq!(
+            ann.phase
+                .as_ref()
+                .and_then(|s| s.display_label())
+                .as_deref(),
+            Some("PLAN")
+        );
         assert_eq!(ann.turn, 1);
     }
 }
@@ -909,5 +944,47 @@ mod rail_tests {
             !collapsed_of(&doc, write_id),
             "error overrides the force-collapse pref"
         );
+    }
+}
+
+#[cfg(test)]
+mod status_contract_tests {
+    use super::*;
+    use crate::rich::locus_status::parse_stdout;
+
+    fn status_event(json: &str) -> RichEvent {
+        RichEvent::AgentStatus {
+            outcome: parse_stdout(json).expect("an outcome"),
+        }
+    }
+
+    #[test]
+    fn an_accepted_frame_adds_no_block() {
+        let mut doc = RichDocument::new();
+        let before = doc.blocks().len();
+        doc.apply_event(status_event(
+            r#"{"agent.status":{"contract":"agent.status/1","run":{"stage":{"label":"OBSERVE"}}}}"#,
+        ));
+        assert_eq!(doc.blocks().len(), before, "a good frame is not a block");
+    }
+
+    #[test]
+    fn an_unsupported_frame_is_visible_in_the_transcript() {
+        // The acceptance criterion: a version mismatch degrades *visibly*.
+        let mut doc = RichDocument::new();
+        doc.apply_event(status_event(
+            r#"{"agent.status":{"contract":"agent.status/2"}}"#,
+        ));
+        let notice = doc
+            .blocks()
+            .iter()
+            .find_map(|b| match &b.kind {
+                BlockKind::Notice { kind, content, .. } => Some((*kind, content.clone())),
+                _ => None,
+            })
+            .expect("an unreadable frame must produce a visible notice");
+        assert_eq!(notice.0, NoticeKind::StatusUnsupported);
+        assert!(notice.0.is_error());
+        assert!(notice.1.contains("v2 unsupported"), "{}", notice.1);
     }
 }

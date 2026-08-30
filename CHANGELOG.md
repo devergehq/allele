@@ -13,6 +13,23 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Added
+- A versioned **agent status contract** (`agent.status/1`, specified in
+  [docs/locus-status-contract.md](docs/locus-status-contract.md)) replaces reading Locus
+  Algorithm phase names out of assistant prose. Locus emits a typed frame as a key in the
+  JSON object its hooks already write to stdout; Allele consumes it through
+  `src/rich/locus_status.rs` and renders generic fields — session, parent session, backend,
+  status, stage, token usage, context usage and cost. Stage labels are free-form data rather
+  than a Rust enum, so Locus can rename, add or drop phases without breaking this view.
+
+### Changed
+- Prose phase-header parsing is demoted to a **fallback** for producers that have not adopted
+  the contract, and is now attributed: a stage inferred from prose renders dimmed so a guess
+  never looks like a reported fact.
+- A status frame declaring a contract version Allele does not implement now degrades
+  **visibly** — a transcript notice, with the last good stage left on screen — instead of
+  silently rendering nothing.
+
 ## [0.4.0] - 2026-08-30
 
 ### Added

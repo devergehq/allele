@@ -12,6 +12,9 @@ prefer linking to them over duplicating.
 - **Contributing & conventions:** [CONTRIBUTING.md](CONTRIBUTING.md) — expectations, CLA, code style.
 - **Cutting a release:** [RELEASING.md](RELEASING.md) — the authoritative release runbook.
 - **Changelog:** [CHANGELOG.md](CHANGELOG.md).
+- **Agent status contract:** [docs/locus-status-contract.md](docs/locus-status-contract.md) —
+  the versioned `agent.status/1` interface Allele consumes from Locus. Owned by
+  `devergehq/locus`; Allele implements the consumer side in `src/rich/locus_status.rs`.
 
 ## Common commands
 ```sh

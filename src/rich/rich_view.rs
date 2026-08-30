@@ -22,7 +22,8 @@ use super::compose_bar::{ComposeBar, ComposeBarEvent};
 use super::document::{
     short_path, truncate_to_char_boundary, Block, BlockId, BlockKind, RichDocument,
 };
-use super::narrative::{Annotation, LocusPhase, NarrativeRole};
+use super::locus_status::Stage;
+use super::narrative::{Annotation, NarrativeRole, StageSource};
 use super::permissions::{PermissionAction, PermissionRequest, RiskLevel};
 use super::reader::{JumpKind, NarrativeIndex, NavCounts, UnreadTracker};
 use crate::stream::{NoticeKind, RichEvent};
@@ -556,8 +557,11 @@ fn render_block(
             .border_color(color)
             .pl(indent + px(8.0));
     }
-    if let Some(NarrativeRole::PhaseHeader(phase)) = role {
-        wrapper = wrapper.child(phase_pill(*phase, font_size));
+    if let Some(NarrativeRole::PhaseHeader(stage)) = role {
+        let source = annotation
+            .and_then(|a| a.stage_source)
+            .unwrap_or(StageSource::Prose);
+        wrapper = wrapper.child(phase_pill(stage, source, font_size));
     }
 
     let block_id = block.id;
@@ -961,20 +965,46 @@ fn role_accent(role: &NarrativeRole) -> Option<Hsla> {
     }
 }
 
-/// A small "LOCUS · PHASE" divider pill rendered above a phase-header block.
-fn phase_pill(phase: LocusPhase, font_size: f32) -> Div {
+/// A small stage divider pill rendered above a stage-header block.
+///
+/// The label comes from the producer, not from an enum Allele owns (DEV-514),
+/// and is already sanitised and length-capped by [`Stage::display_label`].
+///
+/// A stage inferred from prose is drawn dimmed with a hollow dot, so a guess
+/// never looks like a fact. That attribution is the visible half of demoting
+/// prose parsing to a fallback.
+fn phase_pill(stage: &Stage, source: StageSource, font_size: f32) -> Div {
+    let label = stage.display_label().unwrap_or_else(|| "STAGE".to_string());
+    let ordinal = match (stage.ordinal, stage.total) {
+        (Some(n), Some(total)) => format!(" ({n}/{total})"),
+        (Some(n), None) => format!(" ({n})"),
+        _ => String::new(),
+    };
+    let (color, dot) = match source {
+        StageSource::Contract => (theme().ready, theme().ready),
+        // Dimmed: an inference from prose, not a reported fact.
+        StageSource::Prose => (with_alpha(theme().ready, 0.55), gpui::transparent_black()),
+    };
     div()
         .mb(px(6.0))
         .flex()
         .items_center()
         .gap(px(6.0))
-        .child(div().w(px(5.0)).h(px(5.0)).rounded_full().bg(theme().ready))
         .child(
             div()
-                .text_color(theme().ready)
+                .w(px(5.0))
+                .h(px(5.0))
+                .rounded_full()
+                .bg(dot)
+                .border_1()
+                .border_color(color),
+        )
+        .child(
+            div()
+                .text_color(color)
                 .text_size(px(font_size - 2.0))
                 .font_weight(FontWeight::BOLD)
-                .child(format!("LOCUS · {}", phase.label())),
+                .child(format!("LOCUS · {label}{ordinal}")),
         )
 }
 

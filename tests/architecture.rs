@@ -578,3 +578,56 @@ fn architecture_doc_still_documents_the_enforced_rules() {
         );
     }
 }
+
+/// Allele must never reach into a Locus-owned path (DEV-514).
+///
+/// The status contract exists so Allele learns a producer's state from a frame
+/// it is *sent*, not by reading another tool's on-disk layout. Scanning
+/// `~/.locus/data` was explicitly rejected as the wrong seam: it couples this
+/// UI to a directory structure no one has promised to keep, and needs
+/// filesystem access Allele should not want. This is a `0` baseline — the rule
+/// is fully enforced and must stay that way.
+///
+/// Only string literals outside attributes are examined — a literal is the one
+/// way a path could actually be opened, and skipping attributes keeps the
+/// module's own prose about *not* reading `~/.locus` from tripping the rule.
+#[test]
+fn allele_never_reads_a_locus_owned_path() {
+    struct LocusPathVisitor {
+        hits: Vec<String>,
+    }
+
+    impl<'ast> Visit<'ast> for LocusPathVisitor {
+        /// Skip attributes entirely. `syn` models a `///` or `//!` doc comment
+        /// as `#[doc = "…"]`, so without this the module's own prose about
+        /// *not* reading `~/.locus` would trip its own rule.
+        fn visit_attribute(&mut self, _attr: &'ast syn::Attribute) {}
+
+        fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
+            let value = lit.value();
+            let lowered = value.to_ascii_lowercase();
+            if lowered.contains(".locus") || lowered.contains("locus/data") {
+                self.hits.push(value);
+            }
+        }
+    }
+
+    let mut offenders = BTreeSet::new();
+    for (name, path) in source_files() {
+        let src = read(&path);
+        let file = parse(&path, &src);
+        let mut visitor = LocusPathVisitor { hits: Vec::new() };
+        visitor.visit_file(&file);
+        for hit in visitor.hits {
+            offenders.insert(format!("{name}: {hit:?}"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "Allele must not reference a Locus-owned path — status arrives via the \
+         agent.status contract (docs/locus-status-contract.md), not the \
+         filesystem. Found:\n  {}",
+        offenders.into_iter().collect::<Vec<_>>().join("\n  ")
+    );
+}
