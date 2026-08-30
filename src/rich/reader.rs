@@ -13,7 +13,7 @@
 //!
 //! Pure and view-agnostic, so both are unit-tested directly.
 
-use super::narrative::{Annotation, LocusPhase, NarrativeRole};
+use super::narrative::{Annotation, NarrativeRole};
 
 /// A navigable point in the narrative.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,9 +44,12 @@ impl NavCounts {
 }
 
 /// The categories a reader can jump between.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum JumpKind {
-    Phase(LocusPhase),
+    /// A stage boundary. Carries the producer's own label rather than an
+    /// enumerated phase, so a renamed or newly invented stage still indexes
+    /// (DEV-514).
+    Phase(String),
     Decision,
     Outcome,
     Error,
@@ -182,7 +185,9 @@ impl NarrativeIndex {
 
     fn target_for(&self, e: &Entry) -> Option<JumpTarget> {
         let kind = match &e.role {
-            NarrativeRole::PhaseHeader(p) => JumpKind::Phase(*p),
+            NarrativeRole::PhaseHeader(stage) => {
+                JumpKind::Phase(stage.display_label().unwrap_or_else(|| "STAGE".into()))
+            }
             NarrativeRole::Decision => JumpKind::Decision,
             NarrativeRole::Outcome => JumpKind::Outcome,
             NarrativeRole::Unsupported => JumpKind::Error,
@@ -193,7 +198,7 @@ impl NarrativeIndex {
         // trimmed one-line preview of the text.
         let label = match (&kind, &e.artifact) {
             (JumpKind::Artifact, Some(path)) => path.clone(),
-            (JumpKind::Phase(p), _) => p.label().to_string(),
+            (JumpKind::Phase(label), _) => label.clone(),
             _ => first_line_preview(&e.text, 60),
         };
         Some(JumpTarget {
@@ -280,10 +285,18 @@ impl UnreadTracker {
 mod tests {
     use super::*;
 
+    fn stage(label: &str) -> crate::rich::locus_status::Stage {
+        crate::rich::locus_status::Stage {
+            label: Some(label.to_string()),
+            ..Default::default()
+        }
+    }
+
     fn ann(turn: usize, role: NarrativeRole) -> Annotation {
         Annotation {
             turn,
             phase: None,
+            stage_source: None,
             role,
             agent: None,
         }
@@ -299,7 +312,7 @@ mod tests {
         );
         idx.record(
             1,
-            &ann(1, NarrativeRole::PhaseHeader(LocusPhase::Observe)),
+            &ann(1, NarrativeRole::PhaseHeader(stage("OBSERVE"))),
             "Phase 1: OBSERVE",
             None,
         );
@@ -337,8 +350,8 @@ mod tests {
     #[test]
     fn jump_targets_cover_all_navigable_kinds() {
         let idx = sample_index();
-        let kinds: Vec<JumpKind> = idx.jump_targets().iter().map(|t| t.kind).collect();
-        assert!(kinds.contains(&JumpKind::Phase(LocusPhase::Observe)));
+        let kinds: Vec<JumpKind> = idx.jump_targets().iter().map(|t| t.kind.clone()).collect();
+        assert!(kinds.contains(&JumpKind::Phase("OBSERVE".to_string())));
         assert!(kinds.contains(&JumpKind::Decision));
         assert!(kinds.contains(&JumpKind::Artifact));
         assert!(kinds.contains(&JumpKind::Error));
@@ -374,7 +387,7 @@ mod tests {
         let mut idx = sample_index();
         idx.record(
             6,
-            &ann(2, NarrativeRole::PhaseHeader(LocusPhase::Verify)),
+            &ann(2, NarrativeRole::PhaseHeader(stage("VERIFY"))),
             "Phase 6: VERIFY",
             None,
         );

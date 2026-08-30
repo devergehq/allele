@@ -23,6 +23,11 @@ pub mod compose_bar;
 mod document;
 pub use document::truncate_to_char_boundary;
 pub(crate) mod markdown;
+// The agent status contract (DEV-514): the versioned, credential-free channel
+// that replaced parsing Locus phase names out of assistant prose. Spec lives in
+// docs/locus-status-contract.md and is owned by Locus.
+#[allow(dead_code)]
+pub mod locus_status;
 // Narrative projection (DEV-29): interpretive layer over the event stream.
 // The transcript reader (DEV-31) is its consumer; allow dead_code until then.
 #[allow(dead_code)]

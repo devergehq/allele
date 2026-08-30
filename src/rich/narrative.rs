@@ -6,8 +6,9 @@
 //!
 //!   * the **conversational turn** it belongs to (a turn opens on each user
 //!     prompt),
-//!   * the **Locus phase** in effect (OBSERVE…LEARN), recognised from phase
-//!     headers in assistant text and carried forward until the next header,
+//!   * the **producer stage** in effect, taken from the versioned status
+//!     contract when a producer emits one (DEV-514), and otherwise recovered
+//!     from phase headers in assistant text and carried forward,
 //!   * a **narrative role** (classification banner, phase header, decision,
 //!     outcome/summary, reasoning, or plain prose) so the renderer can
 //!     prioritise prompts/decisions/outcomes and de-emphasise routine prose,
@@ -19,9 +20,30 @@
 //! ledger operate. It is deliberately pure (no rendering, no GPUI) so it can
 //! be unit-tested against representative sessions.
 
+use crate::rich::locus_status::{FrameOutcome, Stage, StatusTracker};
 use crate::stream::RichEvent;
 
+/// Where the stage shown for an event came from.
+///
+/// This distinction is the point of DEV-514. A stage read from the versioned
+/// status contract is authoritative; one inferred from English words in
+/// model-generated prose is a guess, and the UI must be able to say so.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StageSource {
+    /// From an `agent.status` frame — typed, versioned, trustworthy.
+    Contract,
+    /// Inferred from a phase header in assistant prose. Legacy fallback for
+    /// producers that have not adopted the contract.
+    Prose,
+}
+
 /// The seven Locus algorithm phases, in order.
+///
+/// **This enum is the *prose fallback's* vocabulary, and nothing more.** It is
+/// the only place in Allele that may name a Locus phase, because prose parsing
+/// is inherently a guess against a fixed word list. Everything downstream
+/// handles [`Stage`], whose label is free-form — so Locus can rename, add, or
+/// drop phases without breaking the contract path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocusPhase {
     Observe,
@@ -47,6 +69,28 @@ impl LocusPhase {
         }
     }
 
+    /// Project onto the generic stage the rest of Allele renders.
+    fn to_stage(self) -> Stage {
+        Stage {
+            id: Some(self.label().to_ascii_lowercase()),
+            label: Some(self.label().to_string()),
+            ordinal: Some(self.ordinal()),
+            total: Some(7),
+        }
+    }
+
+    fn ordinal(self) -> u32 {
+        match self {
+            LocusPhase::Observe => 1,
+            LocusPhase::Think => 2,
+            LocusPhase::Plan => 3,
+            LocusPhase::Build => 4,
+            LocusPhase::Execute => 5,
+            LocusPhase::Verify => 6,
+            LocusPhase::Learn => 7,
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             LocusPhase::Observe => "OBSERVE",
@@ -66,8 +110,9 @@ impl LocusPhase {
 pub enum NarrativeRole {
     /// A `**Classification: …**` banner opening a Locus response.
     Classification,
-    /// A Locus phase header (`Phase 1: OBSERVE (1/7)` or a bare `OBSERVE`).
-    PhaseHeader(LocusPhase),
+    /// A stage announcement: either a contract frame, or a phase header
+    /// (`Phase 1: OBSERVE (1/7)`) recovered from prose.
+    PhaseHeader(Stage),
     /// A user prompt that opened this turn.
     Prompt,
     /// An explicit decision the agent recorded ("Decision:", "I'll go with…").
@@ -104,8 +149,10 @@ impl NarrativeRole {
 pub struct Annotation {
     /// 1-based conversational turn. 0 means "before any user prompt".
     pub turn: usize,
-    /// Locus phase in effect for this event, if any is active.
-    pub phase: Option<LocusPhase>,
+    /// Producer stage in effect for this event, if any is active.
+    pub phase: Option<Stage>,
+    /// Where `phase` came from. `None` when there is no stage.
+    pub stage_source: Option<StageSource>,
     pub role: NarrativeRole,
     /// Delegated subagent id, if this event came from a subagent.
     pub agent: Option<String>,
@@ -115,7 +162,11 @@ pub struct Annotation {
 #[derive(Default)]
 pub struct NarrativeProjector {
     turn: usize,
-    phase: Option<LocusPhase>,
+    /// Authoritative stage, from the status contract.
+    tracker: StatusTracker,
+    /// Best-effort stage, inferred from prose. Only consulted while the
+    /// contract has produced nothing.
+    prose_phase: Option<LocusPhase>,
 }
 
 impl NarrativeProjector {
@@ -123,18 +174,50 @@ impl NarrativeProjector {
         Self::default()
     }
 
-    /// The Locus phase currently in effect (for callers that render a sticky
-    /// phase indicator).
-    pub fn current_phase(&self) -> Option<LocusPhase> {
-        self.phase
+    /// The stage currently in effect, and where it came from, for callers that
+    /// render a sticky stage indicator.
+    ///
+    /// The contract wins whenever a producer has sent a frame; prose is only
+    /// consulted for producers that have not adopted it.
+    pub fn current_stage(&self) -> Option<(Stage, StageSource)> {
+        if let Some(stage) = self.tracker.stage() {
+            return Some((stage.clone(), StageSource::Contract));
+        }
+        self.prose_phase.map(|p| (p.to_stage(), StageSource::Prose))
+    }
+
+    /// Text for a visible degraded badge when a producer is speaking a contract
+    /// version Allele does not implement.
+    ///
+    /// Rendering this is **not optional**. Absence of a stage already means "no
+    /// producer running"; if a version mismatch also rendered nothing, the
+    /// silent cross-repository break this contract exists to prevent would
+    /// simply return in a new form.
+    pub fn degraded_badge(&self) -> Option<String> {
+        self.tracker.degraded_badge()
+    }
+
+    /// Whether a status frame has been accepted in this session. Once true,
+    /// prose parsing is no longer consulted for the stage.
+    pub fn has_contract(&self) -> bool {
+        self.tracker.has_contract()
+    }
+
+    fn stage_fields(&self) -> (Option<Stage>, Option<StageSource>) {
+        match self.current_stage() {
+            Some((stage, source)) => (Some(stage), Some(source)),
+            None => (None, None),
+        }
     }
 
     /// Annotate a user prompt, opening a new turn.
     pub fn on_user_prompt(&mut self) -> Annotation {
         self.turn += 1;
+        let (phase, stage_source) = self.stage_fields();
         Annotation {
             turn: self.turn,
-            phase: self.phase,
+            phase,
+            stage_source,
             role: NarrativeRole::Prompt,
             agent: None,
         }
@@ -158,10 +241,24 @@ impl NarrativeProjector {
             RichEvent::Notice { .. } => NarrativeRole::Activity,
             RichEvent::Fallback { .. } => NarrativeRole::Unsupported,
             RichEvent::Init { .. } | RichEvent::HookStatus { .. } => NarrativeRole::Prose,
+            // The typed stage channel. Ingesting may promote the sticky
+            // indicator from prose to contract, or raise a degraded badge.
+            RichEvent::AgentStatus { outcome } => {
+                self.tracker.ingest(outcome.clone());
+                match outcome {
+                    FrameOutcome::Accepted(frame) => match frame.run.stage.clone() {
+                        Some(stage) => NarrativeRole::PhaseHeader(stage),
+                        None => NarrativeRole::Activity,
+                    },
+                    FrameOutcome::Unsupported(_) => NarrativeRole::Activity,
+                }
+            }
         };
+        let (phase, stage_source) = self.stage_fields();
         Annotation {
             turn: self.turn,
-            phase: self.phase,
+            phase,
+            stage_source,
             role,
             agent,
         }
@@ -172,8 +269,10 @@ impl NarrativeProjector {
         let trimmed = text.trim_start();
 
         if let Some(phase) = detect_phase_header(trimmed) {
-            self.phase = Some(phase);
-            return NarrativeRole::PhaseHeader(phase);
+            self.prose_phase = Some(phase);
+            // A header still marks the passage even once the contract is
+            // authoritative — it just no longer *drives* the indicator.
+            return NarrativeRole::PhaseHeader(phase.to_stage());
         }
         if is_classification_banner(trimmed) {
             return NarrativeRole::Classification;
@@ -214,9 +313,10 @@ fn event_agent(event: &RichEvent) -> Option<String> {
         | RichEvent::Fallback {
             parent_agent_id, ..
         } => parent_agent_id.clone(),
-        RichEvent::Init { .. } | RichEvent::SessionResult { .. } | RichEvent::HookStatus { .. } => {
-            None
-        }
+        RichEvent::Init { .. }
+        | RichEvent::SessionResult { .. }
+        | RichEvent::HookStatus { .. }
+        | RichEvent::AgentStatus { .. } => None,
     }
 }
 
@@ -294,6 +394,27 @@ fn is_outcome(text: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// The stage label an annotation is showing, whatever its source.
+    fn shown(a: &Annotation) -> Option<String> {
+        a.phase.as_ref()?.display_label()
+    }
+
+    /// Build an accepted status frame carrying `label`.
+    fn frame_event(label: &str) -> RichEvent {
+        let json = format!(
+            r#"{{"agent.status":{{"contract":"agent.status/1","run":{{"stage":{{"id":"{}","label":"{label}"}}}}}}}}"#,
+            label.to_ascii_lowercase()
+        );
+        let outcome = crate::rich::locus_status::parse_stdout(&json).expect("a valid frame");
+        RichEvent::AgentStatus { outcome }
+    }
+
+    fn unsupported_event(version: &str) -> RichEvent {
+        let json = format!(r#"{{"agent.status":{{"contract":"agent.status/{version}"}}}}"#);
+        let outcome = crate::rich::locus_status::parse_stdout(&json).expect("an outcome");
+        RichEvent::AgentStatus { outcome }
+    }
+
     fn text(s: &str) -> RichEvent {
         RichEvent::TextBlock {
             text: s.to_string(),
@@ -343,14 +464,77 @@ mod tests {
     fn phase_persists_until_next_header() {
         let mut p = NarrativeProjector::new();
         let a = p.on_event(&text("Phase 1: OBSERVE (1/7)"));
-        assert_eq!(a.role, NarrativeRole::PhaseHeader(LocusPhase::Observe));
+        assert_eq!(
+            a.role,
+            NarrativeRole::PhaseHeader(LocusPhase::Observe.to_stage())
+        );
         // Subsequent prose inherits the active phase.
         let b = p.on_event(&text("Looking at the parser now."));
-        assert_eq!(b.phase, Some(LocusPhase::Observe));
+        assert_eq!(shown(&b).as_deref(), Some("OBSERVE"));
         assert_eq!(b.role, NarrativeRole::Prose);
+        // Without a contract frame, the stage is attributed to prose.
+        assert_eq!(b.stage_source, Some(StageSource::Prose));
+        assert!(!p.has_contract());
         // A new header switches the phase.
         let c = p.on_event(&text("Phase 4: BUILD (4/7)"));
-        assert_eq!(c.phase, Some(LocusPhase::Build));
+        assert_eq!(shown(&c).as_deref(), Some("BUILD"));
+    }
+
+    #[test]
+    fn contract_frame_overrides_prose() {
+        let mut p = NarrativeProjector::new();
+        // Prose gets us a guess...
+        p.on_event(&text("Phase 1: OBSERVE (1/7)"));
+        assert_eq!(p.current_stage().map(|(_, s)| s), Some(StageSource::Prose));
+
+        // ...and a frame supersedes it, even one prose could never produce.
+        let a = p.on_event(&frame_event("TRIAGE"));
+        assert_eq!(shown(&a).as_deref(), Some("TRIAGE"));
+        assert_eq!(a.stage_source, Some(StageSource::Contract));
+        assert!(p.has_contract());
+
+        // Later prose headers no longer drive the indicator.
+        let b = p.on_event(&text("Phase 7: LEARN (7/7)"));
+        assert_eq!(shown(&b).as_deref(), Some("TRIAGE"));
+        assert_eq!(b.stage_source, Some(StageSource::Contract));
+    }
+
+    #[test]
+    fn stage_labels_locus_never_had_still_render() {
+        // The regression this ticket exists to prevent: Locus renaming or
+        // inventing a phase must not blank the indicator.
+        let mut p = NarrativeProjector::new();
+        let a = p.on_event(&frame_event("RECONNAISSANCE"));
+        assert_eq!(shown(&a).as_deref(), Some("RECONNAISSANCE"));
+        assert_eq!(a.stage_source, Some(StageSource::Contract));
+    }
+
+    #[test]
+    fn version_mismatch_degrades_visibly_not_silently() {
+        let mut p = NarrativeProjector::new();
+        p.on_event(&frame_event("OBSERVE"));
+        p.on_event(&unsupported_event("2"));
+
+        // A badge with real text, and the last good stage still on screen.
+        let badge = p.degraded_badge().expect("a visible badge");
+        assert!(badge.contains("unsupported"), "{badge}");
+        assert_eq!(
+            p.current_stage()
+                .and_then(|(s, _)| s.display_label())
+                .as_deref(),
+            Some("OBSERVE")
+        );
+    }
+
+    #[test]
+    fn prose_remains_the_fallback_for_unupgraded_producers() {
+        // No frame ever arrives: the old path still works, attributed.
+        let mut p = NarrativeProjector::new();
+        p.on_event(&text("Phase 6: VERIFY (6/7)"));
+        let (stage, source) = p.current_stage().expect("a prose stage");
+        assert_eq!(stage.display_label().as_deref(), Some("VERIFY"));
+        assert_eq!(source, StageSource::Prose);
+        assert_eq!(p.degraded_badge(), None);
     }
 
     #[test]
@@ -419,7 +603,7 @@ mod tests {
     #[test]
     fn emphasis_flags_the_right_roles() {
         assert!(NarrativeRole::Prompt.is_emphasised());
-        assert!(NarrativeRole::PhaseHeader(LocusPhase::Plan).is_emphasised());
+        assert!(NarrativeRole::PhaseHeader(LocusPhase::Plan.to_stage()).is_emphasised());
         assert!(NarrativeRole::Decision.is_emphasised());
         assert!(!NarrativeRole::Prose.is_emphasised());
         assert!(!NarrativeRole::Activity.is_emphasised());
