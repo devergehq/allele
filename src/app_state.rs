@@ -677,3 +677,251 @@ mod tests {
         }
     }
 }
+
+/// Test-only harness that stands an `AppState` up under GPUI with in-memory
+/// repositories. See ARCHITECTURE.md §5.6 for the extension recipe.
+#[cfg(test)]
+pub(crate) mod fixture {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use gpui::{AppContext as _, Context, TestAppContext, Window, WindowHandle};
+
+    use super::{
+        AppState, ChangesPanelState, ConfirmationState, DrawerState, MainTab, ReaderState,
+        RichState, RightPanelState, SidebarState, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH,
+        SIDEBAR_MIN_WIDTH,
+    };
+    use crate::actions::PendingAction;
+    use crate::project::Project;
+    use crate::repositories::fakes::{InMemorySettingsRepository, InMemoryStateRepository};
+    use crate::repositories::Repositories;
+    use crate::settings::Settings;
+    use crate::state::PersistedState;
+    use crate::text_input;
+
+    /// A live `AppState` in a headless GPUI window, plus handles on the fakes
+    /// behind `AppState.repos` so a test can assert what was persisted.
+    ///
+    /// Deliberately *not* a full replica of the production window: the text
+    /// inputs are created bare, without the `cx.subscribe` wiring `main.rs`
+    /// attaches, and no terminals are spawned. Handlers that spawn a PTY or
+    /// shell out to git are out of scope — this fixture exists for the
+    /// state-transition half of the dispatcher.
+    pub(crate) struct Fixture {
+        pub(crate) window: WindowHandle<AppState>,
+        /// The fake behind `AppState.repos.settings`.
+        pub(crate) settings: Arc<InMemorySettingsRepository>,
+        /// The fake behind `AppState.repos.state`.
+        pub(crate) state: Arc<InMemoryStateRepository>,
+    }
+
+    /// What the fixture starts with. Defaults are "empty app, default
+    /// settings"; a test overrides only the fields it cares about.
+    #[derive(Default)]
+    pub(crate) struct FixtureSpec {
+        pub(crate) projects: Vec<Project>,
+        pub(crate) settings: Settings,
+        pub(crate) state: PersistedState,
+        pub(crate) active: Option<crate::actions::SessionCursor>,
+    }
+
+    impl Fixture {
+        /// Empty app: no projects, default settings, nothing active.
+        pub(crate) fn new(cx: &mut TestAppContext) -> Self {
+            Self::build(FixtureSpec::default(), cx)
+        }
+
+        /// App pre-loaded with `projects`, everything else defaulted.
+        pub(crate) fn with_projects(projects: Vec<Project>, cx: &mut TestAppContext) -> Self {
+            Self::build(
+                FixtureSpec {
+                    projects,
+                    ..FixtureSpec::default()
+                },
+                cx,
+            )
+        }
+
+        pub(crate) fn build(spec: FixtureSpec, cx: &mut TestAppContext) -> Self {
+            let settings_repo = Arc::new(InMemorySettingsRepository::new(spec.settings.clone()));
+            let state_repo = Arc::new(InMemoryStateRepository::new(spec.state.clone()));
+
+            let repos = Repositories {
+                settings: settings_repo.clone(),
+                state: state_repo.clone(),
+            };
+
+            let user_settings = spec.settings;
+            let projects = spec.projects;
+            let active = spec.active;
+            let scratch_pad_history = spec.state.scratch_pad_history.clone();
+
+            let window = cx.add_window(move |_window, cx| {
+                let input = |cx: &mut Context<AppState>| {
+                    cx.new(|cx| text_input::TextInput::new(cx, "", ""))
+                };
+
+                AppState {
+                    projects,
+                    active,
+                    overview_project_id: None,
+                    pending_action: None,
+                    sidebar: SidebarState {
+                        visible: user_settings.sidebar_visible,
+                        width: user_settings.sidebar_width.max(SIDEBAR_MIN_WIDTH),
+                        resizing: false,
+                    },
+                    right_panel: RightPanelState {
+                        visible: user_settings.right_sidebar_visible,
+                        width: user_settings
+                            .right_sidebar_width
+                            .max(RIGHT_SIDEBAR_MIN_WIDTH),
+                        resizing: false,
+                    },
+                    changes: ChangesPanelState::default(),
+                    drawer: DrawerState {
+                        height: user_settings.drawer_height.max(DRAWER_MIN_HEIGHT),
+                        resizing: false,
+                        rename: None,
+                        rename_focus: None,
+                        main_area_top: Default::default(),
+                    },
+                    reader: ReaderState {
+                        selected_path: None,
+                        expanded_dirs: HashSet::new(),
+                        preview: None,
+                        context_menu: None,
+                        find_query: String::new(),
+                        find_active: false,
+                        find_matches: Vec::new(),
+                        find_current: 0,
+                        md_view_source: false,
+                        md_scroll: gpui::ScrollHandle::new(),
+                        recent: Vec::new(),
+                        reveal_line: None,
+                        source_scroll: gpui::ScrollHandle::new(),
+                        active_root: None,
+                        sessions: std::collections::HashMap::new(),
+                    },
+                    confirming: ConfirmationState {
+                        discard: None,
+                        dirty_session: None,
+                        quit: false,
+                        remove_project: None,
+                        dirty_merge: None,
+                        delete_archive: None,
+                        delete_all_archives: None,
+                        armed_at: None,
+                    },
+                    rich: RichState {
+                        view: None,
+                        transcript_tailer: None,
+                        cursor: None,
+                    },
+                    hooks_settings_path: None,
+                    editing_project_settings: None,
+                    user_settings,
+                    settings_window: None,
+                    main_window: None,
+                    pending_dispatch_origins: Default::default(),
+                    pull_warning: None,
+                    sync_notice: None,
+                    main_tab: MainTab::Claude,
+                    browser_status: String::new(),
+                    scratch_pad: None,
+                    new_session_modal: None,
+                    sidebar_filter_input: input(cx),
+                    reader_find_input: input(cx),
+                    file_palette: None,
+                    file_palette_input: input(cx),
+                    file_index: Default::default(),
+                    search: None,
+                    search_input: input(cx),
+                    command_palette: None,
+                    command_palette_input: input(cx),
+                    project_branch_input: input(cx),
+                    project_remote_input: input(cx),
+                    sidebar_filter: String::new(),
+                    session_context_menu: None,
+                    project_context_menu: None,
+                    edit_session_modal: None,
+                    naming_modal: None,
+                    conversation_picker: None,
+                    pending_conversation_choice: None,
+                    conversation_choice_confirmed: None,
+                    remote_browser: None,
+                    scratch_pad_history,
+                    pending_startup: None,
+                    base_infra_status: None,
+                    state_dirty: false,
+                    settings_dirty: false,
+                    repos,
+                    // `detect()` is pure — it builds the adapter bundle without
+                    // touching the process-wide `OnceLock`, so tests never
+                    // depend on startup having installed the global.
+                    platform: crate::platform::Platform::detect(),
+                    capture_ui_requested: false,
+                }
+            });
+
+            Self {
+                window,
+                settings: settings_repo,
+                state: state_repo,
+            }
+        }
+
+        /// Run `f` against the live `AppState` with a real `Window` in hand.
+        pub(crate) fn update<R>(
+            &self,
+            cx: &mut TestAppContext,
+            f: impl FnOnce(&mut AppState, &mut Window, &mut Context<AppState>) -> R,
+        ) -> R {
+            self.window
+                .update(cx, f)
+                .expect("fixture window is still open")
+        }
+
+        /// Enqueue `action` and drain it exactly as the render tick does.
+        /// This is the handler-level entry point: it goes through
+        /// `dispatch_pending_action`, so the stale-confirmation guard and the
+        /// refocus epilogue run too.
+        ///
+        /// Returns `(state_dirty, settings_dirty)` **as the handler left
+        /// them**, read in the same update block. Read them later and you may
+        /// read zeroes: a handler that calls `cx.notify()` schedules a redraw,
+        /// and the real `Render::render` ends in `checkpoint_persistence()`,
+        /// so the flags can already have been drained into the repos by the
+        /// time the next `update` runs. That is the production coordinator
+        /// working, not a fixture artefact — but it means persistence *intent*
+        /// has to be captured in-band.
+        pub(crate) fn dispatch(
+            &self,
+            action: impl Into<PendingAction>,
+            cx: &mut TestAppContext,
+        ) -> (bool, bool) {
+            self.update(cx, |state, window, cx| {
+                state.pending_action = Some(action.into());
+                state.dispatch_pending_action(window, cx);
+                (state.state_dirty, state.settings_dirty)
+            })
+        }
+
+        /// Run the persistence coordinator, as the end of a render tick would.
+        /// Writes land in the in-memory repos, never on disk.
+        pub(crate) fn checkpoint(&self, cx: &mut TestAppContext) {
+            self.update(cx, |state, _window, _cx| state.checkpoint_persistence());
+        }
+
+        /// `(state_dirty, settings_dirty)` right now. For a handler's own
+        /// intent prefer [`Fixture::dispatch`]'s return value — see its note
+        /// on redraws draining the flags first.
+        #[allow(dead_code)]
+        pub(crate) fn dirty_flags(&self, cx: &mut TestAppContext) -> (bool, bool) {
+            self.update(cx, |state, _window, _cx| {
+                (state.state_dirty, state.settings_dirty)
+            })
+        }
+    }
+}

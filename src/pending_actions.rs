@@ -1504,3 +1504,243 @@ impl AppState {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // Deliberately *not* `use super::*`: this module glob-imports `gpui::*`,
+    // which brings gpui's own `test` attribute into scope and sends the
+    // `#[gpui::test]` expansion into infinite recursion.
+    use crate::actions::{
+        ArchiveAction, ProjectAction, SessionCursor, SettingsAction, SidebarAction,
+    };
+    use crate::app_state::fixture::{Fixture, FixtureSpec};
+    use crate::project::Project;
+    use crate::session::Session;
+    use crate::settings::ProjectSettings;
+    use crate::state::ArchivedSession;
+    use gpui::TestAppContext;
+    use std::path::PathBuf;
+    use std::time::{Duration, SystemTime};
+
+    fn project_named(name: &str) -> Project {
+        Project::new(name.to_string(), PathBuf::from(format!("/tmp/{name}")))
+    }
+
+    fn suspended_session(id: &str) -> Session {
+        let now = SystemTime::now();
+        Session::suspended_from_persisted(
+            id.into(),
+            id.into(),
+            now,
+            now,
+            Duration::ZERO,
+            None,
+            false,
+        )
+    }
+
+    fn archive_entry(id: &str, project_id: &str) -> ArchivedSession {
+        ArchivedSession {
+            id: id.into(),
+            project_id: project_id.into(),
+            label: id.into(),
+            archived_at: 0,
+            merge_error: None,
+        }
+    }
+
+    /// Sidebar family. The toggle is pure UI geometry, but geometry is
+    /// persisted — so the handler's whole persistence contract is the
+    /// `settings_dirty` flag, not a write. Assert the intent first, then that
+    /// the coordinator turns exactly that intent into exactly one write.
+    #[gpui::test]
+    fn toggle_sidebar_marks_settings_dirty_and_writes_once_at_checkpoint(cx: &mut TestAppContext) {
+        let fx = Fixture::new(cx);
+        let before = fx.update(cx, |state, _w, _cx| state.sidebar.visible);
+
+        let dirty = fx.dispatch(SidebarAction::ToggleSidebar, cx);
+
+        assert_eq!(
+            fx.update(cx, |state, _w, _cx| state.sidebar.visible),
+            !before,
+            "the handler must flip the sidebar"
+        );
+        assert_eq!(
+            dirty,
+            (false, true),
+            "sidebar geometry lives in settings.json only — state.json must stay clean"
+        );
+        assert_eq!(
+            fx.settings.save_count(),
+            0,
+            "ARCHITECTURE.md §7.2 — handlers record intent; they do not write"
+        );
+
+        fx.checkpoint(cx);
+
+        assert_eq!(fx.settings.snapshot().sidebar_visible, !before);
+        assert_eq!(fx.settings.save_count(), 1);
+        assert_eq!(fx.state.save_count(), 0);
+
+        // A second tick with nothing newly dirty must not re-write: that
+        // coalescing is the entire point of the flag.
+        fx.checkpoint(cx);
+        assert_eq!(fx.settings.save_count(), 1);
+    }
+
+    /// Project family. A reorder mutates the project list (settings.json) and
+    /// re-homes the active cursor (state.json), so it is the one action that
+    /// must mark *both* flags — and the persisted project order has to come
+    /// out matching the in-memory one.
+    #[gpui::test]
+    fn reorder_project_remaps_the_active_cursor_and_marks_both_files_dirty(
+        cx: &mut TestAppContext,
+    ) {
+        let mut first = project_named("alpha");
+        first.sessions.push(suspended_session("s-alpha"));
+        let second = project_named("beta");
+
+        let fx = Fixture::build(
+            FixtureSpec {
+                projects: vec![first, second],
+                active: Some(SessionCursor {
+                    project_idx: 0,
+                    session_idx: 0,
+                }),
+                ..FixtureSpec::default()
+            },
+            cx,
+        );
+
+        let dirty = fx.dispatch(ProjectAction::ReorderProject { from: 0, to: 1 }, cx);
+        assert_eq!(
+            dirty,
+            (true, true),
+            "a reorder moves both the project list (settings.json) and the active cursor \
+             (state.json), so it is the one action that must mark both"
+        );
+
+        let (names, active) = fx.update(cx, |state, _w, _cx| {
+            (
+                state
+                    .projects
+                    .iter()
+                    .map(|p| p.name.clone())
+                    .collect::<Vec<_>>(),
+                state.active,
+            )
+        });
+        assert_eq!(names, vec!["beta".to_string(), "alpha".to_string()]);
+        assert_eq!(
+            active.map(|c| c.project_idx),
+            Some(1),
+            "the active cursor must follow its project, not stay on the index"
+        );
+
+        // This handler notifies, so the redraw's own `checkpoint_persistence()`
+        // may already have flushed. Either way one more checkpoint is a no-op:
+        // the flags are drained, not the writes repeated.
+        fx.checkpoint(cx);
+
+        let persisted_order: Vec<String> = fx
+            .settings
+            .snapshot()
+            .projects
+            .iter()
+            .map(|p| p.name.clone())
+            .collect();
+        assert_eq!(
+            persisted_order,
+            vec!["beta".to_string(), "alpha".to_string()]
+        );
+        assert_eq!(
+            fx.state.snapshot().last_active_session_id.as_deref(),
+            Some("s-alpha"),
+            "state.json must name the session the remapped cursor now points at"
+        );
+        assert_eq!(fx.settings.save_count(), 1);
+        assert_eq!(fx.state.save_count(), 1);
+    }
+
+    /// Settings family. Per-project orchestration settings live in
+    /// settings.json; state.json must not be touched.
+    #[gpui::test]
+    fn update_project_settings_persists_to_settings_json_only(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![project_named("alpha")], cx);
+
+        let dirty = fx.dispatch(
+            SettingsAction::UpdateProjectSettings {
+                project_idx: 0,
+                settings: ProjectSettings {
+                    default_branch: Some("develop".into()),
+                    ..ProjectSettings::default()
+                },
+            },
+            cx,
+        );
+
+        assert_eq!(dirty, (false, true));
+
+        fx.checkpoint(cx);
+
+        let saved = fx.settings.snapshot();
+        assert_eq!(
+            saved.projects[0].settings.default_branch.as_deref(),
+            Some("develop")
+        );
+        assert_eq!(fx.state.save_count(), 0);
+    }
+
+    /// Archive family, via the dispatcher's stale-confirmation guard. A
+    /// destructive action authorised against a sidebar shape that no longer
+    /// exists must be dropped — and dropping it must persist nothing, because
+    /// nothing was mutated.
+    #[gpui::test]
+    fn a_stale_confirmation_drops_the_delete_and_persists_nothing(cx: &mut TestAppContext) {
+        let mut project = project_named("alpha");
+        project.archives.push(archive_entry("arch-1", &project.id));
+        let fx = Fixture::with_projects(vec![project], cx);
+
+        let _ = fx.dispatch(
+            ArchiveAction::RequestDeleteArchive {
+                project_idx: 0,
+                archive_idx: 0,
+            },
+            cx,
+        );
+        assert!(
+            fx.update(cx, |state, _w, _cx| state.confirming.any_armed()),
+            "the request arms the gate"
+        );
+
+        // The sidebar changes shape underneath the open prompt: index 0 may
+        // now address something else entirely.
+        fx.update(cx, |state, _w, _cx| {
+            state.projects[0].sessions.push(suspended_session("s-new"));
+        });
+
+        let dirty = fx.dispatch(
+            ArchiveAction::DeleteArchive {
+                project_idx: 0,
+                archive_idx: 0,
+            },
+            cx,
+        );
+
+        assert_eq!(
+            fx.update(cx, |state, _w, _cx| state.projects[0].archives.len()),
+            1,
+            "the archive must survive an authorisation that went stale"
+        );
+        assert!(!fx.update(cx, |state, _w, _cx| state.confirming.any_armed()));
+        assert_eq!(
+            dirty,
+            (false, false),
+            "a dropped action mutated nothing, so it must record no persistence intent"
+        );
+
+        fx.checkpoint(cx);
+        assert_eq!(fx.state.save_count(), 0);
+        assert_eq!(fx.settings.save_count(), 0);
+    }
+}

@@ -6,8 +6,9 @@
 //! `~/.allele/state.json` respectively.
 //!
 //! Tests can swap in `InMemorySettingsRepository` / `InMemoryStateRepository`
-//! (defined under `#[cfg(test)]` below) to get deterministic fixtures that
-//! never touch the filesystem.
+//! (in the `#[cfg(test)] fakes` module below) to get deterministic fixtures
+//! that never touch the filesystem. `app_state::fixture` bundles them into a
+//! ready-to-drive `AppState` — see ARCHITECTURE.md §5.6.
 //!
 //! Current scope (phase 13): save-side routing only. `AppState::save_state`
 //! and `AppState::save_settings` go through `self.repos.*.save(...)`. The
@@ -83,8 +84,11 @@ impl Repositories {
     }
 }
 
+/// Test-only fakes. Public to the crate (not just this module's `tests`)
+/// so any module can build an `AppState` that never touches the filesystem —
+/// see `app_state::fixture` and ARCHITECTURE.md §5.6.
 #[cfg(test)]
-mod tests {
+pub(crate) mod fakes {
     use super::*;
     use std::sync::Mutex;
 
@@ -92,18 +96,25 @@ mod tests {
     /// an `Arc<Mutex<_>>` so multiple clones observe the same store.
     pub(crate) struct InMemorySettingsRepository {
         inner: Arc<Mutex<Settings>>,
+        /// How many times `save` has been called. Distinguishes "the
+        /// coordinator wrote once" from "it wrote on every mutation".
+        saves: Arc<Mutex<usize>>,
     }
 
     impl InMemorySettingsRepository {
         pub(crate) fn new(initial: Settings) -> Self {
             Self {
                 inner: Arc::new(Mutex::new(initial)),
+                saves: Arc::new(Mutex::new(0)),
             }
         }
 
-        #[allow(dead_code)]
         pub(crate) fn snapshot(&self) -> Settings {
             self.inner.lock().unwrap().clone()
+        }
+
+        pub(crate) fn save_count(&self) -> usize {
+            *self.saves.lock().unwrap()
         }
     }
 
@@ -114,6 +125,7 @@ mod tests {
 
         fn save(&self, settings: &Settings) -> Result<()> {
             *self.inner.lock().unwrap() = settings.clone();
+            *self.saves.lock().unwrap() += 1;
             Ok(())
         }
     }
@@ -122,18 +134,23 @@ mod tests {
     /// settings fake above.
     pub(crate) struct InMemoryStateRepository {
         inner: Arc<Mutex<PersistedState>>,
+        saves: Arc<Mutex<usize>>,
     }
 
     impl InMemoryStateRepository {
         pub(crate) fn new(initial: PersistedState) -> Self {
             Self {
                 inner: Arc::new(Mutex::new(initial)),
+                saves: Arc::new(Mutex::new(0)),
             }
         }
 
-        #[allow(dead_code)]
         pub(crate) fn snapshot(&self) -> PersistedState {
             self.inner.lock().unwrap().clone()
+        }
+
+        pub(crate) fn save_count(&self) -> usize {
+            *self.saves.lock().unwrap()
         }
     }
 
@@ -144,9 +161,16 @@ mod tests {
 
         fn save(&self, state: &PersistedState) -> Result<()> {
             *self.inner.lock().unwrap() = state.clone();
+            *self.saves.lock().unwrap() += 1;
             Ok(())
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fakes::{InMemorySettingsRepository, InMemoryStateRepository};
+    use super::*;
 
     #[test]
     fn in_memory_settings_round_trips_save_and_load() {
@@ -160,6 +184,7 @@ mod tests {
 
         let loaded = repo.load();
         assert_eq!(loaded.sidebar_width, 999.0);
+        assert_eq!(repo.save_count(), 1);
     }
 
     #[test]
@@ -174,6 +199,7 @@ mod tests {
 
         let loaded = repo.load();
         assert_eq!(loaded.last_active_session_id.as_deref(), Some("sess-xyz"));
+        assert_eq!(repo.save_count(), 1);
     }
 
     #[test]
