@@ -221,8 +221,10 @@ to the existing inherent `Settings::{load,save}` methods so the seed
 logic + atomic-write semantics stay in one place.
 
 **Tests**: `InMemorySettingsRepository` / `InMemoryStateRepository`
-(gated `#[cfg(test)]`) provide deterministic fakes — tests set
-initial state, run handlers, assert on the saved state.
+in `repositories::fakes` (gated `#[cfg(test)]`, crate-visible so any
+module can reach them) provide deterministic fakes — tests set initial
+state, run handlers, assert on the saved state. `app_state::fixture`
+bundles them into a drivable `AppState`; see §5.6.
 
 **Injection**: `Repositories` bundle lives on `AppState.repos`,
 Arc-cloned into background tasks. `AppState::save_state` /
@@ -454,6 +456,60 @@ family? If yes:
 4. Add `handle_foo_action` to `pending_actions.rs` and a delegator
    arm in `dispatch_pending_action`
 
+### 5.6 Write a handler-level test
+
+Handlers take `&mut Window` and `&mut Context<AppState>`, so testing one
+means standing a real `AppState` up inside a headless GPUI window. That is
+what `app_state::fixture::Fixture` is for (`#[cfg(test)]`): it builds the
+struct literal with the `InMemory*Repository` fakes from
+`repositories::fakes` in `AppState.repos`, so nothing the test does can
+reach `~/.config/allele` or `~/.allele`.
+
+```rust
+#[gpui::test]
+fn toggling_the_sidebar_is_persisted(cx: &mut TestAppContext) {
+    let fx = Fixture::new(cx);
+
+    let dirty = fx.dispatch(SidebarAction::ToggleSidebar, cx);
+    assert_eq!(dirty, (/* state */ false, /* settings */ true));
+
+    fx.checkpoint(cx);
+    assert!(!fx.settings.snapshot().sidebar_visible);
+}
+```
+
+1. Build the fixture: `Fixture::new(cx)` for an empty app,
+   `Fixture::with_projects(..)`, or `Fixture::build(FixtureSpec { .. }, cx)`
+   to seed projects, settings, persisted state and the active cursor
+2. Drive the action with `fx.dispatch(SomeAction::Variant, cx)` — it goes
+   through `dispatch_pending_action`, so the stale-confirmation guard and
+   the refocus epilogue run exactly as they do in production
+3. Assert **persistence intent**, not a write: `dispatch` returns
+   `(state_dirty, settings_dirty)` as the handler left them. Asserting on
+   `repos` before a checkpoint would be asserting the wrong contract —
+   §7.2 says handlers mark, the coordinator writes
+4. Call `fx.checkpoint(cx)` to run `checkpoint_persistence()`, then assert
+   on `fx.settings.snapshot()` / `fx.state.snapshot()`, and on
+   `save_count()` where write coalescing is the thing under test
+5. Reach the live struct with `fx.update(cx, |state, window, cx| ..)` for
+   anything the helpers don't cover
+
+Two things to know before extending it:
+
+- **A handler that calls `cx.notify()` schedules a redraw, and the real
+  `Render::render` ends in `checkpoint_persistence()`.** The flags can
+  therefore already be drained by the time the *next* `update` runs. That
+  is the coordinator working, not a fixture artefact — it is why intent is
+  captured in-band by `dispatch` rather than read back afterwards.
+- **The fixture is not a full replica of the production window.** Its text
+  inputs are created bare, without the `cx.subscribe` wiring `main.rs`
+  attaches, and no terminals are spawned. Handlers that spawn a PTY, open a
+  native dialog, or shell out to git are out of scope; the state-transition
+  half of the dispatcher is what this covers.
+
+See `pending_actions.rs`'s test module for worked examples across the
+sidebar, project, settings and archive families.
+
 ---
 
 ## 6. The macOS coupling status
@@ -607,8 +663,11 @@ Known work not yet landed, in rough priority order:
   add it.
 - Windows port: rustix-openpty is Unix-only; needs a Windows PTY
   backend (ConPTY) gated behind `cfg(windows)`.
-- Tests using `InMemory*Repository` fakes — the scaffolding exists
-  but no handler-level tests have been written yet.
+- Broaden handler-level test coverage. `app_state::fixture::Fixture`
+  (§5.6) landed with tests across four of the eight `PendingAction`
+  families — sidebar, project, settings, archive. The session and drawer
+  families are the gap, and they are the hard ones: their handlers spawn
+  PTYs and shell out to git, which the fixture deliberately does not fake.
 
 ---
 

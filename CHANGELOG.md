@@ -13,6 +13,13 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Added
+- Handler-level test fixture (`app_state::fixture::Fixture`): stands an `AppState`
+  up in a headless GPUI window backed by the in-memory repositories, so
+  `PendingAction` handlers can be driven and their persistence *intent* asserted
+  without touching the filesystem. First tests cover the sidebar, project, settings
+  and archive families. Documented as ARCHITECTURE.md §5.6.
+
 ## [0.4.0] - 2026-08-30
 
 ### Added
