@@ -22,7 +22,7 @@ use crate::errors::AlleleError;
 
 /// Canonical on-disk locations for the hook infrastructure.
 pub fn base_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".allele"))
+    crate::paths::allele_dir()
 }
 
 pub fn hooks_settings_path() -> Option<PathBuf> {

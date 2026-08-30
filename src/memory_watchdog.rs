@@ -79,11 +79,11 @@ pub fn process_rss_bytes() -> Option<u64> {
 }
 
 fn crash_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".allele").join("crash"))
+    crate::paths::crash_dir()
 }
 
 fn diagnostic_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".allele").join("diagnostics"))
+    crate::paths::diagnostics_dir()
 }
 
 fn write_growth_report(samples: &VecDeque<u64>) {

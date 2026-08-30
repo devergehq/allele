@@ -34,7 +34,7 @@ pub struct SyncLedger {
 impl SyncLedger {
     /// Path to `~/.allele/sync-ledger.json`.
     pub fn path() -> Option<PathBuf> {
-        dirs::home_dir().map(|h| h.join(".allele").join("sync-ledger.json"))
+        crate::paths::sync_ledger_file()
     }
 
     /// Load the ledger from its default path. Missing or unparseable → empty.

@@ -257,8 +257,9 @@ pub fn resolve_script_command(cmd: &str, project_name: &str) -> String {
     if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('~') {
         return trimmed.to_string();
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let scripts_dir = format!("{home}/.allele/projects/{project_name}/scripts");
+    let scripts_dir = crate::paths::project_scripts_dir(project_name)
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     // If the first token looks like a relative path to a script, resolve it
     let first_token = trimmed.split_whitespace().next().unwrap_or("");
     if first_token.contains('/') || first_token.ends_with(".sh") {

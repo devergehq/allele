@@ -26,6 +26,7 @@ mod mac_menu;
 mod memory_watchdog;
 mod naming;
 mod new_session_modal;
+mod paths;
 mod pending_actions;
 mod platform;
 mod project;
@@ -33,6 +34,7 @@ mod reader;
 mod remote_browser;
 mod repositories;
 mod rich;
+mod sandbox;
 mod scratch_pad;
 mod session;
 mod session_ops;
@@ -2618,10 +2620,10 @@ fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // Log to ~/.config/allele/crash.log
-        if let Some(home) = dirs::home_dir() {
-            let log_dir = home.join(".config").join("allele");
-            let _ = std::fs::create_dir_all(&log_dir);
-            let log_path = log_dir.join("crash.log");
+        if let Some(log_path) = paths::crash_log_file() {
+            if let Some(log_dir) = log_path.parent() {
+                let _ = std::fs::create_dir_all(log_dir);
+            }
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -2672,11 +2674,27 @@ fn main() {
     // descriptor ceiling, the orphan sweep, `state.json` — assumes it is the
     // app. `allele sessions status <id>` used to reach all of it and open a
     // second window. See `cli` for why that is worse than it looks.
-    if let cli::Launch::Usage { code } =
-        cli::classify(&std::env::args().skip(1).collect::<Vec<_>>())
-    {
-        eprintln!("{}", cli::USAGE);
-        std::process::exit(code);
+    let (home_override, sandbox_mode) =
+        match cli::classify(&std::env::args().skip(1).collect::<Vec<_>>()) {
+            cli::Launch::Usage { code } => {
+                eprintln!("{}", cli::USAGE);
+                std::process::exit(code);
+            }
+            cli::Launch::Gui { home, sandbox } => (home, sandbox),
+        };
+
+    // Fix the data root before ANYTHING reads a path or spawns a child. Every
+    // line below — tracing, the panic hook, the orphan sweep, state.json, the
+    // MCP control socket — resolves through `paths`, so a root chosen any later
+    // would leave half the process writing to one tree and half to another.
+    let root = if sandbox_mode {
+        paths::default_sandbox_root()
+    } else {
+        home_override
+    };
+    paths::init(root);
+    if sandbox_mode {
+        sandbox::seed();
     }
 
     errors::init_tracing();
@@ -2725,8 +2743,7 @@ fn main() {
     // user-data-dirs from an earlier embedding approach. Safe to delete;
     // browser integration now lives entirely in AppleScript against the
     // user's real Chrome.
-    if let Some(home) = dirs::home_dir() {
-        let stale = home.join(".allele").join("browsers");
+    if let Some(stale) = paths::legacy_browsers_dir() {
         if stale.exists() {
             let _ = std::fs::remove_dir_all(&stale);
         }
@@ -2861,7 +2878,13 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Allele".into()),
+                    // The window title is the only marker visible when the
+                    // app is not focused, so it carries the sandbox flag too.
+                    title: Some(if paths::is_redirected() {
+                        "Allele — SANDBOX".into()
+                    } else {
+                        "Allele".into()
+                    }),
                     // Content extends under the titlebar; the 38px header/tab
                     // rows below center against the traffic lights.
                     appears_transparent: true,
@@ -3973,9 +3996,30 @@ impl Render for AppState {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_size(px(13.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child("Allele"),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(FontWeight::BOLD)
+                                            .child("Allele"),
+                                    )
+                                    // Two identical windows side by side is its
+                                    // own hazard, so a redirected root says so
+                                    // where the eye already is (DEV-487).
+                                    .children(crate::paths::is_redirected().then(|| {
+                                        div()
+                                            .px(px(6.0))
+                                            .py(px(1.0))
+                                            .rounded(px(4.0))
+                                            .bg(theme().warning)
+                                            .text_size(px(9.0))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme().bg_base)
+                                            .child("SANDBOX")
+                                    })),
                             )
                             .child(
                                 div()
