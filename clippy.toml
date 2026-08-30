@@ -21,9 +21,12 @@ disallowed-types = []
 # coordinator can coalesce writes.
 #
 # NOTE: save_state / save_settings are currently `pub(crate)` on AppState
-# (src/main.rs), so this rule can only be advisory until DEV-106 makes them
-# genuinely private. Once they are module-private the compiler enforces it and
-# this entry becomes redundant — delete it then.
+# (src/main.rs), so Clippy can only be advisory here until DEV-106 makes them
+# genuinely private. The rule is enforced in the meantime by
+# `only_the_coordinator_saves_directly` in tests/architecture.rs, which also
+# catches the inherent-`save()` bypass Clippy could not express at all
+# (DEV-520). Once DEV-106 lands, the compiler enforces the direct calls and
+# that test only needs to keep watching the inherent ones.
 disallowed-methods = []
 
 # Keep an eye on accidental complexity growth in the god-files.

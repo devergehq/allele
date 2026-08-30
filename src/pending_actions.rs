@@ -16,7 +16,6 @@ use crate::actions::{
 use crate::app_state::AppState;
 use crate::project::{self, Project};
 use crate::session::{OperationError, OperationErrorKind, Session, SessionStatus};
-use crate::settings::{ProjectSave, Settings};
 use crate::terminal::{clamp_font_size, TerminalView};
 use crate::{browser, clone, git, hooks};
 
@@ -1215,24 +1214,7 @@ impl AppState {
             SettingsAction::UpdateCleanupPaths(paths) => {
                 *skip_refocus = true;
                 self.user_settings.session_cleanup_paths = paths;
-                // Persist. Settings::save() also needs the up-to-date
-                // projects/window-geometry fields — synthesise them
-                // from AppState before writing, mirroring the pattern
-                // used in observe_window_bounds.
-                let snapshot = Settings {
-                    projects: self
-                        .projects
-                        .iter()
-                        .map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        })
-                        .collect(),
-                    ..self.user_settings.clone()
-                };
-                snapshot.save();
+                self.mark_settings_dirty();
             }
             SettingsAction::UpdateBrowserIntegration(enabled) => {
                 *skip_refocus = true;
@@ -1240,20 +1222,7 @@ impl AppState {
                 if !enabled {
                     self.browser_status.clear();
                 }
-                let snapshot = Settings {
-                    projects: self
-                        .projects
-                        .iter()
-                        .map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        })
-                        .collect(),
-                    ..self.user_settings.clone()
-                };
-                snapshot.save();
+                self.mark_settings_dirty();
             }
             SettingsAction::UpdateAgents {
                 agents,
@@ -1262,42 +1231,21 @@ impl AppState {
                 *skip_refocus = true;
                 self.user_settings.agents = agents;
                 self.user_settings.default_agent = default_agent;
+                // The Settings window pushes agent config in through this
+                // action and persists nothing itself, so without this mark
+                // the change survives only until quit — or until some
+                // unrelated action happens to dirty settings.json first.
+                self.mark_settings_dirty();
             }
             SettingsAction::UpdateGitPullBeforeNewSession(enabled) => {
                 *skip_refocus = true;
                 self.user_settings.git_pull_before_new_session = enabled;
-                let snapshot = Settings {
-                    projects: self
-                        .projects
-                        .iter()
-                        .map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        })
-                        .collect(),
-                    ..self.user_settings.clone()
-                };
-                snapshot.save();
+                self.mark_settings_dirty();
             }
             SettingsAction::UpdatePromoteAttentionSessions(enabled) => {
                 *skip_refocus = true;
                 self.user_settings.promote_attention_sessions = enabled;
-                let snapshot = Settings {
-                    projects: self
-                        .projects
-                        .iter()
-                        .map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        })
-                        .collect(),
-                    ..self.user_settings.clone()
-                };
-                snapshot.save();
+                self.mark_settings_dirty();
             }
             SettingsAction::UpdateFontSize(size) => {
                 *skip_refocus = true;
@@ -1324,20 +1272,7 @@ impl AppState {
                         view.update(cx, |tv, cx| tv.set_font_size(new_size, window, cx));
                     }
                 }
-                let snapshot = Settings {
-                    projects: self
-                        .projects
-                        .iter()
-                        .map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        })
-                        .collect(),
-                    ..self.user_settings.clone()
-                };
-                snapshot.save();
+                self.mark_settings_dirty();
             }
             SettingsAction::UpdateExternalEditor(cmd) => {
                 *skip_refocus = true;
@@ -1347,38 +1282,12 @@ impl AppState {
                 } else {
                     Some(trimmed.to_string())
                 };
-                let snapshot = Settings {
-                    projects: self
-                        .projects
-                        .iter()
-                        .map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        })
-                        .collect(),
-                    ..self.user_settings.clone()
-                };
-                snapshot.save();
+                self.mark_settings_dirty();
             }
             SettingsAction::UpdateNamingConfig(config) => {
                 *skip_refocus = true;
                 self.user_settings.naming = config;
-                let snapshot = Settings {
-                    projects: self
-                        .projects
-                        .iter()
-                        .map(|p| ProjectSave {
-                            id: p.id.clone(),
-                            name: p.name.clone(),
-                            source_path: p.source_path.clone(),
-                            settings: p.settings.clone(),
-                        })
-                        .collect(),
-                    ..self.user_settings.clone()
-                };
-                snapshot.save();
+                self.mark_settings_dirty();
             }
             SettingsAction::UpdateProjectSettings {
                 project_idx,
@@ -1516,7 +1425,7 @@ mod tests {
     use crate::app_state::fixture::{Fixture, FixtureSpec};
     use crate::project::Project;
     use crate::session::Session;
-    use crate::settings::ProjectSettings;
+    use crate::settings::{ProjectSettings, Settings};
     use crate::state::ArchivedSession;
     use gpui::TestAppContext;
     use std::path::PathBuf;
@@ -1689,6 +1598,136 @@ mod tests {
             Some("develop")
         );
         assert_eq!(fx.state.save_count(), 0);
+    }
+
+    /// Every `handle_settings_action` arm that mutates persisted settings,
+    /// driven one at a time (DEV-520).
+    ///
+    /// Each of these used to build an ad-hoc `Settings` snapshot and call
+    /// `snapshot.save()` — which went straight to the real
+    /// `~/.config/allele/settings.json`, bypassing both the coordinator and
+    /// `AppState.repos`. The bug was invisible: the value still persisted, it
+    /// just persisted immediately and un-coalesced, and no fixture could
+    /// intercept it. So the assertion that matters is the *negative* one —
+    /// `save_count() == 0` before the checkpoint. That is the only thing that
+    /// distinguishes a marked mutation from a direct write.
+    fn settings_arms() -> Vec<(&'static str, SettingsAction, fn(&Settings) -> bool)> {
+        vec![
+            (
+                "UpdateCleanupPaths",
+                SettingsAction::UpdateCleanupPaths(vec!["node_modules".into()]),
+                |s: &Settings| s.session_cleanup_paths == vec!["node_modules".to_string()],
+            ),
+            (
+                "UpdateBrowserIntegration",
+                SettingsAction::UpdateBrowserIntegration(true),
+                |s: &Settings| s.browser_integration_enabled,
+            ),
+            (
+                "UpdateGitPullBeforeNewSession",
+                SettingsAction::UpdateGitPullBeforeNewSession(true),
+                |s: &Settings| s.git_pull_before_new_session,
+            ),
+            (
+                "UpdatePromoteAttentionSessions",
+                SettingsAction::UpdatePromoteAttentionSessions(true),
+                |s: &Settings| s.promote_attention_sessions,
+            ),
+            (
+                "UpdateFontSize",
+                SettingsAction::UpdateFontSize(17.0),
+                |s: &Settings| (s.font_size - 17.0).abs() < f32::EPSILON,
+            ),
+            (
+                "UpdateExternalEditor",
+                SettingsAction::UpdateExternalEditor("hx".into()),
+                |s: &Settings| s.external_editor_command.as_deref() == Some("hx"),
+            ),
+            (
+                "UpdateNamingConfig",
+                SettingsAction::UpdateNamingConfig(crate::naming::NamingConfig::default()),
+                |_: &Settings| true,
+            ),
+            (
+                "UpdateAgents",
+                SettingsAction::UpdateAgents {
+                    agents: Vec::new(),
+                    default_agent: Some("claude".into()),
+                },
+                |s: &Settings| s.default_agent.as_deref() == Some("claude"),
+            ),
+        ]
+    }
+
+    #[gpui::test]
+    fn every_settings_arm_marks_dirty_instead_of_writing(cx: &mut TestAppContext) {
+        for (name, action, _) in settings_arms() {
+            let fx = Fixture::new(cx);
+
+            let dirty = fx.dispatch(action, cx);
+
+            assert_eq!(
+                dirty,
+                (false, true),
+                "{name} mutates settings.json only — it must mark settings dirty \
+                 and leave state.json alone"
+            );
+            assert_eq!(
+                fx.settings.save_count(),
+                0,
+                "{name} wrote during the handler. ARCHITECTURE.md §7.2 — handlers \
+                 mark, the render-tick coordinator writes. A direct write also \
+                 escapes the fixture and lands in the developer's real \
+                 ~/.config/allele/settings.json (DEV-520)."
+            );
+        }
+    }
+
+    #[gpui::test]
+    fn every_settings_arm_reaches_the_repository_at_checkpoint(cx: &mut TestAppContext) {
+        for (name, action, is_applied) in settings_arms() {
+            let fx = Fixture::new(cx);
+
+            fx.dispatch(action, cx);
+            fx.checkpoint(cx);
+
+            assert!(
+                is_applied(&fx.settings.snapshot()),
+                "{name} marked dirty but its value never reached the repository"
+            );
+            assert_eq!(
+                fx.settings.save_count(),
+                1,
+                "{name} must produce exactly one write per checkpoint"
+            );
+            assert_eq!(
+                fx.state.save_count(),
+                0,
+                "{name} touches settings.json only"
+            );
+        }
+    }
+
+    /// The property the ad-hoc snapshots destroyed: N mutations in one frame
+    /// coalesce to one write. Dragging the font-size slider used to write
+    /// settings.json on every step.
+    #[gpui::test]
+    fn a_burst_of_settings_changes_coalesces_into_one_write(cx: &mut TestAppContext) {
+        let fx = Fixture::new(cx);
+
+        for size in [14.0, 15.0, 16.0, 17.0, 18.0] {
+            fx.dispatch(SettingsAction::UpdateFontSize(size), cx);
+        }
+        assert_eq!(
+            fx.settings.save_count(),
+            0,
+            "five slider steps must not be five writes"
+        );
+
+        fx.checkpoint(cx);
+
+        assert_eq!(fx.settings.save_count(), 1);
+        assert_eq!(fx.settings.snapshot().font_size, 18.0);
     }
 
     /// Archive family, via the dispatcher's stale-confirmation guard. A

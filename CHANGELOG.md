@@ -13,6 +13,16 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Fixed
+- Settings changes made from the Settings window (font size, cleanup paths, browser
+  integration, git-pull-before-new-session, attention promotion, external editor,
+  naming config) went straight to disk instead of through the render-tick
+  coordinator, so a burst of changes — dragging the font-size slider, say — wrote
+  `settings.json` once per step rather than once per frame.
+- Agent configuration changed in the Settings window was never marked for
+  persistence, so it could be lost on quit unless some unrelated change happened to
+  write `settings.json` first.
+
 ### Added
 - Handler-level test fixture (`app_state::fixture::Fixture`): stands an `AppState`
   up in a headless GPUI window backed by the in-memory repositories, so

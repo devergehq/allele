@@ -90,6 +90,16 @@ const ANYHOW_ALLOWLIST: &[&str] = &[
     "src/trust/mod.rs",
 ];
 
+/// §7.2 — argument-less `save()` calls inside `impl AppState` that are *not*
+/// the coordinator. Each one persists something the render tick can't coalesce
+/// and no test fixture can intercept, because it goes to the data type's
+/// inherent `save()` rather than through `AppState.repos`.
+///
+/// DEV-520 emptied this list of its seven `handle_settings_action` entries. The
+/// sync ledger is what's left: it has no repository yet (§8's "extend
+/// repositories" item). Give it one and this list goes to zero.
+const DIRECT_SAVE_ALLOWLIST: &[&str] = &["src/session_ops.rs::apply_pulled_session"];
+
 /// Panic-inducing call sites (`unwrap`/`expect`) in non-test code (DEV-109).
 ///
 /// A grep for `.unwrap()` reports a far larger number, but the overwhelming
@@ -555,6 +565,94 @@ impl<'ast> Visit<'ast> for PanicSiteFinder {
 }
 
 // ---------------------------------------------------------------------------
+// §7.2 — handlers mark dirty; the coordinator writes
+// ---------------------------------------------------------------------------
+
+/// §7.2: "Don't call `save_state()` / `save_settings()` from handlers." Until
+/// DEV-106 makes those methods module-private the compiler cannot enforce it,
+/// and `clippy.toml` says as much — its `disallowed-methods` entry "can only be
+/// advisory until DEV-106". This test is the enforcement in the meantime.
+///
+/// It flags any zero-argument `.save()` inside an `impl AppState` block. The
+/// arity is the discriminator, and it is exact: every bypassing route takes no
+/// arguments (`self.save_settings()`, `snapshot.save()`,
+/// `PersistedState::save()`), while the sanctioned one takes the value
+/// (`self.repos.settings.save(&settings)`). `checkpoint_persistence` is the one
+/// method allowed to write, because it *is* the coordinator.
+///
+/// Why this rule needs a test rather than review: the failure is silent. Seven
+/// `handle_settings_action` arms bypassed the coordinator for months (DEV-520)
+/// and nothing looked broken — the value still persisted, just immediately,
+/// un-coalesced, and into the developer's real `~/.config/allele/settings.json`
+/// even under `cargo test`.
+#[test]
+fn only_the_coordinator_saves_directly() {
+    let mut observed = BTreeSet::new();
+
+    for (rel, path) in source_files() {
+        let src = read(&path);
+        let file = parse(&path, &src);
+
+        for item in &file.items {
+            let syn::Item::Impl(item_impl) = item else {
+                continue;
+            };
+            let syn::Type::Path(ty) = &*item_impl.self_ty else {
+                continue;
+            };
+            if ty
+                .path
+                .segments
+                .last()
+                .is_none_or(|s| s.ident != "AppState")
+            {
+                continue;
+            }
+
+            for impl_item in &item_impl.items {
+                let syn::ImplItem::Fn(method) = impl_item else {
+                    continue;
+                };
+                // The coordinator is the sanctioned writer; test code may do
+                // whatever it likes, since the fakes catch it.
+                if method.sig.ident == "checkpoint_persistence" || is_test_gated(&method.attrs) {
+                    continue;
+                }
+
+                let mut finder = DirectSaveFinder { found: false };
+                finder.visit_block(&method.block);
+                if finder.found {
+                    observed.insert(format!("{rel}::{}", method.sig.ident));
+                }
+            }
+        }
+    }
+
+    assert_matches_allowlist(
+        &observed,
+        DIRECT_SAVE_ALLOWLIST,
+        "ARCHITECTURE.md §7.2 — an AppState method persisted directly instead of \
+         calling mark_state_dirty() / mark_settings_dirty() and letting \
+         checkpoint_persistence() coalesce the write",
+    );
+}
+
+/// Any `.save()` taking no arguments — see `only_the_coordinator_saves_directly`
+/// for why arity is the right discriminator.
+struct DirectSaveFinder {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for DirectSaveFinder {
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "save" && call.args.is_empty() {
+            self.found = true;
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Meta — the docs and the tests must agree
 // ---------------------------------------------------------------------------
 
@@ -566,6 +664,7 @@ fn architecture_doc_still_documents_the_enforced_rules() {
     let doc = read(&repo_root().join("ARCHITECTURE.md"));
     for anchor in [
         "### 7.1 Don't call `eprintln!`",
+        "### 7.2 Don't call `save_state()` / `save_settings()` from handlers",
         "### 7.3 Don't reach for `platform::global()` from `AppState` methods",
         "### 7.4 Don't sprinkle `#[cfg(target_os = \"macos\")]` in business logic",
         "### 7.6 Don't use `anyhow::Result<T>` for new public functions",
