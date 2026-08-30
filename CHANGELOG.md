@@ -13,6 +13,11 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+## [0.3.0] - 2026-08-30
+
+Project-scoped environments, an isolated data root for testing Allele in Allele, and
+a leaner default for MCP-dispatched sessions.
+
 ### Added
 - Projects can declare their own environment. `env` sets literal variables and
   `path_prepend` pushes directories onto the front of `PATH`, and both reach
@@ -23,8 +28,6 @@ Changes on `master` awaiting the next tagged release.
   See `docs/projects-and-sessions.md` for the one caveat about rc files.
   Both are editable from the project settings pane, alongside the existing
   terminals and startup/shutdown fields.
-
-### Added
 - Allele can run against an isolated data root, so it can be tested in Allele
   without a second instance sharing `state.json`, the workspaces root, settings,
   hooks or the MCP control socket with the live one. `--sandbox` uses
@@ -33,24 +36,6 @@ Changes on `master` awaiting the next tagged release.
   instance is marked SANDBOX in its title bar and sidebar. Data owned by other
   tools — `~/.claude`, agent binaries — is never redirected, so a sandbox drives
   your real agent against throwaway projects.
-
-### Fixed
-- A project's `allele.json` no longer silently discards `env` and `path_prepend`
-  configured in the settings pane. Presence of the file used to switch the whole
-  environment over to it, so a file pinning only terminals left the settings-pane
-  values written to disk, shown in the UI, and never applied. Each field now
-  falls back on its own, matching how the `agent` override already worked.
-- Dispatched sessions can now reach the session that dispatched them. A session has
-  two names — allele's label, which the sidebar and auto-naming both rewrite, and the
-  Claude Code process name, fixed at spawn — and messaging resolves against the second.
-  A worker handed the first found it resolved to nothing and stalled holding finished
-  work. Allele now derives a durable `uds:` address from each session's agent process,
-  injects the dispatcher's address into the worker's first prompt automatically, and
-  reports a `reply_to` for every session from `sessions_list`, `sessions_status` and
-  `sessions_create`. Renaming a session no longer affects messaging, and a worker with
-  no reachable dispatcher is told so up front instead of discovering it at send time.
-
-### Added
 - "Skip startup procedures" on the New Session dialog — creates a session with its own
   workspace clone and branch but runs none of the project's orchestration: no startup
   command, no drawer terminals, no preview, and no shutdown command when it closes. For
@@ -80,6 +65,20 @@ Changes on `master` awaiting the next tagged release.
   gets the project's full setup unless they choose otherwise.
 
 ### Fixed
+- A project's `allele.json` no longer silently discards `env` and `path_prepend`
+  configured in the settings pane. Presence of the file used to switch the whole
+  environment over to it, so a file pinning only terminals left the settings-pane
+  values written to disk, shown in the UI, and never applied. Each field now
+  falls back on its own, matching how the `agent` override already worked.
+- Dispatched sessions can now reach the session that dispatched them. A session has
+  two names — allele's label, which the sidebar and auto-naming both rewrite, and the
+  Claude Code process name, fixed at spawn — and messaging resolves against the second.
+  A worker handed the first found it resolved to nothing and stalled holding finished
+  work. Allele now derives a durable `uds:` address from each session's agent process,
+  injects the dispatcher's address into the worker's first prompt automatically, and
+  reports a `reply_to` for every session from `sessions_list`, `sessions_status` and
+  `sessions_create`. Renaming a session no longer affects messaging, and a worker with
+  no reachable dispatcher is told so up front instead of discovering it at send time.
 - Archive delete confirmations no longer survive a project reorder or removal. An armed
   prompt carries a project index, so it could reappear against a different project's
   archives once the indices shifted underneath it.
@@ -103,8 +102,6 @@ Changes on `master` awaiting the next tagged release.
   Claude Code introduces is recorded without being rendered, so the reading view
   degrades quietly instead of filling with JSON. Nothing is lost: the session ledger
   still retains every original line verbatim.
-
-### Fixed
 - Settings sections scroll vertically. Projects, Sessions, Naming, Editor, Browser and
   Appearance all clipped their lower content in a short window, with no way to reach it
   but resizing the window.
@@ -178,6 +175,7 @@ merge batch. Core proof-of-concept complete and runnable.
   browser with merge/delete actions.
 - Per-session drawer terminal panel and auto-naming of sessions from the first prompt.
 
-[Unreleased]: https://github.com/devergehq/allele/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/devergehq/allele/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/devergehq/allele/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/devergehq/allele/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/devergehq/allele/releases/tag/v0.1.0
