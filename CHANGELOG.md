@@ -13,6 +13,13 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Added
+- `script/cut-release.sh` automates the release prep from `RELEASING.md`: it bumps
+  `Cargo.toml`, `Cargo.lock` and `Info.plist` together, rolls `[Unreleased]` into a
+  dated changelog section, refreshes the compare links and commits — with `--dry-run`,
+  `--pr` and `--tag` modes, and guards for a dirty tree, a stale `master`, an existing
+  tag, an empty `[Unreleased]`, and a tag that disagrees with `Cargo.toml`.
+
 ## [0.3.0] - 2026-08-30
 
 Project-scoped environments, an isolated data root for testing Allele in Allele, and
