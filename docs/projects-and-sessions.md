@@ -178,10 +178,33 @@ your rc files *after* this environment is set (they are interactive shells — s
 `export PATH="/opt/homebrew/bin:$PATH"` still outranks `path_prepend`. That is
 how interactive shells work, not something Allele can override.
 
-For Homebrew-managed runtimes the fix is to stop linking them
-(`brew unlink php@8.4`) and select purely by `PATH`. Every version stays usable
-at its versioned `opt` path, and nothing is left on the global one to win the
-race.
+For Homebrew-managed runtimes, stop linking them (`brew unlink php@8.4`) and
+select purely by `PATH`. Every version stays usable at its versioned `opt` path,
+and nothing is left on the global one to win the race.
+
+### Keep the machine-wide default at the END of PATH
+
+Unlinking is necessary but not sufficient. Having unlinked, the obvious next
+step is to put a default back on `PATH` from your shell rc so the tool still
+resolves in an ordinary terminal — and the obvious way to write that line
+re-creates the problem you just solved:
+
+```sh
+# WRONG — outranks path_prepend in every session
+export PATH="/opt/homebrew/opt/php@8.4/bin:$PATH"
+
+# RIGHT — a fallback, reached only when nothing else picked a version
+export PATH="$PATH:/opt/homebrew/opt/php@8.4/bin"
+```
+
+Ordering does the work. Anything that puts a version in front — Allele's
+`path_prepend`, a direnv `.envrc`, an interactive switch function — wins, and
+the rc default is reached only when none of them applied.
+
+The symptom of getting this wrong is easy to misread: the settings pane shows
+the right value, `settings.json` contains it, Allele injects it correctly, and
+the terminal still reports the machine default. Nothing is broken; the rc file
+simply ran last and put itself first.
 
 ---
 

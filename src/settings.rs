@@ -126,7 +126,10 @@ pub struct ProjectSettings {
     /// Caveat worth knowing: drawer terminals run the user's rc files after
     /// this environment is set, so an rc line that unconditionally prepends
     /// to PATH still outranks these. The tool must not also sit on a
-    /// globally-linked path. See DEV-485.
+    /// globally-linked path, and a machine-wide default in a shell rc belongs
+    /// at the END of PATH rather than the front — see "Keep the machine-wide
+    /// default at the END of PATH" in docs/projects-and-sessions.md. See
+    /// DEV-485.
     #[serde(default)]
     pub path_prepend: Vec<String>,
 }
