@@ -34,14 +34,43 @@ use walkdir::WalkDir;
 // Baselines — lower these as debt is paid off. Never raise them.
 // ---------------------------------------------------------------------------
 
-/// Largest permitted file, in lines. `main.rs` is currently 4,885 (DEV-105).
+/// Largest permitted file, in lines, for any file without its own entry in
+/// [`PER_FILE_LINE_LIMITS`] (DEV-105).
 ///
-/// Ratchet plan: 5000 → 1500 → 800 as `main.rs` and the other oversized files
-/// (DEV-111) are decomposed.
-///
-/// Only ~115 lines of headroom above `main.rs` today, which is deliberate: the
-/// next feature that piles into it trips this guard rather than sliding through.
+/// Ratchet plan: 5000 → 1500 → 800 as the oversized files (DEV-111) are
+/// decomposed. Reaching 1,500 means splitting eight files totalling ~20,000
+/// lines, so it is a separate decision rather than a continuation of any one
+/// cleanup. The largest file governed by *this* limit is `src/git/mod.rs`.
 const MAX_FILE_LINES: usize = 5_000;
+
+/// Per-file limits that override [`MAX_FILE_LINES`], so a file that has been
+/// cleaned up keeps its own ratchet instead of drifting back up to the global
+/// ceiling (DEV-507).
+///
+/// `main.rs` sat at 4,979 lines against a 5,000-line global limit — 21 lines of
+/// headroom on a blocking CI gate, where the next ordinary change would present
+/// as *that change* being wrong rather than as accumulated debt. Moving
+/// `impl Render for AppState` into `src/app_render.rs` took it to 3,694. Without
+/// a per-file entry that 1,285-line win would just have become 1,285 lines of
+/// room to regrow.
+///
+/// Three invariants keep this from becoming a loophole, each enforced by a test
+/// below: an entry may only be **lower** than the global limit, it must stay
+/// **tight** against the file it governs, and it must name a file that exists.
+/// Entries only ever go down.
+const PER_FILE_LINE_LIMITS: &[(&str, usize)] = &[("src/main.rs", 3_800)];
+
+/// How much slack a [`PER_FILE_LINE_LIMITS`] entry may carry before it stops
+/// applying pressure and has to be lowered.
+const PER_FILE_HEADROOM: usize = 250;
+
+/// The limit governing `rel`, and whether it came from the per-file table.
+fn limit_for(rel: &str) -> (usize, bool) {
+    match PER_FILE_LINE_LIMITS.iter().find(|(f, _)| *f == rel) {
+        Some((_, limit)) => (*limit, true),
+        None => (MAX_FILE_LINES, false),
+    }
+}
 
 /// Files outside `src/platform/` that still contain `cfg(target_os = ...)`,
 /// violating §7.4. Tracked as an explicit allowlist rather than a count so a
@@ -175,42 +204,84 @@ fn assert_matches_allowlist(observed: &BTreeSet<String>, allowlist: &[&str], rul
 
 #[test]
 fn no_file_exceeds_the_size_ratchet() {
-    let mut oversized: Vec<(String, usize)> = source_files()
+    let mut oversized: Vec<(String, usize, usize)> = source_files()
         .into_iter()
-        .map(|(rel, path)| (rel, read(&path).lines().count()))
-        .filter(|(_, lines)| *lines > MAX_FILE_LINES)
+        .map(|(rel, path)| {
+            let lines = read(&path).lines().count();
+            let (limit, _) = limit_for(&rel);
+            (rel, lines, limit)
+        })
+        .filter(|(_, lines, limit)| lines > limit)
         .collect();
-    oversized.sort_by_key(|(_, lines)| std::cmp::Reverse(*lines));
+    oversized.sort_by_key(|(_, lines, _)| std::cmp::Reverse(*lines));
 
     assert!(
         oversized.is_empty(),
-        "\nARCHITECTURE.md §7.7 — files exceed the {MAX_FILE_LINES}-line ratchet:\n{}\n\n\
-         Split the file, or raise MAX_FILE_LINES only with an explicit decision to do so.\n",
+        "\nARCHITECTURE.md §7.7 — files exceed their size ratchet:\n{}\n\n\
+         Split the file. Raise the limit only with an explicit decision to do so — \
+         and for a file in PER_FILE_LINE_LIMITS, that table only ever goes down.\n",
         oversized
             .iter()
-            .map(|(f, n)| format!("  - {f}: {n} lines"))
+            .map(|(f, n, limit)| format!("  - {f}: {n} lines (limit {limit})"))
             .collect::<Vec<_>>()
             .join("\n"),
     );
 }
 
-/// Guards the ratchet itself: if every file shrinks below the limit, the
-/// constant must come down too, or the rule silently stops applying pressure.
+/// Guards the global ratchet: if every globally-governed file shrinks below the
+/// limit, the constant must come down too, or the rule silently stops applying
+/// pressure. Files with their own entry are excluded — that is the point of the
+/// split, so `main.rs` shrinking can never slacken the global limit.
 #[test]
 fn size_ratchet_is_still_tight() {
     let largest = source_files()
         .into_iter()
+        .filter(|(rel, _)| !limit_for(rel).1)
         .map(|(rel, path)| (rel, read(&path).lines().count()))
         .max_by_key(|(_, lines)| *lines)
-        .expect("at least one source file");
+        .expect("at least one globally-governed source file");
 
     assert!(
         largest.1 * 2 > MAX_FILE_LINES,
-        "\nThe largest file ({}, {} lines) is far below MAX_FILE_LINES ({MAX_FILE_LINES}).\n\
+        "\nThe largest globally-governed file ({}, {} lines) is far below \
+         MAX_FILE_LINES ({MAX_FILE_LINES}).\n\
          Lower MAX_FILE_LINES in tests/architecture.rs to lock in the progress.\n",
         largest.0,
         largest.1,
     );
+}
+
+/// Guards the per-file table the same way, in all three directions it could rot:
+/// an entry that is really a raise, an entry gone slack, or an entry for a file
+/// that no longer exists.
+#[test]
+fn per_file_ratchets_are_still_tight() {
+    let files = source_files();
+
+    for (rel, limit) in PER_FILE_LINE_LIMITS {
+        assert!(
+            *limit < MAX_FILE_LINES,
+            "\nPER_FILE_LINE_LIMITS entry for {rel} is {limit}, at or above the global \
+             MAX_FILE_LINES ({MAX_FILE_LINES}).\n\
+             The table exists to hold cleaned-up files *below* the global limit, not to \
+             exempt a file from it.\n",
+        );
+
+        let Some((_, path)) = files.iter().find(|(f, _)| f == rel) else {
+            panic!(
+                "\nPER_FILE_LINE_LIMITS names {rel}, which no longer exists under src/.\n\
+                 Remove the stale entry.\n"
+            );
+        };
+
+        let lines = read(path).lines().count();
+        assert!(
+            lines + PER_FILE_HEADROOM > *limit,
+            "\n{rel} is {lines} lines, well under its {limit}-line entry in \
+             PER_FILE_LINE_LIMITS.\n\
+             Lower the entry to lock the improvement in — it only ever goes down.\n",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -56,8 +56,9 @@ ergonomic.
 
 ```
 src/
-├── main.rs                 # entry point, AppState constructor, Render impl,
-│                           # panic hook, macOS app menu, About panel
+├── main.rs                 # entry point, AppState constructor + methods,
+│                           # panic hook, startup task wiring
+├── app_render.rs           # impl Render for AppState — the window tree
 ├── app_state.rs            # AppState struct + 5 cohesive sub-structs
 ├── actions.rs              # PendingAction + 8 family enums (command pattern)
 ├── errors.rs               # AlleleError + Result<T> alias
@@ -591,11 +592,19 @@ display string.
 
 Known work not yet landed, in rough priority order:
 
-- **Split `main.rs`.** It sits at exactly the §7.7 5000-line ratchet, so
-  the next line added there fails the gate. It will present as *that
-  change* being wrong rather than as accumulated debt, which is what makes
-  it worth doing before someone loses an afternoon to it. Candidates: the
-  `Render` impl, the macOS app menu, and the startup task wiring.
+- **Keep splitting `main.rs`.** The `Render` impl moved to `app_render.rs`
+  (DEV-507), taking `main.rs` from 4,979 to 3,694 lines against its own
+  3,800-line entry in `PER_FILE_LINE_LIMITS`. The remaining bulk is the
+  2,446-line `impl AppState` and the 1,076-line bootstrap; the startup task
+  wiring is the next candidate. Note that `render()` is not pure — it also
+  dispatches pending actions and checkpoints persistence — and that finer
+  extraction runs into borrow conflicts between `&mut AppState`, `Window`
+  and the `'static` listener closures.
+- **The 5000 → 1500 → 800 ratchet.** Reaching 1,500 means decomposing eight
+  files totalling ~20,000 lines (`git/mod.rs` 3,315, `terminal_view.rs`
+  2,450, `rich_view.rs` 2,320, `session_ops.rs` 2,149, `sidebar/render.rs`
+  1,852, `compose_bar.rs` 1,627, `pending_actions.rs` 1,506). A separate
+  decision, not a continuation of any one cleanup.
 - Adopt `AlleleError` in the remaining `git::*` functions
   (`fetch_and_rebase_onto_remote_branch`, `auto_commit_if_dirty`,
   `delete_ref`, `list_archive_refs`, `prune_archive_refs`, etc.)
