@@ -394,6 +394,27 @@ rename (e.g. auto-naming updates labels but never IDs).
 astronomically rare; when detected, a `-alt` suffix is appended.
 Never treat clone paths as stable outside this layout.
 
+### 4.8 `cx.notify()` can flush the dirty flags before you read them
+
+A handler that calls `cx.notify()` schedules a redraw, and `Render::render`
+ends in `checkpoint_persistence()`. So the sequence is:
+
+```
+handler mutates + mark_settings_dirty()  →  cx.notify()
+   →  next frame renders  →  checkpoint_persistence()  →  flags drained, file written
+```
+
+The consequence, and the reason this is written down: **by the time control
+returns to whatever called the handler, the flags may already be `false` and
+the write already done.** A handler that does *not* notify leaves them set
+until the next render.
+
+This is the coordinator working as designed — not a bug — but it makes
+"did this handler mark dirty?" unanswerable after the fact. Tests must
+capture the flags in the same update block as the dispatch;
+`fixture::Fixture::dispatch` returns them for exactly this reason (§5.6).
+It cost an afternoon once (DEV-518); it should not cost a second one.
+
 ---
 
 ## 5. Extension recipes
@@ -549,6 +570,24 @@ env filter depends on consistent tracing usage.
 
 Use `mark_state_dirty()` / `mark_settings_dirty()`. The coordinator
 at the render tick coalesces writes.
+
+The same rule bans a handler building its own `Settings` value and
+calling the data type's inherent `save()` on it — that is the same
+bypass wearing a different hat. Two things go wrong, and neither is
+visible:
+
+1. **No coalescing.** Dragging the font-size slider wrote settings.json
+   on every step (DEV-520).
+2. **It escapes `AppState.repos`.** An inherent `save()` goes straight
+   to `~/.config/allele/settings.json` — *including under `cargo test`*,
+   where it writes the developer's real config and no fixture can
+   intercept it.
+
+Enforced by `only_the_coordinator_saves_directly` in
+`tests/architecture.rs`, which flags any argument-less `.save()` inside
+an `impl AppState` block outside `checkpoint_persistence`. The arity is
+the tell: the sanctioned call passes the value
+(`self.repos.settings.save(&settings)`), every bypass takes none.
 
 ### 7.3 Don't reach for `platform::global()` from `AppState` methods
 
