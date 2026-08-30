@@ -330,6 +330,11 @@ pub enum BrowserAction {
 }
 
 /// Non-sidebar overlays — scratch pad, future modals.
+///
+/// Every variant starts with `Open`, which Clippy reads as redundant. Here the
+/// verb is the meaning: these are commands, and `OverlayAction::ScratchPad`
+/// would name a thing rather than say what to do with it.
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug)]
 pub enum OverlayAction {
     /// Open (or re-focus) the scratch pad compose overlay.

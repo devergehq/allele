@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use tracing::warn;
 
@@ -8,18 +9,13 @@ use crate::naming::NamingConfig;
 /// Which built-in adapter drives an agent's command building. `Generic`
 /// is used for custom user-added entries that just run a binary with the
 /// configured extra args.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentKind {
     Claude,
     Opencode,
+    #[default]
     Generic,
-}
-
-impl Default for AgentKind {
-    fn default() -> Self {
-        AgentKind::Generic
-    }
 }
 
 /// One entry in the user's configured coding-agent list. Paths are
@@ -48,9 +44,10 @@ pub struct AgentConfig {
 }
 
 /// How session work gets integrated back into the canonical branch.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MergeStrategy {
     /// `git merge --no-ff --no-edit` — preserves merge commit (default).
+    #[default]
     Merge,
     /// `git merge --squash` + explicit commit — collapses session into one commit.
     Squash,
@@ -65,12 +62,6 @@ impl MergeStrategy {
             MergeStrategy::Squash => "Squash",
             MergeStrategy::RebaseThenMerge => "Rebase + merge",
         }
-    }
-}
-
-impl Default for MergeStrategy {
-    fn default() -> Self {
-        Self::Merge
     }
 }
 
@@ -116,6 +107,31 @@ pub struct ProjectSettings {
     /// paths resolve the same way as `startup`.
     #[serde(default)]
     pub shutdown: Option<String>,
+
+    // --- session environment -------------------------------------------------
+    /// Literal environment variables exported into every process this
+    /// project's sessions spawn: the agent PTY, drawer terminals, and the
+    /// `startup`/`shutdown` commands. Values support `{{unique_port}}` and
+    /// `{{folder}}` substitution. `BTreeMap` so the order is stable across
+    /// writes and a settings.json diff stays readable.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+
+    /// Directories pushed onto the FRONT of `PATH`, in declared order.
+    /// Separate from `env` because a map value can only *replace* PATH,
+    /// while what a project actually needs is to take precedence over the
+    /// machine default — pinning a toolchain (say `php@8.3`) without any
+    /// global switch. Same substitution as `env`.
+    ///
+    /// Caveat worth knowing: drawer terminals run the user's rc files after
+    /// this environment is set, so an rc line that unconditionally prepends
+    /// to PATH still outranks these. The tool must not also sit on a
+    /// globally-linked path, and a machine-wide default in a shell rc belongs
+    /// at the END of PATH rather than the front — see "Keep the machine-wide
+    /// default at the END of PATH" in docs/projects-and-sessions.md. See
+    /// DEV-485.
+    #[serde(default)]
+    pub path_prepend: Vec<String>,
 }
 
 impl Default for ProjectSettings {
@@ -128,6 +144,8 @@ impl Default for ProjectSettings {
             terminals: Vec::new(),
             startup: None,
             shutdown: None,
+            env: BTreeMap::new(),
+            path_prepend: Vec::new(),
         }
     }
 }
@@ -174,6 +192,19 @@ pub struct Settings {
     pub drawer_height: f32,
     #[serde(default)]
     pub drawer_visible: bool,
+
+    /// Minutes a session must sit unfocused before its drawer terminals are
+    /// killed to reclaim memory (DEV-445). `0` — the default — disables
+    /// parking entirely.
+    ///
+    /// Off by default deliberately. Parking kills real processes: a dev
+    /// server, a queue worker, a bundler. The memory it buys back is only
+    /// worth having on a machine that is actually short of it, and opting in
+    /// is the user saying their fleet has outgrown their RAM. A destructive
+    /// default that most users never asked for is how a session manager loses
+    /// someone's afternoon.
+    #[serde(default)]
+    pub drawer_park_idle_mins: u64,
 
     // --- right sidebar --------------------------------------------------------
     #[serde(default)]
@@ -423,9 +454,19 @@ pub fn spawn_external_editor(
     }
 }
 
+impl Settings {
+    /// How long a session must sit unfocused before its drawer is parked, or
+    /// `None` when parking is off (the default).
+    pub fn drawer_park_idle(&self) -> Option<std::time::Duration> {
+        (self.drawer_park_idle_mins > 0)
+            .then(|| std::time::Duration::from_secs(self.drawer_park_idle_mins * 60))
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            drawer_park_idle_mins: 0,
             sidebar_width: default_sidebar_width(),
             sidebar_visible: true,
             font_size: default_font_size(),
@@ -462,8 +503,7 @@ impl Default for Settings {
 impl Settings {
     /// Path to the settings file.
     pub fn path() -> Option<PathBuf> {
-        let home = dirs::home_dir()?;
-        Some(home.join(".config").join("allele").join("settings.json"))
+        crate::paths::settings_file()
     }
 
     /// Load settings from disk. Returns default if file doesn't exist or is invalid.
@@ -555,5 +595,30 @@ mod tests {
         let json = r#"{ "session_cleanup_paths": [] }"#;
         let s: Settings = serde_json::from_str(json).unwrap();
         assert!(s.session_cleanup_paths.is_empty());
+    }
+
+    #[test]
+    fn legacy_project_settings_without_env_gets_empty_defaults() {
+        // A settings.json written before DEV-485 must still load, with both
+        // new fields empty so nothing about the spawn path changes.
+        let legacy = r#"{ "merge_strategy": "Merge", "rebase_before_merge": true }"#;
+        let p: ProjectSettings = serde_json::from_str(legacy).expect("should deserialize");
+        assert!(p.env.is_empty());
+        assert!(p.path_prepend.is_empty());
+    }
+
+    #[test]
+    fn project_settings_env_round_trips() {
+        let mut env = BTreeMap::new();
+        env.insert("APP_ENV".to_string(), "local".to_string());
+        let original = ProjectSettings {
+            env,
+            path_prepend: vec!["/opt/homebrew/opt/php@8.3/bin".to_string()],
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&original).expect("should serialize");
+        let back: ProjectSettings = serde_json::from_str(&json).expect("should deserialize");
+        assert_eq!(back.env, original.env);
+        assert_eq!(back.path_prepend, original.path_prepend);
     }
 }

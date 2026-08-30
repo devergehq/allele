@@ -1,6 +1,8 @@
 use gpui::*;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::terminal::TerminalView;
@@ -24,9 +26,12 @@ pub enum Orchestration {
     #[default]
     Full,
     /// `startup` (and `shutdown` on discard), but no drawer terminals and no
-    /// preview. The dispatched-session default.
+    /// preview. What a dispatched session asks for when its tests need the
+    /// project's services standing up first.
     StartupOnly,
-    /// None of it.
+    /// None of it. The dispatched-session default: a worker gets a workspace
+    /// and a branch, and nothing of the project's runs behind it unless it
+    /// asked.
     Nothing,
 }
 
@@ -200,6 +205,112 @@ impl SessionStatus {
 pub struct DrawerTab {
     pub view: Entity<TerminalView>,
     pub name: String,
+    /// The project-configured command this tab was spawned to run, already
+    /// port-substituted. `None` for a tab the user opened by hand.
+    ///
+    /// Kept so the tab can be parked — killed to reclaim memory — and brought
+    /// back running the same thing. Without it a restored tab is a bare shell,
+    /// which is all `pending_drawer_tab_names` could restore before DEV-445:
+    /// fine for a name, useless for a dev server.
+    pub replay: Option<String>,
+    /// Shared handle to the terminal's "the user has typed here" flag.
+    ///
+    /// A tab someone has driven by hand is not safe to park. Whatever is
+    /// running in it is not what `replay` would bring back, so parking it
+    /// would kill work with no way to restore it.
+    ///
+    /// Held as a shared flag rather than read back through the entity so that
+    /// [`Session::tab_parkability`] needs no `Context`.
+    pub user_typed: Arc<AtomicBool>,
+}
+
+impl DrawerTab {
+    /// Whether the user has typed into this tab since it was spawned.
+    pub fn user_typed(&self) -> bool {
+        self.user_typed.load(Ordering::Relaxed)
+    }
+}
+
+/// One drawer tab's parkability inputs, lifted out of the GPUI entity so the
+/// DEV-445 policy is a pure function over plain data — testable without a
+/// window, and stated in exactly one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TabParkability {
+    pub has_replay: bool,
+    pub user_typed: bool,
+}
+
+/// Whether a drawer with these tabs, on a session in this status, may be
+/// parked to reclaim memory (DEV-445).
+///
+/// All-or-nothing per session: a half-parked drawer — some tabs alive, some
+/// gone — reads as a crash rather than a deliberate saving, so a single
+/// unparkable tab protects the whole drawer.
+///
+/// A tab qualifies only if it has a `replay` command and the user has not
+/// typed into it. Both conditions answer one question: can we bring this back
+/// as it was? A hand-opened shell cannot be, and neither can a configured tab
+/// someone has since interrupted and used for something else.
+///
+/// `Running` is excluded because an agent mid-turn may be driving tests
+/// against the very server we would kill. Every other status is quiescent —
+/// nothing of the user's is in flight behind it.
+/// `startup_in_flight` covers the window `status` cannot see: the project's
+/// `startup` command has a 300s timeout, and the drawer terminals are spawned
+/// only after it returns. Parking in that window records an empty tab list and
+/// then has live tabs pushed into it, leaving the session both parked and live
+/// — the one state the `parked_drawer_tabs` invariant forbids.
+pub fn drawer_is_parkable(
+    status: SessionStatus,
+    startup_in_flight: bool,
+    tabs: &[TabParkability],
+) -> bool {
+    !tabs.is_empty()
+        && status != SessionStatus::Running
+        && !startup_in_flight
+        && tabs.iter().all(|t| t.has_replay && !t.user_typed)
+}
+
+/// Whether the idle reaper should park this drawer now.
+///
+/// Kept separate from [`drawer_is_parkable`] so the two questions stay
+/// distinct: *may* we park this — is it restorable, is anything in flight —
+/// versus *should* we park it yet. The first is a safety property and must
+/// never be weakened; the second is a policy knob the user sets.
+///
+/// `threshold` of `None` means parking is disabled, which is the default.
+pub fn should_park_drawer(
+    status: SessionStatus,
+    startup_in_flight: bool,
+    tabs: &[TabParkability],
+    unfocused_for: Duration,
+    threshold: Option<Duration>,
+) -> bool {
+    let Some(threshold) = threshold else {
+        return false;
+    };
+    unfocused_for >= threshold && drawer_is_parkable(status, startup_in_flight, tabs)
+}
+
+/// A drawer tab that is not currently running — either restored from
+/// `state.json` and not yet materialised, or parked to reclaim memory.
+///
+/// Deliberately one type for both cases. Parking is not a new mechanism; it
+/// is the existing lazy-materialisation path made lossless (DEV-445).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParkedTab {
+    pub name: String,
+    /// Command to replay on materialisation. `None` restores a bare shell,
+    /// which is all a pre-DEV-445 `state.json` can tell us.
+    pub replay: Option<String>,
+}
+
+impl ParkedTab {
+    /// A parked tab carrying no command — what a legacy `drawer_tab_names`
+    /// entry rehydrates to.
+    pub fn bare(name: String) -> Self {
+        Self { name, replay: None }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -311,9 +422,24 @@ pub struct Session {
     pub drawer_tabs: Vec<DrawerTab>,
     /// Index into `drawer_tabs` for the currently shown tab.
     pub drawer_active_tab: usize,
-    /// Tab names to lazily spawn when the drawer is first opened — used
-    /// when the session is rehydrated from `state.json`. Consumed on open.
-    pub pending_drawer_tab_names: Vec<String>,
+    /// Drawer tabs that are not running: restored from `state.json` and not
+    /// yet opened, or parked by the idle reaper (DEV-445). Materialised — and
+    /// consumed — by `ensure_drawer_tabs`.
+    ///
+    /// Invariant: this and `drawer_tabs` are never both non-empty. A drawer
+    /// tab is either running or parked, never both.
+    pub parked_drawer_tabs: Vec<ParkedTab>,
+    /// Last time this session was the focused one. Refreshed continuously
+    /// while focused, so `now - last_focused_at` is exactly "unfocused for".
+    ///
+    /// Not persisted: a rehydrated session has no live drawer to park, so the
+    /// only honest starting value is its rehydration time.
+    pub last_focused_at: SystemTime,
+    /// Set when the drawer was parked to reclaim memory, as opposed to simply
+    /// never having been opened. Drives the sidebar's parked marker, so
+    /// "we killed your dev server" reads differently from "you never
+    /// started one".
+    pub drawer_parked_at: Option<SystemTime>,
     /// Whether the bottom drawer is visible for this session. Per-session
     /// so switching sessions preserves each session's drawer state.
     pub drawer_visible: bool,
@@ -447,7 +573,9 @@ impl Session {
             clone_path: None,
             drawer_tabs: Vec::new(),
             drawer_active_tab: 0,
-            pending_drawer_tab_names: Vec::new(),
+            parked_drawer_tabs: Vec::new(),
+            drawer_parked_at: None,
+            last_focused_at: SystemTime::now(),
             drawer_visible: false,
             merged: false,
             auto_naming_fired: false,
@@ -508,7 +636,9 @@ impl Session {
             clone_path,
             drawer_tabs: Vec::new(),
             drawer_active_tab: 0,
-            pending_drawer_tab_names: Vec::new(),
+            parked_drawer_tabs: Vec::new(),
+            drawer_parked_at: None,
+            last_focused_at: SystemTime::now(),
             drawer_visible: false,
             merged,
             auto_naming_fired: false,
@@ -583,14 +713,63 @@ impl Session {
         self
     }
 
-    /// Attach pending drawer-tab names + active index restored from disk.
-    /// The tabs are spawned lazily when the drawer is first opened.
-    pub fn with_drawer_tabs(mut self, names: Vec<String>, active: usize) -> Self {
-        if !names.is_empty() {
-            self.drawer_active_tab = active.min(names.len().saturating_sub(1));
-            self.pending_drawer_tab_names = names;
+    /// Attach parked drawer tabs + active index restored from disk. The tabs
+    /// are spawned lazily when the drawer is first opened.
+    pub fn with_drawer_tabs(mut self, tabs: Vec<ParkedTab>, active: usize) -> Self {
+        if !tabs.is_empty() {
+            self.drawer_active_tab = active.min(tabs.len().saturating_sub(1));
+            self.parked_drawer_tabs = tabs;
         }
         self
+    }
+
+    /// Move every live drawer tab into `parked_drawer_tabs` and drop the
+    /// terminals.
+    ///
+    /// Dropping is what kills them: `PtyTerminal`'s `Drop` closes the PTY and
+    /// `killpg`s the process group, so the dev servers, queue workers and
+    /// bundlers behind the tabs go with it. Nothing else here signals anything.
+    ///
+    /// Shared by session suspend and the DEV-445 idle reaper. Idempotent by
+    /// design — parking an already-parked drawer must not overwrite the
+    /// commands with an empty snapshot, which is exactly what makes the
+    /// reaper safe to run on a timer.
+    pub fn park_drawer_tabs(&mut self) {
+        if self.drawer_tabs.is_empty() {
+            return;
+        }
+        self.parked_drawer_tabs = self
+            .drawer_tabs
+            .iter()
+            .map(|t| ParkedTab {
+                name: t.name.clone(),
+                replay: t.replay.clone(),
+            })
+            .collect();
+        self.drawer_tabs.clear();
+    }
+
+    /// This session's live drawer tabs, reduced to what the park policy needs.
+    pub fn tab_parkability(&self) -> Vec<TabParkability> {
+        self.drawer_tabs
+            .iter()
+            .map(|t| TabParkability {
+                has_replay: t.replay.is_some(),
+                user_typed: t.user_typed(),
+            })
+            .collect()
+    }
+
+    /// Whether anything is mid-materialisation for this session.
+    pub fn startup_in_flight(&self) -> bool {
+        self.startup_status.is_some() || self.operation_error.is_some()
+    }
+
+    /// How long this session has been unfocused, given the last time it was
+    /// the active session. The focused session's stamp is refreshed on every
+    /// reaper tick, so this reads zero for whatever the user is looking at.
+    pub fn unfocused_for(&self, now: SystemTime) -> Duration {
+        now.duration_since(self.last_focused_at).unwrap_or_default()
     }
 
     /// Change the session's status, keeping the active-runtime accounting in
@@ -664,7 +843,118 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use super::Orchestration;
+    use super::{
+        drawer_is_parkable, should_park_drawer, Orchestration, SessionStatus, TabParkability,
+    };
+
+    /// A configured tab nobody has touched — the only shape that is safe to
+    /// kill and bring back.
+    fn clean() -> TabParkability {
+        TabParkability {
+            has_replay: true,
+            user_typed: false,
+        }
+    }
+
+    const IDLE: SessionStatus = SessionStatus::Idle;
+
+    #[test]
+    fn a_clean_configured_drawer_is_parkable() {
+        assert!(drawer_is_parkable(IDLE, false, &[clean(), clean()]));
+    }
+
+    /// A hand-opened tab has no command to replay, so parking it would kill
+    /// whatever the user was doing with nothing to restore it to. One such tab
+    /// protects the whole drawer — a half-parked drawer reads as a crash.
+    #[test]
+    fn one_tab_without_a_command_protects_the_whole_drawer() {
+        let hand_opened = TabParkability {
+            has_replay: false,
+            user_typed: false,
+        };
+        assert!(!drawer_is_parkable(IDLE, false, &[clean(), hand_opened]));
+    }
+
+    /// The user Ctrl-C'd the dev server and used the tab for something else.
+    /// Replaying the configured command would not restore what is there.
+    #[test]
+    fn a_tab_the_user_typed_into_is_never_parked() {
+        let taken_over = TabParkability {
+            has_replay: true,
+            user_typed: true,
+        };
+        assert!(!drawer_is_parkable(IDLE, false, &[taken_over]));
+    }
+
+    /// An agent mid-turn may be driving tests against the very server we would
+    /// kill.
+    #[test]
+    fn a_running_session_is_never_parked() {
+        assert!(!drawer_is_parkable(
+            SessionStatus::Running,
+            false,
+            &[clean()]
+        ));
+    }
+
+    /// The drawer terminals are spawned only after `startup` returns, and that
+    /// has a 300s timeout. Parking inside that window records an empty tab list
+    /// and then has live tabs pushed into it — leaving the session both parked
+    /// and live, which is the one state the invariant forbids.
+    #[test]
+    fn a_session_mid_startup_is_never_parked() {
+        assert!(!drawer_is_parkable(IDLE, true, &[clean()]));
+    }
+
+    #[test]
+    fn an_empty_drawer_has_nothing_to_park() {
+        assert!(!drawer_is_parkable(IDLE, false, &[]));
+    }
+
+    /// Parking is off unless the user asks for it. A feature that kills real
+    /// processes does not get a default.
+    #[test]
+    fn parking_is_disabled_without_a_threshold() {
+        assert!(!should_park_drawer(
+            IDLE,
+            false,
+            &[clean()],
+            Duration::from_secs(86_400),
+            None,
+        ));
+    }
+
+    #[test]
+    fn parking_waits_for_the_threshold() {
+        let ten_min = Some(Duration::from_secs(600));
+        assert!(!should_park_drawer(
+            IDLE,
+            false,
+            &[clean()],
+            Duration::from_secs(599),
+            ten_min
+        ));
+        assert!(should_park_drawer(
+            IDLE,
+            false,
+            &[clean()],
+            Duration::from_secs(600),
+            ten_min
+        ));
+    }
+
+    /// Safety beats policy: an elapsed threshold never overrides a drawer that
+    /// cannot be faithfully restored.
+    #[test]
+    fn the_threshold_does_not_override_safety() {
+        assert!(!should_park_drawer(
+            SessionStatus::Running,
+            false,
+            &[clean()],
+            Duration::from_secs(86_400),
+            Some(Duration::from_secs(600)),
+        ));
+    }
 
     /// The middle state is the whole point of the split: the startup command
     /// runs (so a database is provisioned and tests can run) while the drawer

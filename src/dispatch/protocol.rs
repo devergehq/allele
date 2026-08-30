@@ -33,6 +33,10 @@ pub enum Request {
     SessionsStatus { session_id: String },
     /// Provision a workspace and start a session in it.
     SessionsCreate(CreateRequest),
+    /// Remove a dispatched session, archiving its work.
+    SessionsDiscard { session_id: String },
+    /// Stop whatever a dispatched session is currently doing.
+    SessionsInterrupt { session_id: String },
 }
 
 /// Parameters for `sessions.create`.
@@ -62,10 +66,16 @@ pub struct CreateRequest {
     /// failure mode of a truncated brief is a session starting confidently
     /// on half a specification.
     pub prompt: String,
-    /// How much of the project's setup to run. Defaults to `StartupOnly` for
-    /// dispatched sessions — a session that needs a database provisioned to
-    /// run tests does not need a server, a queue worker, a scheduler and a
-    /// bundler it will never look at.
+    /// How much of the project's setup to run. Defaults to `Nothing` for
+    /// dispatched sessions — a worker clones a workspace, does one job and is
+    /// discarded, and most of them never touch the project's services: they
+    /// run the test binary directly, or against SQLite. Provisioning a
+    /// database, a server, a queue worker and a bundler for that is overhead
+    /// paid on every dispatch to be used by few.
+    ///
+    /// A dispatcher whose work genuinely needs them asks for `StartupOnly`
+    /// (or `Full`) explicitly, so the cost lands on the dispatch that wanted
+    /// it rather than on all of them.
     #[serde(default = "default_dispatch_orchestration")]
     pub orchestration: Orchestration,
     /// The calling session's Claude session id, taken from
@@ -84,10 +94,30 @@ pub struct CreateRequest {
     /// did not spawn.
     #[serde(default)]
     pub caller_session_id: Option<String>,
+    /// The calling session's messaging address, taken from
+    /// `CLAUDE_CODE_MESSAGING_SOCKET` in the MCP server's own environment and
+    /// prefixed `uds:` (DEV-440).
+    ///
+    /// Prepended to the dispatched session's prompt so it can reply without
+    /// the dispatcher having to state an address — which it cannot do
+    /// correctly, because `ListAgents` does not list self and the name in its
+    /// sidebar is not the name its process answers to.
+    ///
+    /// Absent means "the caller has no reachable address". That is reported to
+    /// the worker explicitly rather than dropped; see
+    /// [`crate::dispatch::address::dispatch_preamble`].
+    #[serde(default)]
+    pub caller_reply_to: Option<String>,
 }
 
+/// Dispatched sessions start bare unless they ask for more (DEV-441).
+///
+/// Deliberately *not* [`Orchestration::default()`], which is `Full`: that is
+/// the right answer for a human opening the New Session dialog in a project
+/// they are about to work in, and the wrong one for an agent that wants a
+/// workspace, a branch, and nothing else running behind it.
 fn default_dispatch_orchestration() -> Orchestration {
-    Orchestration::StartupOnly
+    Orchestration::Nothing
 }
 
 // ── Responses ───────────────────────────────────────────────────────────
@@ -100,6 +130,8 @@ pub enum Response {
     Sessions { sessions: Vec<SessionSummary> },
     Status { session: SessionSummary },
     Created { session: CreatedSession },
+    Discarded { session: DiscardedSession },
+    Interrupted { session: InterruptedSession },
     Error { code: ErrorCode, message: String },
 }
 
@@ -114,13 +146,13 @@ pub struct ProjectSummary {
 
 /// What `sessions.create` returns.
 ///
-/// **This is not an address.** `SendMessage` needs `name [ref]`, and the ref
-/// is minted inside Claude Code — allele has no route to it, so none of these
-/// fields can be handed straight to a send. The caller must call `ListAgents`
-/// and resolve `name` to `name [ref]` itself, **fresh at every send**: refs
-/// rotate, and a name amortised against an old ref re-gates when it changes.
+/// **`name` is not an address.** `SendMessage` resolves names against the
+/// Claude Code *process* name, which is fixed at spawn, while this one is
+/// allele's mutable label — auto-naming rewrites it seconds after the first
+/// prompt lands. Resolving it via `ListAgents` may find nothing, or may find
+/// a different session carrying the same string.
 ///
-/// There is deliberately no convenience field that looks like an address.
+/// `reply_to` is an address, and is the one to use. See DEV-440.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CreatedSession {
     /// Allele's stable session id — the **only durable identity** here.
@@ -134,6 +166,45 @@ pub struct CreatedSession {
     pub name: String,
     pub project: String,
     pub state: SessionState,
+    /// The new session's own messaging address, as `uds:<path>` (DEV-440).
+    ///
+    /// Derived from the agent process, so it survives every rename and can
+    /// never collide with another session's. Use it to send follow-ups
+    /// instead of resolving `name`.
+    ///
+    /// `None` means allele could not find a bound socket for the process —
+    /// reported honestly rather than guessed, because a plausible-looking
+    /// wrong address is worse than an absent one.
+    pub reply_to: Option<String>,
+}
+
+/// What `sessions.discard` returns.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DiscardedSession {
+    pub session_id: String,
+    pub name: String,
+    pub project: String,
+    /// The state the session was in when it was discarded.
+    ///
+    /// Reported so a caller that killed something mid-turn can notice.
+    /// Discarding a `running` session is allowed — stopping a runaway is a
+    /// legitimate reason to reach for this — so the response says what was
+    /// stopped rather than the request refusing to stop it.
+    pub was_state: SessionState,
+}
+
+/// What `sessions.interrupt` returns.
+///
+/// Reports the state on both sides of the interrupt rather than asserting
+/// success, so a caller can see whether anything actually stopped. An
+/// interrupt sent to a session that was not running is a no-op, and this
+/// makes that visible instead of implying otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct InterruptedSession {
+    pub session_id: String,
+    pub name: String,
+    pub was_state: SessionState,
+    pub now_state: SessionState,
 }
 
 /// A session's current state.
@@ -193,6 +264,17 @@ pub struct SessionSummary {
     /// Dispatch depth: 0 for human-started, 1 for dispatched by a human's
     /// session, and so on. Derived by allele; never accepted from a caller.
     pub depth: u8,
+    /// This session's messaging address, as `uds:<path>` (DEV-440).
+    ///
+    /// The durable way to reach it: derived from the agent process rather than
+    /// from `name`, so renaming cannot break it and two sessions sharing a
+    /// name cannot share it. This is also how a session discovers **its own**
+    /// address to hand out — `ListAgents` does not list self, so looking up
+    /// its own `session_id` here is the only route.
+    ///
+    /// `None` for a suspended session, or one whose socket allele cannot find.
+    #[serde(default)]
+    pub reply_to: Option<String>,
 }
 
 /// Why a request failed.
@@ -229,6 +311,12 @@ pub enum ErrorCode {
     /// session is recoverable by a human; a phantom success reported to an
     /// orchestrator is not.
     PromptDeliveryUnconfirmed,
+    /// The session exists but was started by a human, not by an agent.
+    ///
+    /// A caller may clean up what agents created; a human's session is not
+    /// the agent's to delete. Distinct from `bad_request` so a caller can
+    /// tell "you may not do that" from "that does not exist".
+    NotDispatched,
     /// Malformed request, unknown project field, etc.
     BadRequest,
     Internal,
@@ -252,6 +340,7 @@ mod tests {
                 prompt: "read https://example.test/brief".into(),
                 orchestration: Orchestration::StartupOnly,
                 caller_session_id: Some("caller".into()),
+                caller_reply_to: Some("uds:/tmp/cc-socks/65452.sock".into()),
             }),
         ];
         for r in reqs {
@@ -264,13 +353,70 @@ mod tests {
         }
     }
 
-    /// A dispatched session that isn't told otherwise gets the startup command
-    /// without the terminals — the shape dispatch exists to produce.
+    /// Discard must round-trip like every other op — it is the one that
+    /// removes a workspace, so a malformed request reaching the handler is
+    /// the worst case in this protocol.
     #[test]
-    fn create_defaults_to_startup_only() {
+    fn discard_round_trips_over_the_wire() {
+        let r = Request::SessionsDiscard {
+            session_id: "b1413d28".into(),
+        };
+        let line = serde_json::to_string(&r).expect("serialises");
+        assert_eq!(line, r#"{"op":"sessions_discard","session_id":"b1413d28"}"#);
+        assert_eq!(serde_json::from_str::<Request>(&line).expect("parses"), r);
+    }
+
+    #[test]
+    fn interrupt_round_trips_over_the_wire() {
+        let r = Request::SessionsInterrupt {
+            session_id: "s1".into(),
+        };
+        let line = serde_json::to_string(&r).expect("serialises");
+        assert_eq!(line, r#"{"op":"sessions_interrupt","session_id":"s1"}"#);
+        assert_eq!(serde_json::from_str::<Request>(&line).expect("parses"), r);
+    }
+
+    /// `not_dispatched` has to be distinguishable on the wire from
+    /// `bad_request`: "you may not do that" and "that does not exist" want
+    /// different responses from a caller.
+    #[test]
+    fn refusing_a_human_session_is_its_own_code() {
+        assert_eq!(
+            serde_json::to_string(&ErrorCode::NotDispatched).expect("serialises"),
+            "\"not_dispatched\""
+        );
+        assert_ne!(ErrorCode::NotDispatched, ErrorCode::BadRequest);
+    }
+
+    /// A dispatched session that isn't told otherwise starts bare: a
+    /// workspace and a branch, and none of the project's setup behind them.
+    #[test]
+    fn create_defaults_to_nothing() {
         let r: CreateRequest =
             serde_json::from_str(r#"{"project":"p","name":"n","prompt":"go"}"#).expect("parses");
-        assert_eq!(r.orchestration, Orchestration::StartupOnly);
+        assert_eq!(r.orchestration, Orchestration::Nothing);
+    }
+
+    /// The dispatch default is a separate decision from the type's `Default`,
+    /// and they deliberately disagree: `Full` is right for a human opening the
+    /// New Session dialog, `Nothing` for an agent that wants a workspace. A
+    /// refactor collapsing the two would silently start a project's whole
+    /// stack behind every dispatched session.
+    #[test]
+    fn dispatch_default_is_not_the_human_default() {
+        assert_ne!(default_dispatch_orchestration(), Orchestration::default());
+        assert_eq!(Orchestration::default(), Orchestration::Full);
+    }
+
+    /// An MCP client from before DEV-440 sends no `caller_reply_to`. It must
+    /// still parse: the field is a strict addition, and a create that arrives
+    /// without one is a dispatch whose worker is told it has no way back —
+    /// which is the honest answer, not a protocol error.
+    #[test]
+    fn create_without_a_reply_address_still_parses() {
+        let r: CreateRequest =
+            serde_json::from_str(r#"{"project":"p","name":"n","prompt":"go"}"#).expect("parses");
+        assert_eq!(r.caller_reply_to, None);
     }
 
     /// The wire vocabulary is snake_case and must stay stable independently of

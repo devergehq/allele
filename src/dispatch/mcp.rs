@@ -102,18 +102,25 @@ fn tool_definitions() -> Value {
         {
             "name": "allele_sessions_list",
             "description":
-                "List allele sessions with their state. Use this rather than ListAgents to \
-                 decide whether a worker is finished: ListAgents collapses every state into \
+                "List allele sessions with their state and their `reply_to` address. Use this \
+                 rather than ListAgents for both: ListAgents collapses every state into \
                  idle/busy, so a session blocked on a permission prompt is indistinguishable \
-                 there from one that has finished.",
+                 there from one that has finished — and it resolves names against the Claude \
+                 Code *process* name, which is not the allele session name shown in the \
+                 sidebar. `reply_to` is a `uds:` address derived from the session's process: \
+                 pass it straight to SendMessage. It survives renaming and cannot collide. \
+                 A session finds its own address by looking up its own session_id here; \
+                 ListAgents does not list self.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
         },
         {
             "name": "allele_sessions_status",
             "description":
-                "State of one allele session. `awaiting_input` means it is blocked on a \
-                 permission prompt and nobody is coming unless a human acts; `state_age_secs` \
-                 says how long it has been that way.",
+                "State of one allele session, and its `reply_to` address. `awaiting_input` \
+                 means it is blocked on a permission prompt and nobody is coming unless a \
+                 human acts; `state_age_secs` says how long it has been that way. `reply_to` \
+                 is a `uds:` address usable directly as SendMessage's `to` — use it instead \
+                 of resolving `name`, which addresses the process name rather than this one.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -131,9 +138,12 @@ fn tool_definitions() -> Value {
             "name": "allele_sessions_create",
             "description":
                 "Create an allele session and send it an initial prompt. Returns the session \
-                 id and the name allele minted, which may differ from the one requested. \
-                 The result is NOT a SendMessage address: resolve the name to `name [ref]` \
-                 via ListAgents, fresh at every send, because refs rotate.",
+                 id, the name allele minted (which may differ from the one requested), and \
+                 `reply_to` — a `uds:` address you can pass straight to SendMessage. Use \
+                 `reply_to`, not `name`: names resolve against the Claude Code process name, \
+                 which is fixed at spawn and is not the allele session name. You do NOT need \
+                 to tell the new session how to reach you — allele injects your own address \
+                 into its prompt automatically.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -148,11 +158,53 @@ fn tool_definitions() -> Value {
                         "type": "string",
                         "enum": ["full", "startup_only", "nothing"],
                         "description": "How much of the project's setup to run. Defaults to \
-                                        startup_only: run the startup command so tests have \
-                                        what they need, without opening drawer terminals.",
+                                        nothing: the session gets its own workspace and branch \
+                                        and starts no startup command, no drawer terminals and \
+                                        no preview. Pass startup_only when the work needs the \
+                                        project's startup command — a provisioned database, \
+                                        say — before its tests will run, or full to also open \
+                                        the drawer terminals and preview.",
                     },
                 },
                 "required": ["project", "name", "prompt"],
+                "additionalProperties": false,
+            },
+        },
+        {
+            "name": "allele_sessions_discard",
+            "description":
+                "Discard an allele session that was created by an agent, freeing a slot \
+                 against the dispatch cap. Non-destructive: uncommitted work is committed \
+                 and the session branch is archived before its workspace is removed, and \
+                 the project's shutdown command runs if its startup did. Refuses sessions \
+                 a human started — those are theirs to remove.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": {
+                        "type": "string",
+                        "description": "The allele session id, as returned by \
+                                        sessions_create or sessions_list.",
+                    },
+                },
+                "required": ["session_id"],
+                "additionalProperties": false,
+            },
+        },
+        {
+            "name": "allele_sessions_interrupt",
+            "description":
+                "Stop what a dispatched allele session is currently doing — the equivalent of \
+                 pressing Escape in it. \
+                 Reports the state before and after so you can see whether anything \
+                 actually stopped — interrupting a session that was not working is a \
+                 no-op. Refuses sessions a human started.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "The allele session id." },
+                },
+                "required": ["session_id"],
                 "additionalProperties": false,
             },
         },
@@ -173,21 +225,43 @@ fn call_tool(params: &Value) -> Result<Value, String> {
             "op": "sessions_status",
             "session_id": args.get("session_id").and_then(Value::as_str).unwrap_or_default(),
         }),
+        "allele_sessions_interrupt" => json!({
+            "op": "sessions_interrupt",
+            "session_id": args.get("session_id").and_then(Value::as_str).unwrap_or_default(),
+        }),
+        "allele_sessions_discard" => json!({
+            "op": "sessions_discard",
+            "session_id": args.get("session_id").and_then(Value::as_str).unwrap_or_default(),
+        }),
         "allele_sessions_create" => {
             let mut v = json!({ "op": "sessions_create" });
-            // This process is a child of the calling Claude session, so its
-            // environment names that session. Allele resolves the id against
-            // its own records and reads the depth from there — the claim
-            // cannot grant a depth the named session does not have.
-            if let Ok(id) = std::env::var("CLAUDE_CODE_SESSION_ID") {
-                if let Some(obj) = v.as_object_mut() {
-                    obj.insert("caller_session_id".into(), json!(id));
-                }
-            }
             if let (Some(obj), Some(a)) = (v.as_object_mut(), args.as_object()) {
                 for (k, val) in a {
                     obj.insert(k.clone(), val.clone());
                 }
+            }
+            // Env-derived fields are written *after* the caller's arguments,
+            // so a caller cannot supply its own. Both describe who is calling,
+            // and the whole point is that the answer comes from the process
+            // tree rather than from the request: this process is a child of
+            // the calling Claude session, so its environment names that
+            // session and nothing the caller writes can rename it.
+            //
+            // (Ordering matters. Merging arguments last let a caller name a
+            // different session as the caller and inherit its dispatch depth.)
+            if let Some(obj) = v.as_object_mut() {
+                // Allele resolves the id against its own records and reads the
+                // depth from there — naming a session cannot grant a depth
+                // that session does not have.
+                if let Ok(id) = std::env::var("CLAUDE_CODE_SESSION_ID") {
+                    obj.insert("caller_session_id".into(), json!(id));
+                }
+                // The address the new session will be told to reply to. Absent
+                // when this process was not started by a Claude session, or
+                // when the socket named by the environment is not bound — in
+                // which case the worker is told it has no way back rather than
+                // being handed a path that will fail at send time. See DEV-440.
+                obj.insert("caller_reply_to".into(), json!(super::address::from_env()));
             }
             v
         }
@@ -254,7 +328,9 @@ mod tests {
         for tool in tools.as_array().expect("array") {
             let name = tool["name"].as_str().expect("name");
             let args = match name {
-                "allele_sessions_status" => json!({ "session_id": "x" }),
+                "allele_sessions_status"
+                | "allele_sessions_discard"
+                | "allele_sessions_interrupt" => json!({ "session_id": "x" }),
                 "allele_sessions_create" => {
                     json!({ "project": "p", "name": "n", "prompt": "go" })
                 }
@@ -269,6 +345,27 @@ mod tests {
                 "{name} is advertised but not routed"
             );
         }
+    }
+
+    /// The destructive tool must be advertised with a session id and nothing
+    /// else — no "all", no project-wide sweep. One session per call is what
+    /// keeps a confused caller's blast radius to one session.
+    #[test]
+    fn discard_takes_exactly_one_session_id() {
+        let tools = tool_definitions();
+        let discard = tools
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|t| t["name"] == "allele_sessions_discard")
+            .expect("discard is advertised");
+        let props = discard["inputSchema"]["properties"]
+            .as_object()
+            .expect("properties");
+        assert_eq!(props.len(), 1, "discard takes one argument");
+        assert!(props.contains_key("session_id"));
+        assert_eq!(discard["inputSchema"]["required"][0], "session_id");
+        assert_eq!(discard["inputSchema"]["additionalProperties"], false);
     }
 
     #[test]

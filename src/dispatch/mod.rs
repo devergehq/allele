@@ -21,11 +21,14 @@
 //! [`update_in_main_window`], so no caller has to rediscover the
 //! distinction.
 
+pub(crate) mod address;
 pub(crate) mod admission;
 pub(crate) mod create;
 pub(crate) mod handler;
+pub(crate) mod manage;
 pub(crate) mod mcp;
 pub(crate) mod protocol;
+pub(crate) mod pty;
 pub(crate) mod server;
 
 use std::sync::mpsc::Receiver;
@@ -88,9 +91,20 @@ fn spawn_control_loop(rx: Receiver<server::ControlRequest>, cx: &mut Context<App
                 // prompt land — seconds of work that must not hold up the
                 // drain. It answers on `reply` when it is done; the socket
                 // thread is already blocked waiting for exactly that.
-                if let protocol::Request::SessionsCreate(req) = request {
-                    create::spawn(req, reply, this.clone(), cx);
-                    continue;
+                // Creation, interrupt and follow-up prompts all wait on the
+                // session to react, which takes seconds and must not hold up
+                // the drain. Each answers on `reply` when done; the socket
+                // thread is already blocked waiting for exactly that.
+                match request {
+                    protocol::Request::SessionsCreate(req) => {
+                        create::spawn(req, reply, this.clone(), cx);
+                        continue;
+                    }
+                    protocol::Request::SessionsInterrupt { session_id } => {
+                        manage::spawn_interrupt(session_id, reply, this.clone(), cx);
+                        continue;
+                    }
+                    _ => {}
                 }
                 let response = update_in_main_window(&this, cx, |state, window, cx| {
                     handler::handle(request, state, window, cx)

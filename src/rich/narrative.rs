@@ -227,7 +227,7 @@ pub fn detect_phase_header(text: &str) -> Option<LocusPhase> {
     let first_line = text.lines().next().unwrap_or("").trim();
     // Strip common Markdown heading / emphasis / list markers.
     let cleaned: String = first_line
-        .trim_start_matches(|c: char| c == '#' || c == '*' || c == '-' || c == ' ' || c == '>')
+        .trim_start_matches(['#', '*', '-', ' ', '>'])
         .to_string();
     let upper = cleaned.to_ascii_uppercase();
 

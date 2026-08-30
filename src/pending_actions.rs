@@ -501,7 +501,7 @@ impl AppState {
                 // the user created without them. See DEV-400 and DEV-415.
                 let restore_orchestration = session.orchestration;
 
-                let needs_git = clone_path.as_ref().map_or(false, |cp| *cp != canonical);
+                let needs_git = clone_path.as_ref().is_some_and(|cp| *cp != canonical);
 
                 if needs_git {
                     let clone_path = clone_path.unwrap();
@@ -928,12 +928,10 @@ impl AppState {
                     if now_visible {
                         self.ensure_drawer_tabs(cursor, window, cx);
                         self.focus_active_drawer_tab(cursor, window, cx);
-                    } else {
-                        if let Some(session) = self.active_session() {
-                            if let Some(tv) = session.terminal_view.as_ref() {
-                                let fh = tv.read(cx).focus_handle.clone();
-                                fh.focus(window, cx);
-                            }
+                    } else if let Some(session) = self.active_session() {
+                        if let Some(tv) = session.terminal_view.as_ref() {
+                            let fh = tv.read(cx).focus_handle.clone();
+                            fh.focus(window, cx);
                         }
                     }
                 }
@@ -942,7 +940,7 @@ impl AppState {
             DrawerAction::NewDrawerTab => {
                 *skip_refocus = true;
                 if let Some(cursor) = self.active {
-                    self.spawn_drawer_tab(cursor, None, None, window, cx);
+                    self.spawn_drawer_tab(cursor, None, None, None, window, cx);
                     if let Some(session) = self
                         .projects
                         .get_mut(cursor.project_idx)

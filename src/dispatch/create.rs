@@ -32,6 +32,7 @@ use std::time::Duration;
 use gpui::{AsyncApp, WeakEntity};
 
 use crate::app_state::AppState;
+use crate::dispatch::address;
 use crate::dispatch::admission;
 use crate::dispatch::protocol::{CreateRequest, CreatedSession, ErrorCode, Response, SessionState};
 use crate::dispatch::update_in_main_window;
@@ -42,8 +43,29 @@ use crate::{agents, config, git};
 /// confirming it. Generous: a cold agent on a busy machine can take a while to
 /// draw its first frame, and a false `prompt_delivery_unconfirmed` would send
 /// an orchestrator chasing a session that is fine.
-const PROMPT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
+pub(super) const PROMPT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(120);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// When to re-send the submit keystroke, as milliseconds after the initial
+/// send, if `user_prompt_submit` still has not been observed (DEV-426).
+///
+/// Allele types an initial prompt as a bracketed paste followed by a bare
+/// carriage return on an 80ms timer, racing the agent's TUI boot. That race
+/// has now been lost twice in production, in two different ways: once to
+/// first-run onboarding swallowing the paste, and once in a perfectly ordinary
+/// environment where the paste landed in the input box and the carriage return
+/// simply did not submit it. The timer is not fragile only under onboarding —
+/// it is fragile.
+///
+/// **Only the submit is retried, never the paste.** A duplicated carriage
+/// return on an empty input is a no-op; a duplicated paste would send the
+/// prompt twice. That asymmetry is the entire reason this is safe to do
+/// blindly, without reading the terminal back.
+///
+/// Backoff rather than a tight loop: if the TUI is still booting, hammering it
+/// achieves nothing, and the later attempts cover the slow-machine case that a
+/// short fixed retry would miss.
+const SUBMIT_RETRIES_MS: [u128; 7] = [1_000, 2_500, 5_000, 10_000, 20_000, 40_000, 80_000];
 
 /// Run a create request to completion and answer on `reply`.
 pub(crate) fn spawn(
@@ -73,22 +95,40 @@ async fn run(request: CreateRequest, this: &WeakEntity<AppState>, cx: &mut Async
         Err((code, message)) => return error(code, message),
     };
 
-    // Wait for allele to observe the prompt being submitted.
+    // Wait for allele to observe the prompt being submitted, re-sending the
+    // submit keystroke on a backoff until it does. See `SUBMIT_RETRIES_MS`.
     let deadline = PROMPT_CONFIRM_TIMEOUT.as_millis() / POLL_INTERVAL.as_millis();
+    let mut retries = SUBMIT_RETRIES_MS.iter().peekable();
+    let mut elapsed_ms: u128 = 0;
+
     for _ in 0..deadline {
         cx.background_executor().timer(POLL_INTERVAL).await;
+        elapsed_ms += POLL_INTERVAL.as_millis();
 
-        let state = update_in_main_window(this, cx, |state, _window, _cx| {
-            lookup_status(state, &started.session_id)
+        if let Some(&&due) = retries.peek() {
+            if elapsed_ms >= due {
+                retries.next();
+                let _ = update_in_main_window(this, cx, |state, _window, cx| {
+                    crate::dispatch::pty::submit(state, &started.session_id, cx)
+                });
+            }
+        }
+
+        let state = update_in_main_window(this, cx, |state, _window, cx| {
+            observe(state, &started.session_id, cx)
         });
         match state {
-            Ok(Some(status)) if consumed_prompt(status) => {
+            Ok(Some(observed)) if consumed_prompt(observed.status) => {
                 return Response::Created {
                     session: CreatedSession {
                         session_id: started.session_id,
                         name: started.name,
                         project: started.project,
-                        state: SessionState::from(status),
+                        state: SessionState::from(observed.status),
+                        // Resolved here rather than at launch: the socket does
+                        // not exist until the agent has booted, and by now
+                        // allele has watched it consume a prompt, so it has.
+                        reply_to: observed.reply_to,
                     },
                 };
             }
@@ -109,10 +149,13 @@ async fn run(request: CreateRequest, this: &WeakEntity<AppState>, cx: &mut Async
         ErrorCode::PromptDeliveryUnconfirmed,
         format!(
             "session {} started as \"{}\" but allele did not observe its prompt \
-             within {}s — it is alive and visible in the sidebar",
+             within {}s, after {} submit attempts. The session is alive and visible \
+             in the sidebar, and the prompt is most likely sitting unsent in its \
+             input box — pressing Enter in that session will start it.",
             started.session_id,
             started.name,
-            PROMPT_CONFIRM_TIMEOUT.as_secs()
+            PROMPT_CONFIRM_TIMEOUT.as_secs(),
+            SUBMIT_RETRIES_MS.len() + 1,
         ),
     )
 }
@@ -121,6 +164,16 @@ struct Started {
     session_id: String,
     name: String,
     project: String,
+}
+
+/// What the poll loop needs to see each tick: the session's status, and — once
+/// its agent has booted far enough to bind a socket — its address.
+///
+/// Read together in one foreground hop rather than two, so the address can
+/// never describe a different moment than the status it is reported beside.
+struct Observed {
+    status: SessionStatus,
+    reply_to: Option<String>,
 }
 
 /// Validate and launch, on the foreground thread.
@@ -221,6 +274,14 @@ fn begin(
         depth,
     };
 
+    // The reply address goes into the prompt rather than being left to the
+    // dispatcher to state, because a dispatcher cannot state it correctly:
+    // `ListAgents` does not list self, and its sidebar name is not the name
+    // its process answers to. When there is no address, the worker is told
+    // that in its first line — see `dispatch_preamble`. See DEV-440.
+    let prompt =
+        address::compose_dispatch_prompt(request.caller_reply_to.as_deref(), &request.prompt);
+
     let before: Vec<String> = state.projects[project_idx]
         .sessions
         .iter()
@@ -232,7 +293,7 @@ fn begin(
         name.clone(),
         None,
         None,
-        Some(request.prompt.clone()),
+        Some(prompt),
         request.orchestration,
         window,
         cx,
@@ -328,21 +389,28 @@ fn find_session_label(state: &AppState, session_id: &str) -> Option<String> {
         .map(|s| s.label.clone())
 }
 
-fn lookup_status(state: &AppState, session_id: &str) -> Option<SessionStatus> {
+fn observe(state: &AppState, session_id: &str, cx: &gpui::App) -> Option<Observed> {
     if state
         .projects
         .iter()
         .any(|p| p.loading_sessions.iter().any(|l| l.id == session_id))
     {
-        // Still cloning. Not a status yet, but not gone either.
-        return Some(SessionStatus::Suspended);
+        // Still cloning. Not a status yet, but not gone either — and with no
+        // process there is nothing to address.
+        return Some(Observed {
+            status: SessionStatus::Suspended,
+            reply_to: None,
+        });
     }
     state
         .projects
         .iter()
         .flat_map(|p| p.sessions.iter())
         .find(|s| s.id == session_id)
-        .map(|s| s.status)
+        .map(|s| Observed {
+            status: s.status,
+            reply_to: address::for_session(s, cx),
+        })
 }
 
 /// Whether a status implies the agent consumed its prompt.
@@ -420,6 +488,37 @@ mod tests {
     /// A session already blocked on a permission prompt, or already finished a
     /// turn, has plainly read something — treating those as unconfirmed would
     /// report failure for a session further along than the one we waited for.
+    /// The schedule must fit inside the confirmation budget, or the last
+    /// attempts never fire and the constant lies about how many were made.
+    #[test]
+    fn every_retry_fits_within_the_confirmation_budget() {
+        let budget = PROMPT_CONFIRM_TIMEOUT.as_millis();
+        for due in SUBMIT_RETRIES_MS {
+            assert!(
+                due < budget,
+                "retry at {due}ms exceeds the {budget}ms budget"
+            );
+        }
+    }
+
+    /// Strictly increasing, so the backoff actually backs off: a schedule that
+    /// repeated or went backwards would hammer a booting TUI.
+    #[test]
+    fn the_retry_schedule_backs_off() {
+        for pair in SUBMIT_RETRIES_MS.windows(2) {
+            assert!(pair[1] > pair[0], "{:?} is not increasing", pair);
+        }
+    }
+
+    /// The first retry has to be soon enough to fix the common case quickly —
+    /// an orchestrator waiting 30s for a keystroke that failed at 80ms is a
+    /// bad trade — and late enough that a normally-booting TUI has drawn.
+    #[test]
+    fn the_first_retry_is_prompt_but_not_instant() {
+        let first = SUBMIT_RETRIES_MS[0];
+        assert!((500..=2_000).contains(&first), "first retry at {first}ms");
+    }
+
     #[test]
     fn states_past_the_prompt_all_count() {
         assert!(consumed_prompt(SessionStatus::Running));

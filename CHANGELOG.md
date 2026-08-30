@@ -14,6 +14,43 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- Projects can declare their own environment. `env` sets literal variables and
+  `path_prepend` pushes directories onto the front of `PATH`, and both reach
+  every process a session spawns — the agent PTY, each drawer terminal, and the
+  `startup`/`shutdown` hooks — including sessions created with orchestration
+  disabled. This lets two sessions running at the same time use different
+  toolchain versions, which a machine-global switch like `brew link` cannot do.
+  See `docs/projects-and-sessions.md` for the one caveat about rc files.
+  Both are editable from the project settings pane, alongside the existing
+  terminals and startup/shutdown fields.
+
+### Added
+- Allele can run against an isolated data root, so it can be tested in Allele
+  without a second instance sharing `state.json`, the workspaces root, settings,
+  hooks or the MCP control socket with the live one. `--sandbox` uses
+  `~/.allele-sandbox` and scaffolds a throwaway git project to open sessions
+  against; `--home <dir>` (or `ALLELE_HOME`) picks any root. A redirected
+  instance is marked SANDBOX in its title bar and sidebar. Data owned by other
+  tools — `~/.claude`, agent binaries — is never redirected, so a sandbox drives
+  your real agent against throwaway projects.
+
+### Fixed
+- A project's `allele.json` no longer silently discards `env` and `path_prepend`
+  configured in the settings pane. Presence of the file used to switch the whole
+  environment over to it, so a file pinning only terminals left the settings-pane
+  values written to disk, shown in the UI, and never applied. Each field now
+  falls back on its own, matching how the `agent` override already worked.
+- Dispatched sessions can now reach the session that dispatched them. A session has
+  two names — allele's label, which the sidebar and auto-naming both rewrite, and the
+  Claude Code process name, fixed at spawn — and messaging resolves against the second.
+  A worker handed the first found it resolved to nothing and stalled holding finished
+  work. Allele now derives a durable `uds:` address from each session's agent process,
+  injects the dispatcher's address into the worker's first prompt automatically, and
+  reports a `reply_to` for every session from `sessions_list`, `sessions_status` and
+  `sessions_create`. Renaming a session no longer affects messaging, and a worker with
+  no reachable dispatcher is told so up front instead of discovering it at send time.
+
+### Added
 - "Skip startup procedures" on the New Session dialog — creates a session with its own
   workspace clone and branch but runs none of the project's orchestration: no startup
   command, no drawer terminals, no preview, and no shutdown command when it closes. For
@@ -30,6 +67,17 @@ Changes on `master` awaiting the next tagged release.
 - The transcript now surfaces session events it previously ignored, as compact
   one-line notices: a pull request opened, an artifact published, a file edited
   outside Claude, a plan accepted, a queued message, and hook errors.
+
+### Changed
+- Sessions dispatched over the MCP (`allele_sessions_create`) now run **none** of the
+  project's orchestration by default, where they previously ran its `startup` command.
+  A worker clones a workspace, does one job and is discarded, and most never touch the
+  project's services — they run the test binary directly, or against SQLite — so
+  provisioning a database, a server and a bundler on every dispatch was a cost paid by
+  all of them to be used by few. A dispatcher whose work does need them now says so:
+  `orchestration: "startup_only"` for the startup command without the drawer terminals,
+  `"full"` for the whole setup. The New Session dialog is unaffected — a human still
+  gets the project's full setup unless they choose otherwise.
 
 ### Fixed
 - Tools installed outside the system directories are reachable again from sessions

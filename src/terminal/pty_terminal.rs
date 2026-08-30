@@ -118,11 +118,33 @@ pub struct PtyTerminal {
     pub bell_pending: bool,
     /// Title set by terminal apps via OSC sequences.
     pub title: Option<String>,
-    /// Process-group leader pid of the child shell, captured at spawn.
-    /// `None` on non-Unix or if the PID was unavailable. Used on drop to
-    /// `killpg` the foreground tree so dev servers that ignore SIGHUP or
-    /// daemonise don't leak.
+    /// Pid of the process alacritty forked, captured at spawn. `None` on
+    /// non-Unix or if the pid was unavailable.
+    ///
+    /// alacritty calls `setsid()` in the fork, so this pid leads *a* process
+    /// group — but not necessarily the one running the user's job. Which it is
+    /// depends on how the terminal was spawned:
+    ///
+    /// - **Agent PTYs** exec the agent binary directly, with no wrapping shell.
+    ///   Here this pid *is* the job, and `killpg` on it reaches everything.
+    /// - **Drawer tabs** spawn with `command: None`, which becomes alacritty's
+    ///   `default_shell_command`: `/usr/bin/login -flp <user> /bin/zsh …`.
+    ///   `login` forks, the interactive shell re-groups, and job control puts
+    ///   each job in a group of its own. This pid is `login`'s — three groups
+    ///   away from the dev server.
+    ///
+    /// So this alone is not enough to tear a drawer tab down; see `master`.
     child_pid: Option<u32>,
+    /// Our own duplicate of the PTY master descriptor. `None` on non-Unix.
+    ///
+    /// Exists so `Drop` can ask `tcgetpgrp` which process group is in the
+    /// foreground — that is the group actually running the user's job, and the
+    /// one `child_pid` cannot identify for a drawer tab.
+    ///
+    /// Released before the event loop shuts the PTY down: the kernel delivers
+    /// SIGHUP when the *last* descriptor to the master closes, and SIGHUP is
+    /// what does most of the killing here. Holding this open would suppress it.
+    master: Option<std::fs::File>,
     /// Cleanup callbacks to run when this terminal is dropped. Fired in
     /// LIFO order (defer semantics) before the kill path, so hooks can
     /// still read outside state.
@@ -131,10 +153,16 @@ pub struct PtyTerminal {
 
 impl PtyTerminal {
     /// Create a terminal running a specific command in a specific directory
+    /// `extra_env` is applied on top of the inherited environment before the
+    /// command's own vars. It is a separate parameter rather than part of
+    /// `ShellCommand` because the drawer spawns bare shells with no command at
+    /// all, and those are exactly the terminals a project most needs to
+    /// configure. See DEV-485.
     pub fn spawn(
         size: TermSize,
         command: Option<ShellCommand>,
         working_dir: Option<PathBuf>,
+        extra_env: Vec<(String, String)>,
     ) -> anyhow::Result<Self> {
         let (events_tx, events_rx) = flume::unbounded();
         let listener = JsonEventListener::new(events_tx);
@@ -161,6 +189,12 @@ impl PtyTerminal {
         // don't duplicate viewport content into our terminal scrollback.
         // Harmless for non-CC processes that ignore the variable.
         env.insert("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string());
+
+        // Project-declared vars land before the command's own, so an adapter
+        // integration var always wins a collision with project config.
+        for (k, v) in extra_env {
+            env.insert(k, v);
+        }
 
         // Build the shell configuration. Adapter-supplied env vars are
         // merged into the PTY environment here so agent event integrations
@@ -190,14 +224,20 @@ impl PtyTerminal {
         let window_id = 0;
         let pty = tty::new(&pty_options, size.into(), window_id)?;
 
-        // Capture the child's pid before the event loop takes ownership of
-        // the Pty. alacritty calls `setsid()` in the fork, so this pid is
-        // also the process-group leader — `killpg(pid, …)` reaches every
-        // foreground descendant.
+        // Capture what we need before the event loop takes ownership of the Pty.
         #[cfg(unix)]
         let child_pid = Some(pty.child().id());
         #[cfg(not(unix))]
         let child_pid: Option<u32> = None;
+
+        // Duplicate the master so `Drop` can read the foreground process group
+        // off it. `try_clone` failing is not fatal — we lose the ability to
+        // identify the job's group and fall back to SIGHUP plus `child_pid`,
+        // which is the behaviour that shipped before DEV-449.
+        #[cfg(unix)]
+        let master = pty.file().try_clone().ok();
+        #[cfg(not(unix))]
+        let master: Option<std::fs::File> = None;
 
         // Start the event loop (reads PTY output → feeds to Term)
         let event_loop = EventLoop::new(term.clone(), listener, pty, false, false)?;
@@ -213,8 +253,19 @@ impl PtyTerminal {
             bell_pending: false,
             title: None,
             child_pid,
+            master,
             cleanup_hooks: Vec::new(),
         })
+    }
+
+    /// Pid of the agent process this terminal is running.
+    ///
+    /// alacritty execs the agent binary directly — there is no wrapping shell —
+    /// so this is the agent's own pid, which is what names its messaging socket.
+    /// See [`crate::dispatch::address`]: it is the basis of the only session
+    /// address that a rename cannot break.
+    pub fn child_pid(&self) -> Option<u32> {
+        self.child_pid
     }
 
     /// Register a callback to run when this terminal is dropped. Hooks
@@ -280,38 +331,134 @@ impl Drop for PtyTerminal {
             }
         }
 
+        // Read the foreground process group off the master while the PTY is
+        // still open. For a drawer tab this is the only way to learn which
+        // group is running the user's job — `child_pid` is `login`'s.
+        #[cfg(unix)]
+        let foreground = self.master.as_ref().and_then(|f| {
+            use std::os::unix::io::AsRawFd;
+            let pgid = unsafe { libc::tcgetpgrp(f.as_raw_fd()) };
+            (pgid > 0).then_some(pgid)
+        });
+
+        // Release our duplicate BEFORE asking the event loop to shut down, so
+        // that its close is the last one and the kernel delivers SIGHUP.
+        self.master = None;
+
         // Close the PTY master FD — this signals the event loop to drain
         // and the kernel will SIGHUP the foreground process group.
         let _ = self.pty_tx.0.send(Msg::Shutdown);
 
         // Belt-and-braces: some children ignore SIGHUP, daemonise, or have
-        // disowned their controlling terminal. Explicitly SIGTERM the
-        // process group, then SIGKILL after a short grace. Done on a
-        // detached thread so Drop (render-thread) stays non-blocking.
+        // disowned their controlling terminal. SIGTERM every group we know
+        // about, then SIGKILL whatever outlives the grace. Done on a detached
+        // thread so Drop (render-thread) stays non-blocking.
         #[cfg(unix)]
-        if let Some(pid) = self.child_pid.take() {
-            std::thread::spawn(move || kill_child_group(pid));
+        {
+            let groups = target_groups(self.child_pid.take(), foreground);
+            if !groups.is_empty() {
+                std::thread::spawn(move || kill_process_groups(groups));
+            }
         }
     }
 }
 
-/// Kill the process group led by `pid` with a SIGTERM→grace→SIGKILL escalation.
-/// Runs on a detached thread so it can sleep without blocking the caller.
+/// The process groups worth signalling when a terminal is torn down.
+///
+/// `child` is what alacritty forked; `foreground` is what `tcgetpgrp` reported.
+/// For an agent PTY these are the same group and the result is one entry; for a
+/// drawer tab running a dev server they differ, and both matter — the shell's
+/// group so the shell goes, the job's group so the server does.
 #[cfg(unix)]
-fn kill_child_group(pid: u32) {
-    let pid = pid as libc::pid_t;
+fn target_groups(child: Option<u32>, foreground: Option<libc::pid_t>) -> Vec<libc::pid_t> {
+    let mut groups = Vec::new();
+    if let Some(pid) = child {
+        groups.push(pid as libc::pid_t);
+    }
+    if let Some(pgid) = foreground {
+        if !groups.contains(&pgid) {
+            groups.push(pgid);
+        }
+    }
+    groups
+}
+
+/// SIGTERM every group, wait for them to go, then SIGKILL whatever is left.
+/// Runs on a detached thread so it can wait without blocking the caller.
+#[cfg(unix)]
+fn kill_process_groups(groups: Vec<libc::pid_t>) {
     // SIGTERM — ask nicely. ESRCH (no such process) is fine: alacritty's
-    // event loop may have already reaped the child.
-    unsafe { libc::killpg(pid, libc::SIGTERM) };
+    // event loop may have already reaped, or SIGHUP may have done the job.
+    for &pgid in &groups {
+        unsafe { libc::killpg(pgid, libc::SIGTERM) };
+    }
 
-    std::thread::sleep(TERM_GRACE);
+    // Poll rather than sleeping the whole grace window.
+    //
+    // We deliberately do not `waitpid` (see below), so a pid can be reaped by
+    // alacritty's event loop and returned to the OS at any point during the
+    // wait — after which anything we signal lands on whoever holds the recycled
+    // pid. Since `PtyTerminal::spawn` creates `setsid()` group leaders, the
+    // plausible victim is another one of our own terminals. Returning the
+    // instant the groups are gone keeps that window to tens of milliseconds
+    // instead of the full grace. It narrows the hazard rather than removing it;
+    // removing it needs allele to own the reaping (kqueue `EVFILT_PROC`).
+    const POLL: Duration = Duration::from_millis(25);
+    let deadline = std::time::Instant::now() + TERM_GRACE;
+    loop {
+        // killpg(pgid, 0) probes for a group's existence without signalling.
+        if groups
+            .iter()
+            .all(|&pgid| unsafe { libc::killpg(pgid, 0) } != 0)
+        {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(POLL);
+    }
 
-    // killpg(pid, 0) probes for the group's existence; if still alive,
-    // escalate to SIGKILL.
-    let alive = unsafe { libc::killpg(pid, 0) } == 0;
-    if alive {
-        unsafe { libc::killpg(pid, libc::SIGKILL) };
+    for &pgid in &groups {
+        if unsafe { libc::killpg(pgid, 0) } == 0 {
+            unsafe { libc::killpg(pgid, libc::SIGKILL) };
+        }
     }
     // Do not waitpid — alacritty's EventLoop owns the Child and reaps it
     // when it drops. Waiting here would race with that reaper.
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::target_groups;
+
+    /// An agent PTY execs the binary directly, so the forked pid *is* the
+    /// foreground group. One entry, not a duplicate signal.
+    #[test]
+    fn agent_pty_yields_a_single_group() {
+        assert_eq!(target_groups(Some(4242), Some(4242)), vec![4242]);
+    }
+
+    /// A drawer tab spawns `/usr/bin/login -flp <user> /bin/zsh …`; login forks,
+    /// the shell re-groups, and job control gives the dev server a group of its
+    /// own. Signalling only `child` — which is what shipped before DEV-449 —
+    /// reaches login and leaves the server running.
+    #[test]
+    fn drawer_tab_yields_both_the_shell_and_the_job() {
+        assert_eq!(target_groups(Some(8244), Some(8455)), vec![8244, 8455]);
+    }
+
+    /// `tcgetpgrp` can fail — no controlling terminal, or the master already
+    /// closed. Falling back to the old behaviour beats signalling nothing.
+    #[test]
+    fn a_failed_tcgetpgrp_falls_back_to_the_child_group() {
+        assert_eq!(target_groups(Some(8244), None), vec![8244]);
+    }
+
+    /// `tcgetpgrp` returns -1 on error and 0 is never a valid pgid; `Drop`
+    /// filters both to `None` before this point, so nothing to signal.
+    #[test]
+    fn nothing_known_means_nothing_signalled() {
+        assert!(target_groups(None, None).is_empty());
+    }
 }

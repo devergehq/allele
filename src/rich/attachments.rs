@@ -120,7 +120,7 @@ const READABLE_EXTS: &[&str] = &[
 /// `~/.allele/attachments/`. Returns `None` if the user has no home dir
 /// (in which case attachments are disabled — not fatal).
 pub fn attachments_root() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".allele").join("attachments"))
+    crate::paths::attachments_dir()
 }
 
 /// Per-session attachments directory.
@@ -155,7 +155,7 @@ pub fn copy_file(src: &Path, session_id: &str) -> std::io::Result<Attachment> {
         .and_then(|n| n.to_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| filename.clone());
-    let is_image = IMAGE_EXTS.iter().any(|e| *e == ext.as_str());
+    let is_image = IMAGE_EXTS.contains(&ext.as_str());
     Ok(Attachment {
         id,
         original_name,

@@ -93,6 +93,16 @@ pub struct TerminalView {
     element_origin_x: std::sync::Arc<std::sync::atomic::AtomicI32>,
     element_origin_y: std::sync::Arc<std::sync::atomic::AtomicI32>,
     scrollbar_dragging: bool,
+    /// Set the first time a keystroke reaches this terminal, and never
+    /// cleared. Shared with the owning `DrawerTab` so the DEV-445 idle
+    /// reaper can tell a tab still running exactly what we launched from
+    /// one the user has since taken over — only the former can be killed
+    /// and faithfully restored.
+    ///
+    /// Deliberately not fed by `send_input`: that is how we replay a
+    /// configured command, and a tab must not disqualify itself from
+    /// parking merely by being unparked.
+    user_typed: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // Cursor blink
     cursor_visible: bool,
     last_keypress: Instant,
@@ -155,12 +165,15 @@ impl TerminalView {
     }
 
     /// Create a terminal view running a specific command, or default shell if None
+    /// `extra_env` carries the project's declared environment (DEV-485) —
+    /// empty for terminals that belong to no project.
     pub fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
         command: Option<ShellCommand>,
         working_dir: Option<PathBuf>,
         initial_font_size: f32,
+        extra_env: Vec<(String, String)>,
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let font_size = clamp_font_size(initial_font_size);
@@ -181,55 +194,63 @@ impl TerminalView {
         let cell_height = f32::from(measured_h);
 
         let saved_working_dir = working_dir.clone();
-        let terminal = match PtyTerminal::spawn(TermSize::default(), command, working_dir) {
-            Ok(t) => Some(t),
-            Err(e) => {
-                warn!("Failed to create PTY: {e}");
-                return Self {
-                    terminal: None,
-                    error: Some(format!("Failed to create PTY: {e}")),
-                    last_cols: 80,
-                    last_rows: 24,
-                    focus_handle,
-                    font_size,
-                    cell_width,
-                    cell_height,
-                    scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-                    scroll_pixel_accumulator: std::sync::Arc::new(std::sync::Mutex::new(0.0)),
-                    // -1 = "not yet painted" sentinel. A real origin can be
-                    // exactly 0 (left sidebar hidden), so 0 must stay valid.
-                    element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
-                    element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
-                    scrollbar_dragging: false,
-                    cursor_visible: true,
-                    last_keypress: Instant::now(),
-                    last_blink_toggle: Instant::now(),
-                    scrollbar_opacity: 0.0,
-                    last_scroll_time: Instant::now() - Duration::from_secs(10),
-                    selection_anchor: None,
-                    selection_extent: None,
-                    selecting: false,
-                    search_active: false,
-                    search_query: String::new(),
-                    search_matches: Vec::new(),
-                    search_current_idx: 0,
-                    hovered_url: None,
-                    hovered_path: None,
-                    working_dir: saved_working_dir.clone(),
-                    visible_url_spans: Vec::new(),
-                    visible_path_spans: Vec::new(),
-                    terminal_context_menu: None,
-                    bottom_inset: 0.0,
-                    right_inset: 0.0,
-                    pending_resize: None,
-                    bell_flash_start: None,
-                    frame_count: 0,
-                    last_fps_time: Instant::now(),
-                    current_fps: 0,
-                    keymap: KeymapConfig::default(),
-                };
-            }
-        };
+        let terminal =
+            match PtyTerminal::spawn(TermSize::default(), command, working_dir, extra_env) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    warn!("Failed to create PTY: {e}");
+                    return Self {
+                        terminal: None,
+                        error: Some(format!("Failed to create PTY: {e}")),
+                        last_cols: 80,
+                        last_rows: 24,
+                        focus_handle,
+                        font_size,
+                        cell_width,
+                        cell_height,
+                        scroll_dirty: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+                            false,
+                        )),
+                        scroll_pixel_accumulator: std::sync::Arc::new(std::sync::Mutex::new(0.0)),
+                        // -1 = "not yet painted" sentinel. A real origin can be
+                        // exactly 0 (left sidebar hidden), so 0 must stay valid.
+                        element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(
+                            -1,
+                        )),
+                        element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(
+                            -1,
+                        )),
+                        scrollbar_dragging: false,
+                        user_typed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                        cursor_visible: true,
+                        last_keypress: Instant::now(),
+                        last_blink_toggle: Instant::now(),
+                        scrollbar_opacity: 0.0,
+                        last_scroll_time: Instant::now() - Duration::from_secs(10),
+                        selection_anchor: None,
+                        selection_extent: None,
+                        selecting: false,
+                        search_active: false,
+                        search_query: String::new(),
+                        search_matches: Vec::new(),
+                        search_current_idx: 0,
+                        hovered_url: None,
+                        hovered_path: None,
+                        working_dir: saved_working_dir.clone(),
+                        visible_url_spans: Vec::new(),
+                        visible_path_spans: Vec::new(),
+                        terminal_context_menu: None,
+                        bottom_inset: 0.0,
+                        right_inset: 0.0,
+                        pending_resize: None,
+                        bell_flash_start: None,
+                        frame_count: 0,
+                        last_fps_time: Instant::now(),
+                        current_fps: 0,
+                        keymap: KeymapConfig::default(),
+                    };
+                }
+            };
 
         // Auto-focus this terminal on creation
         focus_handle.focus(window, cx);
@@ -357,7 +378,7 @@ impl TerminalView {
                         }
 
                         // Signal whether the PTY has exited and all animations settled
-                        let pty_done = this.terminal.as_ref().map_or(true, |t| t.exited);
+                        let pty_done = this.terminal.as_ref().is_none_or(|t| t.exited);
                         let animations_done = !bell_expired
                             && this.bell_flash_start.is_none()
                             && this.pending_resize.is_none()
@@ -370,9 +391,11 @@ impl TerminalView {
                 match result {
                     Ok((should_redraw, settled)) => {
                         if should_redraw {
-                            if this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
-                                cx.notify();
-                            }).is_err() {
+                            let redrawn =
+                                this.update(cx, |_this: &mut Self, cx: &mut Context<Self>| {
+                                    cx.notify();
+                                });
+                            if redrawn.is_err() {
                                 break; // entity dropped
                             }
                         }
@@ -408,6 +431,7 @@ impl TerminalView {
             element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             scrollbar_dragging: false,
+            user_typed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cursor_visible: true,
             last_keypress: Instant::now(),
             last_blink_toggle: Instant::now(),
@@ -467,7 +491,7 @@ impl TerminalView {
 
     /// Check if the PTY process has exited
     pub fn has_exited(&self) -> bool {
-        self.terminal.as_ref().map_or(true, |t| t.exited)
+        self.terminal.as_ref().is_none_or(|t| t.exited)
     }
 
     /// Write bytes directly to the PTY, as if the user had typed them.
@@ -475,10 +499,27 @@ impl TerminalView {
     /// `allele.json` — the shell reads them from its stdin buffer once the
     /// rc files finish loading, so the command runs but the shell stays
     /// interactive afterwards.
+    /// Handle to this terminal's "the user has typed here" flag.
+    ///
+    /// Cloned into the owning `DrawerTab` so parkability can be evaluated
+    /// without a `Context` — which is what keeps the DEV-445 policy a pure
+    /// function over plain data rather than something only reachable from a
+    /// render tick.
+    pub fn user_typed_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        self.user_typed.clone()
+    }
+
     pub fn send_input(&self, bytes: &[u8]) {
         if let Some(ref t) = self.terminal {
             t.write(bytes);
         }
+    }
+
+    /// Pid of the agent process running in this terminal, if it spawned.
+    /// See [`crate::dispatch::address`] — it is what a durable session
+    /// address is derived from.
+    pub fn agent_pid(&self) -> Option<u32> {
+        self.terminal.as_ref().and_then(|t| t.child_pid())
     }
 
     /// Get the current terminal title set by the shell via OSC sequences.
@@ -1591,6 +1632,8 @@ impl Render for TerminalView {
             .on_key_down(
                 cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
                     this.last_keypress = Instant::now();
+                    this.user_typed
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
                     this.cursor_visible = true;
 
                     let key = event.keystroke.key.as_str();

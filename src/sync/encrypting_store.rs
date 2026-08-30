@@ -72,10 +72,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_ne!(at_rest, plaintext, "payload stored in the clear");
-        assert!(
-            !at_rest.windows(9).any(|w| w == b"PLAINTEXT"),
-            "plaintext leaked into stored ciphertext"
-        );
+        crate::sync::leak_check::assert_not_leaked(&at_rest, b"PLAINTEXT", "plaintext");
 
         // Reading back through the decorator returns the plaintext.
         assert_eq!(

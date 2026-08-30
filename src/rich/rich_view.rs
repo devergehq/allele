@@ -1275,7 +1275,7 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
             let path = input
                 .get("path")
                 .and_then(|v| v.as_str())
-                .map(|p| super::document::short_path(p))
+                .map(super::document::short_path)
                 .unwrap_or_default();
             let include = input.get("include").and_then(|v| v.as_str());
             let mut detail = format!("/{pattern}/");
@@ -1317,7 +1317,7 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
             );
             if !prompt.is_empty() {
                 let preview = if prompt.len() > 500 {
-                    format!("{}…", truncate_to_char_boundary(&prompt, 497))
+                    format!("{}…", truncate_to_char_boundary(prompt, 497))
                 } else {
                     prompt.to_string()
                 };
@@ -1553,19 +1553,19 @@ fn render_diff(
 
             if hunk_ratio < 0.4 {
                 // Structural replacement — group reds then greens.
-                for j in del_start..del_end {
+                for change in &changes[del_start..del_end] {
                     diff = diff.child(render_diff_line_plain(
                         "-",
-                        &changes[j].1,
+                        &change.1,
                         code_size,
                         with_alpha(theme().danger, 0.8),
                         with_alpha(theme().danger, 0.1),
                     ));
                 }
-                for j in ins_start..ins_end {
+                for change in &changes[ins_start..ins_end] {
                     diff = diff.child(render_diff_line_plain(
                         "+",
-                        &changes[j].1,
+                        &change.1,
                         code_size,
                         with_alpha(theme().success, 0.8),
                         with_alpha(theme().success, 0.1),
@@ -1851,7 +1851,7 @@ fn render_session_end(
     if let Some(text) = result_text {
         if !text.is_empty() {
             let preview = if text.len() > 500 {
-                format!("{}...", truncate_to_char_boundary(&text, 497))
+                format!("{}...", truncate_to_char_boundary(text, 497))
             } else {
                 text.to_string()
             };

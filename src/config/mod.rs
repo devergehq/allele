@@ -11,7 +11,7 @@
 //! warning on stderr so the author can see why it was ignored.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::net::TcpListener;
 use std::path::Path;
 use tracing::warn;
@@ -55,6 +55,14 @@ pub struct ProjectConfig {
     /// clone is archived/trashed. Empty or whitespace-only is absent.
     #[serde(default)]
     pub shutdown: Option<String>,
+    /// Literal environment variables for every process the session spawns.
+    /// See `ProjectSettings::env`.
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    /// Directories prepended to `PATH`, in declared order.
+    /// See `ProjectSettings::path_prepend`.
+    #[serde(default)]
+    pub path_prepend: Vec<String>,
 }
 
 impl ProjectConfig {
@@ -85,7 +93,11 @@ impl ProjectConfig {
     /// Returns `None` when the user hasn't configured any orchestration
     /// for this project (no terminals and no startup command).
     pub fn from_settings(settings: &ProjectSettings) -> Option<Self> {
-        if settings.terminals.is_empty() && settings.startup.is_none() {
+        if settings.terminals.is_empty()
+            && settings.startup.is_none()
+            && settings.env.is_empty()
+            && settings.path_prepend.is_empty()
+        {
             return None;
         }
         Some(Self {
@@ -94,7 +106,120 @@ impl ProjectConfig {
             agent: None,
             startup: settings.startup.clone(),
             shutdown: settings.shutdown.clone(),
+            env: settings.env.clone(),
+            path_prepend: settings.path_prepend.clone(),
         })
+    }
+}
+
+/// The environment a project declares for every process its sessions spawn.
+///
+/// Kept separate from the rest of `ProjectConfig` because it applies to more
+/// than orchestration: a session created with orchestration disabled still
+/// needs its toolchain resolved, so this is read at every spawn site rather
+/// than behind the `runs_startup()` gate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProjectEnv {
+    pub vars: BTreeMap<String, String>,
+    pub path_prepend: Vec<String>,
+}
+
+impl ProjectEnv {
+    /// Choose each field independently: a value declared in `allele.json` wins,
+    /// and anything it leaves undeclared falls back to project settings. This
+    /// is the field-level precedence the `agent` override uses, where an
+    /// `allele.json` carrying no `agent` key falls through to the global
+    /// default rather than forcing "no agent".
+    ///
+    /// The first version of this switched on the *presence* of `allele.json`,
+    /// so a file pinning only terminals silently discarded env configured in
+    /// the settings pane — no error, values still shown in the UI and still
+    /// written to settings.json, just never applied (DEV-488).
+    ///
+    /// Consequence worth knowing: an empty declaration cannot *clear* an
+    /// inherited value, because empty is how "undeclared" is spelled in JSON
+    /// for a map and a list. `agent: null` behaves the same way.
+    fn pick(cfg: Option<&ProjectConfig>, settings: &ProjectSettings) -> Self {
+        let declared_vars = cfg.map(|c| c.env.clone()).unwrap_or_default();
+        let declared_paths = cfg.map(|c| c.path_prepend.clone()).unwrap_or_default();
+        Self {
+            vars: if declared_vars.is_empty() {
+                settings.env.clone()
+            } else {
+                declared_vars
+            },
+            path_prepend: if declared_paths.is_empty() {
+                settings.path_prepend.clone()
+            } else {
+                declared_paths
+            },
+        }
+    }
+
+    /// Resolve from a per-repo `allele.json` layered over the project's
+    /// settings, so a repo can pin its own toolchain for everyone who clones
+    /// it. See [`Self::pick`] for the precedence.
+    pub fn resolve(source_path: &Path, settings: &ProjectSettings) -> Self {
+        Self::pick(ProjectConfig::load(source_path).as_ref(), settings)
+    }
+
+    /// Same precedence as [`Self::resolve`], for the call sites that have
+    /// already loaded a `ProjectConfig` for other reasons. `settings` is still
+    /// required: the loaded config may be a per-repo `allele.json` that
+    /// declares no environment at all.
+    pub fn from_config(cfg: &ProjectConfig, settings: &ProjectSettings) -> Self {
+        Self::pick(Some(cfg), settings)
+    }
+
+    /// Materialise into `(key, value)` pairs ready for a PTY or `Command`.
+    ///
+    /// `path_prepend` is folded into a single `PATH` entry built from
+    /// `inherited_path` — passed in rather than read from the process so this
+    /// stays testable. An explicit `PATH` in `vars` is treated as the base to
+    /// prepend onto, so declaring both cannot silently discard one of them.
+    /// Blank entries are dropped and exact duplicates collapse to their first
+    /// occurrence, keeping a hand-edited settings.json from bloating PATH.
+    pub fn materialise(
+        &self,
+        port: Option<u16>,
+        folder: &Path,
+        inherited_path: Option<&str>,
+    ) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = self
+            .vars
+            .iter()
+            .filter(|(key, _)| !key.trim().is_empty() && *key != "PATH")
+            .map(|(key, value)| (key.clone(), substitute(value, port, folder)))
+            .collect();
+
+        if self.path_prepend.is_empty() {
+            if let Some(path) = self.vars.get("PATH") {
+                out.push(("PATH".to_string(), substitute(path, port, folder)));
+            }
+            return out;
+        }
+
+        let base = self
+            .vars
+            .get("PATH")
+            .map(|p| substitute(p, port, folder))
+            .or_else(|| inherited_path.map(str::to_string))
+            .unwrap_or_default();
+
+        let mut seen = HashSet::new();
+        let mut entries: Vec<String> = Vec::new();
+        for dir in &self.path_prepend {
+            let dir = substitute(dir, port, folder);
+            if dir.trim().is_empty() || !seen.insert(dir.clone()) {
+                continue;
+            }
+            entries.push(dir);
+        }
+        if !base.is_empty() {
+            entries.push(base);
+        }
+        out.push(("PATH".to_string(), entries.join(":")));
+        out
     }
 }
 
@@ -132,8 +257,9 @@ pub fn resolve_script_command(cmd: &str, project_name: &str) -> String {
     if trimmed.is_empty() || trimmed.starts_with('/') || trimmed.starts_with('~') {
         return trimmed.to_string();
     }
-    let home = std::env::var("HOME").unwrap_or_default();
-    let scripts_dir = format!("{home}/.allele/projects/{project_name}/scripts");
+    let scripts_dir = crate::paths::project_scripts_dir(project_name)
+        .map(|p| p.display().to_string())
+        .unwrap_or_default();
     // If the first token looks like a relative path to a script, resolve it
     let first_token = trimmed.split_whitespace().next().unwrap_or("");
     if first_token.contains('/') || first_token.ends_with(".sh") {
@@ -285,5 +411,212 @@ mod tests {
         let port = allocate_port(&reserved).expect("should find a free port");
         assert!(!reserved.contains(&port));
         assert!((PORT_RANGE_START..=PORT_RANGE_END).contains(&port));
+    }
+
+    fn env_of(pairs: &[(&str, &str)], prepend: &[&str]) -> ProjectEnv {
+        ProjectEnv {
+            vars: pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            path_prepend: prepend.iter().map(|d| d.to_string()).collect(),
+        }
+    }
+
+    fn lookup<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
+        env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
+    }
+
+    #[test]
+    fn materialise_empty_env_yields_nothing() {
+        let out = ProjectEnv::default().materialise(None, Path::new("/tmp/c"), Some("/usr/bin"));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn materialise_prepends_path_in_declared_order() {
+        let env = env_of(&[], &["/opt/php/bin", "/opt/php/sbin"]);
+        let out = env.materialise(None, Path::new("/tmp/c"), Some("/usr/bin:/bin"));
+        assert_eq!(
+            lookup(&out, "PATH"),
+            Some("/opt/php/bin:/opt/php/sbin:/usr/bin:/bin")
+        );
+    }
+
+    #[test]
+    fn materialise_passes_vars_through_untouched() {
+        let env = env_of(&[("APP_ENV", "local")], &[]);
+        let out = env.materialise(None, Path::new("/tmp/c"), Some("/usr/bin"));
+        assert_eq!(out, vec![("APP_ENV".to_string(), "local".to_string())]);
+    }
+
+    #[test]
+    fn materialise_substitutes_in_values_and_paths() {
+        let env = env_of(
+            &[("APP_URL", "http://localhost:{{unique_port}}")],
+            &["{{folder}}/bin"],
+        );
+        let out = env.materialise(Some(42000), Path::new("/tmp/clone"), Some("/usr/bin"));
+        assert_eq!(lookup(&out, "APP_URL"), Some("http://localhost:42000"));
+        assert_eq!(lookup(&out, "PATH"), Some("/tmp/clone/bin:/usr/bin"));
+    }
+
+    #[test]
+    fn materialise_treats_explicit_path_as_the_base() {
+        // Declaring both must not silently drop either one.
+        let env = env_of(&[("PATH", "/custom")], &["/opt/php/bin"]);
+        let out = env.materialise(None, Path::new("/tmp/c"), Some("/usr/bin"));
+        assert_eq!(lookup(&out, "PATH"), Some("/opt/php/bin:/custom"));
+    }
+
+    #[test]
+    fn materialise_keeps_explicit_path_when_nothing_is_prepended() {
+        let env = env_of(&[("PATH", "/custom")], &[]);
+        let out = env.materialise(None, Path::new("/tmp/c"), Some("/usr/bin"));
+        assert_eq!(lookup(&out, "PATH"), Some("/custom"));
+    }
+
+    #[test]
+    fn materialise_drops_blank_and_duplicate_path_entries() {
+        let env = env_of(
+            &[],
+            &["/opt/php/bin", "  ", "/opt/php/bin", "/opt/node/bin"],
+        );
+        let out = env.materialise(None, Path::new("/tmp/c"), Some("/usr/bin"));
+        assert_eq!(
+            lookup(&out, "PATH"),
+            Some("/opt/php/bin:/opt/node/bin:/usr/bin")
+        );
+    }
+
+    #[test]
+    fn materialise_without_inherited_path_emits_only_the_prepends() {
+        let env = env_of(&[], &["/opt/php/bin"]);
+        let out = env.materialise(None, Path::new("/tmp/c"), None);
+        assert_eq!(lookup(&out, "PATH"), Some("/opt/php/bin"));
+    }
+
+    #[test]
+    fn materialise_ignores_blank_keys() {
+        let env = env_of(&[("", "ignored"), ("KEEP", "yes")], &[]);
+        let out = env.materialise(None, Path::new("/tmp/c"), Some("/usr/bin"));
+        assert_eq!(out, vec![("KEEP".to_string(), "yes".to_string())]);
+    }
+
+    #[test]
+    fn load_parses_env_and_path_prepend() {
+        let tmp = std::env::temp_dir().join("allele-test-env-cfg");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("allele.json"),
+            r#"{"env":{"APP_ENV":"local"},"path_prepend":["/opt/php/bin"]}"#,
+        )
+        .unwrap();
+        let cfg = ProjectConfig::load(&tmp).expect("should parse");
+        assert_eq!(cfg.env.get("APP_ENV").map(String::as_str), Some("local"));
+        assert_eq!(cfg.path_prepend, vec!["/opt/php/bin".to_string()]);
+    }
+
+    #[test]
+    fn from_settings_carries_env_even_with_no_orchestration() {
+        // A project that only pins a toolchain still needs a config back.
+        let settings = ProjectSettings {
+            path_prepend: vec!["/opt/php/bin".to_string()],
+            ..Default::default()
+        };
+        let cfg = ProjectConfig::from_settings(&settings).expect("env alone is enough");
+        assert_eq!(cfg.path_prepend, vec!["/opt/php/bin".to_string()]);
+        assert!(cfg.terminals.is_empty());
+    }
+
+    #[test]
+    fn from_settings_still_none_when_truly_empty() {
+        assert!(ProjectConfig::from_settings(&ProjectSettings::default()).is_none());
+    }
+
+    /// Write an `allele.json` into a fresh dir and hand back the dir.
+    fn project_with_allele_json(name: &str, body: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(name);
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(tmp.join("allele.json"), body).unwrap();
+        tmp
+    }
+
+    fn settings_with_env() -> ProjectSettings {
+        let mut env = BTreeMap::new();
+        env.insert("FROM".to_string(), "settings".to_string());
+        ProjectSettings {
+            env,
+            path_prepend: vec!["/from/settings".to_string()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn resolve_uses_settings_when_no_allele_json() {
+        let tmp = std::env::temp_dir().join("allele-test-resolve-none");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let env = ProjectEnv::resolve(&tmp, &settings_with_env());
+        assert_eq!(env.vars.get("FROM").map(String::as_str), Some("settings"));
+        assert_eq!(env.path_prepend, vec!["/from/settings".to_string()]);
+    }
+
+    #[test]
+    fn resolve_keeps_settings_when_allele_json_declares_no_env() {
+        // DEV-488: an allele.json present for other reasons — here, terminals —
+        // must not silently discard environment configured in the settings pane.
+        let tmp = project_with_allele_json(
+            "allele-test-resolve-silent",
+            r#"{"terminals":[{"label":"Serve","command":"bin/dev"}]}"#,
+        );
+        let env = ProjectEnv::resolve(&tmp, &settings_with_env());
+        assert_eq!(env.vars.get("FROM").map(String::as_str), Some("settings"));
+        assert_eq!(env.path_prepend, vec!["/from/settings".to_string()]);
+    }
+
+    #[test]
+    fn resolve_prefers_allele_json_when_it_declares_env() {
+        let tmp = project_with_allele_json(
+            "allele-test-resolve-declared",
+            r#"{"env":{"FROM":"allele.json"},"path_prepend":["/from/allele-json"]}"#,
+        );
+        let env = ProjectEnv::resolve(&tmp, &settings_with_env());
+        assert_eq!(
+            env.vars.get("FROM").map(String::as_str),
+            Some("allele.json")
+        );
+        assert_eq!(env.path_prepend, vec!["/from/allele-json".to_string()]);
+    }
+
+    #[test]
+    fn resolve_falls_back_per_field_not_wholesale() {
+        // allele.json pins the PATH but says nothing about vars, so the vars
+        // still come from settings. The two fields are independent.
+        let tmp = project_with_allele_json(
+            "allele-test-resolve-partial",
+            r#"{"path_prepend":["/from/allele-json"]}"#,
+        );
+        let env = ProjectEnv::resolve(&tmp, &settings_with_env());
+        assert_eq!(env.vars.get("FROM").map(String::as_str), Some("settings"));
+        assert_eq!(env.path_prepend, vec!["/from/allele-json".to_string()]);
+    }
+
+    #[test]
+    fn from_config_applies_the_same_fallback() {
+        // The startup/shutdown sites reach ProjectEnv this way, and were
+        // affected by the same bug.
+        let cfg = ProjectConfig::from_settings(&ProjectSettings {
+            terminals: vec![TerminalCfg {
+                label: "Serve".to_string(),
+                command: "bin/dev".to_string(),
+            }],
+            ..Default::default()
+        })
+        .expect("terminals alone produce a config");
+        let env = ProjectEnv::from_config(&cfg, &settings_with_env());
+        assert_eq!(env.vars.get("FROM").map(String::as_str), Some("settings"));
+        assert_eq!(env.path_prepend, vec!["/from/settings".to_string()]);
     }
 }

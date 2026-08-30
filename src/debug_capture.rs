@@ -36,7 +36,7 @@ fn now_ms() -> u128 {
 }
 
 pub(crate) fn debug_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|home| home.join(".allele").join("debug"))
+    crate::paths::debug_dir()
 }
 
 pub(crate) fn take_request() -> bool {

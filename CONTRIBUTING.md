@@ -44,6 +44,40 @@ cargo build --release
 
 First build is slow because GPUI and alacritty_terminal are large. Incremental builds are fast.
 
+## Testing a change without disturbing your live instance
+
+Allele is usually developed *in* Allele, so trying a change means running a
+second instance — and by default both would share `~/.allele/state.json`, the
+workspaces root, settings, hooks and the MCP control socket. A second process
+atomically rewriting `state.json` can clobber the first one's session list.
+
+Run the test instance against its own root:
+
+```sh
+cargo run --release -- --sandbox
+```
+
+`--sandbox` uses `~/.allele-sandbox`, and on first run scaffolds a throwaway git
+repository and registers it as a project, so there is something to open sessions
+against that is not your real work. Delete the whole thing whenever you like:
+
+```sh
+rm -rf ~/.allele-sandbox
+```
+
+For a root of your own choosing, `--home <dir>` (or the `ALLELE_HOME`
+environment variable — the flag wins). Both are refused together, since they
+disagree about where to run and guessing risks writing to the live tree.
+
+A redirected instance is marked **SANDBOX** in its window title and beside the
+sidebar heading, because two identical windows side by side is its own hazard.
+
+**What is not redirected**, deliberately: `~/.claude`, `~/.claude.json`,
+`~/.config/opencode` and the paths Allele probes for installed agent binaries.
+Those belong to other tools. A sandbox drives your real Claude Code against
+throwaway projects — redirecting them would give you a broken agent rather than
+an isolated one. See `src/paths.rs`.
+
 ## Code conventions
 
 - **Rust 2021 edition.** Standard `rustfmt` and `clippy` — no custom rules yet. Run `cargo fmt` before pushing: CI runs `cargo fmt --all -- --check` on every PR (`.github/workflows/ci.yml`), and `master` requires that check to pass.

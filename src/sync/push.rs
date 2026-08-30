@@ -144,6 +144,7 @@ mod tests {
             active_runtime_secs: 0,
             merged: false,
             drawer_tab_names: Vec::new(),
+            drawer_tabs: Vec::new(),
             drawer_active_tab: 0,
             browser_tab_id: None,
             browser_last_url: None,
@@ -192,7 +193,7 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert!(!at_rest.windows(2).any(|w| w == b"My"));
+        crate::sync::leak_check::assert_not_leaked(&at_rest, b"My session", "session label");
 
         // Decodes to the expected bundle.
         let bytes = store.get(&meta_key("sess-1")).await.unwrap().unwrap();

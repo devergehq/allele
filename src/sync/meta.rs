@@ -170,6 +170,7 @@ impl SessionBundleMeta {
             active_runtime_secs: self.active_runtime_secs,
             merged: false,
             drawer_tab_names: Vec::new(),
+            drawer_tabs: Vec::new(),
             drawer_active_tab: 0,
             browser_tab_id: None,
             browser_last_url: None,
@@ -258,6 +259,16 @@ mod tests {
             active_runtime_secs: 120,
             merged: true,
             drawer_tab_names: vec!["build".into(), "logs".into()],
+            drawer_tabs: vec![
+                crate::state::PersistedDrawerTab {
+                    name: "build".into(),
+                    replay: Some("bun dev".into()),
+                },
+                crate::state::PersistedDrawerTab {
+                    name: "logs".into(),
+                    replay: None,
+                },
+            ],
             drawer_active_tab: 1,
             browser_tab_id: Some(7),
             browser_last_url: Some("https://example.test/x".into()),

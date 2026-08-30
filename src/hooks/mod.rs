@@ -22,7 +22,7 @@ use crate::errors::AlleleError;
 
 /// Canonical on-disk locations for the hook infrastructure.
 pub fn base_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".allele"))
+    crate::paths::allele_dir()
 }
 
 pub fn hooks_settings_path() -> Option<PathBuf> {
@@ -245,16 +245,9 @@ pub struct HookPayload {
 /// Tracks per-file read offsets so previously-processed lines are never
 /// re-emitted. In-memory only — if the app restarts, we fast-forward each
 /// file to its current end (see [`EventWatcher::initialize_offsets`]).
+#[derive(Default)]
 pub struct EventWatcher {
     offsets: std::collections::HashMap<PathBuf, u64>,
-}
-
-impl Default for EventWatcher {
-    fn default() -> Self {
-        Self {
-            offsets: std::collections::HashMap::new(),
-        }
-    }
 }
 
 impl EventWatcher {

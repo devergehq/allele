@@ -79,11 +79,11 @@ pub fn process_rss_bytes() -> Option<u64> {
 }
 
 fn crash_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".allele").join("crash"))
+    crate::paths::crash_dir()
 }
 
 fn diagnostic_dir() -> Option<PathBuf> {
-    Some(dirs::home_dir()?.join(".allele").join("diagnostics"))
+    crate::paths::diagnostics_dir()
 }
 
 fn write_growth_report(samples: &VecDeque<u64>) {
@@ -281,7 +281,7 @@ mod tests {
     fn growth_tracker_detects_sustained_growth() {
         let mut tracker = GrowthTracker::default();
         let intervals = GROWTH_WINDOW_SAMPLES as u64 - 1;
-        let step = (SUSTAINED_GROWTH_BYTES + intervals - 1) / intervals;
+        let step = SUSTAINED_GROWTH_BYTES.div_ceil(intervals);
         let mut detected = false;
         for index in 0..GROWTH_WINDOW_SAMPLES {
             detected = tracker.observe(256 * 1024 * 1024 + step * index as u64);

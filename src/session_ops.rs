@@ -102,6 +102,9 @@ impl AppState {
         // available" — the PTY drops into the user's default shell.
         let project_override =
             config::ProjectConfig::load(&project.source_path).and_then(|c| c.agent);
+        // The project's declared environment (DEV-485). Resolved here, from the
+        // source repo, because the clone does not exist yet.
+        let project_env = config::ProjectEnv::resolve(&project.source_path, &project.settings);
         let agent = agents::resolve(
             &self.user_settings.agents,
             self.user_settings.default_agent.as_deref(),
@@ -260,6 +263,14 @@ impl AppState {
                 }
 
                 // Create the terminal view with the clone as PWD
+                // Materialise the project environment against the clone. `{{unique_port}}`
+                // is not available here — the port is allocated later, in
+                // `apply_project_config` — so it resolves for drawer terminals and the
+                // startup command but not for the agent PTY. PATH pinning, the reason
+                // this exists, does not depend on it. See DEV-485.
+                let inherited_path = std::env::var("PATH").ok();
+                let agent_env =
+                    project_env.materialise(None, &clone_path, inherited_path.as_deref());
                 let initial_font_size = this.user_settings.font_size;
                 let terminal_view = cx.new(|cx| {
                     TerminalView::new(
@@ -268,6 +279,7 @@ impl AppState {
                         command,
                         Some(clone_path.clone()),
                         initial_font_size,
+                        agent_env,
                     )
                 });
 
@@ -435,6 +447,9 @@ impl AppState {
 
         let project_override =
             config::ProjectConfig::load(&project.source_path).and_then(|c| c.agent);
+        // The project's declared environment (DEV-485). Resolved here, from the
+        // source repo, because the clone does not exist yet.
+        let project_env = config::ProjectEnv::resolve(&project.source_path, &project.settings);
         let agent = agents::resolve(
             &self.user_settings.agents,
             self.user_settings.default_agent.as_deref(),
@@ -638,6 +653,14 @@ impl AppState {
                     crate::git::exclude_pattern_in_clone(&clone_path, ".allele-session");
                 }
 
+                // Materialise the project environment against the clone. `{{unique_port}}`
+                // is not available here — the port is allocated later, in
+                // `apply_project_config` — so it resolves for drawer terminals and the
+                // startup command but not for the agent PTY. PATH pinning, the reason
+                // this exists, does not depend on it. See DEV-485.
+                let inherited_path = std::env::var("PATH").ok();
+                let agent_env =
+                    project_env.materialise(None, &clone_path, inherited_path.as_deref());
                 let initial_font_size = this.user_settings.font_size;
                 let terminal_view = cx.new(|cx| {
                     TerminalView::new(
@@ -646,6 +669,7 @@ impl AppState {
                         command,
                         Some(clone_path.clone()),
                         initial_font_size,
+                        agent_env,
                     )
                 });
 
@@ -757,6 +781,7 @@ impl AppState {
                 if let Some(origin) = this.pending_dispatch_origins.remove(&session.id) {
                     session.origin = origin;
                 }
+                let dispatched = session.origin.is_dispatched();
 
                 let Some(project) = this.projects.get_mut(project_idx) else {
                     return;
@@ -767,7 +792,17 @@ impl AppState {
                     project_idx,
                     session_idx,
                 };
-                this.active = Some(cursor);
+                // Selecting the new session is right when a human asked for
+                // it, and wrong when an agent did (DEV-425). Dispatch exists so
+                // a human keeps working while sessions start; yanking them out
+                // of the session they are typing in makes a fan-out of five
+                // *more* disruptive than starting them by hand, which defeats
+                // the point. The session still appears in the sidebar with its
+                // "dispatched by …" attribution, so it is announced without
+                // interrupting.
+                if !dispatched {
+                    this.active = Some(cursor);
+                }
                 this.apply_project_config(cursor, window, cx);
                 this.mark_state_dirty();
                 Self::schedule_operation_result_repaint(cx);
@@ -784,7 +819,7 @@ impl AppState {
                         cx.background_executor()
                             .timer(std::time::Duration::from_millis(80))
                             .await;
-                        let _ = cx.update(|cx| {
+                        cx.update(|cx| {
                             if let Some(tv) = tv_weak.upgrade() {
                                 if let Some(terminal) = tv.read(cx).pty() {
                                     terminal.write(b"\r");
@@ -879,11 +914,11 @@ impl AppState {
         // Drop the terminal_view and drawer — Drop impl on PtyTerminal sends
         // Msg::Shutdown, killing the subprocesses. The clone on disk is untouched.
         session.terminal_view = None;
-        // Drop the drawer PTYs but preserve the names so the next open
-        // restores the same tab layout (matches the rehydration path).
-        let names: Vec<String> = session.drawer_tabs.iter().map(|t| t.name.clone()).collect();
-        session.drawer_tabs.clear();
-        session.pending_drawer_tab_names = names;
+        // Drop the drawer PTYs but preserve the tabs so the next open restores
+        // the same layout — and, since DEV-445, the same commands. Before that
+        // this kept names only, so resuming a suspended session gave you four
+        // bare shells where a server, a queue, a scheduler and a bundler had been.
+        session.park_drawer_tabs();
         session.drawer_visible = false;
         session.set_status(SessionStatus::Suspended);
         session.last_active = std::time::SystemTime::now();
@@ -1135,6 +1170,9 @@ impl AppState {
         // Falls back to allele.json → global default → first enabled.
         let project_override =
             config::ProjectConfig::load(&project.source_path).and_then(|c| c.agent);
+        // The project's declared environment (DEV-485). Resolved here, from the
+        // source repo, because the clone does not exist yet.
+        let project_env = config::ProjectEnv::resolve(&project.source_path, &project.settings);
         let agent = agents::resolve(
             &self.user_settings.agents,
             self.user_settings.default_agent.as_deref(),
@@ -1193,6 +1231,13 @@ impl AppState {
             .and_then(|a| agents::build_command(a, &ctx, true));
 
         // Build the new TerminalView on the main thread with window access.
+        // Materialise the project environment against the clone. `{{unique_port}}`
+        // is not available here — the port is allocated later, in
+        // `apply_project_config` — so it resolves for drawer terminals and the
+        // startup command but not for the agent PTY. PATH pinning, the reason
+        // this exists, does not depend on it. See DEV-485.
+        let inherited_path = std::env::var("PATH").ok();
+        let agent_env = project_env.materialise(None, &clone_path, inherited_path.as_deref());
         let initial_font_size = self.user_settings.font_size;
         let terminal_view = cx.new(|cx| {
             TerminalView::new(
@@ -1201,6 +1246,7 @@ impl AppState {
                 command,
                 Some(clone_path.clone()),
                 initial_font_size,
+                agent_env,
             )
         });
 
@@ -1412,11 +1458,21 @@ impl AppState {
             .and_then(|clone_path| {
                 let cfg = config::ProjectConfig::load(clone_path)
                     .or_else(|| config::ProjectConfig::from_settings(&project.settings))?;
-                cfg.shutdown
+                let cmd = cfg
+                    .shutdown
                     .as_ref()
                     .map(|s| config::resolve_script_command(s, &project.name))
                     .map(|s| config::substitute(&s, removed.allocated_port, clone_path))
-                    .filter(|s| !s.trim().is_empty())
+                    .filter(|s| !s.trim().is_empty())?;
+                // Same environment the session ran under, so a teardown script
+                // resolves the same toolchain its startup counterpart did.
+                let inherited_path = std::env::var("PATH").ok();
+                let env = config::ProjectEnv::from_config(&cfg, &project.settings).materialise(
+                    removed.allocated_port,
+                    clone_path,
+                    inherited_path.as_deref(),
+                );
+                Some((cmd, env))
             });
 
         // Drop the Session — this frees the terminal_view entity (if any),
@@ -1492,11 +1548,12 @@ impl AppState {
                         // hook can't freeze the app. Failure is logged and
                         // teardown continues so a broken hook can't strand
                         // the clone on disk.
-                        if let Some(cmd) = shutdown_cmd {
+                        if let Some((cmd, env)) = shutdown_cmd {
                             match std::process::Command::new("sh")
                                 .arg("-c")
                                 .arg(&cmd)
                                 .current_dir(&clone_path)
+                                .envs(env)
                                 .status()
                             {
                                 Ok(s) if !s.success() => {
@@ -1881,10 +1938,7 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
         persisted.clone_path.clone(),
         persisted.merged,
     )
-    .with_drawer_tabs(
-        persisted.drawer_tab_names.clone(),
-        persisted.drawer_active_tab,
-    )
+    .with_drawer_tabs(persisted.drawer_tabs(), persisted.drawer_active_tab)
     .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
     .with_agent_id(persisted.agent_id.clone())
     .with_claude_session_id(persisted.claude_session_id.clone());

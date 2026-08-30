@@ -36,3 +36,78 @@ pub mod store;
 pub use meta::{ProjectIdentity, SessionBundleMeta, SyncHeader};
 #[allow(unused_imports)]
 pub use store::{meta_key, session_id_from_key, MemStore, SyncStore, SESSIONS_PREFIX};
+
+#[cfg(test)]
+pub(crate) mod leak_check {
+    //! Asserting that plaintext did not survive encryption (DEV-433).
+    //!
+    //! The obvious way to write this check is subtly wrong:
+    //!
+    //! ```ignore
+    //! assert!(!at_rest.windows(2).any(|w| w == b"My"));
+    //! ```
+    //!
+    //! Ciphertext is effectively uniform random bytes, so a short needle
+    //! occurs *by chance*. For a haystack of `n` bytes and a needle of `k`
+    //! bytes the probability is roughly `n / 256^k` — with a two-byte needle
+    //! and a few tens of kilobytes of ciphertext that is a coin flip, and the
+    //! ciphertext differs every run, so it fails intermittently forever.
+    //!
+    //! One such assertion cost several days of "failed once, passed on rerun,
+    //! believed pre-existing" before anyone worked out it was arithmetic
+    //! rather than the environment.
+    //!
+    //! The needle length is enforced rather than advised, so the mistake
+    //! cannot be reintroduced quietly.
+
+    /// Shortest needle whose accidental occurrence is negligible.
+    ///
+    /// At eight bytes the chance is about `n / 2^64` — one in millions of
+    /// millions for any plausible payload, against roughly one in three for
+    /// the two-byte version this replaced.
+    const MIN_NEEDLE: usize = 8;
+
+    /// Assert `needle` does not appear anywhere in `haystack`.
+    ///
+    /// Panics if the needle is too short to be a reliable probe, because a
+    /// test that fails at random is worse than no test: it trains everyone
+    /// reading it to disbelieve the suite.
+    pub(crate) fn assert_not_leaked(haystack: &[u8], needle: &[u8], what: &str) {
+        assert!(
+            needle.len() >= MIN_NEEDLE,
+            "leak probe {needle:?} is {} bytes; needs at least {MIN_NEEDLE} or it will \
+             match random ciphertext by chance. Use a longer, distinctive plaintext.",
+            needle.len(),
+        );
+        assert!(
+            !haystack.windows(needle.len()).any(|w| w == needle),
+            "{what} leaked into ciphertext",
+        );
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_present_needle_is_caught() {
+            let caught = std::panic::catch_unwind(|| {
+                assert_not_leaked(b"xxxxSECRET-VALUExxxx", b"SECRET-VALUE", "secret")
+            });
+            assert!(caught.is_err(), "a real leak must fail the assertion");
+        }
+
+        #[test]
+        fn an_absent_needle_passes() {
+            assert_not_leaked(b"xxxxxxxxxxxxxxxxxxxx", b"SECRET-VALUE", "secret");
+        }
+
+        /// The guard that stops the original bug returning.
+        #[test]
+        fn a_short_needle_is_rejected_rather_than_silently_flaky() {
+            let rejected =
+                std::panic::catch_unwind(|| assert_not_leaked(b"haystack", b"My", "label"));
+            assert!(rejected.is_err(), "a 2-byte probe must be refused");
+        }
+    }
+}

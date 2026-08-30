@@ -6,6 +6,7 @@ mod assets;
 mod base_infra;
 mod browser;
 mod changes;
+mod cli;
 mod clone;
 mod config;
 mod conversation_picker;
@@ -19,11 +20,13 @@ mod git;
 mod hook_events;
 mod hooks;
 mod icon;
+mod interrupted;
 mod keymap;
 mod mac_menu;
 mod memory_watchdog;
 mod naming;
 mod new_session_modal;
+mod paths;
 mod pending_actions;
 mod platform;
 mod project;
@@ -31,6 +34,7 @@ mod reader;
 mod remote_browser;
 mod repositories;
 mod rich;
+mod sandbox;
 mod scratch_pad;
 mod session;
 mod session_ops;
@@ -609,7 +613,7 @@ impl AppState {
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(80))
                 .await;
-            let _ = cx.update(|cx| {
+            cx.update(|cx| {
                 if let Some(tv) = tv_weak.upgrade() {
                     if let Some(terminal) = tv.read(cx).pty() {
                         terminal.write(b"\r");
@@ -2183,7 +2187,8 @@ impl AppState {
             .and_then(|p| p.sessions.get_mut(cursor.session_idx))
         {
             session.drawer_tabs.clear();
-            session.pending_drawer_tab_names.clear();
+            session.parked_drawer_tabs.clear();
+            session.drawer_parked_at = None;
             session.drawer_active_tab = 0;
             session.allocated_port = port;
         }
@@ -2205,6 +2210,16 @@ impl AppState {
         // for a legitimate first-run migrate + seed; a healthy run finishes in
         // seconds.
         const STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+        // The project's declared environment reaches `startup` too, so a
+        // migrate/seed script resolves the same toolchain the session will
+        // (DEV-485). `cfg` is already loaded, so no second config read.
+        let inherited_path = std::env::var("PATH").ok();
+        let startup_env = config::ProjectEnv::from_config(&cfg, &project_settings).materialise(
+            port,
+            &clone_path,
+            inherited_path.as_deref(),
+        );
 
         if let Some(startup_cmd) = startup {
             // Show initial status in sidebar while startup runs.
@@ -2232,12 +2247,14 @@ impl AppState {
                     .spawn({
                         let cmd = startup_cmd.clone();
                         let cwd = clone_for_task.clone();
+                        let env = startup_env.clone();
                         async move {
                             use std::os::unix::process::CommandExt;
                             let child = std::process::Command::new("sh")
                                 .arg("-c")
                                 .arg(&cmd)
                                 .current_dir(&cwd)
+                                .envs(env)
                                 .stdout(std::process::Stdio::piped())
                                 .stderr(std::process::Stdio::piped())
                                 // New process group (pgid == child pid) so a
@@ -2256,14 +2273,20 @@ impl AppState {
                                     let stderr_drain = child.stderr.take().map(|stderr| {
                                         std::thread::spawn(move || {
                                             use std::io::BufRead;
-                                            for line in std::io::BufReader::new(stderr).lines().flatten() {
+                                            for line in std::io::BufReader::new(stderr)
+                        .lines()
+                        .map_while(Result::ok)
+                    {
                                                 warn!("allele: startup command (stderr): {line}");
                                             }
                                         })
                                     });
                                     if let Some(stdout) = child.stdout.take() {
                                         use std::io::BufRead;
-                                        for line in std::io::BufReader::new(stdout).lines().flatten() {
+                                        for line in std::io::BufReader::new(stdout)
+                        .lines()
+                        .map_while(Result::ok)
+                    {
                                             let _ = tx.send(line);
                                         }
                                     }
@@ -2431,20 +2454,14 @@ impl AppState {
             // it as if the user had typed it. When the command exits or is
             // interrupted (Ctrl+C), the shell is still there for the user
             // to restart or run anything else.
-            self.spawn_drawer_tab(cursor, Some(term.label.clone()), None, window, cx);
-            if !substituted.trim().is_empty() {
-                if let Some(session) = self
-                    .projects
-                    .get(cursor.project_idx)
-                    .and_then(|p| p.sessions.get(cursor.session_idx))
-                {
-                    if let Some(tab) = session.drawer_tabs.last() {
-                        let mut line = substituted.into_bytes();
-                        line.push(b'\n');
-                        tab.view.read(cx).send_input(&line);
-                    }
-                }
-            }
+            self.spawn_drawer_tab(
+                cursor,
+                Some(term.label.clone()),
+                None,
+                Some(substituted),
+                window,
+                cx,
+            );
         }
 
         if !cfg.terminals.is_empty() {
@@ -2603,10 +2620,10 @@ fn install_panic_hook() {
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         // Log to ~/.config/allele/crash.log
-        if let Some(home) = dirs::home_dir() {
-            let log_dir = home.join(".config").join("allele");
-            let _ = std::fs::create_dir_all(&log_dir);
-            let log_path = log_dir.join("crash.log");
+        if let Some(log_path) = paths::crash_log_file() {
+            if let Some(log_dir) = log_path.parent() {
+                let _ = std::fs::create_dir_all(log_dir);
+            }
             let timestamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs())
@@ -2651,6 +2668,35 @@ fn install_panic_hook() {
 fn main() {
     // `--mcp-serve` never returns; it must claim stdout before anything logs.
     dispatch::mcp::exit_if_serving();
+
+    // Refuse unrecognised arguments before anything with a side effect runs.
+    // Allele has no CLI, and everything below this point — tracing, the
+    // descriptor ceiling, the orphan sweep, `state.json` — assumes it is the
+    // app. `allele sessions status <id>` used to reach all of it and open a
+    // second window. See `cli` for why that is worse than it looks.
+    let (home_override, sandbox_mode) =
+        match cli::classify(&std::env::args().skip(1).collect::<Vec<_>>()) {
+            cli::Launch::Usage { code } => {
+                eprintln!("{}", cli::USAGE);
+                std::process::exit(code);
+            }
+            cli::Launch::Gui { home, sandbox } => (home, sandbox),
+        };
+
+    // Fix the data root before ANYTHING reads a path or spawns a child. Every
+    // line below — tracing, the panic hook, the orphan sweep, state.json, the
+    // MCP control socket — resolves through `paths`, so a root chosen any later
+    // would leave half the process writing to one tree and half to another.
+    let root = if sandbox_mode {
+        paths::default_sandbox_root()
+    } else {
+        home_override
+    };
+    paths::init(root);
+    if sandbox_mode {
+        sandbox::seed();
+    }
+
     errors::init_tracing();
     install_panic_hook();
 
@@ -2697,8 +2743,7 @@ fn main() {
     // user-data-dirs from an earlier embedding approach. Safe to delete;
     // browser integration now lives entirely in AppleScript against the
     // user's real Chrome.
-    if let Some(home) = dirs::home_dir() {
-        let stale = home.join(".allele").join("browsers");
+    if let Some(stale) = paths::legacy_browsers_dir() {
         if stale.exists() {
             let _ = std::fs::remove_dir_all(&stale);
         }
@@ -2833,7 +2878,13 @@ fn main() {
         cx.open_window(
             WindowOptions {
                 titlebar: Some(TitlebarOptions {
-                    title: Some("Allele".into()),
+                    // The window title is the only marker visible when the
+                    // app is not focused, so it carries the sandbox flag too.
+                    title: Some(if paths::is_redirected() {
+                        "Allele — SANDBOX".into()
+                    } else {
+                        "Allele".into()
+                    }),
                     // Content extends under the titlebar; the 38px header/tab
                     // rows below center against the traffic lights.
                     appears_transparent: true,
@@ -2947,10 +2998,7 @@ fn main() {
                             persisted.clone_path.clone(),
                             persisted.merged,
                         )
-                        .with_drawer_tabs(
-                            persisted.drawer_tab_names.clone(),
-                            persisted.drawer_active_tab,
-                        )
+                        .with_drawer_tabs(persisted.drawer_tabs(), persisted.drawer_active_tab)
                         .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
                         .with_agent_id(persisted.agent_id.clone())
                         .with_claude_session_id(persisted.claude_session_id.clone())
@@ -2976,12 +3024,18 @@ fn main() {
                     // with pre-existing events from a previous app session.
                     cx.spawn(async move |this, cx| {
                         let mut watcher = hooks::EventWatcher::new();
+                        let mut interrupts = interrupted::InterruptWatcher::default();
                         watcher.initialize_offsets();
 
                         loop {
                             cx.background_executor()
                                 .timer(std::time::Duration::from_millis(250))
                                 .await;
+
+                            // Claude Code emits no hook when a turn is
+                            // interrupted, so this is the only way a session
+                            // leaves `Running` after one. See DEV-432.
+                            interrupted::poll_once(&mut interrupts, &this, cx).await;
 
                             let events = watcher.poll();
                             if events.is_empty() {
@@ -3015,7 +3069,13 @@ fn main() {
                             // status runs across an await during which the
                             // user can reorder or remove sessions, which would
                             // land a result on the wrong session's row.
-                            let Ok(targets) = this.update(cx, |this: &mut AppState, _cx| {
+                            let Ok(targets) = this.update(cx, |this: &mut AppState, cx| {
+                                // Idle-drawer parking rides this tick rather than
+                                // adding a loop of its own: the threshold is
+                                // minutes, so 15s is ample resolution, and one
+                                // timer is one thing to reason about (DEV-445).
+                                this.reap_idle_drawers(cx);
+
                                 let mut t = Vec::new();
                                 for project in this.projects.iter() {
                                     for session in project.sessions.iter() {
@@ -3936,9 +3996,30 @@ impl Render for AppState {
                             .justify_between()
                             .child(
                                 div()
-                                    .text_size(px(13.0))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child("Allele"),
+                                    .flex()
+                                    .flex_row()
+                                    .items_center()
+                                    .gap(px(8.0))
+                                    .child(
+                                        div()
+                                            .text_size(px(13.0))
+                                            .font_weight(FontWeight::BOLD)
+                                            .child("Allele"),
+                                    )
+                                    // Two identical windows side by side is its
+                                    // own hazard, so a redirected root says so
+                                    // where the eye already is (DEV-487).
+                                    .children(crate::paths::is_redirected().then(|| {
+                                        div()
+                                            .px(px(6.0))
+                                            .py(px(1.0))
+                                            .rounded(px(4.0))
+                                            .bg(theme().warning)
+                                            .text_size(px(9.0))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(theme().bg_base)
+                                            .child("SANDBOX")
+                                    })),
                             )
                             .child(
                                 div()
