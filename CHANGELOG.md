@@ -13,6 +13,16 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Changed
+- The attention bar collapses. It now opens with a summary header — a count of
+  the sessions waiting on you, and a chevron — and clicking that header folds
+  the per-session rows away and back. Even expanded, the list is capped at six
+  rows and scrolls past that. Running twenty-odd sessions used to mean an
+  attention bar that took most of the window and a terminal you could not read;
+  the count is the part worth glancing at, so collapsing keeps it and gives the
+  space back. The collapsed choice persists across restarts, and a bar with
+  nothing waiting still renders nothing at all.
+
 ## [0.4.0] - 2026-08-30
 
 ### Added
