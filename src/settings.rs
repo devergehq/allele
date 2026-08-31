@@ -307,6 +307,15 @@ pub struct Settings {
     #[serde(default)]
     pub sidebar_active_only: bool,
 
+    /// When true, the attention bar above the main tab strip is collapsed to
+    /// its summary header — the count stays visible, the per-session rows do
+    /// not. A user running twenty-odd sessions has an attention bar that eats
+    /// the viewport; collapsing keeps the signal and gives back the space.
+    /// Toggled by clicking the bar's own header. Persisted so the choice
+    /// survives a restart. See DEV-525.
+    #[serde(default)]
+    pub attention_bar_collapsed: bool,
+
     /// Branch naming configuration — controls how session branches are named
     /// (LLM model, mode, per-platform settings).
     #[serde(default)]
@@ -494,6 +503,7 @@ impl Default for Settings {
             git_pull_before_new_session: false,
             promote_attention_sessions: true,
             sidebar_active_only: false,
+            attention_bar_collapsed: false,
             naming: NamingConfig::default(),
             sync: SyncSettings::default(),
         }
@@ -595,6 +605,28 @@ mod tests {
         let json = r#"{ "session_cleanup_paths": [] }"#;
         let s: Settings = serde_json::from_str(json).unwrap();
         assert!(s.session_cleanup_paths.is_empty());
+    }
+
+    #[test]
+    fn attention_bar_defaults_to_expanded() {
+        // The bar's value is that it is visible; a first run must show the
+        // rows, not hide them behind a collapse the user never asked for.
+        assert!(!Settings::default().attention_bar_collapsed);
+        let legacy = r#"{ "sidebar_width": 240.0 }"#;
+        let s: Settings = serde_json::from_str(legacy).expect("should deserialize");
+        assert!(!s.attention_bar_collapsed);
+    }
+
+    #[test]
+    fn attention_bar_collapsed_round_trips() {
+        // Collapsing is a persisted choice — it has to survive the write/read
+        // cycle, or the bar springs back open on every restart.
+        let json = r#"{ "attention_bar_collapsed": true }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(s.attention_bar_collapsed);
+        let round_tripped: Settings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(round_tripped.attention_bar_collapsed);
     }
 
     #[test]

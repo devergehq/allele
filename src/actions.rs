@@ -234,6 +234,10 @@ pub enum SidebarAction {
     /// Turn the active-only view mode off unconditionally — the "Show all"
     /// escape hatch in the hint row, so an empty sidebar is never a dead end.
     ShowAllSessions,
+    /// Collapse or expand the attention bar above the main tab strip. Emitted
+    /// by clicking the bar's own summary header — the only affordance, by
+    /// design (DEV-525).
+    ToggleAttentionBar,
     /// Re-run `git status` for the changes panel (manual refresh button,
     /// hook-event triggers).
     RefreshChanges,

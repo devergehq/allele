@@ -26,6 +26,16 @@ pub(crate) const RIGHT_SIDEBAR_MIN_WIDTH: f32 = 160.0;
 /// never push the content column into overflow.
 pub(crate) const MAIN_AREA_MIN_HEIGHT: f32 = 100.0;
 
+/// Rendered height of one attention-bar row: 11pt text on 5px padding either
+/// side. Used only to derive the list's max height, so it tracks the row's
+/// `py` and text size in `render_attention_bar`.
+pub(crate) const ATTENTION_BAR_ROW_HEIGHT: f32 = 24.0;
+/// How many attention rows the expanded bar shows before it starts scrolling.
+/// The bar sits above the terminal, so it is capped rather than allowed to
+/// grow with the session count — six rows is enough to triage at a glance
+/// without the bar becoming the window (DEV-525).
+pub(crate) const ATTENTION_BAR_MAX_ROWS: f32 = 6.0;
+
 /// Which view is shown in the main (center) column.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum MainTab {

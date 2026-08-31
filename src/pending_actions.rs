@@ -1090,6 +1090,11 @@ impl AppState {
                 self.user_settings.sidebar_active_only = false;
                 self.mark_settings_dirty();
             }
+            SidebarAction::ToggleAttentionBar => {
+                self.user_settings.attention_bar_collapsed =
+                    !self.user_settings.attention_bar_collapsed;
+                self.mark_settings_dirty();
+            }
             SidebarAction::RefreshChanges => {
                 self.refresh_changes(cx);
             }
