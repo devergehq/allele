@@ -607,8 +607,12 @@ impl AppState {
             .overflow_scroll()
             .px(px(20.0))
             .py(px(14.0));
-        for chunk in &sections {
-            rendered = rendered.child(crate::rich::markdown::render(chunk, false, font_size));
+        for (ix, chunk) in sections.iter().enumerate() {
+            // The seed keeps each chunk's code fences on their own scroll
+            // offset (DEV-577); chunk index is stable for a given preview.
+            rendered = rendered.child(crate::rich::markdown::render(
+                chunk, false, font_size, ix as u64,
+            ));
         }
 
         let mut row = div()
