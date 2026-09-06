@@ -1,4 +1,4 @@
-//! Tree-sitter backed syntax highlighting for the source Reader (DEV-73).
+//! Tree-sitter backed syntax highlighting (DEV-73).
 //!
 //! Produces the same per-line [`HlLine`](super::highlight::HlLine) / `TextRun`
 //! output as the built-in lexer, so the render path is unchanged. A curated set
@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use gpui::{Hsla, SharedString, TextRun};
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
 
-use super::highlight::{mono_font, HlLine, TokenColors};
+use super::{mono_font, HlLine, TokenColors};
 
 /// Capture names we configure the highlighter with. `Highlight(i)` from a query
 /// indexes into this array; tree-sitter matches the most specific name, so
