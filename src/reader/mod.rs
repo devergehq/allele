@@ -9,11 +9,9 @@
 
 pub(crate) mod command;
 pub(crate) mod deeplink;
-pub(crate) mod highlight;
 pub(crate) mod index;
 pub(crate) mod palette;
 pub(crate) mod search;
-pub(crate) mod ts_highlight;
 
 use crate::theme::theme;
 use gpui::prelude::FluentBuilder as _;
@@ -481,8 +479,8 @@ impl AppState {
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        let colors = highlight::theme_colors();
-        let lines = highlight::highlight(contents, &ext, colors);
+        let colors = crate::syntax::theme_colors();
+        let lines = crate::syntax::highlight(contents, &ext, colors);
         let total = lines.len();
         let shown = total.min(Self::MAX_RENDER_LINES);
         let gutter_w = px((format!("{total}").len().max(2) as f32) * 8.0 + 16.0);

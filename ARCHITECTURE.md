@@ -587,6 +587,30 @@ display string.
 
 ---
 
+### 7.11 Don't make two feature modules depend on each other
+
+`reader` renders Markdown through `rich::markdown`. That is the dependency
+pointing the way it should — a reading surface using the shared renderer.
+
+When `rich::markdown` needed syntax highlighting it reached back into
+`reader::highlight`, and the two feature modules then depended on each other's
+implementation modules, with `reader` exposing its own purely so `rich` could
+borrow them. Rust permits the cycle, nothing failed, and no test noticed — which
+is exactly why it would have quietly got worse.
+
+Shared capability belongs in a neutral module both consume. The highlighter was
+never reader-specific: it maps an extension to a grammar and produces styled
+runs. It now lives in `src/syntax/`, and `tests/architecture.rs` fails if
+anything under `src/rich/` names `crate::reader` again.
+
+The rule is deliberately directional. Banning every cross-feature reference
+would ban the legitimate one too.
+
+One trap worth knowing: there are **two** modules called `reader`. `crate::reader`
+is the Project Reader; `crate::rich::reader` is DEV-31's transcript navigation,
+which `rich_view` uses via `super::reader`. The rule matches `crate::reader`
+only, because matching the bare name flags the wrong one.
+
 ## 8. Open follow-ups
 
 Known work not yet landed, in rough priority order:
