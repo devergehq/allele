@@ -156,6 +156,69 @@ fn list_marker(list_stack: &mut [Option<u64>], base_color: Hsla) -> Option<ListM
     }
 }
 
+/// One rendered table cell: its inline text and runs, or `None` when empty.
+type TableCell = Option<(SharedString, Vec<TextRun>)>;
+
+/// Accumulates a table's cells as pulldown-cmark walks it.
+///
+/// The subtlety this exists to hold: **pulldown-cmark wraps the header cells in
+/// `TableHead` directly and emits no `TableRow` for them.** Committing the
+/// header only on `End(TableRow)` therefore dropped it on the floor, and every
+/// table rendered headerless. Alternating row backgrounds used to disguise
+/// that; a single hairline rule does not.
+#[derive(Default)]
+struct TableBuilder {
+    in_head: bool,
+    current: Vec<TableCell>,
+    header: Vec<TableCell>,
+    body: Vec<Vec<TableCell>>,
+}
+
+impl TableBuilder {
+    fn start_table(&mut self) {
+        *self = Self::default();
+    }
+
+    fn start_head(&mut self) {
+        self.in_head = true;
+        self.current.clear();
+    }
+
+    /// Commit the header here, because no `TableRow` end will arrive for it.
+    fn end_head(&mut self) {
+        if !self.current.is_empty() {
+            self.header = std::mem::take(&mut self.current);
+        }
+        self.in_head = false;
+    }
+
+    fn start_row(&mut self) {
+        self.current.clear();
+    }
+
+    /// Kept branching on `in_head` as well: a parser that *does* emit a row
+    /// inside the head must not push the header into the body.
+    fn end_row(&mut self) {
+        let row = std::mem::take(&mut self.current);
+        if self.in_head {
+            self.header = row;
+        } else {
+            self.body.push(row);
+        }
+    }
+
+    fn push_cell(&mut self, cell: TableCell) {
+        self.current.push(cell);
+    }
+
+    fn finish(&mut self) -> (Vec<TableCell>, Vec<Vec<TableCell>>) {
+        (
+            std::mem::take(&mut self.header),
+            std::mem::take(&mut self.body),
+        )
+    }
+}
+
 /// Accumulates a single paragraph/heading's worth of inline text + runs.
 struct InlineBuilder {
     text: String,
@@ -267,11 +330,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
     // pushed into `inline` — that is what cost the hanging indent.
     let mut pending_marker: Option<ListMarker> = None;
 
-    // Table state — cells collect inline content; rows collect cells.
-    let mut in_table_head = false;
-    let mut current_row: Vec<Option<(SharedString, Vec<TextRun>)>> = Vec::new();
-    let mut table_header: Vec<Option<(SharedString, Vec<TextRun>)>> = Vec::new();
-    let mut table_body: Vec<Vec<Option<(SharedString, Vec<TextRun>)>>> = Vec::new();
+    let mut table = TableBuilder::default();
 
     for event in parser {
         match event {
@@ -432,40 +491,22 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                     &mut pending_marker,
                     font_size,
                 );
-                table_header.clear();
-                table_body.clear();
+                table.start_table();
             }
             Event::End(TagEnd::Table) => {
-                container = container.child(table_element(
-                    std::mem::take(&mut table_header),
-                    std::mem::take(&mut table_body),
-                    font_size,
-                ));
+                let (header, rows) = table.finish();
+                container = container.child(table_element(header, rows, font_size));
             }
-            Event::Start(Tag::TableHead) => {
-                in_table_head = true;
-                current_row.clear();
-            }
-            Event::End(TagEnd::TableHead) => {
-                in_table_head = false;
-            }
-            Event::Start(Tag::TableRow) => {
-                current_row.clear();
-            }
-            Event::End(TagEnd::TableRow) => {
-                let row = std::mem::take(&mut current_row);
-                if in_table_head {
-                    table_header = row;
-                } else {
-                    table_body.push(row);
-                }
-            }
+            Event::Start(Tag::TableHead) => table.start_head(),
+            Event::End(TagEnd::TableHead) => table.end_head(),
+            Event::Start(Tag::TableRow) => table.start_row(),
+            Event::End(TagEnd::TableRow) => table.end_row(),
             Event::Start(Tag::TableCell) => {
                 inline = InlineBuilder::new();
             }
             Event::End(TagEnd::TableCell) => {
                 let cell = std::mem::replace(&mut inline, InlineBuilder::new()).finish();
-                current_row.push(cell);
+                table.push_cell(cell);
             }
             // ── Blockquotes ───────────────────────────────────────
             Event::Start(Tag::BlockQuote(_)) => {
@@ -896,6 +937,7 @@ fn table_element(
                     .py(px(5.0))
                     .text_size(px(cell_size))
                     .text_color(theme().text_secondary)
+                    .font_weight(FontWeight::BOLD)
                     .child(StyledText::new(text).with_runs(runs))
             } else {
                 div().flex_1().min_w_0().px(px(8.0)).py(px(5.0))
@@ -1164,6 +1206,72 @@ prose measure and must hang under its own text\n  - nested\n    - deeper\n\n\
 - loose item\n\n  second paragraph of the same item\n";
         let _ = render(sample, false, 14.0);
         let _ = render(sample, true, 14.0);
+    }
+
+    #[test]
+    fn a_table_header_survives_pulldown_cmarks_event_shape() {
+        // pulldown-cmark wraps header cells in TableHead and emits NO TableRow
+        // for them. Committing the header only on end_row dropped it entirely,
+        // and every table rendered headerless.
+        let mut t = TableBuilder::default();
+        t.start_table();
+        t.start_head();
+        t.push_cell(Some(("Element".into(), vec![])));
+        t.push_cell(Some(("Before".into(), vec![])));
+        t.end_head();
+        t.start_row();
+        t.push_cell(Some(("code fence".into(), vec![])));
+        t.push_cell(Some(("flat green".into(), vec![])));
+        t.end_row();
+        let (header, body) = t.finish();
+        assert_eq!(header.len(), 2, "the header row must survive");
+        assert_eq!(body.len(), 1, "and must not be counted as a body row");
+    }
+
+    #[test]
+    fn a_header_row_is_still_handled_if_one_is_emitted() {
+        // Defensive: a parser that does emit a TableRow inside the head must
+        // not push the header into the body.
+        let mut t = TableBuilder::default();
+        t.start_table();
+        t.start_head();
+        t.start_row();
+        t.push_cell(Some(("Element".into(), vec![])));
+        t.end_row();
+        t.end_head();
+        let (header, body) = t.finish();
+        assert_eq!(header.len(), 1);
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn a_headerless_table_keeps_every_row_in_the_body() {
+        let mut t = TableBuilder::default();
+        t.start_table();
+        for _ in 0..3 {
+            t.start_row();
+            t.push_cell(Some(("x".into(), vec![])));
+            t.end_row();
+        }
+        let (header, body) = t.finish();
+        assert!(header.is_empty());
+        assert_eq!(body.len(), 3);
+    }
+
+    #[test]
+    fn each_table_starts_clean() {
+        let mut t = TableBuilder::default();
+        t.start_table();
+        t.start_head();
+        t.push_cell(Some(("stale".into(), vec![])));
+        t.end_head();
+        t.start_table();
+        let (header, body) = t.finish();
+        assert!(
+            header.is_empty(),
+            "a new table must not inherit the last one"
+        );
+        assert!(body.is_empty());
     }
 
     #[test]
