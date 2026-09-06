@@ -18,7 +18,7 @@ use crate::theme::{theme, with_alpha};
 use gpui::*;
 use similar::{ChangeTag, TextDiff};
 
-use super::column::{framed, prose_width};
+use super::column::{framed, mono_width, prose_width, scroll_x};
 use super::compose_bar::{ComposeBar, ComposeBarEvent};
 use super::document::{
     short_path, truncate_to_char_boundary, Block, BlockId, BlockKind, RichDocument,
@@ -571,7 +571,7 @@ fn render_block(
 
     match &block.kind {
         BlockKind::Text { content, streaming } => {
-            wrapper = wrapper.child(render_text_block(content, *streaming, font_size));
+            wrapper = wrapper.child(render_text_block(content, *streaming, font_size, block_id));
         }
         BlockKind::Thinking { content } => {
             wrapper = wrapper.child(render_thinking_block(
@@ -987,7 +987,12 @@ fn phase_pill(phase: LocusPhase, font_size: f32) -> Div {
 
 // ── Text block ────────────────────────────────────────────────────
 
-fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
+fn render_text_block(
+    content: &str,
+    streaming: bool,
+    font_size: f32,
+    block_id: super::document::BlockId,
+) -> Div {
     // Claude's prose IS the main content of the transcript — tool calls and
     // thinking are supporting context — so it carries no speaker chrome of its
     // own (DEV-572). A turn emits several text blocks, and a label on each one
@@ -1008,12 +1013,12 @@ fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
         .py(px(6.0))
         .flex()
         .items_start()
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(super::markdown::render(content, streaming, font_size)),
-        )
+        .child(div().flex_1().min_w_0().child(super::markdown::render(
+            content,
+            streaming,
+            font_size,
+            block_id as u64,
+        )))
 }
 
 // ── Thinking block (collapsed by default, subtle) ─────────────────
@@ -1526,6 +1531,36 @@ fn render_diff(
         .map(|c| (c.tag(), c.value().trim_end_matches('\n').to_string()))
         .collect();
 
+    // DEV-577: the lines collect into a body that scrolls sideways as one.
+    // One scroller for the whole diff, not one per line — per-line scrollers
+    // would drift out of step with each other and make the diff unreadable.
+    //
+    // Three properties, each load-bearing:
+    //   * `whitespace_nowrap` stops the wrap. GPUI measures text against the
+    //     width it is offered, so without it a line re-wraps to the scroller's
+    //     width however the flex item is sized.
+    //   * an explicit `w` from the longest line gives the scroller a real
+    //     content size. Nowrap text paints past its bounds without reporting a
+    //     wider measured size, so without this the scroller sees content the
+    //     size of its own viewport and clips instead of scrolling — which
+    //     hides the end of a line with no way to reach it.
+    //   * `items_start` lets each line size to itself; `min_w` on the lines
+    //     then brings the short ones back up so the +/- backgrounds line up.
+    const DIFF_LINE_CHROME: f32 = 10.0 + 10.0 + 10.0 + 6.0;
+    let widest = changes
+        .iter()
+        .map(|(_, line)| line.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let mut body = div()
+        .w(mono_width(widest, code_size) + px(DIFF_LINE_CHROME))
+        .min_w(relative(1.0))
+        .flex()
+        .flex_col()
+        .items_start()
+        .whitespace_nowrap();
+
     let mut i = 0;
     while i < changes.len() {
         // Try to pair consecutive Delete+Insert runs for intraline highlighting.
@@ -1560,7 +1595,7 @@ fn render_diff(
             if hunk_ratio < 0.4 {
                 // Structural replacement — group reds then greens.
                 for change in &changes[del_start..del_end] {
-                    diff = diff.child(render_diff_line_plain(
+                    body = body.child(render_diff_line_plain(
                         "-",
                         &change.1,
                         code_size,
@@ -1569,7 +1604,7 @@ fn render_diff(
                     ));
                 }
                 for change in &changes[ins_start..ins_end] {
-                    diff = diff.child(render_diff_line_plain(
+                    body = body.child(render_diff_line_plain(
                         "+",
                         &change.1,
                         code_size,
@@ -1585,21 +1620,21 @@ fn render_diff(
                     let ins_line = &changes[ins_start + j].1;
                     let ratio = strsim_ratio(del_line, ins_line);
                     if ratio > 0.4 {
-                        diff = diff.child(render_diff_line_intraline(
+                        body = body.child(render_diff_line_intraline(
                             "-", del_line, ins_line, true, code_size,
                         ));
-                        diff = diff.child(render_diff_line_intraline(
+                        body = body.child(render_diff_line_intraline(
                             "+", ins_line, del_line, false, code_size,
                         ));
                     } else {
-                        diff = diff.child(render_diff_line_plain(
+                        body = body.child(render_diff_line_plain(
                             "-",
                             del_line,
                             code_size,
                             with_alpha(theme().danger, 0.8),
                             with_alpha(theme().danger, 0.1),
                         ));
-                        diff = diff.child(render_diff_line_plain(
+                        body = body.child(render_diff_line_plain(
                             "+",
                             ins_line,
                             code_size,
@@ -1609,7 +1644,7 @@ fn render_diff(
                     }
                 }
                 for j in paired..del_count {
-                    diff = diff.child(render_diff_line_plain(
+                    body = body.child(render_diff_line_plain(
                         "-",
                         &changes[del_start + j].1,
                         code_size,
@@ -1618,7 +1653,7 @@ fn render_diff(
                     ));
                 }
                 for j in paired..ins_count {
-                    diff = diff.child(render_diff_line_plain(
+                    body = body.child(render_diff_line_plain(
                         "+",
                         &changes[ins_start + j].1,
                         code_size,
@@ -1632,7 +1667,7 @@ fn render_diff(
 
         // Equal line.
         if i < changes.len() && changes[i].0 == ChangeTag::Equal {
-            diff = diff.child(render_diff_line_plain(
+            body = body.child(render_diff_line_plain(
                 " ",
                 &changes[i].1,
                 code_size,
@@ -1643,7 +1678,10 @@ fn render_diff(
         }
     }
 
-    diff
+    diff.child(scroll_x(
+        ElementId::Name(format!("diff-body-{block_id}").into()),
+        body,
+    ))
 }
 
 fn strsim_ratio(a: &str, b: &str) -> f64 {
@@ -1667,9 +1705,17 @@ fn render_diff_line_plain(
     text_color: Hsla,
     bg_color: Hsla,
 ) -> Div {
+    // No `w_full().min_w_0()` and no `flex_1` on the text: those are what made
+    // a long line wrap, and a wrapped diff line renders its continuation
+    // without the +/- that says which side it came from (DEV-577). The line
+    // keeps its natural width; the body around it scrolls.
     div()
-        .w_full()
-        .min_w_0()
+        .flex_shrink_0()
+        // At least as wide as the body, so a short line's background reaches
+        // the same right edge as a long one instead of stopping where its text
+        // happens to end. Wider than the body when the line is longer — that is
+        // what there is to scroll.
+        .min_w(relative(1.0))
         .px(px(10.0))
         .py(px(1.0))
         .bg(bg_color)
@@ -1686,8 +1732,7 @@ fn render_diff_line_plain(
         )
         .child(
             div()
-                .flex_1()
-                .min_w_0()
+                .flex_shrink_0()
                 .text_color(text_color)
                 .text_size(px(code_size))
                 .font_family(crate::theme::FONT_MONO)
@@ -1773,9 +1818,11 @@ fn render_diff_line_intraline(
 
     let styled = StyledText::new(SharedString::from(full_text)).with_runs(merged);
 
+    // Sized to its content for the same reason as the plain line: the body
+    // scrolls, the line does not wrap (DEV-577).
     div()
-        .w_full()
-        .min_w_0()
+        .flex_shrink_0()
+        .min_w(relative(1.0))
         .px(px(10.0))
         .py(px(1.0))
         .bg(bg_color)
@@ -1790,13 +1837,7 @@ fn render_diff_line_intraline(
                 .font_family(crate::theme::FONT_MONO)
                 .child(prefix),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(px(code_size))
-                .child(styled),
-        )
+        .child(div().flex_shrink_0().text_size(px(code_size)).child(styled))
 }
 
 // ── Session end ───────────────────────────────────────────────────

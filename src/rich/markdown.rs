@@ -14,10 +14,10 @@ use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 
 use crate::reader::highlight::{self, HlLine, TokenColors};
-use crate::rich::column::prose_width;
+use crate::rich::column::{mono_width, prose_width, scroll_x};
 use crate::theme::{theme, with_alpha};
 use gpui::{
-    div, px, Div, Font, FontFeatures, FontStyle, FontWeight, Hsla, ParentElement as _,
+    div, px, Div, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla, ParentElement as _,
     SharedString, Styled as _, StyledText, TextRun, UnderlineStyle,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
@@ -294,7 +294,12 @@ fn flush_inline(
 /// Render markdown-formatted text as a GPUI div tree. Pure function — safe to
 /// re-call every frame; pulldown-cmark parses at hundreds of MB/s for the sizes
 /// involved here.
-pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
+///
+/// `id_seed` distinguishes this call's code fences from every other call's.
+/// Fences scroll horizontally (DEV-577) and GPUI keys a scroll offset by the
+/// element's id path, so two blocks sharing a seed would share a scroll
+/// position. Callers pass something stable and unique per block.
+pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> Div {
     let base_color = if streaming {
         theme().text_body
     } else {
@@ -323,6 +328,9 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
     let mut in_code_block = false;
     let mut code_buffer = String::new();
     let mut code_lang = String::new();
+    // Serial number for this render's code fences, so each gets its own
+    // scroll container rather than sharing one.
+    let mut fence_ix: u64 = 0;
     // list_stack entries: Some(n) = ordered list with next-number n, None = unordered.
     let mut list_stack: Vec<Option<u64>> = Vec::new();
     // The current item's marker, held until its content is flushed so
@@ -387,6 +395,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                     std::mem::take(&mut code_buffer),
                     std::mem::take(&mut code_lang),
                     font_size,
+                    fence_id(id_seed, &mut fence_ix),
                 ));
             }
             Event::Start(Tag::List(first_number)) => {
@@ -581,6 +590,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
             code_buffer,
             std::mem::take(&mut code_lang),
             font_size,
+            fence_id(id_seed, &mut fence_ix),
         ));
     }
 
@@ -761,7 +771,18 @@ fn ext_for_fence_lang(lang: &str) -> Option<&'static str> {
     })
 }
 
-fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
+/// A unique element id for the next code fence in this render.
+///
+/// Both halves matter: the seed separates one block's fences from another's,
+/// and the serial separates fences within a block. GPUI keys scroll offsets by
+/// the id path, so a repeat would make two fences scroll together.
+fn fence_id(seed: u64, ix: &mut u64) -> ElementId {
+    let id = ElementId::Name(format!("md-fence-{seed}-{ix}").into());
+    *ix += 1;
+    id
+}
+
+fn code_block_element(code: String, lang: String, font_size: f32, id: ElementId) -> Div {
     let code_size = font_size - 1.0;
     let trimmed = if code.ends_with('\n') {
         &code[..code.len() - 1]
@@ -811,12 +832,41 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
         return block;
     }
 
+    // DEV-577: the lines size to themselves and the body scrolls sideways
+    // inside the block, rather than wrapping. Wrapping does not shorten a code
+    // line, it just breaks it across rows and loses the indentation that says
+    // where you are. `flex_col` with the default stretch alignment then sizes
+    // the column to its widest line, so every line's background — and any
+    // future selection highlight — spans the full scrolled width instead of
+    // stopping where that particular line happens to end.
+    // An explicit content width, computed from the longest line, is what gives
+    // the scroller something to scroll — see `column::mono_width`. `min_w` at
+    // 100% keeps a short fence from being narrower than its own block.
+    let widest = trimmed
+        .split('\n')
+        .map(str::chars)
+        .map(Iterator::count)
+        .max();
     let mut content = div()
+        .w(mono_width(widest.unwrap_or(0), code_size))
+        .min_w(gpui::relative(1.0))
         .px(px(10.0))
         .pt(padding_top)
         .pb(px(6.0))
         .flex()
-        .flex_col();
+        .flex_col()
+        // `items_start` is load-bearing, not cosmetic: width is the CROSS axis
+        // of a flex column, so the default stretch alignment sizes every line
+        // to the container. The text then overflows the line while the column
+        // stays container-width, and the scroller sees nothing to scroll.
+        // Start-aligned, each line sizes to its own content and the column to
+        // its widest, which is the overflow the scroller acts on.
+        .items_start()
+        // And the line that stops the wrap in the first place. `flex_shrink_0` keeps a line
+        // from being squeezed, but GPUI measures text against the width it is
+        // offered and wraps to it regardless; only a nowrap text style makes a
+        // line keep its full length and overflow the scroller.
+        .whitespace_nowrap();
 
     // A recognised fence language goes through the Reader's highlighter
     // (DEV-73), sharing its token palette so the same class is the same colour
@@ -827,6 +877,7 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
             for line in highlighted_fence(trimmed, ext, highlight::theme_colors()).iter() {
                 content = content.child(
                     div()
+                        .flex_shrink_0()
                         .text_size(px(code_size))
                         .child(StyledText::new(line.text.clone()).with_runs(line.runs.clone())),
                 );
@@ -842,13 +893,13 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
                     underline: None,
                     strikethrough: None,
                 };
-                content = content.child(div().text_size(px(code_size)).child(
+                content = content.child(div().flex_shrink_0().text_size(px(code_size)).child(
                     StyledText::new(SharedString::from(line.to_string())).with_runs(vec![run]),
                 ));
             }
         }
     }
-    block.child(content)
+    block.child(scroll_x(id, content))
 }
 
 /// One list item: marker in its own cell, content in a flexible one beside it.
@@ -1025,8 +1076,8 @@ fn main() {
 Mid-stream **unterminated
 "#;
         // Streaming = true, then false. Both paths must not panic.
-        let _ = render(sample, true, 14.0);
-        let _ = render(sample, false, 14.0);
+        let _ = render(sample, true, 14.0, 0);
+        let _ = render(sample, false, 14.0, 0);
     }
 
     #[test]
@@ -1108,8 +1159,8 @@ Mid-stream **unterminated
         let plain = "```brainfuck\n+++++[->+++<]\n```\n";
         let untagged = "```\nno language tag\n```\n";
         for sample in [highlighted, plain, untagged] {
-            let _ = render(sample, false, 14.0);
-            let _ = render(sample, true, 14.0);
+            let _ = render(sample, false, 14.0, 0);
+            let _ = render(sample, true, 14.0, 0);
         }
     }
 
@@ -1204,8 +1255,8 @@ Mid-stream **unterminated
 prose measure and must hang under its own text\n  - nested\n    - deeper\n\n\
 1. one\n2. two\n\n- [ ] open\n- [x] done\n\n\
 - loose item\n\n  second paragraph of the same item\n";
-        let _ = render(sample, false, 14.0);
-        let _ = render(sample, true, 14.0);
+        let _ = render(sample, false, 14.0, 0);
+        let _ = render(sample, true, 14.0, 0);
     }
 
     #[test]
@@ -1275,19 +1326,49 @@ prose measure and must hang under its own text\n  - nested\n    - deeper\n\n\
     }
 
     #[test]
+    fn every_fence_gets_its_own_scroll_id() {
+        // GPUI keys a scroll offset by the element id path, so a repeat would
+        // make two fences scroll together.
+        let mut ix = 0;
+        let a = fence_id(7, &mut ix);
+        let b = fence_id(7, &mut ix);
+        assert_ne!(a, b, "two fences in one block must not share an id");
+    }
+
+    #[test]
+    fn fences_in_different_blocks_do_not_collide() {
+        let (mut i, mut j) = (0, 0);
+        assert_ne!(fence_id(1, &mut i), fence_id(2, &mut j));
+    }
+
+    #[test]
+    fn the_fence_serial_advances_once_per_fence() {
+        let mut ix = 0;
+        for _ in 0..3 {
+            let _ = fence_id(0, &mut ix);
+        }
+        assert_eq!(ix, 3);
+    }
+
+    #[test]
     fn empty_input_does_not_panic() {
-        let _ = render("", false, 14.0);
-        let _ = render("", true, 14.0);
+        let _ = render("", false, 14.0, 0);
+        let _ = render("", true, 14.0, 0);
     }
 
     #[test]
     fn plain_text_does_not_panic() {
-        let _ = render("Just some normal text without any markdown.", false, 14.0);
+        let _ = render(
+            "Just some normal text without any markdown.",
+            false,
+            14.0,
+            0,
+        );
     }
 
     #[test]
     fn task_list_does_not_panic() {
-        let _ = render("- [ ] open\n- [x] done\n- [ ] another\n", false, 14.0);
-        let _ = render("- [ ] streaming\n- [x] done\n", true, 14.0);
+        let _ = render("- [ ] open\n- [x] done\n- [ ] another\n", false, 14.0, 0);
+        let _ = render("- [ ] streaming\n- [x] done\n", true, 14.0, 0);
     }
 }
