@@ -8,6 +8,7 @@
 //! Pure function: `render(content, streaming, font_size) -> Div`. No memoisation,
 //! no `Window` parameter — fonts are constructed inline.
 
+use crate::rich::column::prose_width;
 use crate::theme::{theme, with_alpha};
 use gpui::{
     div, px, Div, Font, FontFeatures, FontStyle, FontWeight, Hsla, ParentElement as _,
@@ -526,7 +527,11 @@ fn image_element(alt: String, dest: String, font_size: f32) -> Div {
 // ── Block builders ────────────────────────────────────────────────
 
 fn paragraph_element(text: SharedString, runs: Vec<TextRun>, font_size: f32) -> Div {
+    // DEV-571: running text wraps at the prose measure, not the block frame.
+    // Code blocks and tables deliberately keep the full frame — their width is
+    // determined by their content, and clamping them loses information.
     div()
+        .max_w(prose_width(font_size))
         .py(px(4.0))
         .text_size(px(font_size))
         .child(StyledText::new(text).with_runs(runs))
@@ -547,6 +552,7 @@ fn heading_element(
         HeadingLevel::H6 => (font_size, 4.0, 2.0),
     };
     let text_div = div()
+        .max_w(prose_width(font_size))
         .text_size(px(size))
         .child(StyledText::new(text).with_runs(runs));
 
@@ -638,6 +644,7 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
 
 fn list_item_element(text: SharedString, runs: Vec<TextRun>, font_size: f32) -> Div {
     div()
+        .max_w(prose_width(font_size))
         .py(px(1.0))
         .pl(px(4.0))
         .text_size(px(font_size))
