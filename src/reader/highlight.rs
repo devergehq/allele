@@ -190,6 +190,34 @@ fn syntax_for(ext: &str) -> Syntax {
     }
 }
 
+/// The theme's token palette. Shared so every syntax-highlighted surface —
+/// the source Reader and Markdown code fences (DEV-573) — colours the same
+/// token class the same way.
+///
+/// Comments use `text_muted`, not `text_faint`: against the Markdown fence
+/// surface (`bg_raised` at 0.6 over `bg_base`, blending to #292a3b) faint
+/// measures 2.89:1, well under the 4.5:1 needed for body text, and only 3.36:1
+/// against the Reader's own background. Muted clears it at 5.0:1. Comments
+/// routinely carry the constraint that explains the code — they cannot recede
+/// into the background.
+pub(crate) fn theme_colors() -> TokenColors {
+    use crate::theme::theme;
+    TokenColors {
+        text: theme().text_primary,
+        comment: theme().text_muted,
+        string: theme().success,
+        keyword: theme().lavender,
+        number: theme().warning,
+        function: theme().info,
+        type_: theme().accent,
+        constant: theme().warning,
+        property: theme().text_body,
+        operator: theme().text_secondary,
+        punctuation: theme().text_muted,
+        variable: theme().text_primary,
+    }
+}
+
 pub(crate) fn mono_font() -> Font {
     Font {
         family: crate::theme::FONT_MONO.into(),
@@ -205,6 +233,7 @@ fn is_word(c: char) -> bool {
 }
 
 /// A rendered line: the raw text plus the styled runs to hand to `StyledText`.
+#[derive(Clone)]
 pub(crate) struct HlLine {
     pub text: SharedString,
     pub runs: Vec<TextRun>,

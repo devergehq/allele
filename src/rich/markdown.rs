@@ -8,6 +8,12 @@
 //! Pure function: `render(content, streaming, font_size) -> Div`. No memoisation,
 //! no `Window` parameter — fonts are constructed inline.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::hash::{Hash as _, Hasher as _};
+use std::rc::Rc;
+
+use crate::reader::highlight::{self, HlLine, TokenColors};
 use crate::rich::column::prose_width;
 use crate::theme::{theme, with_alpha};
 use gpui::{
@@ -19,6 +25,10 @@ use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, T
 // ── Palette (Catppuccin Mocha — matches rich_view.rs) ─────────────
 
 const MONO_FAMILY: &str = crate::theme::FONT_MONO;
+
+/// Vertical space between consecutive paragraphs. Heading margins are set
+/// against this — a heading that does not clear it separates nothing.
+const PARAGRAPH_GAP: f32 = 8.0;
 
 fn body_font(bold: bool, italic: bool) -> Font {
     Font {
@@ -421,8 +431,8 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 let body = std::mem::replace(&mut container, div());
                 let parent = parents.pop().unwrap_or_else(|| div().flex().flex_col());
                 let quoted = div()
-                    .my(px(4.0))
-                    .pl(px(10.0))
+                    .my(px(8.0))
+                    .pl(px(12.0))
                     .border_l_2()
                     .border_color(with_alpha(theme().text_secondary, 0.4))
                     .child(body);
@@ -476,8 +486,8 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
     while let Some(parent) = parents.pop() {
         let body = std::mem::replace(&mut container, div());
         let quoted = div()
-            .my(px(4.0))
-            .pl(px(10.0))
+            .my(px(8.0))
+            .pl(px(12.0))
             .border_l_2()
             .border_color(with_alpha(theme().text_secondary, 0.4))
             .child(body);
@@ -532,9 +542,27 @@ fn paragraph_element(text: SharedString, runs: Vec<TextRun>, font_size: f32) -> 
     // determined by their content, and clamping them loses information.
     div()
         .max_w(prose_width(font_size))
-        .py(px(4.0))
+        .py(px(PARAGRAPH_GAP / 2.0))
         .text_size(px(font_size))
         .child(StyledText::new(text).with_runs(runs))
+}
+
+/// Type size and vertical margins for a heading level, as
+/// `(size, margin_top, margin_bottom)`.
+///
+/// DEV-573: paragraphs sit [`PARAGRAPH_GAP`] apart, so the old 10px heading
+/// top-margin separated nothing — hierarchy did not read at all. Top space now
+/// clearly exceeds inter-paragraph space, and stays larger than the bottom, so
+/// a heading binds to the text it introduces rather than to the text above it.
+fn heading_spacing(level: HeadingLevel, font_size: f32) -> (f32, f32, f32) {
+    match level {
+        HeadingLevel::H1 => (font_size + 8.0, 22.0, 6.0),
+        HeadingLevel::H2 => (font_size + 5.0, 18.0, 5.0),
+        HeadingLevel::H3 => (font_size + 3.0, 14.0, 4.0),
+        HeadingLevel::H4 => (font_size + 2.0, 11.0, 3.0),
+        HeadingLevel::H5 => (font_size + 1.0, 9.0, 3.0),
+        HeadingLevel::H6 => (font_size, 9.0, 2.0),
+    }
 }
 
 fn heading_element(
@@ -543,51 +571,114 @@ fn heading_element(
     runs: Vec<TextRun>,
     font_size: f32,
 ) -> Div {
-    let (size, top, bottom) = match level {
-        HeadingLevel::H1 => (font_size + 8.0, 10.0, 6.0),
-        HeadingLevel::H2 => (font_size + 5.0, 8.0, 5.0),
-        HeadingLevel::H3 => (font_size + 3.0, 6.0, 4.0),
-        HeadingLevel::H4 => (font_size + 2.0, 5.0, 3.0),
-        HeadingLevel::H5 => (font_size + 1.0, 4.0, 3.0),
-        HeadingLevel::H6 => (font_size, 4.0, 2.0),
-    };
+    let (size, top, bottom) = heading_spacing(level, font_size);
     let text_div = div()
         .max_w(prose_width(font_size))
         .text_size(px(size))
         .child(StyledText::new(text).with_runs(runs));
 
-    // H1/H2 get a lavender left accent bar for strong section separation.
-    match level {
-        HeadingLevel::H1 | HeadingLevel::H2 => div()
-            .mt(px(top))
-            .mb(px(bottom))
-            .pl(px(8.0))
-            .border_l_2()
-            .border_color(with_alpha(theme().ready, 0.55))
-            .child(text_div),
-        _ => div().mt(px(top)).mb(px(bottom)).child(text_div),
+    // No left accent bar: DEV-29 uses a left bar to mark narrative roles
+    // (decisions, outcomes), and the same token cannot mean two things in one
+    // column. Size and space carry the hierarchy on their own.
+    div().mt(px(top)).mb(px(bottom)).child(text_div)
+}
+
+// Note: this reaches into `reader::highlight`, while `reader` renders Markdown
+// through this module — a cycle between two feature modules. The shared
+// highlighter wants to live in a neutral module both consume; tracked
+// separately rather than widening this change.
+
+/// Cache of highlighted fences, keyed by content + language + palette.
+///
+/// `render` is documented as safe to call every frame, and GPUI does exactly
+/// that for every visible block. Only the tree-sitter *configuration* is
+/// cached upstream (`reader::ts_highlight`) — `Highlighter::highlight` still
+/// reparses the whole fence on each call, so without this a screenful of code
+/// would be reparsed at frame rate. The palette is part of the key because
+/// token colours are baked into the cached `TextRun`s, so a theme change must
+/// miss rather than serve stale colours.
+///
+/// Thread-local because highlighting runs on the render thread, matching the
+/// grammar cache it sits in front of.
+type FenceCache = HashMap<u64, Rc<Vec<HlLine>>>;
+
+thread_local! {
+    static FENCE_CACHE: RefCell<FenceCache> = RefCell::new(HashMap::new());
+}
+
+/// Entries retained before the cache is dropped wholesale. A transcript shows
+/// far fewer distinct fences than this at once; the bound exists so a very long
+/// session cannot grow it without limit.
+const FENCE_CACHE_CAPACITY: usize = 128;
+
+fn fence_key(code: &str, ext: &str, colors: &TokenColors) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    code.hash(&mut hasher);
+    ext.hash(&mut hasher);
+    // Hsla is not Hash; its bit patterns identify the palette well enough to
+    // detect a theme swap.
+    for c in [colors.text, colors.comment, colors.keyword, colors.string] {
+        c.h.to_bits().hash(&mut hasher);
+        c.s.to_bits().hash(&mut hasher);
+        c.l.to_bits().hash(&mut hasher);
+        c.a.to_bits().hash(&mut hasher);
     }
+    hasher.finish()
+}
+
+/// Highlight a fence, reusing the previous frame's result when nothing changed.
+fn highlighted_fence(code: &str, ext: &str, colors: TokenColors) -> Rc<Vec<HlLine>> {
+    let key = fence_key(code, ext, &colors);
+    FENCE_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if let Some(hit) = cache.get(&key) {
+            return Rc::clone(hit);
+        }
+        if cache.len() >= FENCE_CACHE_CAPACITY {
+            cache.clear();
+        }
+        let lines = Rc::new(highlight::highlight(code, ext, colors));
+        cache.insert(key, Rc::clone(&lines));
+        lines
+    })
+}
+
+/// Map a fence's language tag to the file extension the highlighter keys on.
+/// Anything not listed renders as plain monospace rather than being guessed at.
+fn ext_for_fence_lang(lang: &str) -> Option<&'static str> {
+    Some(match lang.trim().to_ascii_lowercase().as_str() {
+        "rust" | "rs" => "rs",
+        "typescript" | "ts" => "ts",
+        "tsx" | "jsx" | "javascript" | "js" => "tsx",
+        "python" | "py" => "py",
+        "go" | "golang" => "go",
+        "json" => "json",
+        "bash" | "sh" | "shell" | "zsh" | "console" => "sh",
+        "php" => "php",
+        _ => return None,
+    })
 }
 
 fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
     let code_size = font_size - 1.0;
-    let base_color = theme().success;
     let trimmed = if code.ends_with('\n') {
         &code[..code.len() - 1]
     } else {
         &code
     };
 
+    // DEV-573: the surface tint alone says "this is code". The old block also
+    // spent a peach left border and a peach language label saying the same
+    // thing, and painted every token one flat green — three colour channels
+    // encoding a single bit, with none left over for syntax. Highlighting
+    // needs those channels back.
     let mut block = div()
         .my(px(10.0))
         .rounded(px(6.0))
         .bg(with_alpha(theme().bg_raised, 0.6))
-        .border_l_2()
-        .border_color(with_alpha(theme().attention, 0.5))
         .flex()
         .flex_col();
 
-    // Language label — sits above the code in a muted peach tone.
     let has_lang = !lang.is_empty();
     if has_lang {
         block = block.child(
@@ -596,9 +687,9 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
                 .pt(px(5.0))
                 .pb(px(1.0))
                 .text_size(px(font_size - 3.0).max(px(9.0)))
-                .text_color(with_alpha(theme().attention, 0.65))
+                .text_color(theme().text_faint)
                 .font_family(MONO_FAMILY)
-                .child(lang),
+                .child(lang.clone()),
         );
     }
 
@@ -624,20 +715,36 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
         .pb(px(6.0))
         .flex()
         .flex_col();
-    for line in trimmed.split('\n') {
-        let run = TextRun {
-            len: line.len(),
-            font: mono_font(false, false),
-            color: base_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        content = content.child(
-            div()
-                .text_size(px(code_size))
-                .child(StyledText::new(SharedString::from(line.to_string())).with_runs(vec![run])),
-        );
+
+    // A recognised fence language goes through the Reader's highlighter
+    // (DEV-73), sharing its token palette so the same class is the same colour
+    // everywhere. An unrecognised or absent tag renders as plain monospace —
+    // guessing a grammar colours code wrongly, which is worse than not at all.
+    match ext_for_fence_lang(&lang) {
+        Some(ext) => {
+            for line in highlighted_fence(trimmed, ext, highlight::theme_colors()).iter() {
+                content = content.child(
+                    div()
+                        .text_size(px(code_size))
+                        .child(StyledText::new(line.text.clone()).with_runs(line.runs.clone())),
+                );
+            }
+        }
+        None => {
+            for line in trimmed.split('\n') {
+                let run = TextRun {
+                    len: line.len(),
+                    font: mono_font(false, false),
+                    color: theme().text_body,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                content = content.child(div().text_size(px(code_size)).child(
+                    StyledText::new(SharedString::from(line.to_string())).with_runs(vec![run]),
+                ));
+            }
+        }
     }
     block.child(content)
 }
@@ -658,8 +765,17 @@ fn table_element(
 ) -> Div {
     let cell_size = font_size - 1.0;
 
+    // DEV-573: rows are separated by a hairline rule, not by alternating
+    // backgrounds. Row parity carries almost no signal at transcript density,
+    // and striping spends a lot of ink to convey it. The rule does the same
+    // separating job for a fraction of the weight.
+    // 0.35, not the 0.2 this started at: once a cell wraps to two lines a
+    // near-invisible rule stops associating the row, and a value can be read
+    // against the wrong record.
+    let rule = with_alpha(theme().text_faint, 0.35);
+
     let mut table = div()
-        .my(px(6.0))
+        .my(px(8.0))
         .w_full()
         .min_w_0()
         .rounded(px(6.0))
@@ -668,7 +784,12 @@ fn table_element(
         .flex_col();
 
     if !header.is_empty() {
-        let mut row = div().w_full().min_w_0().flex().bg(theme().bg_raised);
+        let mut row = div()
+            .w_full()
+            .min_w_0()
+            .flex()
+            .border_b_1()
+            .border_color(with_alpha(theme().text_faint, 0.45));
         for cell in header {
             let content = if let Some((text, runs)) = cell {
                 div()
@@ -677,7 +798,7 @@ fn table_element(
                     .px(px(8.0))
                     .py(px(5.0))
                     .text_size(px(cell_size))
-                    .text_color(theme().text_body)
+                    .text_color(theme().text_secondary)
                     .child(StyledText::new(text).with_runs(runs))
             } else {
                 div().flex_1().min_w_0().px(px(8.0)).py(px(5.0))
@@ -687,13 +808,12 @@ fn table_element(
         table = table.child(row);
     }
 
+    let last = rows.len().saturating_sub(1);
     for (i, row_cells) in rows.into_iter().enumerate() {
-        let bg = if i % 2 == 0 {
-            with_alpha(theme().bg_raised, 0.45)
-        } else {
-            with_alpha(theme().bg_raised, 0.2)
-        };
-        let mut row = div().w_full().min_w_0().flex().bg(bg);
+        let mut row = div().w_full().min_w_0().flex();
+        if i != last {
+            row = row.border_b_1().border_color(rule);
+        }
         for cell in row_cells {
             let content = if let Some((text, runs)) = cell {
                 div()
@@ -768,6 +888,129 @@ Mid-stream **unterminated
         // Streaming = true, then false. Both paths must not panic.
         let _ = render(sample, true, 14.0);
         let _ = render(sample, false, 14.0);
+    }
+
+    #[test]
+    fn heading_top_margin_clears_the_paragraph_gap() {
+        // A heading whose top margin does not exceed the space between two
+        // paragraphs is invisible as a separator — the DEV-573 bug.
+        for level in [
+            HeadingLevel::H1,
+            HeadingLevel::H2,
+            HeadingLevel::H3,
+            HeadingLevel::H4,
+            HeadingLevel::H5,
+            HeadingLevel::H6,
+        ] {
+            let (_, top, _) = heading_spacing(level, 14.0);
+            assert!(
+                top > PARAGRAPH_GAP,
+                "{level:?} top margin {top} must exceed the {PARAGRAPH_GAP}px paragraph gap"
+            );
+        }
+    }
+
+    #[test]
+    fn headings_bind_downward_to_the_text_they_introduce() {
+        for level in [
+            HeadingLevel::H1,
+            HeadingLevel::H2,
+            HeadingLevel::H3,
+            HeadingLevel::H4,
+            HeadingLevel::H5,
+            HeadingLevel::H6,
+        ] {
+            let (_, top, bottom) = heading_spacing(level, 14.0);
+            assert!(
+                top > bottom,
+                "{level:?} must sit closer to what follows it than to what precedes it"
+            );
+        }
+    }
+
+    #[test]
+    fn heading_hierarchy_is_monotonic() {
+        let levels = [
+            HeadingLevel::H1,
+            HeadingLevel::H2,
+            HeadingLevel::H3,
+            HeadingLevel::H4,
+            HeadingLevel::H5,
+            HeadingLevel::H6,
+        ];
+        for pair in levels.windows(2) {
+            let (size_a, top_a, _) = heading_spacing(pair[0], 14.0);
+            let (size_b, top_b, _) = heading_spacing(pair[1], 14.0);
+            assert!(size_a >= size_b, "type size must not grow as depth grows");
+            assert!(top_a >= top_b, "top margin must not grow as depth grows");
+        }
+    }
+
+    #[test]
+    fn known_fence_languages_map_to_a_highlighted_extension() {
+        assert_eq!(ext_for_fence_lang("rust"), Some("rs"));
+        assert_eq!(ext_for_fence_lang("Python"), Some("py"));
+        assert_eq!(ext_for_fence_lang("  BASH  "), Some("sh"));
+        assert_eq!(ext_for_fence_lang("js"), Some("tsx"));
+    }
+
+    #[test]
+    fn unknown_fence_languages_are_not_guessed_at() {
+        // Guessing a grammar colours code wrongly, which is worse than
+        // rendering it plain.
+        assert_eq!(ext_for_fence_lang(""), None);
+        assert_eq!(ext_for_fence_lang("brainfuck"), None);
+        assert_eq!(ext_for_fence_lang("text"), None);
+    }
+
+    #[test]
+    fn highlighted_and_plain_fences_both_render() {
+        let highlighted = "```rust\nfn main() { let x = \"hi\"; }\n```\n";
+        let plain = "```brainfuck\n+++++[->+++<]\n```\n";
+        let untagged = "```\nno language tag\n```\n";
+        for sample in [highlighted, plain, untagged] {
+            let _ = render(sample, false, 14.0);
+            let _ = render(sample, true, 14.0);
+        }
+    }
+
+    #[test]
+    fn identical_fences_reuse_the_cached_highlight() {
+        // The whole point of the cache: a fence that has not changed must not
+        // be reparsed on the next frame.
+        let first = highlighted_fence("fn main() { let x = 1; }", "rs", highlight::theme_colors());
+        let second = highlighted_fence("fn main() { let x = 1; }", "rs", highlight::theme_colors());
+        assert!(
+            Rc::ptr_eq(&first, &second),
+            "an unchanged fence must be served from the cache"
+        );
+    }
+
+    #[test]
+    fn a_different_palette_misses_the_cache() {
+        // Token colours are baked into the cached runs, so a theme swap has to
+        // miss rather than serve stale colours.
+        let colors = highlight::theme_colors();
+        let mut swapped = colors;
+        swapped.keyword = colors.string;
+        assert_ne!(
+            fence_key("fn main() {}", "rs", &colors),
+            fence_key("fn main() {}", "rs", &swapped),
+            "a palette change must change the cache key"
+        );
+    }
+
+    #[test]
+    fn the_fence_cache_stays_bounded() {
+        for i in 0..(FENCE_CACHE_CAPACITY * 2) {
+            let _ = highlighted_fence(&format!("let x{i} = {i};"), "rs", highlight::theme_colors());
+        }
+        FENCE_CACHE.with(|cache| {
+            assert!(
+                cache.borrow().len() <= FENCE_CACHE_CAPACITY,
+                "the cache must not grow without bound across a long session"
+            );
+        });
     }
 
     #[test]
