@@ -122,6 +122,40 @@ impl InlineStyle {
     }
 }
 
+/// A list item's bullet, number or checkbox.
+///
+/// Held apart from the item's content rather than pushed into the same
+/// `StyledText`, so a wrapped line hangs under the text instead of under the
+/// marker, and so nesting can be real indentation rather than leading spaces.
+/// Both matter much more since DEV-571 narrowed the prose measure: list items
+/// wrap far more often than they used to.
+#[derive(Clone)]
+struct ListMarker {
+    text: String,
+    color: Hsla,
+}
+
+/// Build the marker for the item starting now, advancing an ordered list's
+/// counter. `None` for an item with no enclosing list, which malformed
+/// markdown can produce.
+fn list_marker(list_stack: &mut [Option<u64>], base_color: Hsla) -> Option<ListMarker> {
+    match list_stack.last_mut() {
+        Some(Some(n)) => {
+            let text = format!("{n}.");
+            *n += 1;
+            Some(ListMarker {
+                text,
+                color: base_color,
+            })
+        }
+        Some(None) => Some(ListMarker {
+            text: "•".to_string(),
+            color: base_color,
+        }),
+        None => None,
+    }
+}
+
 /// Accumulates a single paragraph/heading's worth of inline text + runs.
 struct InlineBuilder {
     text: String,
@@ -167,6 +201,33 @@ impl InlineBuilder {
 
 // ── Public API ────────────────────────────────────────────────────
 
+/// Close off whatever inline content has accumulated and append it to
+/// `container`, as a list item when we are inside a list and a paragraph
+/// otherwise. `marker` is consumed, so the second paragraph of a loose list
+/// item indents to match its first without repeating the bullet.
+fn flush_inline(
+    container: Div,
+    inline: &mut InlineBuilder,
+    list_depth: usize,
+    marker: &mut Option<ListMarker>,
+    font_size: f32,
+) -> Div {
+    let Some((text, runs)) = std::mem::replace(inline, InlineBuilder::new()).finish() else {
+        return container;
+    };
+    if list_depth > 0 {
+        container.child(list_item_element(
+            marker.take(),
+            list_depth,
+            text,
+            runs,
+            font_size,
+        ))
+    } else {
+        container.child(paragraph_element(text, runs, font_size))
+    }
+}
+
 /// Render markdown-formatted text as a GPUI div tree. Pure function — safe to
 /// re-call every frame; pulldown-cmark parses at hundreds of MB/s for the sizes
 /// involved here.
@@ -201,9 +262,10 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
     let mut code_lang = String::new();
     // list_stack entries: Some(n) = ordered list with next-number n, None = unordered.
     let mut list_stack: Vec<Option<u64>> = Vec::new();
-    // Deferred bullet/number prefix — held until first content so TaskListMarker
-    // can replace it with a checkbox before anything is pushed to `inline`.
-    let mut pending_list_prefix: Option<String> = None;
+    // The current item's marker, held until its content is flushed so
+    // TaskListMarker can replace a bullet with a checkbox first. It is never
+    // pushed into `inline` — that is what cost the hanging indent.
+    let mut pending_marker: Option<ListMarker> = None;
 
     // Table state — cells collect inline content; rows collect cells.
     let mut in_table_head = false;
@@ -217,18 +279,22 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 // No-op: paragraph content accumulates into `inline`.
             }
             Event::End(TagEnd::Paragraph) => {
-                if let Some((text, runs)) =
-                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
-                {
-                    container = container.child(paragraph_element(text, runs, font_size));
-                }
+                container = flush_inline(
+                    container,
+                    &mut inline,
+                    list_stack.len(),
+                    &mut pending_marker,
+                    font_size,
+                );
             }
             Event::Start(Tag::Heading { level, .. }) => {
-                if let Some((text, runs)) =
-                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
-                {
-                    container = container.child(paragraph_element(text, runs, font_size));
-                }
+                container = flush_inline(
+                    container,
+                    &mut inline,
+                    list_stack.len(),
+                    &mut pending_marker,
+                    font_size,
+                );
                 current_heading = Some(level);
                 inline.style.bold = true;
             }
@@ -242,11 +308,13 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
-                if let Some((text, runs)) =
-                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
-                {
-                    container = container.child(paragraph_element(text, runs, font_size));
-                }
+                container = flush_inline(
+                    container,
+                    &mut inline,
+                    list_stack.len(),
+                    &mut pending_marker,
+                    font_size,
+                );
                 in_code_block = true;
                 code_buffer.clear();
                 code_lang = match kind {
@@ -263,56 +331,48 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 ));
             }
             Event::Start(Tag::List(first_number)) => {
-                if let Some((text, runs)) =
-                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
-                {
-                    container = container.child(paragraph_element(text, runs, font_size));
-                }
+                container = flush_inline(
+                    container,
+                    &mut inline,
+                    list_stack.len(),
+                    &mut pending_marker,
+                    font_size,
+                );
                 list_stack.push(first_number);
             }
             Event::End(TagEnd::List(_)) => {
                 list_stack.pop();
             }
             Event::Start(Tag::Item) => {
-                let depth = list_stack.len().saturating_sub(1);
-                let indent = " ".repeat(depth * 2);
-                let prefix = match list_stack.last_mut() {
-                    Some(Some(n)) => {
-                        let p = format!("{indent}{n}. ");
-                        *n += 1;
-                        p
-                    }
-                    Some(None) => format!("{indent}• "),
-                    None => String::new(),
-                };
-                // Defer the prefix — TaskListMarker may replace it with a checkbox.
-                pending_list_prefix = Some(prefix);
+                pending_marker = list_marker(&mut list_stack, base_color);
             }
             Event::End(TagEnd::Item) => {
-                // Flush any prefix left over from an empty item.
-                if let Some(prefix) = pending_list_prefix.take() {
-                    inline.push(&prefix, base_color);
-                }
-                if let Some((text, runs)) =
-                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
-                {
-                    container = container.child(list_item_element(text, runs, font_size));
-                }
+                // Tight items flush here. A loose item flushed at its paragraph
+                // end, which consumed the marker, so this is a no-op for those
+                // and for an item with no content at all.
+                container = flush_inline(
+                    container,
+                    &mut inline,
+                    list_stack.len(),
+                    &mut pending_marker,
+                    font_size,
+                );
+                pending_marker = None;
             }
             // ── Task list checkboxes ──────────────────────────────
             Event::TaskListMarker(checked) => {
-                // Discard the bullet prefix — the checkbox replaces it.
-                pending_list_prefix = None;
-                let depth = list_stack.len().saturating_sub(1);
-                let indent = " ".repeat(depth * 2);
-                if checked {
-                    inline.push(&format!("{indent}☑ "), theme().success);
+                // The checkbox replaces the bullet outright.
+                pending_marker = Some(if checked {
+                    ListMarker {
+                        text: "☑".to_string(),
+                        color: theme().success,
+                    }
                 } else {
-                    inline.push(
-                        &format!("{indent}☐ "),
-                        with_alpha(theme().text_secondary, 0.6),
-                    );
-                }
+                    ListMarker {
+                        text: "☐".to_string(),
+                        color: with_alpha(theme().text_secondary, 0.6),
+                    }
+                });
             }
             Event::Start(Tag::Emphasis) => inline.style.italic = true,
             Event::End(TagEnd::Emphasis) => inline.style.italic = false,
@@ -323,18 +383,12 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
             Event::Start(Tag::Link { .. }) => inline.style.link = true,
             Event::End(TagEnd::Link) => inline.style.link = false,
             Event::Code(s) => {
-                if let Some(prefix) = pending_list_prefix.take() {
-                    inline.push(&prefix, base_color);
-                }
                 let was = inline.style.code;
                 inline.style.code = true;
                 inline.push(&s, base_color);
                 inline.style.code = was;
             }
             Event::Text(s) => {
-                if let Some(prefix) = pending_list_prefix.take() {
-                    inline.push(&prefix, base_color);
-                }
                 if in_image {
                     // Alt text — collected for the image placeholder, not body.
                     image_alt.push_str(&s);
@@ -345,9 +399,6 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 }
             }
             Event::SoftBreak => {
-                if let Some(prefix) = pending_list_prefix.take() {
-                    inline.push(&prefix, base_color);
-                }
                 if !in_code_block {
                     inline.push(" ", base_color);
                 }
@@ -358,11 +409,13 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
                 }
             }
             Event::Rule => {
-                if let Some((text, runs)) =
-                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
-                {
-                    container = container.child(paragraph_element(text, runs, font_size));
-                }
+                container = flush_inline(
+                    container,
+                    &mut inline,
+                    list_stack.len(),
+                    &mut pending_marker,
+                    font_size,
+                );
                 container = container.child(
                     div()
                         .my(px(6.0))
@@ -372,11 +425,13 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
             }
             // ── Tables ────────────────────────────────────────────
             Event::Start(Tag::Table(_)) => {
-                if let Some((text, runs)) =
-                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
-                {
-                    container = container.child(paragraph_element(text, runs, font_size));
-                }
+                container = flush_inline(
+                    container,
+                    &mut inline,
+                    list_stack.len(),
+                    &mut pending_marker,
+                    font_size,
+                );
                 table_header.clear();
                 table_body.clear();
             }
@@ -414,20 +469,24 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
             }
             // ── Blockquotes ───────────────────────────────────────
             Event::Start(Tag::BlockQuote(_)) => {
-                if let Some((text, runs)) =
-                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
-                {
-                    container = container.child(paragraph_element(text, runs, font_size));
-                }
+                container = flush_inline(
+                    container,
+                    &mut inline,
+                    list_stack.len(),
+                    &mut pending_marker,
+                    font_size,
+                );
                 // Start a fresh body for the quote; remember the parent.
                 parents.push(std::mem::replace(&mut container, div().flex().flex_col()));
             }
             Event::End(TagEnd::BlockQuote(_)) => {
-                if let Some((text, runs)) =
-                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
-                {
-                    container = container.child(paragraph_element(text, runs, font_size));
-                }
+                container = flush_inline(
+                    container,
+                    &mut inline,
+                    list_stack.len(),
+                    &mut pending_marker,
+                    font_size,
+                );
                 let body = std::mem::replace(&mut container, div());
                 let parent = parents.pop().unwrap_or_else(|| div().flex().flex_col());
                 let quoted = div()
@@ -447,11 +506,13 @@ pub fn render(content: &str, streaming: bool, font_size: f32) -> Div {
             Event::End(TagEnd::Image) => {
                 in_image = false;
                 // Flush any inline text before the image sits on its own line.
-                if let Some((text, runs)) =
-                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
-                {
-                    container = container.child(paragraph_element(text, runs, font_size));
-                }
+                container = flush_inline(
+                    container,
+                    &mut inline,
+                    list_stack.len(),
+                    &mut pending_marker,
+                    font_size,
+                );
                 container = container.child(image_element(
                     std::mem::take(&mut image_alt),
                     std::mem::take(&mut image_dest),
@@ -749,13 +810,49 @@ fn code_block_element(code: String, lang: String, font_size: f32) -> Div {
     block.child(content)
 }
 
-fn list_item_element(text: SharedString, runs: Vec<TextRun>, font_size: f32) -> Div {
+/// One list item: marker in its own cell, content in a flexible one beside it.
+///
+/// The two-cell layout is what gives a wrapped line its hanging indent — the
+/// content column starts to the right of the marker and stays there. Nesting is
+/// left padding rather than leading spaces, for the same reason: spaces live
+/// inside the text run and vanish the moment it wraps.
+///
+/// `marker` is `None` for the second and later paragraphs of a loose item,
+/// which align with the item's text but do not repeat its bullet.
+fn list_item_element(
+    marker: Option<ListMarker>,
+    depth: usize,
+    text: SharedString,
+    runs: Vec<TextRun>,
+    font_size: f32,
+) -> Div {
+    // Wide enough for "10." at the body size, so ordered lists do not shift
+    // their content column as they pass nine items.
+    let marker_w = px(font_size * 1.7);
+    let indent = px(depth.saturating_sub(1) as f32 * font_size * 1.2);
+
     div()
         .max_w(prose_width(font_size))
         .py(px(1.0))
-        .pl(px(4.0))
-        .text_size(px(font_size))
-        .child(StyledText::new(text).with_runs(runs))
+        .pl(indent)
+        .flex()
+        .items_start()
+        .child(match marker {
+            Some(m) => div()
+                .flex_shrink_0()
+                .w(marker_w)
+                .text_size(px(font_size))
+                .text_color(m.color)
+                .child(m.text),
+            None => div().flex_shrink_0().w(marker_w),
+        })
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_size(px(font_size))
+                .child(StyledText::new(text).with_runs(runs)),
+        )
 }
 
 fn table_element(
@@ -1011,6 +1108,62 @@ Mid-stream **unterminated
                 "the cache must not grow without bound across a long session"
             );
         });
+    }
+
+    #[test]
+    fn unordered_items_all_get_the_same_marker() {
+        let mut stack = vec![None];
+        let c = theme().text_primary;
+        for _ in 0..3 {
+            assert_eq!(list_marker(&mut stack, c).unwrap().text, "•");
+        }
+    }
+
+    #[test]
+    fn ordered_items_count_up() {
+        let mut stack = vec![Some(1)];
+        let c = theme().text_primary;
+        let seen: Vec<String> = (0..3)
+            .map(|_| list_marker(&mut stack, c).unwrap().text)
+            .collect();
+        assert_eq!(seen, vec!["1.", "2.", "3."]);
+    }
+
+    #[test]
+    fn an_ordered_list_can_start_anywhere() {
+        let mut stack = vec![Some(7)];
+        assert_eq!(
+            list_marker(&mut stack, theme().text_primary).unwrap().text,
+            "7."
+        );
+    }
+
+    #[test]
+    fn an_item_outside_any_list_has_no_marker() {
+        // Malformed markdown can emit Item without List; it must not panic.
+        let mut stack: Vec<Option<u64>> = Vec::new();
+        assert!(list_marker(&mut stack, theme().text_primary).is_none());
+    }
+
+    #[test]
+    fn markers_carry_no_layout_in_their_text() {
+        // The marker used to be a padded string ("  • ") because indentation
+        // and spacing lived inside the text run — which is exactly why a
+        // wrapped line lost its hanging indent. Both are layout now.
+        let mut stack = vec![None, None, None];
+        let m = list_marker(&mut stack, theme().text_primary).unwrap();
+        assert_eq!(m.text.trim(), m.text, "no padding inside the marker text");
+        assert!(!m.text.contains(' '), "no spacing inside the marker text");
+    }
+
+    #[test]
+    fn nested_and_wrapping_lists_render() {
+        let sample = "- a very long bullet that will certainly wrap at any sane \
+prose measure and must hang under its own text\n  - nested\n    - deeper\n\n\
+1. one\n2. two\n\n- [ ] open\n- [x] done\n\n\
+- loose item\n\n  second paragraph of the same item\n";
+        let _ = render(sample, false, 14.0);
+        let _ = render(sample, true, 14.0);
     }
 
     #[test]
