@@ -61,6 +61,12 @@ pub struct RichView {
     document: RichDocument,
     compose_bar: Entity<ComposeBar>,
     font_size: f32,
+    /// Rail runs the reader has opened (DEV-575), by the run's first block id.
+    ///
+    /// Kept here rather than on `Block.collapsed`: whether the rail is open is
+    /// a different question from whether a given call's input JSON is
+    /// expanded, and sharing one flag would answer both at once.
+    expanded_rails: std::collections::HashSet<super::document::BlockId>,
     /// What to call the agent when a turn's prose is attributed (DEV-574).
     /// Derived from the session's configured agent, so an OpenCode session
     /// does not get labelled "Claude".
@@ -158,6 +164,7 @@ impl RichView {
             document,
             compose_bar,
             font_size,
+            expanded_rails: std::collections::HashSet::new(),
             agent_label: agent_display_name(agent_kind).into(),
             busy: false,
             list_state,
@@ -384,6 +391,28 @@ impl RichView {
         if run_len == 0 {
             return div().into_any_element();
         }
+
+        // DEV-575: a run of routine calls draws as one line unless opened. When
+        // it is opened the same line stays on as a header, so the run is still
+        // legible as a group and there is somewhere to click to close it again.
+        let mut rail_header = None;
+        if let Some((start, len)) = self.document.rail_run_at(ix) {
+            let Some(start_id) = self.document.blocks().get(start).map(|b| b.id) else {
+                return div().into_any_element();
+            };
+            let open = self.expanded_rails.contains(&start_id);
+            if !open && ix != start {
+                return div().into_any_element();
+            }
+            if ix == start {
+                let (summary, count) = self.document.rail_summary(start, len);
+                let header = render_rail(start_id, &summary, count, open, font_size, cx);
+                if !open {
+                    return framed(font_size, header).into_any_element();
+                }
+                rail_header = Some(header);
+            }
+        }
         let merged = (run_len > 1).then(|| self.document.run_content(ix, run_len));
         let speaker = self
             .document
@@ -412,6 +441,16 @@ impl RichView {
         // frame goes here rather than inside `render_block` so that the
         // agent header, the run's left border and the role accent bars all
         // land inside the column with the content they belong to.
+        let block_el = if let Some(header) = rail_header {
+            div()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(block_el)
+                .into_any_element()
+        } else {
+            block_el.into_any_element()
+        };
         let content = if let Some(header) = agent_header {
             div()
                 .flex()
@@ -705,6 +744,63 @@ fn render_block(
     }
 
     wrapper
+}
+
+/// The collapsed routine rail: one line standing in for a run of low-signal
+/// calls (DEV-575).
+///
+/// Deliberately quieter than a tool card — no status border, no surface. The
+/// point of the rail is that these calls stop competing with the prose; giving
+/// the summary a card's weight would spend most of what the aggregation saved.
+fn render_rail(
+    start_id: super::document::BlockId,
+    summary: &str,
+    count: u32,
+    open: bool,
+    font_size: f32,
+    cx: &mut Context<RichView>,
+) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(format!("rail-{start_id}").into()))
+        .w_full()
+        .min_w_0()
+        .px(px(10.0))
+        .py(px(3.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        // One line, whatever the summary says. A tool target can be arbitrarily
+        // long, and a rail that wraps to three lines gives back the space the
+        // aggregation just saved.
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .cursor(gpui::CursorStyle::PointingHand)
+        .child(chevron(!open))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_color(theme().text_faint)
+                .text_size(px(font_size - 2.0))
+                .child(summary.to_string()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(with_alpha(theme().text_faint, 0.6))
+                .text_size(px(font_size - 3.0))
+                .child(format!("({count} calls)")),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, _window, cx| {
+                if !this.expanded_rails.remove(&start_id) {
+                    this.expanded_rails.insert(start_id);
+                }
+                cx.notify();
+            }),
+        )
 }
 
 // ── Navigation strip (DEV-31) ─────────────────────────────────────
