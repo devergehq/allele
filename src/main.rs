@@ -826,7 +826,13 @@ impl AppState {
 
         let tool_visibility = self.user_settings.tool_visibility.clone();
         let view = cx.new(|cx| {
-            rich::RichView::new(cx, allele_session_id.clone(), font_size, tool_visibility)
+            rich::RichView::new(
+                cx,
+                allele_session_id.clone(),
+                font_size,
+                tool_visibility,
+                agent_kind,
+            )
         });
 
         // ComposeBar submits bubble up as RichViewEvent::Submit. Route
