@@ -13,6 +13,17 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Added
+- The limits on MCP-dispatched sessions are now configurable. By default a session
+  a human started may dispatch, the sessions it dispatches may not, and at most 20
+  dispatched sessions exist at once — unchanged. An orchestrator whose workers need
+  to dispatch an independent reviewer or investigator of their own can now be given
+  one more level by adding `"dispatch": { "max_depth": 2, "max_sessions": 30 }` to
+  `~/.config/allele/settings.json` (edit it while Allele is quit; it is read at
+  launch). A refused dispatch now says which depth the caller is at and what the
+  limit is, rather than "dispatched sessions may not dispatch", which is no longer
+  true in general.
+
 ### Changed
 - The attention bar collapses. It now opens with a summary header — a count of
   the sessions waiting on you, and a chevron — and clicking that header folds

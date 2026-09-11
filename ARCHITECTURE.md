@@ -68,7 +68,7 @@ src/
 │   ├── server.rs           # ~/.allele/control.sock, 0600
 │   ├── handler.rs          # read-only ops, non-interactive by contract
 │   ├── create.rs           # sessions.create — the only async operation
-│   ├── admission.rs        # dispatched-session cap + depth limit
+│   ├── admission.rs        # dispatched-session cap + depth limit (§4.8)
 │   ├── address.rs          # durable session addresses (never name-derived)
 │   └── mcp.rs              # `Allele --mcp-serve` stdio MCP server
 ├── repositories.rs         # SettingsRepository + StateRepository traits
@@ -391,6 +391,47 @@ rename (e.g. auto-naming updates labels but never IDs).
 `short-id` is the first 8 chars of the session UUID. Collisions are
 astronomically rare; when detected, a `-alt` suffix is appended.
 Never treat clone paths as stable outside this layout.
+
+### 4.8 Dispatch admission: depth before capacity, both from settings
+
+`dispatch::admission::admit` is the only gate on `sessions.create`, and it
+checks two independent limits (DEV-415):
+
+- **Depth** — how deep dispatch may nest. A human's session is depth 0,
+  what it dispatches is depth 1, and so on. Default **1**: a human's
+  session may dispatch, its workers may not.
+- **Cap** — dispatched sessions that exist at once, counted globally across
+  every dispatcher and depth. Default **20**. Human-started sessions are
+  never counted.
+
+Both are configurable in `settings.json` (DEV-600), for machines whose owner
+runs orchestrators that need workers to dispatch a helper of their own:
+
+```json
+"dispatch": { "max_depth": 2, "max_sessions": 30 }
+```
+
+Either key may be omitted and keeps its default; `max_depth: 0` turns
+dispatch off. Settings are read at startup, so a change needs a relaunch —
+and since allele rewrites the whole file on save, edit it while allele is
+quit. There is deliberately no settings-window control.
+
+What must stay true whatever the configuration:
+
+- **A child's depth is derived from allele's record of its creator,** never
+  from the request. `CreateRequest` carries no depth and no limit fields.
+- **Depth is checked before capacity,** so a recursion attempt is reported as
+  recursion rather than as "capacity", which would invite a retry that can
+  never succeed.
+- **Depth arithmetic cannot wrap or saturate** (`checked_add`), so even
+  `max_depth: 255` ends.
+- **The defaults stay 1 and 20.** Raising depth is an opt-in, never a
+  default: every dispatched session runs the same "dispatch when
+  parallelisable" rule, so each allowed level multiplies the fleet.
+
+These bound *dispatch* recursion by an agent following its own rules. They
+are not a security control — a session with a shell can reach processes and
+files allele cannot see; see DEV-419.
 
 ---
 
