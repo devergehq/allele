@@ -245,22 +245,20 @@ fn begin(
         .and_then(|id| find_session_origin(state, id))
         .unwrap_or(SessionOrigin::Human);
 
-    let depth = admission::admit(&caller_origin, admission::live_dispatched_count(state)).map_err(
-        |code| {
-            let message = match code {
-                ErrorCode::DepthLimitExceeded => format!(
-                    "dispatched sessions may not dispatch (depth limit {})",
-                    admission::MAX_DISPATCH_DEPTH
-                ),
-                _ => format!(
-                    "{} dispatched sessions already running (limit {})",
-                    admission::live_dispatched_count(state),
-                    admission::MAX_DISPATCHED_SESSIONS
-                ),
-            };
-            (code, message)
-        },
-    )?;
+    // Limits come from the user's settings, never the request — see
+    // `admission::DispatchLimits`.
+    let limits = state.user_settings.dispatch;
+    let live = admission::live_dispatched_count(state);
+    let depth = admission::admit(&caller_origin, live, &limits).map_err(|code| {
+        let message = match code {
+            ErrorCode::DepthLimitExceeded => depth_limit_message(caller_origin.depth(), &limits),
+            _ => format!(
+                "{live} dispatched sessions already running (limit {})",
+                limits.max_sessions
+            ),
+        };
+        (code, message)
+    })?;
 
     let name = unique_name(state, request.name.trim());
     let by_label = request
@@ -431,6 +429,25 @@ fn error(code: ErrorCode, message: String) -> Response {
     Response::Error { code, message }
 }
 
+/// Why a caller at `caller_depth` was refused under `limits`.
+///
+/// States the caller's depth beside the limit, because once the limit is
+/// configurable "dispatched sessions may not dispatch" is no longer true in
+/// general — at depth 2 a worker may. Deliberately does **not** name the
+/// setting: the reader is an orchestrator running the very rule the limit
+/// exists to stop, and telling it where the limit lives invites it to edit
+/// the owner's settings rather than do the work itself.
+fn depth_limit_message(caller_depth: u8, limits: &admission::DispatchLimits) -> String {
+    if limits.max_depth == 0 {
+        return "dispatch is turned off on this machine (depth limit 0)".to_string();
+    }
+    format!(
+        "this session is at dispatch depth {caller_depth} and the depth limit is {}, \
+         so it may not dispatch",
+        limits.max_depth
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -517,6 +534,43 @@ mod tests {
     fn the_first_retry_is_prompt_but_not_instant() {
         let first = SUBMIT_RETRIES_MS[0];
         assert!((500..=2_000).contains(&first), "first retry at {first}ms");
+    }
+
+    /// The refusal has to be true at whatever limit is configured — the old
+    /// "dispatched sessions may not dispatch" is false at depth 2.
+    #[test]
+    fn the_depth_refusal_states_the_callers_depth_and_the_limit() {
+        let depth_two = admission::DispatchLimits {
+            max_depth: 2,
+            max_sessions: 30,
+        };
+        let message = depth_limit_message(2, &depth_two);
+        assert!(message.contains("depth 2"), "{message}");
+        assert!(message.contains("limit is 2"), "{message}");
+
+        let message = depth_limit_message(1, &admission::DispatchLimits::default());
+        assert!(message.contains("depth 1"), "{message}");
+        assert!(message.contains("limit is 1"), "{message}");
+    }
+
+    /// Only a limit of 0 refuses a human's session, and "depth 0 at limit 0"
+    /// would read as a bug rather than a setting.
+    #[test]
+    fn the_depth_refusal_says_when_dispatch_is_off() {
+        let off = admission::DispatchLimits {
+            max_depth: 0,
+            ..Default::default()
+        };
+        assert!(depth_limit_message(0, &off).contains("turned off"));
+    }
+
+    /// The reader is an agent running the rule the limit exists to stop;
+    /// pointing it at the setting invites it to raise its own limit.
+    #[test]
+    fn the_depth_refusal_does_not_name_the_setting() {
+        let message = depth_limit_message(1, &admission::DispatchLimits::default());
+        assert!(!message.contains("settings"), "{message}");
+        assert!(!message.contains("max_depth"), "{message}");
     }
 
     #[test]

@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tracing::warn;
 
 use crate::config::TerminalCfg;
+use crate::dispatch::admission::DispatchLimits;
 use crate::naming::NamingConfig;
 
 /// Which built-in adapter drives an agent's command building. `Generic`
@@ -325,6 +326,17 @@ pub struct Settings {
     /// configures a store.
     #[serde(default)]
     pub sync: SyncSettings,
+
+    /// Admission limits for sessions started over the MCP control socket
+    /// (DEV-600): how deep dispatch may nest and how many dispatched sessions
+    /// may exist at once. Defaults to depth 1 and 20 sessions — see
+    /// [`DispatchLimits`] for why, and for what raising them costs.
+    ///
+    /// No settings-window control, deliberately: this is an opt-in for people
+    /// running orchestrators, and it should take an edit to `settings.json`
+    /// rather than a stray click.
+    #[serde(default)]
+    pub dispatch: DispatchLimits,
 }
 
 /// Session-sync store configuration. All plain strings — no credentials are
@@ -506,6 +518,7 @@ impl Default for Settings {
             attention_bar_collapsed: false,
             naming: NamingConfig::default(),
             sync: SyncSettings::default(),
+            dispatch: DispatchLimits::default(),
         }
     }
 }
@@ -627,6 +640,52 @@ mod tests {
         let round_tripped: Settings =
             serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert!(round_tripped.attention_bar_collapsed);
+    }
+
+    #[test]
+    fn dispatch_limits_default_when_absent() {
+        // Every settings.json written before DEV-600 lacks the key, and so
+        // does every machine whose owner never opted in. Both must land on
+        // the fork-bomb defaults, not on zero — a zero cap would silently
+        // turn dispatch off for everyone.
+        assert_eq!(Settings::default().dispatch, DispatchLimits::default());
+        let legacy = r#"{ "sidebar_width": 240.0 }"#;
+        let s: Settings = serde_json::from_str(legacy).expect("should deserialize");
+        assert_eq!(s.dispatch.max_depth, 1);
+        assert_eq!(s.dispatch.max_sessions, 20);
+    }
+
+    #[test]
+    fn dispatch_limits_opt_in_is_read() {
+        let json = r#"{ "dispatch": { "max_depth": 2, "max_sessions": 30 } }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.dispatch.max_depth, 2);
+        assert_eq!(s.dispatch.max_sessions, 30);
+    }
+
+    #[test]
+    fn dispatch_limits_partial_keeps_the_other_default() {
+        // Raising depth without touching the cap must not zero the cap.
+        let json = r#"{ "dispatch": { "max_depth": 2 } }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.dispatch.max_depth, 2);
+        assert_eq!(s.dispatch.max_sessions, 20);
+
+        let json = r#"{ "dispatch": { "max_sessions": 30 } }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.dispatch.max_depth, 1);
+        assert_eq!(s.dispatch.max_sessions, 30);
+    }
+
+    #[test]
+    fn dispatch_limits_round_trip() {
+        // `Settings::save` rewrites the whole file, so an opt-in that did not
+        // survive the write would be lost the first time the sidebar moved.
+        let json = r#"{ "dispatch": { "max_depth": 2, "max_sessions": 30 } }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        let round_tripped: Settings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(round_tripped.dispatch, s.dispatch);
     }
 
     #[test]
