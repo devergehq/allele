@@ -808,26 +808,21 @@ impl AppState {
                 Self::schedule_operation_result_repaint(cx);
 
                 // Send the initial prompt if provided.
-                if let Some(ref prompt_text) = prompt {
-                    if let Some(terminal) = terminal_view.read(cx).pty() {
-                        terminal.write(b"\x1b[200~");
-                        terminal.write(prompt_text.as_bytes());
-                        terminal.write(b"\x1b[201~");
-                    }
-                    let tv_weak = terminal_view.downgrade();
-                    cx.spawn(async move |_this, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(80))
-                            .await;
-                        cx.update(|cx| {
-                            if let Some(tv) = tv_weak.upgrade() {
-                                if let Some(terminal) = tv.read(cx).pty() {
-                                    terminal.write(b"\r");
-                                }
-                            }
-                        });
-                    })
-                    .detach();
+                //
+                // Delivery waits for the agent's input editor before pasting,
+                // and retries the submit until it lands. Both matter here: the
+                // prompt is being typed into an agent that is still booting,
+                // which is exactly the race a fixed timer loses. Retrying is
+                // safe because a session created a moment ago has nobody at
+                // its keyboard, so a repeated Enter can only meet an empty
+                // input. See `dispatch::pty::deliver` (DEV-603).
+                if let Some(prompt_text) = prompt {
+                    crate::dispatch::pty::deliver(
+                        &terminal_view,
+                        prompt_text,
+                        crate::dispatch::pty::CREATION_SUBMIT_RETRIES_MS,
+                        cx,
+                    );
                 }
 
                 cx.notify();
