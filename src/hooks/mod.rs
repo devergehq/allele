@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 use crate::errors::AlleleError;
@@ -37,6 +37,52 @@ pub fn events_dir() -> Option<PathBuf> {
     Some(base_dir()?.join("events"))
 }
 
+/// Restrict the events directory and everything already in it to the owner,
+/// returning how many files were tightened.
+///
+/// The receiver writes new files `0600` via its umask, but that does nothing
+/// for an install that already exists: the directory and its history predate
+/// it. On the machine this was found on that meant 81 world-readable briefs,
+/// the oldest four months old.
+///
+/// This module already chmods the receiver script `0755` on purpose, and
+/// `dispatch::server` binds the control socket `0600` with a note about
+/// privilege. The events directory was the one gap in that pattern (DEV-605).
+#[cfg(unix)]
+fn restrict_events_dir(dir: &Path) -> usize {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+
+    let Ok(entries) = fs::read_dir(dir) else {
+        return 0;
+    };
+
+    let mut tightened = 0usize;
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        let mode = meta.permissions().mode();
+        if mode & 0o077 == 0 {
+            continue; // already owner-only
+        }
+        // Keep the owner bits, drop group and other.
+        if fs::set_permissions(entry.path(), fs::Permissions::from_mode(mode & 0o700)).is_ok() {
+            tightened += 1;
+        }
+    }
+    tightened
+}
+
+#[cfg(not(unix))]
+fn restrict_events_dir(_dir: &Path) -> usize {
+    0
+}
+
 /// Shell body for the receiver script. Written verbatim to disk on startup.
 ///
 /// Deliberately minimal:
@@ -51,6 +97,10 @@ const RECEIVER_SCRIPT: &str = r#"#!/bin/bash
 # regenerated on next launch.
 
 set -u
+# Event files carry the briefs sessions are dispatched with, which routinely
+# include client context. Owner-only, so a dependency postinstall or any tool
+# an agent runs cannot read another session's brief (DEV-605).
+umask 077
 kind="${1:-unknown}"
 events_dir="$HOME/.allele/events"
 mkdir -p "$events_dir" 2>/dev/null || exit 0
@@ -159,6 +209,15 @@ pub fn install_if_missing() -> crate::errors::Result<PathBuf> {
     fs::create_dir_all(&base)?;
     fs::create_dir_all(base.join("bin"))?;
     fs::create_dir_all(base.join("events"))?;
+
+    // Tighten on every launch, not just at creation: an existing install has
+    // months of 0644 briefs that the receiver's umask alone would never fix.
+    if let Some(dir) = events_dir() {
+        let tightened = restrict_events_dir(&dir);
+        if tightened > 0 {
+            info!("hooks: made {tightened} existing event files owner-only");
+        }
+    }
 
     // Write the receiver script every time — it's tiny and this guarantees
     // the on-disk copy matches the source in case we ship a fix.
@@ -568,6 +627,62 @@ pub fn show_fatal_dialog(title: &str, body: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hole DEV-605 closes: a brief written 0644 is readable by every
+    /// process running as the user — every MCP server, every dependency
+    /// postinstall, every tool any dispatched agent runs.
+    #[test]
+    fn tightening_makes_world_readable_event_files_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("allele-perms-{}-loose", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("brief.prompt");
+        fs::write(&path, b"client context").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let tightened = restrict_events_dir(&dir);
+
+        assert_eq!(tightened, 1);
+        let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "file left at {mode:o}");
+        let dir_mode = fs::metadata(&dir).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "dir left at {dir_mode:o}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Runs on every launch, so it must not report work it did not do — and
+    /// must not disturb a file that is already private.
+    #[test]
+    fn tightening_leaves_already_private_files_alone() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("allele-perms-{}-tight", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("brief.prompt");
+        fs::write(&path, b"already private").expect("write");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        assert_eq!(restrict_events_dir(&dir), 0);
+        let mode = fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "file left at {mode:o}");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The umask is what keeps *new* files owner-only; the startup sweep only
+    /// repairs history. A receiver script without it silently reopens the hole
+    /// for every session created from then on.
+    #[test]
+    fn the_receiver_script_sets_an_owner_only_umask() {
+        assert!(
+            RECEIVER_SCRIPT.contains("umask 077"),
+            "the generated receiver must not write group- or world-readable event files"
+        );
+    }
 
     /// An events directory holding `<id>.jsonl` and `<id>.prompt` per id, each
     /// backdated by `age` so the sweep's minimum-age guard can be exercised.
