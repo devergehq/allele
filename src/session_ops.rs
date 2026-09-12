@@ -1238,7 +1238,22 @@ impl AppState {
 
         // Only adapters that understand session ids care about history —
         // for claude this gates `--resume` vs `--session-id`.
-        let has_history = claude_session_history_exists(&session_id);
+        //
+        // Derive the transcript path from the workspace first: that is a single
+        // stat on `~/.claude/projects/<dashed-cwd>/<id>.jsonl`, where the scan
+        // below reads all ~580 project directories and stats each one. The scan
+        // costs 6.5ms idle but 86ms under the disk load a dispatch creates — on
+        // the thread that has to draw, once per click, while someone resumes a
+        // list of sessions. It is the same defect DEV-602 took out of the render
+        // path and left here.
+        //
+        // The scan stays as a fallback, so a transcript filed somewhere the
+        // derivation does not predict is still found and the session still
+        // resumes its conversation rather than silently starting a new one
+        // (DEV-609).
+        let has_history = crate::transcript::expected_session_jsonl(&clone_path, &session_id)
+            .is_some_and(|p| p.exists())
+            || claude_session_history_exists(&session_id);
         let hooks_path_str = self
             .hooks_settings_path
             .as_ref()

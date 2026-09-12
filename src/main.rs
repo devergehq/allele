@@ -1760,7 +1760,13 @@ impl AppState {
     ///
     /// Private to `checkpoint_persistence()`. External callers must use
     /// `mark_state_dirty()` — see ARCHITECTURE.md §4.4.
-    pub(crate) fn save_state(&self) {
+    /// The in-memory snapshot that gets written to `state.json`.
+    ///
+    /// Split out from the write so the value can be built on the foreground —
+    /// where the data lives — and handed to a background task to write. The
+    /// write is the part that blocks, and it was blocking the thread that
+    /// draws. See `AppState::checkpoint_persistence` (DEV-609).
+    pub(crate) fn state_snapshot(&self) -> PersistedState {
         let mut persisted = PersistedState::default();
         for project in &self.projects {
             for session in &project.sessions {
@@ -1779,7 +1785,15 @@ impl AppState {
                 .map(|s| s.id.clone())
         });
         persisted.scratch_pad_history = self.scratch_pad_history.clone();
-        if let Err(e) = self.repos.state.save(&persisted) {
+        persisted
+    }
+
+    /// Write `state.json` synchronously.
+    ///
+    /// Private to `checkpoint_persistence()` and the quit path — everything
+    /// else must use `mark_state_dirty()`, see ARCHITECTURE.md §4.4.
+    pub(crate) fn save_state(&self) {
+        if let Err(e) = self.repos.state.save(&self.state_snapshot()) {
             warn!("Failed to save state.json: {e}");
         }
     }
@@ -3094,6 +3108,11 @@ fn main() {
                                         cx.notify();
                                         false
                                     } else {
+                                        // Writes are debounced, so up to half a
+                                        // second of state may not be on disk
+                                        // and the process is about to go away
+                                        // (DEV-609).
+                                        state.flush_persistence_blocking();
                                         true
                                     }
                                 })
@@ -3564,6 +3583,8 @@ fn main() {
                         base_infra_status: None,
                         state_dirty: false,
                         settings_dirty: false,
+                        state_gate: Default::default(),
+                        persist_flush_scheduled: false,
                         repos: repositories::Repositories::production(),
                         platform: crate::platform::global().clone_arcs(),
                         capture_ui_requested: false,
@@ -4404,6 +4425,10 @@ impl Render for AppState {
                                                 cx.listener(
                                                     |this: &mut Self, _event, _window, cx| {
                                                         this.confirming.quit = false;
+                                                        // See the Quit action:
+                                                        // debounced writes must
+                                                        // land before exit.
+                                                        this.flush_persistence_blocking();
                                                         cx.quit();
                                                     },
                                                 ),
@@ -4887,9 +4912,9 @@ impl Render for AppState {
             }
         }
 
-        // Coalesce per-frame mutations into at most one write per file.
-        // See ARCHITECTURE.md §3.4.
-        self.checkpoint_persistence();
+        // Coalesce mutations into at most one write per debounce window.
+        // See ARCHITECTURE.md §3.4 and `PERSIST_DEBOUNCE` (DEV-609).
+        self.checkpoint_persistence(cx);
 
         outer
     }

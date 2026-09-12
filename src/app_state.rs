@@ -429,6 +429,11 @@ pub(crate) struct AppState {
     pub(crate) state_dirty: bool,
     /// Same contract as `state_dirty` but for the settings.json file.
     pub(crate) settings_dirty: bool,
+    /// Debounce state for `state.json` — see [`PERSIST_DEBOUNCE`].
+    pub(crate) state_gate: PersistGate,
+    /// True when a deferred flush timer is already pending, so a state that
+    /// stays dirty across many frames schedules one timer, not one per frame.
+    pub(crate) persist_flush_scheduled: bool,
     /// Persistence backends for settings.json and state.json. Arc-cloned
     /// into background tasks so they can write without borrowing AppState.
     /// See `src/repositories.rs` and ARCHITECTURE.md §3.3.
@@ -439,6 +444,35 @@ pub(crate) struct AppState {
     pub(crate) platform: crate::platform::Platform,
     /// Set by the Debug menu or agent request-file watcher.
     pub(crate) capture_ui_requested: bool,
+}
+
+/// How long to wait between `state.json` writes.
+///
+/// The file is a crash-recovery snapshot, not a transaction log: losing half a
+/// second of sidebar state to a hard kill is immaterial, while writing it on
+/// every frame is not. Measured at 0.3ms idle but **37ms under the disk load a
+/// dispatch creates** — per frame, against a 16ms budget at 60fps. Quitting
+/// flushes synchronously, so an orderly exit loses nothing (DEV-609).
+pub(crate) const PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether a write is due, given when the last one happened.
+///
+/// Pure, so the cadence can be tested without a clock or a filesystem.
+pub(crate) fn persist_is_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    match last {
+        None => true,
+        Some(last) => now.duration_since(last) >= PERSIST_DEBOUNCE,
+    }
+}
+
+/// Debounce bookkeeping for one persisted file.
+#[derive(Default)]
+pub(crate) struct PersistGate {
+    /// When the last write started. `None` until the first one.
+    pub(crate) written_at: Option<std::time::Instant>,
+    /// True while a background write is running, so two writes can never race
+    /// to rename over the same path.
+    pub(crate) in_flight: bool,
 }
 
 impl AppState {
@@ -456,10 +490,88 @@ impl AppState {
         self.settings_dirty = true;
     }
 
-    /// Drain the dirty flags and flush pending writes. Called once at
-    /// the end of every `Render::render` tick so N mutations per frame
-    /// coalesce to at most one write per file.
-    pub(crate) fn checkpoint_persistence(&mut self) {
+    /// Drain the dirty flags and flush pending writes. Called once at the end
+    /// of every `Render::render` tick.
+    ///
+    /// Coalescing used to be per-frame only, which meant a state that stayed
+    /// dirty — resuming sessions, hook events, a dispatch churning
+    /// `loading_sessions` — wrote the whole file every frame. See
+    /// [`PERSIST_DEBOUNCE`] (DEV-609).
+    pub(crate) fn checkpoint_persistence(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.state_dirty {
+            self.flush_state(cx);
+        }
+        if self.settings_dirty {
+            self.save_settings();
+            self.settings_dirty = false;
+        }
+    }
+
+    /// Write `state.json` if one is due; otherwise make sure one is coming.
+    ///
+    /// The write itself goes to the background executor. Serialising is
+    /// in-memory and stays here; the write is the part that blocks, and it was
+    /// blocking the thread that draws.
+    fn flush_state(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.state_gate.in_flight {
+            // Stays dirty. The in-flight write reschedules on completion, so
+            // the newest state still lands.
+            return;
+        }
+        if !persist_is_due(self.state_gate.written_at, std::time::Instant::now()) {
+            self.schedule_persist_flush(cx);
+            return;
+        }
+
+        self.state_dirty = false;
+        self.state_gate.written_at = Some(std::time::Instant::now());
+        self.state_gate.in_flight = true;
+
+        let snapshot = self.state_snapshot();
+        let repo = self.repos.state.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = repo.save(&snapshot) {
+                        tracing::warn!("Failed to save state.json: {e}");
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                this.state_gate.in_flight = false;
+                if this.state_dirty {
+                    this.schedule_persist_flush(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Guarantee a deferred write lands even if rendering stops.
+    ///
+    /// Without this, a change made in the last 500ms before the app goes idle
+    /// would sit dirty until something else happened to trigger a frame.
+    fn schedule_persist_flush(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.persist_flush_scheduled {
+            return;
+        }
+        self.persist_flush_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PERSIST_DEBOUNCE).await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                this.persist_flush_scheduled = false;
+                this.checkpoint_persistence(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Write anything outstanding right now, blocking the caller.
+    ///
+    /// Only for quit. The debounce means up to [`PERSIST_DEBOUNCE`] of changes
+    /// may not have reached disk, and the process is about to stop existing —
+    /// so an orderly exit pays the write rather than losing the state.
+    pub(crate) fn flush_persistence_blocking(&mut self) {
         if self.state_dirty {
             self.save_state();
             self.state_dirty = false;
@@ -473,7 +585,38 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{structural_stamp, ConfirmationState};
+    use super::{persist_is_due, structural_stamp, ConfirmationState, PERSIST_DEBOUNCE};
+
+    /// DEV-609: writes are debounced across frames, not merely within one.
+    ///
+    /// A state that stays dirty — someone resuming sessions while a dispatch
+    /// churns `loading_sessions` — used to rewrite the whole file every frame,
+    /// at 37ms a write under that load against a 16ms frame budget.
+    #[test]
+    fn the_first_write_is_due_and_the_next_is_not() {
+        let now = std::time::Instant::now();
+        assert!(persist_is_due(None, now), "nothing written yet");
+        assert!(!persist_is_due(Some(now), now), "not twice in a frame");
+    }
+
+    #[test]
+    fn a_write_is_due_again_once_the_window_has_passed() {
+        let now = std::time::Instant::now();
+        let earlier = now
+            .checked_sub(PERSIST_DEBOUNCE + std::time::Duration::from_millis(1))
+            .expect("representable");
+        assert!(persist_is_due(Some(earlier), now));
+    }
+
+    /// The window bounds what a hard kill can lose. An orderly quit flushes
+    /// synchronously, so this only governs a crash — and it must stay small
+    /// enough that the loss is immaterial, large enough to stop per-frame
+    /// writes.
+    #[test]
+    fn the_debounce_window_is_bounded_at_both_ends() {
+        assert!(PERSIST_DEBOUNCE >= std::time::Duration::from_millis(100));
+        assert!(PERSIST_DEBOUNCE <= std::time::Duration::from_secs(1));
+    }
     use crate::actions::{
         ArchiveAction, PendingAction, ProjectAction, SessionAction, SessionCursor,
     };
