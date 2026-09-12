@@ -491,6 +491,17 @@ pub struct Session {
     /// via `git::working_tree_change_count`'s unit, so the header, the sidebar
     /// dirty dot, and the panel always agree. Display-only; never persisted.
     pub git_dirty_count: Option<usize>,
+    /// Whether a `Done` or `Suspended` session can be revived with its prior
+    /// conversation: its clone is still on disk *and* Claude has a history
+    /// jsonl for it. `None` until first observed, so the header offers
+    /// "Open session" rather than asserting a Resume it has not verified.
+    ///
+    /// Cached because answering it touches the filesystem twice — a stat on
+    /// the clone and a scan of `~/.claude/projects` — and it used to be
+    /// answered inside `render`, on every frame, for the active session. See
+    /// DEV-602. Refreshed by the background poller, immediately when a PTY
+    /// exits, and once at startup. Display-only; never persisted.
+    pub resumable: Option<bool>,
     /// The current git branch name for this session (e.g. "fix-auth-5dc47535").
     /// Persisted to state.json for orphan cleanup identification.
     pub branch_name: Option<String>,
@@ -589,6 +600,7 @@ impl Session {
             merge_strategy_override: None,
             git_dirty: None,
             git_dirty_count: None,
+            resumable: None,
             branch_name: None,
             branch_locked: false,
             orchestration: Orchestration::default(),
@@ -652,6 +664,7 @@ impl Session {
             merge_strategy_override: None,
             git_dirty: None,
             git_dirty_count: None,
+            resumable: None,
             branch_name: None,
             branch_locked: false,
             orchestration: Orchestration::default(),
