@@ -412,11 +412,21 @@ impl AppState {
         .detach();
     }
 
-    /// Create a new session with custom details (name, branch, agent, prompt).
+    /// Create a new session with custom details (name, branch, agent, prompt),
+    /// returning the id it was given.
     ///
     /// This is the "with details" counterpart to `add_session_to_project`.
     /// It accepts optional overrides for label, branch slug, agent, and an
     /// initial prompt to send to the agent after creation.
+    ///
+    /// `None` means nothing was started — an unknown project, or a source path
+    /// that has gone missing (which raises the Relocate modal instead).
+    ///
+    /// **The id is returned rather than discovered.** Callers that need to
+    /// follow the session afterwards used to snapshot the project's session
+    /// list and diff it once this returned, which silently claimed a different
+    /// session's id whenever anything else was mid-provisioning. The id is
+    /// minted here, so it is handed back here (DEV-601).
     pub(crate) fn add_session_to_project_with_details(
         &mut self,
         project_idx: usize,
@@ -427,15 +437,13 @@ impl AppState {
         orchestration: crate::session::Orchestration,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some(project) = self.projects.get_mut(project_idx) else {
-            return;
-        };
+    ) -> Option<String> {
+        let project = self.projects.get_mut(project_idx)?;
 
         if !project.source_path.exists() {
             self.pending_action = Some(ProjectAction::RelocateProject(project_idx).into());
             cx.notify();
-            return;
+            return None;
         }
 
         let source_path = project.source_path.clone();
@@ -514,6 +522,9 @@ impl AppState {
         // background task below so the network call never blocks the UI.
         let branch_slug_for_clone = branch_slug.clone();
         let session_id_for_branch = session_id.clone();
+        // Cloned before the task takes ownership, so the id can be returned to
+        // the caller that asked for this session (DEV-601).
+        let created_session_id = session_id.clone();
 
         cx.spawn_in(window, async move |this, cx| {
             let (clone_result, pull_error, branch_warning, branch_error) = cx
@@ -848,6 +859,8 @@ impl AppState {
             }
         })
         .detach();
+
+        Some(created_session_id)
     }
 
     /// Called when the user presses Enter in a terminal. If the owning
