@@ -545,8 +545,13 @@ impl AppState {
     }
 
     /// Flush the composed scratch-pad payload to the active session's PTY.
-    /// Mirrors the bracketed-paste logic in `terminal_view.rs` so behaviour
-    /// is identical to a manual Cmd+V, then writes `\r` to submit.
+    ///
+    /// Delivered through [`crate::dispatch::pty::deliver`], which is what
+    /// actually matches the clipboard path in `terminal_view.rs`: it checks
+    /// `TermMode::BRACKETED_PASTE` before emitting the markers. This comment
+    /// used to claim the logic was mirrored here while omitting that check —
+    /// a doc asserting a mirror that is not there tells the next reader not
+    /// to look (DEV-603).
     fn scratch_pad_send(
         &mut self,
         text: String,
@@ -598,31 +603,17 @@ impl AppState {
         }
         payload.push_str(&text);
 
-        // Claude Code's input editor has a paste-detection heuristic: when
-        // lots of bytes arrive back-to-back, the trailing `\r` gets absorbed
-        // into the paste as another newline instead of firing the submit.
-        // Wrap the payload in bracketed paste so CC knows where the paste
-        // ends, then dispatch the `\r` after a short gap so it's treated as
-        // a real Enter keystroke rather than pasted content.
-        if let Some(terminal) = tv.read(cx).pty() {
-            terminal.write(b"\x1b[200~");
-            terminal.write(payload.as_bytes());
-            terminal.write(b"\x1b[201~");
-        }
-        let tv_weak = tv.downgrade();
-        cx.spawn(async move |_this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(80))
-                .await;
-            cx.update(|cx| {
-                if let Some(tv) = tv_weak.upgrade() {
-                    if let Some(terminal) = tv.read(cx).pty() {
-                        terminal.write(b"\r");
-                    }
-                }
-            });
-        })
-        .detach();
+        // Delivered through the shared primitive so this path gets the same
+        // readiness gate as session creation: the bracketed-paste markers are
+        // only meaningful once the agent has enabled the mode, and writing
+        // them before that puts escape bytes in the input box.
+        //
+        // No submit retries, deliberately. This targets the session the user
+        // is looking at, and they may be typing in it — a late extra Enter
+        // could submit a half-written message of theirs. A newly created
+        // session has nobody at the keyboard, which is why creation retries
+        // and this does not. See `dispatch::pty::deliver` (DEV-603).
+        dispatch::pty::deliver(&tv, payload, &[], cx);
     }
 
     /// Remove a scratch pad history entry by id, persist the change, and
