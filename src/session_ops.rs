@@ -129,6 +129,7 @@ impl AppState {
             label: &display_label,
             hooks_settings_path: hooks_path_str.as_deref(),
             has_history: false,
+            initial_prompt: None,
         };
         let command = agent
             .as_ref()
@@ -489,10 +490,16 @@ impl AppState {
             label: &display_label,
             hooks_settings_path: hooks_path_str.as_deref(),
             has_history: false,
+            initial_prompt: initial_prompt.as_deref(),
         };
         let command = agent
             .as_ref()
             .and_then(|a| agents::build_command(a, &ctx, false));
+
+        // When the agent takes the brief as an argument, it arrives already
+        // submitted and nothing is typed into the TUI at all. Only agents that
+        // cannot do that fall back to the typed path below (DEV-604).
+        let agent_takes_prompt = agent.as_ref().is_some_and(agents::consumes_initial_prompt);
 
         project.loading_sessions.push(project::LoadingSession {
             id: session_id.clone(),
@@ -820,20 +827,28 @@ impl AppState {
 
                 // Send the initial prompt if provided.
                 //
-                // Delivery waits for the agent's input editor before pasting,
-                // and retries the submit until it lands. Both matter here: the
-                // prompt is being typed into an agent that is still booting,
-                // which is exactly the race a fixed timer loses. Retrying is
-                // safe because a session created a moment ago has nobody at
-                // its keyboard, so a repeated Enter can only meet an empty
-                // input. See `dispatch::pty::deliver` (DEV-603).
+                // An agent that takes it as an argument already has it: the
+                // prompt was on the command line at spawn and arrived
+                // submitted, so there is nothing to type and nothing to
+                // confirm by keystroke. That is the whole point of DEV-604 —
+                // the typed path raced the agent's TUI boot, and lost.
+                //
+                // Everything else still types: a bare shell, or an adapter
+                // with no positional-prompt support. There the race is not in
+                // play — a shell has no TUI to boot — so the lossier path is
+                // acceptable where it is the only one.
                 if let Some(prompt_text) = prompt {
-                    crate::dispatch::pty::deliver(
-                        &terminal_view,
-                        prompt_text,
-                        crate::dispatch::pty::CREATION_SUBMIT_RETRIES_MS,
-                        cx,
-                    );
+                    if agent_takes_prompt {
+                        info!("initial prompt handed to the agent at spawn; not typing it");
+                    } else {
+                        info!("agent takes no prompt argument; typing the initial prompt");
+                        crate::dispatch::pty::deliver(
+                            &terminal_view,
+                            prompt_text,
+                            crate::dispatch::pty::CREATION_SUBMIT_RETRIES_MS,
+                            cx,
+                        );
+                    }
                 }
 
                 cx.notify();
@@ -1233,6 +1248,7 @@ impl AppState {
             label: &label,
             hooks_settings_path: hooks_path_str.as_deref(),
             has_history,
+            initial_prompt: None,
         };
         let command = agent
             .as_ref()

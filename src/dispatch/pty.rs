@@ -10,6 +10,8 @@ use std::time::Duration;
 use alacritty_terminal::term::TermMode;
 use gpui::{Context, Entity};
 
+use tracing::{info, warn};
+
 use crate::app_state::AppState;
 use crate::terminal::TerminalView;
 
@@ -43,11 +45,12 @@ pub(super) fn interrupt(state: &AppState, session_id: &str, cx: &Context<AppStat
     })
 }
 
-/// How long to wait for the agent's input editor before pasting anyway.
+/// How long to wait for the terminal to accept a bracketed paste before
+/// writing the payload plainly instead.
 ///
-/// Generous on purpose: a cold agent on a loaded machine takes seconds to draw
-/// its first frame, and waiting costs nothing a caller notices, while pasting
-/// early costs the prompt.
+/// Generous on purpose, and bounded on purpose: an agent sets the mode within
+/// a second, while a bare shell may never set it at all, and delivery must not
+/// hang on a terminal that is answering honestly.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How often readiness is re-checked while waiting.
@@ -79,10 +82,14 @@ pub(crate) const CREATION_SUBMIT_RETRIES_MS: &[u64] = &[1_000, 2_500, 5_000, 10_
 ///
 /// Three steps:
 ///
-/// 1. **Wait for the input editor.** `BRACKETED_PASTE` is set by the
-///    application when it initialises its editor, so it is direct evidence
-///    from the agent's own terminal that there is something there to receive
-///    the paste — rather than a timer's guess about how long booting takes.
+/// 1. **Wait until a bracketed paste will be parsed.** This is marker safety,
+///    *not* readiness — a correction to what DEV-603 claimed here.
+///    `BRACKETED_PASTE` is set when the application puts the terminal into raw
+///    mode, which for Claude Code is ~0.5s after launch (measured) and well
+///    before its input editor mounts. Waiting on it therefore does not mean
+///    anything is listening; it only tells you whether `200~` will be read as
+///    a marker or land as literal bytes. Session creation no longer relies on
+///    this at all — it hands the prompt over at spawn instead (DEV-604).
 ///    Bounded by [`READY_TIMEOUT`]; on expiry the payload is written plainly,
 ///    with no markers, exactly as the clipboard path does when the mode is
 ///    off. **The fallback is not optional**: an agent-less Shell session may
@@ -118,6 +125,18 @@ pub(crate) fn deliver(
             waited += READY_POLL;
         };
 
+        // Logged because the alternative is diagnosing delivery by experiment:
+        // this path had no record of which branch it took, which is why a PTY
+        // probe was needed to work out why prompts were being lost (DEV-604).
+        if bracketed {
+            info!("delivery: bracketed paste accepted after {waited:?}");
+        } else {
+            warn!(
+                "delivery: no bracketed-paste mode after {READY_TIMEOUT:?}; \
+                 writing the payload plainly"
+            );
+        }
+
         // Step 2 — paste.
         let bytes = paste_sequence(&payload, bracketed);
         if !write_bytes(&tv, &bytes, cx) {
@@ -142,8 +161,12 @@ pub(crate) fn deliver(
     .detach();
 }
 
-/// Whether the terminal has bracketed paste enabled — i.e. whether an
-/// application is up and listening for input.
+/// Whether the terminal has bracketed paste enabled.
+///
+/// Says only that `200~` will be parsed rather than landing as literal bytes.
+/// It is **not** a sign that anything is listening: Claude Code sets this
+/// ~0.5s after launch, when it puts the terminal in raw mode, long before its
+/// input editor exists (DEV-604).
 fn accepts_bracketed_paste(terminal: &crate::terminal::pty_terminal::PtyTerminal) -> bool {
     terminal
         .term
