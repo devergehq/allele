@@ -1605,6 +1605,58 @@ impl AppState {
         }
     }
 
+    /// Sessions whose resumability wants refreshing, as `(id, clone path)`.
+    ///
+    /// Collected on the foreground and answered off it: each answer costs a
+    /// stat on the clone plus a scan of `~/.claude/projects`, which is why it
+    /// is never computed during render (DEV-602).
+    pub(crate) fn resumable_targets(&self) -> Vec<(String, Option<std::path::PathBuf>)> {
+        self.projects
+            .iter()
+            .flat_map(|p| p.sessions.iter())
+            .map(|s| (s.id.clone(), s.clone_path.clone()))
+            .collect()
+    }
+
+    /// Store a refreshed resumability flag, returning whether it changed — so
+    /// a caller can skip a repaint that would show nothing new.
+    pub(crate) fn record_resumable(&mut self, session_id: &str, resumable: bool) -> bool {
+        for project in &mut self.projects {
+            for session in &mut project.sessions {
+                if session.id == session_id {
+                    if session.resumable == Some(resumable) {
+                        return false;
+                    }
+                    session.resumable = Some(resumable);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Every session id that may legitimately own a file in `~/.allele/events`.
+    ///
+    /// Both ids per session, deliberately: `/clear` rotates the Claude
+    /// conversation id, and the hook receiver names the events file after
+    /// whichever id the hook fired under. Pruning on `Session::id` alone would
+    /// delete the live events of every session that has ever been cleared.
+    /// Loading sessions count too — their agent can be writing events before
+    /// the clone lands (DEV-602).
+    pub(crate) fn live_event_ids(&self) -> std::collections::HashSet<String> {
+        let mut live = std::collections::HashSet::new();
+        for project in self.projects.iter() {
+            for session in project.sessions.iter() {
+                live.insert(session.id.clone());
+                live.insert(session.claude_session_id().to_string());
+            }
+            for loading in project.loading_sessions.iter() {
+                live.insert(loading.id.clone());
+            }
+        }
+        live
+    }
+
     /// Push a session's bundle (metadata) up to the configured sync store.
     /// Gathers the session/project data on the main thread, then does the git
     /// precondition check + encrypted upload off-thread via the sync bridge.

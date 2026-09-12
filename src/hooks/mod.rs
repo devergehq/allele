@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
 use std::path::PathBuf;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::errors::AlleleError;
 
@@ -242,12 +242,29 @@ pub struct HookPayload {
     pub tool_input: Option<serde_json::Value>,
 }
 
+/// How often the events directory is swept. The poller ticks four times a
+/// second; sweeping at that rate would cost more than the growth it prevents.
+const PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Whether a sweep is due. Pure so the cadence can be tested without a clock
+/// or a directory — see [`EventWatcher::maybe_prune`].
+fn prune_is_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    match last {
+        None => true,
+        Some(last) => now.duration_since(last) >= PRUNE_INTERVAL,
+    }
+}
+
 /// Tracks per-file read offsets so previously-processed lines are never
 /// re-emitted. In-memory only — if the app restarts, we fast-forward each
 /// file to its current end (see [`EventWatcher::initialize_offsets`]).
 #[derive(Default)]
 pub struct EventWatcher {
     offsets: std::collections::HashMap<PathBuf, u64>,
+    /// When the events directory was last swept. `None` until the first
+    /// sweep, which is why pruning is rate-limited rather than scheduled —
+    /// see [`EventWatcher::maybe_prune`].
+    last_prune: Option<std::time::Instant>,
 }
 
 impl EventWatcher {
@@ -378,6 +395,96 @@ impl EventWatcher {
 
         out
     }
+
+    /// Delete event files belonging to sessions allele no longer has, at most
+    /// once a minute. Returns how many files were removed.
+    ///
+    /// The directory is otherwise append-only: every session that has ever run
+    /// leaves a `<id>.jsonl` and a `<id>.prompt` behind for good, and
+    /// [`poll`](Self::poll) stats every one of them four times a second. On
+    /// the machine this was diagnosed on that had reached 830 files and 133MB,
+    /// costing ~13% of the foreground thread before anything was even read.
+    ///
+    /// Rate-limited here rather than at the call site so the cadence lives
+    /// with the thing it governs, and the poller stays a poller (DEV-602).
+    pub fn maybe_prune(&mut self, live: &std::collections::HashSet<String>) -> usize {
+        let now = std::time::Instant::now();
+        if !prune_is_due(self.last_prune, now) {
+            return 0;
+        }
+        self.last_prune = Some(now);
+
+        let Some(dir) = events_dir() else {
+            return 0;
+        };
+        self.prune_in(&dir, live)
+    }
+
+    /// The sweep itself, against an explicit directory.
+    ///
+    /// Takes the directory rather than resolving it so the sweep can be
+    /// exercised against a temp dir. The resolved path is the user's real
+    /// `~/.allele/events`, and a test that swept that would be deleting the
+    /// status of sessions someone is running.
+    ///
+    /// Two guards, both load-bearing:
+    ///
+    /// 1. `live` must carry a session's workspace id *and* its current Claude
+    ///    conversation id — `/clear` rotates the latter, and the events file is
+    ///    named after whichever one the hook fired under. See
+    ///    `AppState::live_event_ids`.
+    /// 2. A file is only removed once it has gone untouched for `MIN_AGE`, so
+    ///    a session whose `Session` has not materialised yet cannot have its
+    ///    events deleted out from under it.
+    fn prune_in(
+        &mut self,
+        dir: &std::path::Path,
+        live: &std::collections::HashSet<String>,
+    ) -> usize {
+        /// Deliberately generous. The cost of keeping a dead session's events
+        /// for another hour is a few stats; the cost of deleting a live
+        /// session's is losing the status of a session someone is watching.
+        const MIN_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+        let Ok(entries) = fs::read_dir(dir) else {
+            return 0;
+        };
+
+        let mut removed = 0usize;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !matches!(
+                path.extension().and_then(|e| e.to_str()),
+                Some("jsonl") | Some("prompt")
+            ) {
+                continue;
+            }
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if live.contains(stem) {
+                continue;
+            }
+            let recently_touched = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|m| m.elapsed().ok())
+                .is_none_or(|age| age < MIN_AGE);
+            if recently_touched {
+                continue;
+            }
+            if fs::remove_file(&path).is_ok() {
+                self.offsets.remove(&path);
+                removed += 1;
+            }
+        }
+
+        if removed > 0 {
+            info!("hooks: pruned {removed} event files for sessions that no longer exist");
+        }
+        removed
+    }
 }
 
 // --- attention affordances ---------------------------------------------------
@@ -461,6 +568,120 @@ pub fn show_fatal_dialog(title: &str, body: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An events directory holding `<id>.jsonl` and `<id>.prompt` per id, each
+    /// backdated by `age` so the sweep's minimum-age guard can be exercised.
+    fn events_fixture(tag: &str, ids: &[&str], age: std::time::Duration) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("allele-prune-{}-{tag}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).expect("temp dir");
+
+        let when = std::time::SystemTime::now() - age;
+        for id in ids {
+            for ext in ["jsonl", "prompt"] {
+                let file = fs::File::create(dir.join(format!("{id}.{ext}"))).expect("create");
+                file.set_modified(when).expect("backdate");
+            }
+        }
+        dir
+    }
+
+    fn live(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    const TWO_HOURS: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+    /// The guard that matters most: a session someone is watching must never
+    /// lose its events, however old the file is.
+    #[test]
+    fn a_live_sessions_events_are_never_pruned() {
+        let dir = events_fixture("live", &["alive"], TWO_HOURS);
+
+        let removed = EventWatcher::default().prune_in(&dir, &live(&["alive"]));
+
+        assert_eq!(removed, 0);
+        assert!(dir.join("alive.jsonl").exists());
+        assert!(dir.join("alive.prompt").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A `/clear` rotates the Claude conversation id, and the events file is
+    /// named after whichever id the hook fired under. Pruning on the workspace
+    /// id alone would delete the live events of every cleared session — which
+    /// is why `live_event_ids` contributes both.
+    #[test]
+    fn a_rotated_conversation_id_still_protects_its_events() {
+        let dir = events_fixture("rotated", &["rotated-convo"], TWO_HOURS);
+
+        // The workspace id is "workspace"; the file is named after the id the
+        // hook fired under, which the set also carries.
+        let removed =
+            EventWatcher::default().prune_in(&dir, &live(&["workspace", "rotated-convo"]));
+
+        assert_eq!(removed, 0);
+        assert!(dir.join("rotated-convo.jsonl").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_dead_sessions_events_are_pruned() {
+        let dir = events_fixture("dead", &["gone"], TWO_HOURS);
+
+        let removed = EventWatcher::default().prune_in(&dir, &live(&["someone-else"]));
+
+        assert_eq!(removed, 2, "both the jsonl and its prompt sidecar");
+        assert!(!dir.join("gone.jsonl").exists());
+        assert!(!dir.join("gone.prompt").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A session whose `Session` has not materialised yet — still cloning —
+    /// is not in the live set, but its agent may already be writing events.
+    /// The age guard is what stops the sweep deleting them underneath it.
+    #[test]
+    fn a_recently_touched_file_survives_even_when_unknown() {
+        let dir = events_fixture(
+            "fresh",
+            &["just-started"],
+            std::time::Duration::from_secs(5),
+        );
+
+        let removed = EventWatcher::default().prune_in(&dir, &live(&[]));
+
+        assert_eq!(removed, 0);
+        assert!(dir.join("just-started.jsonl").exists());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Pruned files must also leave the offset map, or it grows without bound
+    /// holding paths that no longer exist.
+    #[test]
+    fn pruning_forgets_the_offsets_of_deleted_files() {
+        let dir = events_fixture("offsets", &["gone"], TWO_HOURS);
+        let mut watcher = EventWatcher::default();
+        watcher.offsets.insert(dir.join("gone.jsonl"), 128);
+
+        watcher.prune_in(&dir, &live(&[]));
+
+        assert!(!watcher.offsets.contains_key(&dir.join("gone.jsonl")));
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The poller ticks four times a second; sweeping every tick would cost
+    /// more than the growth it prevents.
+    #[test]
+    fn a_sweep_is_due_once_per_interval() {
+        let now = std::time::Instant::now();
+
+        assert!(prune_is_due(None, now), "the first sweep is always due");
+        assert!(!prune_is_due(Some(now), now), "not twice in a row");
+
+        let long_ago = now
+            .checked_sub(PRUNE_INTERVAL + std::time::Duration::from_secs(1))
+            .expect("representable");
+        assert!(prune_is_due(Some(long_ago), now));
+    }
 
     #[test]
     fn hook_event_line_parses_cwd_when_present() {

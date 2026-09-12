@@ -149,6 +149,16 @@ impl Render for SimpleTooltip {
 /// format — just scan the `projects` directory for any matching filename.
 /// Returns `false` on any IO error so the caller falls back to `--session-id`
 /// (fresh session, same UUID) rather than failing into "Session ended".
+/// Whether a session can be revived with its prior conversation: its clone is
+/// still on disk *and* Claude has a history jsonl for it.
+///
+/// Both halves touch the filesystem, so this is answered on the background
+/// executor and cached in `Session::resumable`. It must never be called from
+/// render — that is the defect DEV-602 exists to fix.
+fn session_is_resumable(clone_path: Option<&std::path::Path>, session_id: &str) -> bool {
+    clone_path.is_some_and(|p| p.exists()) && claude_session_history_exists(session_id)
+}
+
 fn claude_session_history_exists(session_id: &str) -> bool {
     let Some(home) = dirs::home_dir() else {
         return false;
@@ -2858,7 +2868,36 @@ fn main() {
                             // leaves `Running` after one. See DEV-432.
                             interrupted::poll_once(&mut interrupts, &this, cx).await;
 
-                            let events = watcher.poll();
+                            // Which ids may own a file in the events dir. Read
+                            // on the foreground because it walks AppState, but
+                            // it touches no disk — the pruning it feeds does,
+                            // and that happens below, off-thread.
+                            let Ok(live) = this.read_with(cx, |this, _cx| this.live_event_ids())
+                            else {
+                                break; // AppState dropped — app is exiting
+                            };
+
+                            // Scanning the events directory is filesystem work
+                            // — a read_dir plus an open and fstat per file,
+                            // four times a second, over a directory nothing
+                            // ever pruned (830 files / 133MB when this was
+                            // found). Only folding the events into AppState
+                            // needs the foreground, so the scan moves off it,
+                            // mirroring `interrupted::poll_once` above, and
+                            // takes the prune with it. See DEV-602.
+                            let (returned, events) = cx
+                                .background_executor()
+                                .spawn({
+                                    let mut w = std::mem::take(&mut watcher);
+                                    async move {
+                                        let events = w.poll();
+                                        w.maybe_prune(&live);
+                                        (w, events)
+                                    }
+                                })
+                                .await;
+                            watcher = returned;
+
                             if events.is_empty() {
                                 continue;
                             }
@@ -2881,48 +2920,69 @@ fn main() {
                     // porcelain status per session clone on the background
                     // executor and update the sidebar dirty indicators.
                     cx.spawn(async move |this, cx| {
+                        // The first pass runs immediately. `Session::resumable`
+                        // starts as `None`, and a rehydrated session's Resume
+                        // affordance should not be missing for the first 15
+                        // seconds after launch (DEV-602).
+                        let mut interval = std::time::Duration::ZERO;
                         loop {
-                            cx.background_executor()
-                                .timer(std::time::Duration::from_secs(15))
-                                .await;
+                            cx.background_executor().timer(interval).await;
+                            interval = std::time::Duration::from_secs(15);
 
                             // Collect clone paths, not (p_idx, s_idx). The
                             // status runs across an await during which the
                             // user can reorder or remove sessions, which would
                             // land a result on the wrong session's row.
-                            let Ok(targets) = this.update(cx, |this: &mut AppState, cx| {
-                                // Idle-drawer parking rides this tick rather than
-                                // adding a loop of its own: the threshold is
-                                // minutes, so 15s is ample resolution, and one
-                                // timer is one thing to reason about (DEV-445).
-                                this.reap_idle_drawers(cx);
+                            let Ok((targets, resumable_targets)) =
+                                this.update(cx, |this: &mut AppState, cx| {
+                                    // Idle-drawer parking rides this tick rather than
+                                    // adding a loop of its own: the threshold is
+                                    // minutes, so 15s is ample resolution, and one
+                                    // timer is one thing to reason about (DEV-445).
+                                    this.reap_idle_drawers(cx);
 
-                                let mut t = Vec::new();
-                                for project in this.projects.iter() {
-                                    for session in project.sessions.iter() {
-                                        if let Some(cp) = &session.clone_path {
-                                            t.push(cp.clone());
+                                    let mut t = Vec::new();
+                                    for project in this.projects.iter() {
+                                        for session in project.sessions.iter() {
+                                            if let Some(cp) = &session.clone_path {
+                                                t.push(cp.clone());
+                                            }
                                         }
                                     }
-                                }
-                                t
-                            }) else {
+                                    (t, this.resumable_targets())
+                                })
+                            else {
                                 break; // AppState dropped — app is exiting
                             };
-                            if targets.is_empty() {
+                            if targets.is_empty() && resumable_targets.is_empty() {
                                 continue;
                             }
 
-                            let results = cx
+                            // Resumability rides this tick for the same reason
+                            // idle-drawer parking does. Both are filesystem
+                            // work — a porcelain status per clone, and per
+                            // session a stat plus a scan of ~/.claude/projects
+                            // — so they share one timer and one background hop
+                            // rather than each growing a loop of their own.
+                            let (results, resumable) = cx
                                 .background_executor()
                                 .spawn(async move {
-                                    targets
+                                    let results = targets
                                         .into_iter()
                                         .map(|cp| {
                                             let count = git::working_tree_change_count(&cp);
                                             (cp, count)
                                         })
-                                        .collect::<Vec<_>>()
+                                        .collect::<Vec<_>>();
+                                    let resumable = resumable_targets
+                                        .into_iter()
+                                        .map(|(id, clone_path)| {
+                                            let ok =
+                                                session_is_resumable(clone_path.as_deref(), &id);
+                                            (id, ok)
+                                        })
+                                        .collect::<Vec<_>>();
+                                    (results, resumable)
                                 })
                                 .await;
 
@@ -2938,6 +2998,11 @@ fn main() {
                                             .map(|s| s.git_dirty_count);
                                         if current != Some(count) {
                                             this.record_workspace_change_count(&repo, count);
+                                            changed = true;
+                                        }
+                                    }
+                                    for (id, ok) in resumable {
+                                        if this.record_resumable(&id, ok) {
                                             changed = true;
                                         }
                                     }
@@ -3599,6 +3664,7 @@ impl Render for AppState {
         // Suspended sessions are already terminal/attached-less and are
         // skipped.
         let mut pty_state_dirty = false;
+        let mut newly_done: Vec<(String, Option<std::path::PathBuf>)> = Vec::new();
         let now = std::time::Instant::now();
         for project in &mut self.projects {
             for session in &mut project.sessions {
@@ -3634,6 +3700,11 @@ impl Render for AppState {
                             session.id, session.label
                         );
                         session.set_status(SessionStatus::Done);
+                        // Refreshed just below rather than at the next 15s
+                        // tick: the "Session ended" bar needs its Resume
+                        // affordance now, and answering it costs filesystem
+                        // work that must not happen here. See DEV-602.
+                        newly_done.push((session.id.clone(), session.clone_path.clone()));
                     }
                     session.last_active = std::time::SystemTime::now();
                     session.resuming_until = None;
@@ -3647,6 +3718,27 @@ impl Render for AppState {
         }
         if pty_state_dirty {
             self.mark_state_dirty();
+        }
+
+        // One session just ended, at most a few ever at once — so this is a
+        // one-shot per exit, not a poll, and the filesystem work happens off
+        // the foreground thread.
+        for (id, clone_path) in newly_done {
+            cx.spawn(async move |this, cx| {
+                let resumable = cx
+                    .background_executor()
+                    .spawn({
+                        let id = id.clone();
+                        async move { session_is_resumable(clone_path.as_deref(), &id) }
+                    })
+                    .await;
+                let _ = this.update(cx, |this: &mut AppState, cx| {
+                    if this.record_resumable(&id, resumable) {
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
         }
 
         // Active-only view mode (DEV-295) — what the filter is holding back.
@@ -3751,12 +3843,16 @@ impl Render for AppState {
         // Needs both the clone directory still on disk *and* Claude's history
         // jsonl for this session id. When true, the "Session ended" bar shows
         // a primary "Resume" button; otherwise it falls back to "New Session".
+        //
+        // Read from `Session::resumable` rather than computed here. Answering
+        // it directly costs a stat on the clone plus a scan of every directory
+        // in `~/.claude/projects` — 570 of them on this machine, so ~1140
+        // stats — and this runs on every frame, on the thread that also has to
+        // draw. Under the disk load a dispatch creates, those reads block on
+        // APFS locks held by git and the UI stops. See DEV-602.
         let active_is_resumable = self
             .active_session()
-            .map(|s| {
-                s.clone_path.as_ref().map(|p| p.exists()).unwrap_or(false)
-                    && claude_session_history_exists(&s.id)
-            })
+            .and_then(|s| s.resumable)
             .unwrap_or(false);
 
         // Changes panel staleness check — kicks a background `git status`
