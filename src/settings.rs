@@ -579,18 +579,79 @@ impl Settings {
         let Some(path) = Self::path() else {
             return;
         };
+        if let Err(e) = self.save_to(&path) {
+            tracing::warn!("Failed to save settings.json: {e}");
+        }
+    }
+
+    /// Atomically write these settings to `path`.
+    ///
+    /// Temp + rename, the same guarantee `PersistedState::save` gives: either
+    /// the new settings are fully on disk or the old ones are untouched. This
+    /// used to be a plain `fs::write` — truncate, then write — so a crash, a
+    /// power loss or a full disk in between left the file truncated and the
+    /// next launch loaded defaults. This file holds the project list, the
+    /// agent configuration and the sync settings (DEV-623).
+    ///
+    /// Takes the path rather than resolving it, so the write can be exercised
+    /// against a temp directory. `Self::path()` is the user's real config, and
+    /// a test that wrote there would overwrite their settings.
+    pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)?;
         }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
-        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The guarantee DEV-623 adds: a write never leaves a half-written file,
+    /// and never leaves its temp file behind either.
+    #[test]
+    fn saving_is_atomic_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("allele-settings-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("settings.json");
+
+        let settings = Settings::default();
+        settings.save_to(&path).expect("write");
+
+        let written = std::fs::read_to_string(&path).expect("readable");
+        serde_json::from_str::<Settings>(&written).expect("parses back");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "temp file left behind"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Replacing an existing file must not go through a truncated state that a
+    /// reader could observe — the rename is what makes that true.
+    #[test]
+    fn saving_over_an_existing_file_replaces_it_whole() {
+        let dir = std::env::temp_dir().join(format!("allele-settings-{}-over", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, b"{ not valid json").expect("seed");
+
+        Settings::default().save_to(&path).expect("write");
+
+        let written = std::fs::read_to_string(&path).expect("readable");
+        serde_json::from_str::<Settings>(&written).expect("parses back");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn default_includes_overmind_sock() {

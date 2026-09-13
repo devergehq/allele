@@ -1720,7 +1720,11 @@ impl AppState {
 
     /// Private to `checkpoint_persistence()`. External callers must use
     /// `mark_settings_dirty()` — see ARCHITECTURE.md §4.4.
-    pub(crate) fn save_settings(&self) {
+    /// The in-memory snapshot that gets written to `settings.json`.
+    ///
+    /// Split from the write for the same reason as `state_snapshot`: building
+    /// it needs `&self` and is cheap, writing it blocks and is not (DEV-623).
+    pub(crate) fn settings_snapshot(&self) -> Settings {
         // Start from the live user_settings so attention preferences
         // (sound/notification opt-ins) are preserved on every write, then
         // override only the fields that the AppState is the source of truth
@@ -1748,18 +1752,19 @@ impl AppState {
             right_sidebar_width: self.right_panel.width,
             ..self.user_settings.clone()
         };
-        if let Err(e) = self.repos.settings.save(&settings) {
+        settings
+    }
+
+    /// Write `settings.json` synchronously.
+    ///
+    /// Private to `checkpoint_persistence()` and the quit path — everything
+    /// else must use `mark_settings_dirty()`, see ARCHITECTURE.md §4.4.
+    pub(crate) fn save_settings(&self) {
+        if let Err(e) = self.repos.settings.save(&self.settings_snapshot()) {
             warn!("Failed to save settings.json: {e}");
         }
     }
 
-    /// Persist every session across every project to `~/.allele/state.json`.
-    /// Called after any mutation that creates, removes, or transitions a session.
-    /// Errors are logged but not surfaced — losing a state write is survivable,
-    /// the orphan sweep will clean up any mismatch on next startup.
-    ///
-    /// Private to `checkpoint_persistence()`. External callers must use
-    /// `mark_state_dirty()` — see ARCHITECTURE.md §4.4.
     /// The in-memory snapshot that gets written to `state.json`.
     ///
     /// Split out from the write so the value can be built on the foreground —
@@ -1788,7 +1793,11 @@ impl AppState {
         persisted
     }
 
-    /// Write `state.json` synchronously.
+    /// Persist every session across every project to `~/.allele/state.json`,
+    /// synchronously.
+    ///
+    /// Errors are logged but not surfaced — losing a state write is survivable,
+    /// the orphan sweep cleans up any mismatch on next startup.
     ///
     /// Private to `checkpoint_persistence()` and the quit path — everything
     /// else must use `mark_state_dirty()`, see ARCHITECTURE.md §4.4.
@@ -3584,6 +3593,7 @@ fn main() {
                         state_dirty: false,
                         settings_dirty: false,
                         state_gate: Default::default(),
+                        settings_gate: Default::default(),
                         persist_flush_scheduled: false,
                         repos: repositories::Repositories::production(),
                         platform: crate::platform::global().clone_arcs(),
