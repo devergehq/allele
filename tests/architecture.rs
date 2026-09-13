@@ -34,9 +34,9 @@ use walkdir::WalkDir;
 // Baselines — lower these as debt is paid off. Never raise them.
 // ---------------------------------------------------------------------------
 
-/// Largest permitted file, in lines. `main.rs` is currently 4,674.
+/// Largest permitted file, in lines. `main.rs` is currently 4,430.
 ///
-/// Ratchet plan: 5000 → **4800** → 1500 → 800 as `main.rs` and the other
+/// Ratchet plan: 5000 → 4800 → **4550** → 1500 → 800 as `main.rs` and the other
 /// oversized files (DEV-111, DEV-624) are decomposed.
 ///
 /// **Lower this in the same PR as every extraction.** The re-decomposition
@@ -45,9 +45,9 @@ use walkdir::WalkDir;
 /// the whole time. A limit that is never lowered stops being a forcing function
 /// and becomes a target (DEV-624).
 ///
-/// ~126 lines of headroom today, which is deliberate: the next feature that
+/// ~120 lines of headroom today, which is deliberate: the next feature that
 /// piles into `main.rs` trips this guard rather than sliding through.
-const MAX_FILE_LINES: usize = 4_800;
+const MAX_FILE_LINES: usize = 4_550;
 
 /// Files outside `src/platform/` that still contain `cfg(target_os = ...)`,
 /// violating §7.4. Tracked as an explicit allowlist rather than a count so a

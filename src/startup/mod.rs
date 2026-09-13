@@ -6,4 +6,5 @@
 //! to 4,922 lines against a 5,000-line ratchet after a decomposition that was
 //! already recorded as finished.
 
+pub(crate) mod actions;
 pub(crate) mod pollers;
