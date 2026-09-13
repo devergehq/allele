@@ -431,6 +431,10 @@ pub(crate) struct AppState {
     pub(crate) settings_dirty: bool,
     /// Debounce state for `state.json` — see [`PERSIST_DEBOUNCE`].
     pub(crate) state_gate: PersistGate,
+    /// Same, for `settings.json`. Written far less often — every call site is
+    /// a discrete user action, not a per-frame mutation — but the write is the
+    /// same kind of foreground filesystem work (DEV-623).
+    pub(crate) settings_gate: PersistGate,
     /// True when a deferred flush timer is already pending, so a state that
     /// stays dirty across many frames schedules one timer, not one per frame.
     pub(crate) persist_flush_scheduled: bool,
@@ -502,9 +506,47 @@ impl AppState {
             self.flush_state(cx);
         }
         if self.settings_dirty {
-            self.save_settings();
-            self.settings_dirty = false;
+            self.flush_settings(cx);
         }
+    }
+
+    /// Write `settings.json` off the foreground, on the same terms as
+    /// [`flush_state`](Self::flush_state).
+    ///
+    /// Measured at 0.1ms idle and 9.5ms under the disk load a dispatch creates
+    /// — a single hitch on mouse-up rather than the per-frame storm `state.json`
+    /// had, since every caller is a discrete user action (DEV-623).
+    fn flush_settings(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.settings_gate.in_flight {
+            return;
+        }
+        if !persist_is_due(self.settings_gate.written_at, std::time::Instant::now()) {
+            self.schedule_persist_flush(cx);
+            return;
+        }
+
+        self.settings_dirty = false;
+        self.settings_gate.written_at = Some(std::time::Instant::now());
+        self.settings_gate.in_flight = true;
+
+        let snapshot = self.settings_snapshot();
+        let repo = self.repos.settings.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = repo.save(&snapshot) {
+                        tracing::warn!("Failed to save settings.json: {e}");
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                this.settings_gate.in_flight = false;
+                if this.settings_dirty {
+                    this.schedule_persist_flush(cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Write `state.json` if one is due; otherwise make sure one is coming.
