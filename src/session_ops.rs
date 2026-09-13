@@ -20,10 +20,7 @@ use crate::session::{
 };
 use crate::state::ArchivedSession;
 use crate::terminal::{clamp_font_size, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
-use crate::{
-    agents, browser, claude_session_history_exists, clone, config, conversations, git, project,
-    settings,
-};
+use crate::{agents, browser, clone, config, conversations, git, project, settings};
 
 /// Subtitle for a freshly created session, given whether the APFS clone took.
 ///
@@ -1253,7 +1250,7 @@ impl AppState {
         // (DEV-609).
         let has_history = crate::transcript::expected_session_jsonl(&clone_path, &session_id)
             .is_some_and(|p| p.exists())
-            || claude_session_history_exists(&session_id);
+            || crate::transcript::claude_session_history_exists(&session_id);
         let hooks_path_str = self
             .hooks_settings_path
             .as_ref()
