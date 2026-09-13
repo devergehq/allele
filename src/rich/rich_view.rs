@@ -18,6 +18,7 @@ use crate::theme::{theme, with_alpha};
 use gpui::*;
 use similar::{ChangeTag, TextDiff};
 
+use super::column::{framed, prose_width};
 use super::compose_bar::{ComposeBar, ComposeBarEvent};
 use super::document::{
     short_path, truncate_to_char_boundary, Block, BlockId, BlockKind, RichDocument,
@@ -387,7 +388,12 @@ impl RichView {
         });
 
         let block_el = render_block(block, annotation, font_size, cx);
-        if let Some(header) = agent_header {
+        // DEV-571: every item shares one centred frame, so the whole feed
+        // reads down a single column instead of stretching to the pane. The
+        // frame goes here rather than inside `render_block` so that the
+        // agent header, the run's left border and the role accent bars all
+        // land inside the column with the content they belong to.
+        let content = if let Some(header) = agent_header {
             div()
                 .flex()
                 .flex_col()
@@ -396,7 +402,8 @@ impl RichView {
                 .into_any_element()
         } else {
             block_el.into_any_element()
-        }
+        };
+        framed(font_size, content).into_any_element()
     }
 
     fn render_scrollbar(&self) -> Div {
@@ -1915,6 +1922,7 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
                     div()
                         .flex_1()
                         .min_w_0()
+                        .max_w(prose_width(font_size))
                         .text_color(theme().text_primary)
                         .text_size(px(font_size))
                         .child(content.to_string()),
