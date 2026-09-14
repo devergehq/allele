@@ -118,7 +118,10 @@ async fn run(request: CreateRequest, this: &WeakEntity<AppState>, cx: &mut Async
             observe(state, &started.session_id, cx)
         });
         match state {
-            Ok(Some(observed)) if consumed_prompt(observed.status) => {
+            Ok(Some(observed))
+                if consumed_prompt(observed.status)
+                    && observed.status != started.claimed_status =>
+            {
                 return Response::Created {
                     session: CreatedSession {
                         session_id: started.session_id,
@@ -164,6 +167,12 @@ struct Started {
     session_id: String,
     name: String,
     project: String,
+    /// The session's status at the moment its id was claimed.
+    ///
+    /// Confirmation requires a *transition* away from this, so a session that
+    /// was already past the prompt cannot be reported as having consumed one
+    /// it never received (DEV-601).
+    claimed_status: SessionStatus,
 }
 
 /// What the poll loop needs to see each tick: the session's status, and — once
@@ -245,22 +254,20 @@ fn begin(
         .and_then(|id| find_session_origin(state, id))
         .unwrap_or(SessionOrigin::Human);
 
-    let depth = admission::admit(&caller_origin, admission::live_dispatched_count(state)).map_err(
-        |code| {
-            let message = match code {
-                ErrorCode::DepthLimitExceeded => format!(
-                    "dispatched sessions may not dispatch (depth limit {})",
-                    admission::MAX_DISPATCH_DEPTH
-                ),
-                _ => format!(
-                    "{} dispatched sessions already running (limit {})",
-                    admission::live_dispatched_count(state),
-                    admission::MAX_DISPATCHED_SESSIONS
-                ),
-            };
-            (code, message)
-        },
-    )?;
+    // Limits come from the user's settings, never the request — see
+    // `admission::DispatchLimits`.
+    let limits = state.user_settings.dispatch;
+    let live = admission::live_dispatched_count(state);
+    let depth = admission::admit(&caller_origin, live, &limits).map_err(|code| {
+        let message = match code {
+            ErrorCode::DepthLimitExceeded => depth_limit_message(caller_origin.depth(), &limits),
+            _ => format!(
+                "{live} dispatched sessions already running (limit {})",
+                limits.max_sessions
+            ),
+        };
+        (code, message)
+    })?;
 
     let name = unique_name(state, request.name.trim());
     let by_label = request
@@ -282,44 +289,54 @@ fn begin(
     let prompt =
         address::compose_dispatch_prompt(request.caller_reply_to.as_deref(), &request.prompt);
 
-    let before: Vec<String> = state.projects[project_idx]
-        .sessions
-        .iter()
-        .map(|s| s.id.clone())
-        .collect();
-
-    state.add_session_to_project_with_details(
-        project_idx,
-        name.clone(),
-        None,
-        None,
-        Some(prompt),
-        request.orchestration,
-        window,
-        cx,
-    );
-
-    // Creation is asynchronous — the session appears once its clone lands, so
-    // the id is claimed from the loading list rather than the session list.
-    let project = &mut state.projects[project_idx];
-    let session_id = project
-        .loading_sessions
-        .iter()
-        .map(|l| l.id.clone())
-        .find(|id| !before.contains(id))
-        .or_else(|| {
-            project
-                .sessions
-                .iter()
-                .map(|s| s.id.clone())
-                .find(|id| !before.contains(id))
-        })
+    // The id comes back from the call that minted it (DEV-601).
+    //
+    // It used to be inferred: snapshot `sessions` before, then take the first
+    // entry in `loading_sessions` that was not in that snapshot. The snapshot
+    // never included `loading_sessions`, and the new session is appended last,
+    // so any other entry already provisioning — a concurrent dispatch, a
+    // human's New Session, or a discard's "(archiving)" placeholder — was
+    // claimed in its place. Deterministic, not a race: wrong every time the
+    // list was non-empty. The caller then received a foreign id, the dispatch
+    // attribution was filed under it (leaving the real session `human` and
+    // undiscardable), and the submit retries below were typed into someone
+    // else's terminal.
+    let session_id = state
+        .add_session_to_project_with_details(
+            project_idx,
+            name.clone(),
+            None,
+            None,
+            Some(prompt),
+            request.orchestration,
+            window,
+            cx,
+        )
         .ok_or_else(|| {
             (
                 ErrorCode::CloneFailed,
                 "allele did not begin provisioning a workspace".to_string(),
             )
         })?;
+
+    // A session created a moment ago cannot already have consumed a prompt.
+    // If one has, the id does not describe this request, and confirming it
+    // would report success for a prompt this caller never delivered. The id
+    // fix above should make this unreachable; it is here so that any future
+    // path handing back a stale or already-running session fails loudly
+    // instead of silently certifying someone else's work.
+    let claimed_status = observe(state, &session_id, cx)
+        .map(|observed| observed.status)
+        .unwrap_or(SessionStatus::Suspended);
+    if consumed_prompt(claimed_status) {
+        return Err((
+            ErrorCode::Internal,
+            format!(
+                "session {session_id} had already consumed a prompt when it was claimed, \
+                 so it cannot be the session this request created"
+            ),
+        ));
+    }
 
     // Recorded against the loading session so attribution survives even if
     // provisioning fails and a human is left looking at the wreckage.
@@ -331,6 +348,7 @@ fn begin(
         session_id,
         name,
         project: state.projects[project_idx].name.clone(),
+        claimed_status,
     })
 }
 
@@ -431,6 +449,25 @@ fn error(code: ErrorCode, message: String) -> Response {
     Response::Error { code, message }
 }
 
+/// Why a caller at `caller_depth` was refused under `limits`.
+///
+/// States the caller's depth beside the limit, because once the limit is
+/// configurable "dispatched sessions may not dispatch" is no longer true in
+/// general — at depth 2 a worker may. Deliberately does **not** name the
+/// setting: the reader is an orchestrator running the very rule the limit
+/// exists to stop, and telling it where the limit lives invites it to edit
+/// the owner's settings rather than do the work itself.
+fn depth_limit_message(caller_depth: u8, limits: &admission::DispatchLimits) -> String {
+    if limits.max_depth == 0 {
+        return "dispatch is turned off on this machine (depth limit 0)".to_string();
+    }
+    format!(
+        "this session is at dispatch depth {caller_depth} and the depth limit is {}, \
+         so it may not dispatch",
+        limits.max_depth
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,10 +556,73 @@ mod tests {
         assert!((500..=2_000).contains(&first), "first retry at {first}ms");
     }
 
+    /// The refusal has to be true at whatever limit is configured — the old
+    /// "dispatched sessions may not dispatch" is false at depth 2.
+    #[test]
+    fn the_depth_refusal_states_the_callers_depth_and_the_limit() {
+        let depth_two = admission::DispatchLimits {
+            max_depth: 2,
+            max_sessions: 30,
+        };
+        let message = depth_limit_message(2, &depth_two);
+        assert!(message.contains("depth 2"), "{message}");
+        assert!(message.contains("limit is 2"), "{message}");
+
+        let message = depth_limit_message(1, &admission::DispatchLimits::default());
+        assert!(message.contains("depth 1"), "{message}");
+        assert!(message.contains("limit is 1"), "{message}");
+    }
+
+    /// Only a limit of 0 refuses a human's session, and "depth 0 at limit 0"
+    /// would read as a bug rather than a setting.
+    #[test]
+    fn the_depth_refusal_says_when_dispatch_is_off() {
+        let off = admission::DispatchLimits {
+            max_depth: 0,
+            ..Default::default()
+        };
+        assert!(depth_limit_message(0, &off).contains("turned off"));
+    }
+
+    /// The reader is an agent running the rule the limit exists to stop;
+    /// pointing it at the setting invites it to raise its own limit.
+    #[test]
+    fn the_depth_refusal_does_not_name_the_setting() {
+        let message = depth_limit_message(1, &admission::DispatchLimits::default());
+        assert!(!message.contains("settings"), "{message}");
+        assert!(!message.contains("max_depth"), "{message}");
+    }
+
     #[test]
     fn states_past_the_prompt_all_count() {
         assert!(consumed_prompt(SessionStatus::Running));
         assert!(consumed_prompt(SessionStatus::AwaitingInput));
         assert!(consumed_prompt(SessionStatus::ResponseReady));
+    }
+
+    /// The rule the claim-time check in `begin` rests on (DEV-601).
+    ///
+    /// A session whose workspace is still being provisioned reports
+    /// `Suspended`, which is the only state a just-created session can be in.
+    /// Every state that counts as having consumed a prompt therefore means the
+    /// claimed id belongs to some *other* session — the failure that let a
+    /// mis-claim be reported as a success, rather than as the error it is.
+    #[test]
+    fn a_freshly_created_session_has_not_consumed_a_prompt() {
+        assert!(
+            !consumed_prompt(SessionStatus::Suspended),
+            "a session still provisioning must be claimable"
+        );
+
+        for status in [
+            SessionStatus::Running,
+            SessionStatus::AwaitingInput,
+            SessionStatus::ResponseReady,
+        ] {
+            assert!(
+                consumed_prompt(status),
+                "{status:?} at claim time means the id is not this request's session"
+            );
+        }
     }
 }

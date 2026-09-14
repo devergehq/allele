@@ -14,11 +14,30 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- The limits on MCP-dispatched sessions are now configurable. By default a session
+  a human started may dispatch, the sessions it dispatches may not, and at most 20
+  dispatched sessions exist at once — unchanged. An orchestrator whose workers need
+  to dispatch an independent reviewer or investigator of their own can now be given
+  one more level by adding `"dispatch": { "max_depth": 2, "max_sessions": 30 }` to
+  `~/.config/allele/settings.json` (edit it while Allele is quit; it is read at
+  launch). A refused dispatch now says which depth the caller is at and what the
+  limit is, rather than "dispatched sessions may not dispatch", which is no longer
+  true in general.
 - Handler-level test fixture (`app_state::fixture::Fixture`): stands an `AppState`
   up in a headless GPUI window backed by the in-memory repositories, so
   `PendingAction` handlers can be driven and their persistence *intent* asserted
   without touching the filesystem. First tests cover the sidebar, project, settings
   and archive families. Documented as ARCHITECTURE.md §5.6.
+
+### Changed
+- The attention bar collapses. It now opens with a summary header — a count of
+  the sessions waiting on you, and a chevron — and clicking that header folds
+  the per-session rows away and back. Even expanded, the list is capped at six
+  rows and scrolls past that. Running twenty-odd sessions used to mean an
+  attention bar that took most of the window and a terminal you could not read;
+  the count is the part worth glancing at, so collapsing keeps it and gives the
+  space back. The collapsed choice persists across restarts, and a bar with
+  nothing waiting still renders nothing at all.
 
 ## [0.4.0] - 2026-08-30
 

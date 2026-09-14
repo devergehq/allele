@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use tracing::warn;
 
 use crate::config::TerminalCfg;
+use crate::dispatch::admission::DispatchLimits;
 use crate::naming::NamingConfig;
 
 /// Which built-in adapter drives an agent's command building. `Generic`
@@ -307,6 +308,15 @@ pub struct Settings {
     #[serde(default)]
     pub sidebar_active_only: bool,
 
+    /// When true, the attention bar above the main tab strip is collapsed to
+    /// its summary header — the count stays visible, the per-session rows do
+    /// not. A user running twenty-odd sessions has an attention bar that eats
+    /// the viewport; collapsing keeps the signal and gives back the space.
+    /// Toggled by clicking the bar's own header. Persisted so the choice
+    /// survives a restart. See DEV-525.
+    #[serde(default)]
+    pub attention_bar_collapsed: bool,
+
     /// Branch naming configuration — controls how session branches are named
     /// (LLM model, mode, per-platform settings).
     #[serde(default)]
@@ -316,6 +326,17 @@ pub struct Settings {
     /// configures a store.
     #[serde(default)]
     pub sync: SyncSettings,
+
+    /// Admission limits for sessions started over the MCP control socket
+    /// (DEV-600): how deep dispatch may nest and how many dispatched sessions
+    /// may exist at once. Defaults to depth 1 and 20 sessions — see
+    /// [`DispatchLimits`] for why, and for what raising them costs.
+    ///
+    /// No settings-window control, deliberately: this is an opt-in for people
+    /// running orchestrators, and it should take an edit to `settings.json`
+    /// rather than a stray click.
+    #[serde(default)]
+    pub dispatch: DispatchLimits,
 }
 
 /// Session-sync store configuration. All plain strings — no credentials are
@@ -494,8 +515,10 @@ impl Default for Settings {
             git_pull_before_new_session: false,
             promote_attention_sessions: true,
             sidebar_active_only: false,
+            attention_bar_collapsed: false,
             naming: NamingConfig::default(),
             sync: SyncSettings::default(),
+            dispatch: DispatchLimits::default(),
         }
     }
 }
@@ -556,18 +579,79 @@ impl Settings {
         let Some(path) = Self::path() else {
             return;
         };
+        if let Err(e) = self.save_to(&path) {
+            tracing::warn!("Failed to save settings.json: {e}");
+        }
+    }
+
+    /// Atomically write these settings to `path`.
+    ///
+    /// Temp + rename, the same guarantee `PersistedState::save` gives: either
+    /// the new settings are fully on disk or the old ones are untouched. This
+    /// used to be a plain `fs::write` — truncate, then write — so a crash, a
+    /// power loss or a full disk in between left the file truncated and the
+    /// next launch loaded defaults. This file holds the project list, the
+    /// agent configuration and the sync settings (DEV-623).
+    ///
+    /// Takes the path rather than resolving it, so the write can be exercised
+    /// against a temp directory. `Self::path()` is the user's real config, and
+    /// a test that wrote there would overwrite their settings.
+    pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            std::fs::create_dir_all(parent)?;
         }
-        if let Ok(json) = serde_json::to_string_pretty(self) {
-            let _ = std::fs::write(&path, json);
-        }
+        let json = serde_json::to_string_pretty(self)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, json)?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The guarantee DEV-623 adds: a write never leaves a half-written file,
+    /// and never leaves its temp file behind either.
+    #[test]
+    fn saving_is_atomic_and_leaves_no_temp_file() {
+        let dir = std::env::temp_dir().join(format!("allele-settings-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        let path = dir.join("settings.json");
+
+        let settings = Settings::default();
+        settings.save_to(&path).expect("write");
+
+        let written = std::fs::read_to_string(&path).expect("readable");
+        serde_json::from_str::<Settings>(&written).expect("parses back");
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "temp file left behind"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Replacing an existing file must not go through a truncated state that a
+    /// reader could observe — the rename is what makes that true.
+    #[test]
+    fn saving_over_an_existing_file_replaces_it_whole() {
+        let dir = std::env::temp_dir().join(format!("allele-settings-{}-over", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, b"{ not valid json").expect("seed");
+
+        Settings::default().save_to(&path).expect("write");
+
+        let written = std::fs::read_to_string(&path).expect("readable");
+        serde_json::from_str::<Settings>(&written).expect("parses back");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn default_includes_overmind_sock() {
@@ -595,6 +679,74 @@ mod tests {
         let json = r#"{ "session_cleanup_paths": [] }"#;
         let s: Settings = serde_json::from_str(json).unwrap();
         assert!(s.session_cleanup_paths.is_empty());
+    }
+
+    #[test]
+    fn attention_bar_defaults_to_expanded() {
+        // The bar's value is that it is visible; a first run must show the
+        // rows, not hide them behind a collapse the user never asked for.
+        assert!(!Settings::default().attention_bar_collapsed);
+        let legacy = r#"{ "sidebar_width": 240.0 }"#;
+        let s: Settings = serde_json::from_str(legacy).expect("should deserialize");
+        assert!(!s.attention_bar_collapsed);
+    }
+
+    #[test]
+    fn attention_bar_collapsed_round_trips() {
+        // Collapsing is a persisted choice — it has to survive the write/read
+        // cycle, or the bar springs back open on every restart.
+        let json = r#"{ "attention_bar_collapsed": true }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert!(s.attention_bar_collapsed);
+        let round_tripped: Settings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(round_tripped.attention_bar_collapsed);
+    }
+
+    #[test]
+    fn dispatch_limits_default_when_absent() {
+        // Every settings.json written before DEV-600 lacks the key, and so
+        // does every machine whose owner never opted in. Both must land on
+        // the fork-bomb defaults, not on zero — a zero cap would silently
+        // turn dispatch off for everyone.
+        assert_eq!(Settings::default().dispatch, DispatchLimits::default());
+        let legacy = r#"{ "sidebar_width": 240.0 }"#;
+        let s: Settings = serde_json::from_str(legacy).expect("should deserialize");
+        assert_eq!(s.dispatch.max_depth, 1);
+        assert_eq!(s.dispatch.max_sessions, 20);
+    }
+
+    #[test]
+    fn dispatch_limits_opt_in_is_read() {
+        let json = r#"{ "dispatch": { "max_depth": 2, "max_sessions": 30 } }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.dispatch.max_depth, 2);
+        assert_eq!(s.dispatch.max_sessions, 30);
+    }
+
+    #[test]
+    fn dispatch_limits_partial_keeps_the_other_default() {
+        // Raising depth without touching the cap must not zero the cap.
+        let json = r#"{ "dispatch": { "max_depth": 2 } }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.dispatch.max_depth, 2);
+        assert_eq!(s.dispatch.max_sessions, 20);
+
+        let json = r#"{ "dispatch": { "max_sessions": 30 } }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        assert_eq!(s.dispatch.max_depth, 1);
+        assert_eq!(s.dispatch.max_sessions, 30);
+    }
+
+    #[test]
+    fn dispatch_limits_round_trip() {
+        // `Settings::save` rewrites the whole file, so an opt-in that did not
+        // survive the write would be lost the first time the sidebar moved.
+        let json = r#"{ "dispatch": { "max_depth": 2, "max_sessions": 30 } }"#;
+        let s: Settings = serde_json::from_str(json).unwrap();
+        let round_tripped: Settings =
+            serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(round_tripped.dispatch, s.dispatch);
     }
 
     #[test]

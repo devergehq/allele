@@ -20,10 +20,7 @@ use crate::session::{
 };
 use crate::state::ArchivedSession;
 use crate::terminal::{clamp_font_size, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
-use crate::{
-    agents, browser, claude_session_history_exists, clone, config, conversations, git, project,
-    settings,
-};
+use crate::{agents, browser, clone, config, conversations, git, project, settings};
 
 /// Subtitle for a freshly created session, given whether the APFS clone took.
 ///
@@ -129,6 +126,7 @@ impl AppState {
             label: &display_label,
             hooks_settings_path: hooks_path_str.as_deref(),
             has_history: false,
+            initial_prompt: None,
         };
         let command = agent
             .as_ref()
@@ -412,11 +410,21 @@ impl AppState {
         .detach();
     }
 
-    /// Create a new session with custom details (name, branch, agent, prompt).
+    /// Create a new session with custom details (name, branch, agent, prompt),
+    /// returning the id it was given.
     ///
     /// This is the "with details" counterpart to `add_session_to_project`.
     /// It accepts optional overrides for label, branch slug, agent, and an
     /// initial prompt to send to the agent after creation.
+    ///
+    /// `None` means nothing was started — an unknown project, or a source path
+    /// that has gone missing (which raises the Relocate modal instead).
+    ///
+    /// **The id is returned rather than discovered.** Callers that need to
+    /// follow the session afterwards used to snapshot the project's session
+    /// list and diff it once this returned, which silently claimed a different
+    /// session's id whenever anything else was mid-provisioning. The id is
+    /// minted here, so it is handed back here (DEV-601).
     pub(crate) fn add_session_to_project_with_details(
         &mut self,
         project_idx: usize,
@@ -427,15 +435,13 @@ impl AppState {
         orchestration: crate::session::Orchestration,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some(project) = self.projects.get_mut(project_idx) else {
-            return;
-        };
+    ) -> Option<String> {
+        let project = self.projects.get_mut(project_idx)?;
 
         if !project.source_path.exists() {
             self.pending_action = Some(ProjectAction::RelocateProject(project_idx).into());
             cx.notify();
-            return;
+            return None;
         }
 
         let source_path = project.source_path.clone();
@@ -481,10 +487,16 @@ impl AppState {
             label: &display_label,
             hooks_settings_path: hooks_path_str.as_deref(),
             has_history: false,
+            initial_prompt: initial_prompt.as_deref(),
         };
         let command = agent
             .as_ref()
             .and_then(|a| agents::build_command(a, &ctx, false));
+
+        // When the agent takes the brief as an argument, it arrives already
+        // submitted and nothing is typed into the TUI at all. Only agents that
+        // cannot do that fall back to the typed path below (DEV-604).
+        let agent_takes_prompt = agent.as_ref().is_some_and(agents::consumes_initial_prompt);
 
         project.loading_sessions.push(project::LoadingSession {
             id: session_id.clone(),
@@ -514,6 +526,9 @@ impl AppState {
         // background task below so the network call never blocks the UI.
         let branch_slug_for_clone = branch_slug.clone();
         let session_id_for_branch = session_id.clone();
+        // Cloned before the task takes ownership, so the id can be returned to
+        // the caller that asked for this session (DEV-601).
+        let created_session_id = session_id.clone();
 
         cx.spawn_in(window, async move |this, cx| {
             let (clone_result, pull_error, branch_warning, branch_error) = cx
@@ -808,26 +823,29 @@ impl AppState {
                 Self::schedule_operation_result_repaint(cx);
 
                 // Send the initial prompt if provided.
-                if let Some(ref prompt_text) = prompt {
-                    if let Some(terminal) = terminal_view.read(cx).pty() {
-                        terminal.write(b"\x1b[200~");
-                        terminal.write(prompt_text.as_bytes());
-                        terminal.write(b"\x1b[201~");
+                //
+                // An agent that takes it as an argument already has it: the
+                // prompt was on the command line at spawn and arrived
+                // submitted, so there is nothing to type and nothing to
+                // confirm by keystroke. That is the whole point of DEV-604 —
+                // the typed path raced the agent's TUI boot, and lost.
+                //
+                // Everything else still types: a bare shell, or an adapter
+                // with no positional-prompt support. There the race is not in
+                // play — a shell has no TUI to boot — so the lossier path is
+                // acceptable where it is the only one.
+                if let Some(prompt_text) = prompt {
+                    if agent_takes_prompt {
+                        info!("initial prompt handed to the agent at spawn; not typing it");
+                    } else {
+                        info!("agent takes no prompt argument; typing the initial prompt");
+                        crate::dispatch::pty::deliver(
+                            &terminal_view,
+                            prompt_text,
+                            crate::dispatch::pty::CREATION_SUBMIT_RETRIES_MS,
+                            cx,
+                        );
                     }
-                    let tv_weak = terminal_view.downgrade();
-                    cx.spawn(async move |_this, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(80))
-                            .await;
-                        cx.update(|cx| {
-                            if let Some(tv) = tv_weak.upgrade() {
-                                if let Some(terminal) = tv.read(cx).pty() {
-                                    terminal.write(b"\r");
-                                }
-                            }
-                        });
-                    })
-                    .detach();
                 }
 
                 cx.notify();
@@ -848,6 +866,8 @@ impl AppState {
             }
         })
         .detach();
+
+        Some(created_session_id)
     }
 
     /// Called when the user presses Enter in a terminal. If the owning
@@ -1215,7 +1235,22 @@ impl AppState {
 
         // Only adapters that understand session ids care about history —
         // for claude this gates `--resume` vs `--session-id`.
-        let has_history = claude_session_history_exists(&session_id);
+        //
+        // Derive the transcript path from the workspace first: that is a single
+        // stat on `~/.claude/projects/<dashed-cwd>/<id>.jsonl`, where the scan
+        // below reads all ~580 project directories and stats each one. The scan
+        // costs 6.5ms idle but 86ms under the disk load a dispatch creates — on
+        // the thread that has to draw, once per click, while someone resumes a
+        // list of sessions. It is the same defect DEV-602 took out of the render
+        // path and left here.
+        //
+        // The scan stays as a fallback, so a transcript filed somewhere the
+        // derivation does not predict is still found and the session still
+        // resumes its conversation rather than silently starting a new one
+        // (DEV-609).
+        let has_history = crate::transcript::expected_session_jsonl(&clone_path, &session_id)
+            .is_some_and(|p| p.exists())
+            || crate::transcript::claude_session_history_exists(&session_id);
         let hooks_path_str = self
             .hooks_settings_path
             .as_ref()
@@ -1225,6 +1260,7 @@ impl AppState {
             label: &label,
             hooks_settings_path: hooks_path_str.as_deref(),
             has_history,
+            initial_prompt: None,
         };
         let command = agent
             .as_ref()
@@ -1608,6 +1644,58 @@ impl AppState {
             })
             .detach();
         }
+    }
+
+    /// Sessions whose resumability wants refreshing, as `(id, clone path)`.
+    ///
+    /// Collected on the foreground and answered off it: each answer costs a
+    /// stat on the clone plus a scan of `~/.claude/projects`, which is why it
+    /// is never computed during render (DEV-602).
+    pub(crate) fn resumable_targets(&self) -> Vec<(String, Option<std::path::PathBuf>)> {
+        self.projects
+            .iter()
+            .flat_map(|p| p.sessions.iter())
+            .map(|s| (s.id.clone(), s.clone_path.clone()))
+            .collect()
+    }
+
+    /// Store a refreshed resumability flag, returning whether it changed — so
+    /// a caller can skip a repaint that would show nothing new.
+    pub(crate) fn record_resumable(&mut self, session_id: &str, resumable: bool) -> bool {
+        for project in &mut self.projects {
+            for session in &mut project.sessions {
+                if session.id == session_id {
+                    if session.resumable == Some(resumable) {
+                        return false;
+                    }
+                    session.resumable = Some(resumable);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Every session id that may legitimately own a file in `~/.allele/events`.
+    ///
+    /// Both ids per session, deliberately: `/clear` rotates the Claude
+    /// conversation id, and the hook receiver names the events file after
+    /// whichever id the hook fired under. Pruning on `Session::id` alone would
+    /// delete the live events of every session that has ever been cleared.
+    /// Loading sessions count too — their agent can be writing events before
+    /// the clone lands (DEV-602).
+    pub(crate) fn live_event_ids(&self) -> std::collections::HashSet<String> {
+        let mut live = std::collections::HashSet::new();
+        for project in self.projects.iter() {
+            for session in project.sessions.iter() {
+                live.insert(session.id.clone());
+                live.insert(session.claude_session_id().to_string());
+            }
+            for loading in project.loading_sessions.iter() {
+                live.insert(loading.id.clone());
+            }
+        }
+        live
     }
 
     /// Push a session's bundle (metadata) up to the configured sync store.

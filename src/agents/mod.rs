@@ -27,6 +27,10 @@ pub struct SpawnCtx<'a> {
     /// and the caller wants a resume. Ignored by adapters that don't
     /// distinguish between fresh and resumed sessions.
     pub has_history: bool,
+    /// The first prompt this session should start with, when the caller has
+    /// one *and* the adapter can take it as an argument. `None` for a resume,
+    /// and for sessions created without a brief (DEV-604).
+    pub initial_prompt: Option<&'a str>,
 }
 
 // ── Canonical event vocabulary ───────────────────────────────────────────
@@ -128,6 +132,17 @@ pub trait AgentAdapter: Send + Sync {
         false
     }
 
+    /// Whether a first prompt can be handed over as a positional argument at
+    /// spawn, arriving already submitted.
+    ///
+    /// False by default. An adapter that cannot do this keeps the typed
+    /// delivery path, which is universal but lossy: it races the agent's TUI
+    /// boot, and losing that race is what left dispatched sessions sitting
+    /// with an unsent prompt (DEV-604).
+    fn consumes_initial_prompt(&self) -> bool {
+        false
+    }
+
     // ── Event integration ────────────────────────────────────────────────
 
     /// One-time, idempotent install of any on-disk assets this agent needs
@@ -196,6 +211,13 @@ impl AgentAdapter for ClaudeAdapter {
         args.push(ctx.label.into());
         args.extend(extra.iter().cloned());
         args
+    }
+
+    /// `claude [options] [prompt]` — the positional prompt starts an
+    /// interactive session with that prompt already submitted, so allele
+    /// never has to type it in.
+    fn consumes_initial_prompt(&self) -> bool {
+        true
     }
 
     /// Claude's hook receiver + `hooks.json` are installed by
@@ -337,6 +359,14 @@ impl AgentAdapter for GenericAdapter {
     }
 }
 
+/// Whether this agent takes a first prompt as a command-line argument.
+///
+/// Callers use this to decide whether to hand the brief over at spawn or fall
+/// back to typing it into the TUI — see `build_command` (DEV-604).
+pub fn consumes_initial_prompt(agent: &AgentConfig) -> bool {
+    adapter_for(agent.kind).consumes_initial_prompt()
+}
+
 pub fn adapter_for(kind: AgentKind) -> Box<dyn AgentAdapter> {
     match kind {
         AgentKind::Claude => Box::new(ClaudeAdapter),
@@ -408,6 +438,19 @@ pub fn build_command(agent: &AgentConfig, ctx: &SpawnCtx, resume: bool) -> Optio
     // opencode's ALLELE_SESSION_ID env, …) so status reporting works.
     let integration = adapter.event_integration(ctx);
     args.extend(integration.args);
+
+    // The prompt goes last, after every flag, because it is positional — and
+    // only here rather than inside `build_new_session_args`, so the event
+    // integration's own flags cannot end up behind it.
+    //
+    // Never on a resume: the conversation being resumed already has its first
+    // turn, and handing it another would start it over (DEV-604).
+    if !resume && adapter.consumes_initial_prompt() {
+        if let Some(prompt) = ctx.initial_prompt.filter(|p| !p.trim().is_empty()) {
+            args.push(prompt.to_string());
+        }
+    }
+
     Some(ShellCommand::with_args_env(path, args, integration.env))
 }
 
@@ -471,6 +514,118 @@ mod tests {
         }
     }
 
+    /// DEV-604: the brief rides the command line, so nothing is typed into a
+    /// TUI that may not be listening yet. This is what replaced the paste-then
+    /// -Enter race that left dispatched sessions with unsent prompts.
+    #[test]
+    fn claude_takes_the_initial_prompt_as_a_trailing_positional() {
+        let agent = cfg("claude", AgentKind::Claude, Some("/bin/true"), true);
+        let ctx = SpawnCtx {
+            session_id: "abc",
+            label: "Claude 1",
+            hooks_settings_path: Some("/tmp/hooks.json"),
+            has_history: false,
+            initial_prompt: Some("review the auth module"),
+        };
+        let cmd = build_command(&agent, &ctx, false).expect("agent has path");
+        assert_eq!(
+            cmd.args.last().map(String::as_str),
+            Some("review the auth module")
+        );
+    }
+
+    /// The prompt is positional, so every flag has to precede it — including
+    /// the event-integration flags, which are appended after the adapter's own
+    /// args. Building the prompt into `build_new_session_args` would have put
+    /// `--settings` behind it.
+    #[test]
+    fn the_initial_prompt_comes_after_every_flag() {
+        let agent = cfg("claude", AgentKind::Claude, Some("/bin/true"), true);
+        let ctx = SpawnCtx {
+            session_id: "abc",
+            label: "Claude 1",
+            hooks_settings_path: Some("/tmp/hooks.json"),
+            has_history: false,
+            initial_prompt: Some("do the thing"),
+        };
+        let cmd = build_command(&agent, &ctx, false).expect("agent has path");
+
+        let prompt_at = cmd
+            .args
+            .iter()
+            .position(|a| a == "do the thing")
+            .expect("prompt present");
+        assert_eq!(prompt_at, cmd.args.len() - 1, "{:?}", cmd.args);
+
+        let settings_at = cmd
+            .args
+            .iter()
+            .position(|a| a == "--settings")
+            .expect("hooks wired");
+        assert!(settings_at < prompt_at, "{:?}", cmd.args);
+    }
+
+    /// A resumed conversation already has its first turn. Handing it the brief
+    /// again would start the work over.
+    #[test]
+    fn a_resume_never_carries_the_initial_prompt() {
+        let agent = cfg("claude", AgentKind::Claude, Some("/bin/true"), true);
+        let ctx = SpawnCtx {
+            session_id: "abc",
+            label: "Claude 1",
+            hooks_settings_path: None,
+            has_history: true,
+            initial_prompt: Some("do the thing"),
+        };
+        let cmd = build_command(&agent, &ctx, true).expect("agent has path");
+        assert!(
+            !cmd.args.iter().any(|a| a == "do the thing"),
+            "{:?}",
+            cmd.args
+        );
+    }
+
+    /// An empty brief would otherwise arrive as an empty argument, which reads
+    /// as a submitted blank turn rather than as no prompt at all.
+    #[test]
+    fn a_blank_initial_prompt_is_not_passed() {
+        let agent = cfg("claude", AgentKind::Claude, Some("/bin/true"), true);
+        let ctx = SpawnCtx {
+            session_id: "abc",
+            label: "Claude 1",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: Some("   "),
+        };
+        let cmd = build_command(&agent, &ctx, false).expect("agent has path");
+        assert_eq!(cmd.args, vec!["--session-id", "abc", "--name", "Claude 1"]);
+    }
+
+    /// Only adapters that actually support it. Everything else keeps the typed
+    /// delivery path, which is lossier but universal — and for a bare shell
+    /// there is no TUI boot to race anyway.
+    #[test]
+    fn only_claude_consumes_the_initial_prompt() {
+        assert!(consumes_initial_prompt(&cfg(
+            "claude",
+            AgentKind::Claude,
+            Some("/bin/true"),
+            true
+        )));
+        assert!(!consumes_initial_prompt(&cfg(
+            "opencode",
+            AgentKind::Opencode,
+            Some("/bin/true"),
+            true
+        )));
+        assert!(!consumes_initial_prompt(&cfg(
+            "custom",
+            AgentKind::Generic,
+            Some("/bin/bash"),
+            true
+        )));
+    }
+
     #[test]
     fn claude_new_session_builds_session_id_args() {
         let agent = cfg("claude", AgentKind::Claude, Some("/bin/true"), true);
@@ -479,6 +634,7 @@ mod tests {
             label: "Claude 1",
             hooks_settings_path: Some("/tmp/hooks.json"),
             has_history: false,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, false).expect("agent has path");
         assert_eq!(cmd.program, "/bin/true");
@@ -503,6 +659,7 @@ mod tests {
             label: "Claude 1",
             hooks_settings_path: None,
             has_history: true,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, true).expect("agent has path");
         assert_eq!(cmd.args, vec!["--resume", "abc", "--name", "Claude 1"]);
@@ -516,6 +673,7 @@ mod tests {
             label: "Claude 1",
             hooks_settings_path: None,
             has_history: false,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, true).expect("agent has path");
         assert_eq!(cmd.args, vec!["--session-id", "abc", "--name", "Claude 1"]);
@@ -530,6 +688,7 @@ mod tests {
             label: "C",
             hooks_settings_path: None,
             has_history: false,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, false).expect("agent has path");
         assert_eq!(
@@ -547,6 +706,7 @@ mod tests {
             label: "Custom",
             hooks_settings_path: Some("/ignored"),
             has_history: false,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, false).expect("agent has path");
         assert_eq!(cmd.program, "/bin/bash");
@@ -561,6 +721,7 @@ mod tests {
             label: "l",
             hooks_settings_path: None,
             has_history: false,
+            initial_prompt: None,
         };
         assert!(build_command(&disabled, &ctx, false).is_none());
         let no_path = cfg("claude", AgentKind::Claude, None, true);
@@ -642,6 +803,7 @@ mod tests {
             label: "opencode 1",
             hooks_settings_path: None,
             has_history: false,
+            initial_prompt: None,
         };
         let integ = a.event_integration(&ctx);
         assert!(integ.args.is_empty(), "opencode needs no extra CLI args");
@@ -661,6 +823,7 @@ mod tests {
             label: "opencode 1",
             hooks_settings_path: None,
             has_history: false,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, false).expect("agent has path");
         assert!(cmd
@@ -683,6 +846,7 @@ mod tests {
                 label: "y",
                 hooks_settings_path: None,
                 has_history: false,
+                initial_prompt: None,
             })
             .env
             .is_empty());

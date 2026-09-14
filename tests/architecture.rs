@@ -34,14 +34,26 @@ use walkdir::WalkDir;
 // Baselines — lower these as debt is paid off. Never raise them.
 // ---------------------------------------------------------------------------
 
-/// Largest permitted file, in lines. `main.rs` is currently 4,885 (DEV-105).
+/// Largest permitted file, in lines.
 ///
-/// Ratchet plan: 5000 → 1500 → 800 as `main.rs` and the other oversized files
-/// (DEV-111) are decomposed.
+/// **`main.rs` is no longer the binding constraint.** After DEV-624's
+/// extractions it is 2,178 lines, and the largest files are now
+/// `src/git/mod.rs` (3,315), `src/terminal/terminal_view.rs` (2,450) and
+/// `src/rich/rich_view.rs` (2,320). Further lowering needs those decomposed,
+/// not `main.rs`.
 ///
-/// Only ~115 lines of headroom above `main.rs` today, which is deliberate: the
+/// Ratchet plan: 5000 → 4800 → 4550 → **3450** → 2400 → 1500 → 800, each step
+/// landing in the same PR as the extraction that earns it (DEV-111, DEV-624).
+///
+/// **Lower this in the same PR as every extraction.** The re-decomposition
+/// recorded in `docs/RE-DECOMPOSITION-PLAN.md` completed phases 1-15 and 17-19,
+/// and `main.rs` still grew back to 4,922 — because this constant sat at 5,000
+/// the whole time. A limit that is never lowered stops being a forcing function
+/// and becomes a target (DEV-624).
+///
+/// ~135 lines of headroom above `git/mod.rs` today, which is deliberate: the
 /// next feature that piles into it trips this guard rather than sliding through.
-const MAX_FILE_LINES: usize = 5_000;
+const MAX_FILE_LINES: usize = 3_450;
 
 /// Files outside `src/platform/` that still contain `cfg(target_os = ...)`,
 /// violating §7.4. Tracked as an explicit allowlist rather than a count so a

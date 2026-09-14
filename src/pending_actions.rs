@@ -125,7 +125,10 @@ impl AppState {
                 initial_prompt,
                 orchestration,
             } => {
-                self.add_session_to_project_with_details(
+                // The new id is deliberately dropped: a human's session is
+                // followed by watching the sidebar, not by an awaiting caller.
+                // Dispatch is the path that needs it — see dispatch::create.
+                let _ = self.add_session_to_project_with_details(
                     project_idx,
                     label,
                     branch_slug,
@@ -1088,6 +1091,11 @@ impl AppState {
             }
             SidebarAction::ShowAllSessions => {
                 self.user_settings.sidebar_active_only = false;
+                self.mark_settings_dirty();
+            }
+            SidebarAction::ToggleAttentionBar => {
+                self.user_settings.attention_bar_collapsed =
+                    !self.user_settings.attention_bar_collapsed;
                 self.mark_settings_dirty();
             }
             SidebarAction::RefreshChanges => {
