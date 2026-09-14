@@ -23,6 +23,11 @@ Changes on `master` awaiting the next tagged release.
   launch). A refused dispatch now says which depth the caller is at and what the
   limit is, rather than "dispatched sessions may not dispatch", which is no longer
   true in general.
+- Handler-level test fixture (`app_state::fixture::Fixture`): stands an `AppState`
+  up in a headless GPUI window backed by the in-memory repositories, so
+  `PendingAction` handlers can be driven and their persistence *intent* asserted
+  without touching the filesystem. First tests cover the sidebar, project, settings
+  and archive families. Documented as ARCHITECTURE.md §5.6.
 
 ### Changed
 - The attention bar collapses. It now opens with a summary header — a count of
