@@ -237,8 +237,6 @@ pub(crate) struct ConfirmationState {
     /// Project index awaiting remove-project confirmation. When `Some(idx)`
     /// the project header row shows Confirm/Cancel instead of the ✕ button.
     pub(crate) remove_project: Option<usize>,
-    /// Session cursor awaiting merge-with-uncommitted-changes confirmation.
-    pub(crate) dirty_merge: Option<SessionCursor>,
     /// Archive awaiting permanent ref deletion confirmation.
     pub(crate) delete_archive: Option<(usize, usize)>,
     /// Project index whose *entire* archive list awaits bulk-deletion
@@ -261,7 +259,6 @@ impl ConfirmationState {
         self.discard.is_some()
             || self.dirty_session.is_some()
             || self.remove_project.is_some()
-            || self.dirty_merge.is_some()
             || self.delete_archive.is_some()
             || self.delete_all_archives.is_some()
     }
@@ -274,7 +271,6 @@ impl ConfirmationState {
         self.discard = None;
         self.dirty_session = None;
         self.remove_project = None;
-        self.dirty_merge = None;
         self.delete_archive = None;
         self.delete_all_archives = None;
         self.armed_at = None;
@@ -677,7 +673,6 @@ mod tests {
             now,
             Duration::ZERO,
             None,
-            false,
         )
     }
 
@@ -687,7 +682,6 @@ mod tests {
             project_id: "proj".into(),
             label: "archived".into(),
             archived_at: 0,
-            merge_error: None,
         }
     }
 
@@ -704,7 +698,6 @@ mod tests {
             dirty_session: None,
             quit: false,
             remove_project: None,
-            dirty_merge: None,
             delete_archive: None,
             delete_all_archives: None,
             armed_at: None,
@@ -768,7 +761,6 @@ mod tests {
             Box::new(move |c| c.discard = Some(cursor)),
             Box::new(|c| c.dirty_session = Some(0)),
             Box::new(|c| c.remove_project = Some(0)),
-            Box::new(move |c| c.dirty_merge = Some(cursor)),
             Box::new(|c| c.delete_archive = Some((0, 0))),
             Box::new(|c| c.delete_all_archives = Some(0)),
         ];
@@ -800,7 +792,6 @@ mod tests {
         state.discard = Some(cursor);
         state.dirty_session = Some(1);
         state.remove_project = Some(1);
-        state.dirty_merge = Some(cursor);
         state.delete_archive = Some((1, 2));
         state.delete_all_archives = Some(1);
         state.armed_at = Some((1, 2, 3));
@@ -815,11 +806,6 @@ mod tests {
     fn only_confirmation_gated_actions_are_droppable() {
         let gated: Vec<PendingAction> = vec![
             SessionAction::DiscardSession {
-                project_idx: 0,
-                session_idx: 0,
-            }
-            .into(),
-            SessionAction::ProceedDirtyMerge {
                 project_idx: 0,
                 session_idx: 0,
             }
@@ -854,11 +840,6 @@ mod tests {
             ArchiveAction::CancelDeleteArchive.into(),
             ProjectAction::CancelRemoveProject.into(),
             ArchiveAction::RestoreArchive {
-                project_idx: 0,
-                archive_idx: 0,
-            }
-            .into(),
-            ArchiveAction::MergeArchive {
                 project_idx: 0,
                 archive_idx: 0,
             }

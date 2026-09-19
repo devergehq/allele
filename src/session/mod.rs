@@ -316,7 +316,6 @@ impl ParkedTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationErrorKind {
     Resume,
-    MergeAndClose,
     /// The per-project `startup` command timed out and was killed. Retry
     /// re-runs `apply_project_config` for the session.
     Startup,
@@ -443,10 +442,6 @@ pub struct Session {
     /// Whether the bottom drawer is visible for this session. Per-session
     /// so switching sessions preserves each session's drawer state.
     pub drawer_visible: bool,
-    /// Set to `true` after a successful merge-and-close. When the session
-    /// is subsequently removed, `remove_session` skips creating an archive
-    /// entry because the work is already in canonical.
-    pub merged: bool,
     /// Set to `true` once `trigger_auto_naming` has been called for this
     /// session, to prevent spawning duplicate naming tasks.
     pub auto_naming_fired: bool,
@@ -479,8 +474,6 @@ pub struct Session {
     pub pinned: bool,
     /// Optional user comment displayed as a subtitle on the session row.
     pub comment: Option<String>,
-    /// Per-session merge strategy. `None` = use the project's setting.
-    pub merge_strategy_override: Option<crate::settings::MergeStrategy>,
     /// Whether the workspace has uncommitted changes. `None` until the
     /// first background poll completes. Display-only; never persisted.
     pub git_dirty: Option<bool>,
@@ -588,7 +581,6 @@ impl Session {
             drawer_parked_at: None,
             last_focused_at: SystemTime::now(),
             drawer_visible: false,
-            merged: false,
             auto_naming_fired: false,
             allocated_port: None,
             resuming_until: None,
@@ -597,7 +589,6 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
-            merge_strategy_override: None,
             git_dirty: None,
             git_dirty_count: None,
             resumable: None,
@@ -627,7 +618,6 @@ impl Session {
         last_active: SystemTime,
         active_accumulated: Duration,
         clone_path: Option<PathBuf>,
-        merged: bool,
     ) -> Self {
         Self {
             id,
@@ -652,7 +642,6 @@ impl Session {
             drawer_parked_at: None,
             last_focused_at: SystemTime::now(),
             drawer_visible: false,
-            merged,
             auto_naming_fired: false,
             allocated_port: None,
             resuming_until: None,
@@ -661,7 +650,6 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
-            merge_strategy_override: None,
             git_dirty: None,
             git_dirty_count: None,
             resumable: None,
@@ -1024,7 +1012,6 @@ mod tests {
             now,
             std::time::Duration::ZERO,
             None,
-            false,
         )
     }
 

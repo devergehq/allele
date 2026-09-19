@@ -71,7 +71,6 @@ pub struct Theme {
     pub tint_danger_hover: Hsla,
     pub tint_danger_soft: Hsla,
     pub tint_warning: Hsla,
-    pub tint_warning_hover: Hsla,
     pub tint_warning_soft: Hsla,
 
     // ── Text ─────────────────────────────────────────────────────
@@ -149,7 +148,6 @@ impl Theme {
             tint_danger_hover: c(0x58303a),
             tint_danger_soft: c(0x3b1e1e),
             tint_warning: c(0x3b2f1e),
-            tint_warning_hover: c(0x4a3f2a),
             tint_warning_soft: c(0x2e2a1e),
 
             text_primary: c(0xcdd6f4),

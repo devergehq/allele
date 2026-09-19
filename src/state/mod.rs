@@ -63,10 +63,6 @@ pub struct PersistedSession {
     /// since their historical active runtime is unrecoverable.
     #[serde(default)]
     pub active_runtime_secs: u64,
-    /// True if this session's work was already merged into canonical via
-    /// merge-and-close. When set, discard skips creating an archive entry.
-    #[serde(default)]
-    pub merged: bool,
     /// Drawer terminal tab names at save time.
     ///
     /// Superseded by `drawer_tabs`, which also carries each tab's command.
@@ -106,9 +102,6 @@ pub struct PersistedSession {
     /// cleanup identification now that branches don't carry the allele/session/ prefix.
     #[serde(default)]
     pub branch_name: Option<String>,
-    /// Per-session merge strategy override. `None` = project setting.
-    #[serde(default)]
-    pub merge_strategy_override: Option<crate::settings::MergeStrategy>,
     /// True when the user chose the session's branch explicitly; auto-naming
     /// must not rename it. Persisted so a placeholder-labelled session can't
     /// re-fire the rename after a restart.
@@ -211,7 +204,6 @@ impl PersistedSession {
             // Snapshot banked + in-flight runtime so a live session's progress
             // survives a save/quit (it rehydrates Suspended with this banked).
             active_runtime_secs: session.active_runtime().as_secs(),
-            merged: session.merged,
             // A session's tabs live in exactly one of these two places — live
             // in `drawer_tabs`, or parked (rehydrated-but-unopened, or killed
             // by the idle reaper) in `parked_drawer_tabs`. Read whichever holds
@@ -234,7 +226,6 @@ impl PersistedSession {
             pinned: session.pinned,
             comment: session.comment.clone(),
             branch_name: session.branch_name.clone(),
-            merge_strategy_override: session.merge_strategy_override,
             branch_locked: session.branch_locked,
             // Derived, for older Allele versions reading this file.
             skip_orchestration: !session.orchestration.runs_startup(),
@@ -257,9 +248,6 @@ pub struct ArchivedSession {
     pub label: String,
     /// Unix timestamp when the session was archived (seconds since epoch).
     pub archived_at: u64,
-    /// Transient merge failure, shown beside this archive with a retry action.
-    #[serde(skip)]
-    pub merge_error: Option<String>,
 }
 
 /// One saved Scratch Pad entry. Persisted so users can recall past

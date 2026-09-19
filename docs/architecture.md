@@ -80,7 +80,7 @@ Native macOS widgets for free, but: (1) Swift-Rust FFI is a permanent maintenanc
 │  │  │ Git Plumbing                              │   │ │
 │  │  │ - session branches (allele/session/<id>)  │   │ │
 │  │  │ - archive refs (refs/allele/archive/<id>) │   │ │
-│  │  │ - merge-back pipeline + auto-commit       │   │ │
+│  │  │ - auto-commit on discard                  │   │ │
 │  │  │ - periodic archive ref pruning            │   │ │
 │  │  └──────────────────────────────────────────┘   │ │
 │  │                                                  │ │
@@ -117,7 +117,7 @@ src/
 ├── clone/
 │   └── mod.rs           # APFS clonefile() FFI, trash, orphan sweep
 ├── git/
-│   └── mod.rs           # Git plumbing — session branches, archive refs, merge-back pipeline
+│   └── mod.rs           # Git plumbing — session branches, archive refs
 ├── hooks/
 │   └── mod.rs           # Claude Code hook infrastructure, event polling, sounds
 ├── project/
@@ -208,7 +208,7 @@ Allele manages git branches and refs to preserve session work across the clone l
 | Ref | Location | Purpose |
 |-----|----------|---------|
 | `refs/heads/allele/session/<session-id>` | Clone's `.git/` | Session work branch, rooted at canonical's HEAD at clone time |
-| `refs/allele/archive/<session-id>` | Canonical's `.git/` | Session work fetched back on discard, for later merge or deletion |
+| `refs/allele/archive/<session-id>` | Canonical's `.git/` | Session work fetched back on discard, for later restore or deletion |
 
 ### Lifecycle
 
@@ -216,7 +216,7 @@ Allele manages git branches and refs to preserve session work across the clone l
 2. **Session work** → Claude commits normally on the session branch
 3. **Session close (suspend)** → PTY killed, clone kept, session branch preserved
 4. **Session discard** → auto-commit any dirty state → `git fetch` session branch into canonical as archive ref → trash clone
-5. **Archive merge** → user clicks "Merge" in archive browser → `git merge --no-ff` into canonical working tree
+5. **Archive restore** → user clicks "Restore" in archive browser → the session is re-created as a suspended session from the archive ref
 6. **Archive delete** → user clicks "Delete" → `git update-ref -d` removes the ref
 7. **Archive pruning** → on startup, refs older than `TRASH_TTL_DAYS` (14d) are deleted
 

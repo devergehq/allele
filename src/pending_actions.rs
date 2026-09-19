@@ -14,11 +14,11 @@ use crate::actions::{
     SessionAction, SessionCursor, SettingsAction, SidebarAction,
 };
 use crate::app_state::AppState;
-use crate::project::{self, Project};
-use crate::session::{OperationError, OperationErrorKind, Session, SessionStatus};
+use crate::project::Project;
+use crate::session::{Session, SessionStatus};
 use crate::settings::{ProjectSave, Settings};
 use crate::terminal::{clamp_font_size, TerminalView};
-use crate::{browser, clone, git, hooks};
+use crate::{browser, git};
 
 impl AppState {
     pub(crate) fn dispatch_pending_action(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -183,48 +183,6 @@ impl AppState {
                     window,
                     cx,
                 );
-            }
-            SessionAction::CancelDirtyMerge => {
-                self.confirming.dirty_merge = None;
-                cx.notify();
-            }
-            SessionAction::ProceedDirtyMerge {
-                project_idx,
-                session_idx,
-            } => {
-                self.confirming.dirty_merge = None;
-                self.execute_merge_and_close(
-                    SessionCursor {
-                        project_idx,
-                        session_idx,
-                    },
-                    true, // discard_uncommitted
-                    window,
-                    cx,
-                );
-            }
-            SessionAction::MergeAndClose {
-                project_idx,
-                session_idx,
-            } => {
-                let cursor = SessionCursor {
-                    project_idx,
-                    session_idx,
-                };
-                let is_dirty = self
-                    .projects
-                    .get(cursor.project_idx)
-                    .and_then(|p| p.sessions.get(cursor.session_idx))
-                    .and_then(|s| s.clone_path.as_ref())
-                    .map(|cp| git::is_working_tree_dirty(cp))
-                    .unwrap_or(false);
-
-                if is_dirty {
-                    self.arm_confirmation(|c| c.dirty_merge = Some(cursor));
-                    cx.notify();
-                } else {
-                    self.execute_merge_and_close(cursor, false, window, cx);
-                }
             }
             SessionAction::SelectSession {
                 project_idx,
@@ -472,211 +430,6 @@ impl AppState {
         }
     }
 
-    fn execute_merge_and_close(
-        &mut self,
-        cursor: SessionCursor,
-        discard_uncommitted: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if let Some(project) = self.projects.get_mut(cursor.project_idx) {
-            if cursor.session_idx < project.sessions.len() {
-                let session = &mut project.sessions[cursor.session_idx];
-                let clone_path = session.clone_path.clone();
-                let session_id = session.id.clone();
-                let session_label = session.label.clone();
-                let canonical = project.source_path.clone();
-                let mut proj_settings = project.settings.clone();
-                // Per-session override beats the project-level strategy
-                // (archives merged later still use the project setting).
-                if let Some(strategy) = session.merge_strategy_override {
-                    proj_settings.merge_strategy = strategy;
-                }
-
-                let restore_started = session.started_at;
-                let restore_last_active = session.last_active;
-                let restore_active_runtime = session.active_runtime();
-                let restore_agent_id = session.agent_id.clone();
-                // Carried explicitly: the restore below rebuilds the session
-                // from a handful of fields, so anything not named here silently
-                // reverts to its default. Losing this one would quietly re-arm
-                // the project's startup scripts, or its terminals, on a session
-                // the user created without them. See DEV-400 and DEV-415.
-                let restore_orchestration = session.orchestration;
-
-                let needs_git = clone_path.as_ref().is_some_and(|cp| *cp != canonical);
-
-                if needs_git {
-                    let clone_path = clone_path.unwrap();
-                    let restore_clone = clone_path.clone();
-
-                    let placeholder_id = uuid::Uuid::new_v4().to_string();
-                    {
-                        let project = self.projects.get_mut(cursor.project_idx).expect(
-                            "cursor produced by a sidebar click; project_idx always in bounds",
-                        );
-                        project.loading_sessions.push(project::LoadingSession {
-                            id: placeholder_id.clone(),
-                            label: format!("{session_label} (rebasing & merging)"),
-                            status: if proj_settings.rebase_before_merge {
-                                "Archiving, rebasing, and merging…".into()
-                            } else {
-                                "Archiving and merging…".into()
-                            },
-                        });
-                        project.sessions.remove(cursor.session_idx);
-                    }
-
-                    if let Some(active) = self.active {
-                        if active == cursor {
-                            let project = &self.projects[cursor.project_idx];
-                            self.active = if !project.sessions.is_empty() {
-                                let new_idx = cursor.session_idx.min(project.sessions.len() - 1);
-                                Some(SessionCursor {
-                                    project_idx: cursor.project_idx,
-                                    session_idx: new_idx,
-                                })
-                            } else {
-                                self.projects.iter().enumerate().find_map(|(p_idx, p)| {
-                                    if !p.sessions.is_empty() {
-                                        Some(SessionCursor {
-                                            project_idx: p_idx,
-                                            session_idx: 0,
-                                        })
-                                    } else {
-                                        None
-                                    }
-                                })
-                            };
-                        } else if active.project_idx == cursor.project_idx
-                            && active.session_idx > cursor.session_idx
-                        {
-                            self.active = Some(SessionCursor {
-                                project_idx: active.project_idx,
-                                session_idx: active.session_idx - 1,
-                            });
-                        }
-                    }
-                    self.mark_state_dirty();
-                    cx.notify();
-
-                    let restore_id = session_id.clone();
-                    let restore_label = session_label.clone();
-
-                    let placeholder_id_for_task = placeholder_id.clone();
-                    let project_idx_for_task = cursor.project_idx;
-                    cx.spawn(async move |this, cx| {
-                        let result = cx
-                            .background_executor()
-                            .spawn(async move {
-                                if discard_uncommitted {
-                                    git::archive_session_committed_only(&canonical, &clone_path, &session_id)?;
-                                } else {
-                                    git::archive_session(&canonical, &clone_path, &session_id)?;
-                                }
-
-                                let remote = proj_settings.resolved_remote();
-                                if proj_settings.rebase_before_merge && git::has_remote(&canonical, remote) {
-                                    let branch_override = proj_settings.default_branch.as_deref();
-                                    if let Err(e) = git::fetch_and_rebase_onto_remote_branch(&canonical, remote, branch_override) {
-                                        warn!("Rebase onto {remote} failed for {session_id}: {e}");
-                                        let _ = git::delete_ref(
-                                            &canonical,
-                                            &git::archive_ref_name(&session_id),
-                                        );
-                                        anyhow::bail!("Rebase failed — resolve conflicts in the session and merge again. {e}");
-                                    }
-                                    info!("Rebased canonical onto {remote} for {session_id}");
-                                }
-
-                                let merge_result = match proj_settings.merge_strategy {
-                                    crate::settings::MergeStrategy::Merge => {
-                                        git::merge_archive(&canonical, &session_id)
-                                    }
-                                    crate::settings::MergeStrategy::Squash => {
-                                        git::squash_merge_archive(&canonical, &session_id)
-                                    }
-                                    crate::settings::MergeStrategy::RebaseThenMerge => {
-                                        git::rebase_merge_archive(&canonical, &session_id)
-                                    }
-                                };
-
-                                let _ = git::delete_ref(
-                                    &canonical,
-                                    &git::archive_ref_name(&session_id),
-                                );
-
-                                match merge_result {
-                                    Ok(git::MergeResult::Merged) => {
-                                        info!("Merged session {session_id} into canonical");
-                                    }
-                                    Ok(git::MergeResult::AlreadyUpToDate) => {
-                                        info!("Session {session_id} already up to date — nothing to merge");
-                                    }
-                                    Err(e) => {
-                                        warn!("merge_archive failed for {session_id}: {e}");
-                                        anyhow::bail!("Merge failed — resolve conflicts in the session and merge again. {e}");
-                                    }
-                                }
-
-                                if let Err(e) = clone::trash_clone(&clone_path) {
-                                    warn!("Failed to trash clone after merge for {session_id}: {e}");
-                                }
-                                Ok(())
-                            })
-                            .await;
-
-                        let _ = this.update(cx, |this: &mut Self, cx| {
-                            if let Some(project) = this.projects.get_mut(project_idx_for_task) {
-                                project.loading_sessions.retain(|l| l.id != placeholder_id_for_task);
-                            }
-
-                            if let Err(e) = &result {
-                                warn!("Merge-and-close pipeline error: {e}");
-
-                                let restored = Session::suspended_from_persisted(
-                                    restore_id.clone(),
-                                    restore_label.clone(),
-                                    restore_started,
-                                    restore_last_active,
-                                    restore_active_runtime,
-                                    Some(restore_clone.clone()),
-                                    false,
-                                )
-                                .with_agent_id(restore_agent_id.clone());
-                                let mut restored = restored;
-                                restored.orchestration = restore_orchestration;
-                                restored.operation_error = Some(OperationError {
-                                    kind: OperationErrorKind::MergeAndClose,
-                                    message: e.to_string(),
-                                });
-                                if let Some(project) = this.projects.get_mut(project_idx_for_task) {
-                                    project.sessions.push(restored);
-                                }
-
-                                hooks::show_notification(
-                                    "Merge failed",
-                                    &format!("{restore_label}: resolve conflicts and merge again"),
-                                );
-                            }
-
-                            this.mark_state_dirty();
-                            cx.notify();
-                        });
-                    })
-                    .detach();
-                } else {
-                    if let Some(project) = self.projects.get_mut(cursor.project_idx) {
-                        if cursor.session_idx < project.sessions.len() {
-                            project.sessions[cursor.session_idx].merged = true;
-                        }
-                    }
-                    self.remove_session(cursor, window, cx);
-                }
-            }
-        }
-    }
-
     pub(crate) fn handle_archive_action(
         &mut self,
         action: ArchiveAction,
@@ -738,55 +491,6 @@ impl AppState {
                         total - failed,
                         project.name
                     );
-                }
-                self.mark_state_dirty();
-                cx.notify();
-            }
-            ArchiveAction::MergeArchive {
-                project_idx,
-                archive_idx,
-            } => {
-                if let Some(project) = self.projects.get_mut(project_idx) {
-                    if let Some(entry) = project.archives.get(archive_idx) {
-                        let session_id = entry.id.clone();
-                        let merge_result = match project.settings.merge_strategy {
-                            crate::settings::MergeStrategy::Merge => {
-                                git::merge_archive(&project.source_path, &session_id)
-                            }
-                            crate::settings::MergeStrategy::Squash => {
-                                git::squash_merge_archive(&project.source_path, &session_id)
-                            }
-                            crate::settings::MergeStrategy::RebaseThenMerge => {
-                                git::rebase_merge_archive(&project.source_path, &session_id)
-                            }
-                        };
-                        match merge_result {
-                            Ok(git::MergeResult::Merged) => {
-                                let _ = git::delete_ref(
-                                    &project.source_path,
-                                    &git::archive_ref_name(&session_id),
-                                );
-                                project.archives.remove(archive_idx);
-                                info!("Merged archive {session_id} into canonical");
-                            }
-                            Ok(git::MergeResult::AlreadyUpToDate) => {
-                                let _ = git::delete_ref(
-                                    &project.source_path,
-                                    &git::archive_ref_name(&session_id),
-                                );
-                                project.archives.remove(archive_idx);
-                                info!(
-                                    "Archive {session_id} had no new commits — nothing to merge (already up to date)"
-                                );
-                            }
-                            Err(e) => {
-                                warn!("merge_archive failed for {session_id}: {e}");
-                                project.archives[archive_idx].merge_error = Some(format!(
-                                    "Merge failed. Resolve conflicts, then retry: {e}"
-                                ));
-                            }
-                        }
-                    }
                 }
                 self.mark_state_dirty();
                 cx.notify();
@@ -887,7 +591,6 @@ impl AppState {
                     now,
                     std::time::Duration::ZERO,
                     Some(clone_path),
-                    false,
                 )
                 .with_agent_id(agent_id)
                 .with_branch_name(Some(branch));
