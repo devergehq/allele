@@ -124,8 +124,8 @@ pub fn working_tree_change_count(path: &Path) -> Option<usize> {
 
 /// Return true if the working tree has uncommitted changes (staged,
 /// unstaged, or untracked files). Shares one code path with
-/// `working_tree_change_count` so the dirty dot and the header count can
-/// never disagree about what "dirty" means.
+/// `working_tree_change_count` so the changes panel and the header count
+/// can never disagree about what "dirty" means.
 pub fn is_working_tree_dirty(path: &Path) -> bool {
     working_tree_change_count(path).is_some_and(|count| count > 0)
 }

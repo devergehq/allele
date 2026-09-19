@@ -1193,6 +1193,9 @@ impl Render for AppState {
         // when the panel is visible but showing data for a different
         // session's clone (first open, session switch). Guarded inside.
         self.ensure_changes_fresh(cx);
+        // Same check for the header's changed count, which is on screen
+        // whether or not the panel is (DEV-684). Guarded inside.
+        self.ensure_active_changes_observed(cx);
 
         let sidebar_w = self.sidebar.width;
         let sidebar_visible = self.sidebar.visible;
