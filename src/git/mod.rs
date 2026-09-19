@@ -1,5 +1,5 @@
 //! Typed wrapper around subprocess `git` calls for the clone/session
-//! merge-back pipeline.
+//! branch-and-archive pipeline.
 //!
 //! ## Why shell out
 //!
@@ -184,25 +184,6 @@ pub fn unpushed_commit_count(repo: &Path) -> Option<usize> {
         .ok()
 }
 
-/// Detect the default branch name for a remote (e.g. `main` or `master`).
-/// Checks `refs/remotes/<remote>/HEAD` first; falls back to `"master"`.
-pub fn remote_default_branch(repo: &Path, remote: &str) -> String {
-    if !is_git_repo(repo) {
-        return "master".to_string();
-    }
-    let mut cmd = git_cmd(Some(repo));
-    cmd.arg("symbolic-ref")
-        .arg(format!("refs/remotes/{remote}/HEAD"));
-    match cmd.output() {
-        Ok(o) if o.status.success() => {
-            let full = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            // e.g. "refs/remotes/origin/main" → "main"
-            full.rsplit('/').next().unwrap_or("master").to_string()
-        }
-        _ => "master".to_string(),
-    }
-}
-
 /// Result of a best-effort source-root pull before a new session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PullOutcome {
@@ -272,79 +253,6 @@ fn is_non_fast_forward(stderr: &str) -> bool {
         || s.contains("can't be fast-forwarded")
         || s.contains("cannot be fast-forwarded")
         || s.contains("diverging branches")
-}
-
-/// Fetch the remote's default branch (or `branch_override` if given) and
-/// rebase the current branch onto it.
-///
-/// Steps:
-/// 1. Detect remote default branch (main/master) — or use `branch_override` if given
-/// 2. `git fetch <remote> <branch>`
-/// 3. `git rebase <remote>/<branch>`
-///
-/// If the rebase encounters conflicts, it is automatically aborted and the
-/// error is propagated — the caller should surface this to the user.
-///
-/// Returns `Ok(true)` if the rebase made changes, `Ok(false)` if already
-/// up to date (no rebase needed).
-pub fn fetch_and_rebase_onto_remote_branch(
-    repo: &Path,
-    remote: &str,
-    branch_override: Option<&str>,
-) -> crate::errors::Result<bool> {
-    if !is_git_repo(repo) {
-        return Err(AlleleError::Git(format!(
-            "fetch_and_rebase_onto_remote: not a git repo: {}",
-            repo.display()
-        )));
-    }
-
-    let branch = match branch_override {
-        Some(b) => b.to_string(),
-        None => remote_default_branch(repo, remote),
-    };
-
-    // Record HEAD before to detect if rebase changed anything.
-    let head_before = {
-        let mut cmd = git_cmd(Some(repo));
-        cmd.arg("rev-parse").arg("HEAD");
-        run_git_stdout(cmd, "rev-parse HEAD (pre-rebase)")
-            .map_err(|e| AlleleError::Git(e.to_string()))?
-    };
-
-    // 1. Fetch the remote branch — use user_git_cmd so the user's
-    //    credential helpers (osxkeychain, SSH agent) are available.
-    let mut cmd = user_git_cmd(repo);
-    cmd.arg("fetch").arg(remote).arg(&branch);
-    run_git(cmd, &format!("fetch {remote} {branch}"))
-        .map_err(|e| AlleleError::Git(e.to_string()))?;
-
-    // 2. Rebase onto the fetched remote branch
-    let rebase_ref = format!("{remote}/{branch}");
-    let mut cmd = git_cmd(Some(repo));
-    cmd.arg("rebase").arg(&rebase_ref);
-    let rebase_result = run_git(cmd, &format!("rebase {rebase_ref}"));
-
-    if let Err(e) = rebase_result {
-        // Abort the in-progress rebase to leave the repo in a clean state.
-        let mut abort_cmd = git_cmd(Some(repo));
-        abort_cmd.arg("rebase").arg("--abort");
-        let _ = run_git(abort_cmd, "rebase --abort");
-
-        return Err(AlleleError::Git(format!(
-            "Rebase onto {rebase_ref} failed (conflicts likely). \
-             Rebase has been aborted, repo is unchanged. Error: {e}"
-        )));
-    }
-
-    let head_after = {
-        let mut cmd = git_cmd(Some(repo));
-        cmd.arg("rev-parse").arg("HEAD");
-        run_git_stdout(cmd, "rev-parse HEAD (post-rebase)")
-            .map_err(|e| AlleleError::Git(e.to_string()))?
-    };
-
-    Ok(head_before != head_after)
 }
 
 /// Initialise `path` as a git repository and create an initial commit
@@ -906,20 +814,6 @@ pub fn auto_commit_if_dirty(clone: &Path) -> crate::errors::Result<bool> {
     Ok(true)
 }
 
-/// Discard all uncommitted changes in a working tree: reset staged
-/// changes and remove untracked files. Equivalent to
-/// `git checkout -- . && git clean -fd`.
-pub fn discard_uncommitted(repo: &Path) -> crate::errors::Result<()> {
-    let mut checkout = git_cmd(Some(repo));
-    checkout.arg("checkout").arg("--").arg(".");
-    run_git(checkout, "checkout -- . (discard)").map_err(|e| AlleleError::Git(e.to_string()))?;
-
-    let mut clean = git_cmd(Some(repo));
-    clean.arg("clean").arg("-fd");
-    run_git(clean, "clean -fd (discard)").map_err(|e| AlleleError::Git(e.to_string()))?;
-    Ok(())
-}
-
 /// Archive a clone's session work back into canonical by fetching the
 /// session branch as `refs/allele/archive/<session-id>`.
 ///
@@ -936,22 +830,6 @@ pub fn archive_session(
     // Capture any uncommitted work before fetching the branch.
     if let Err(e) = auto_commit_if_dirty(clone) {
         warn!("auto_commit_if_dirty failed for {session_id}: {e}");
-    }
-    fetch_session_branch(canonical, clone, session_id)
-}
-
-/// Like [`archive_session`] but discards uncommitted changes instead of
-/// auto-committing them. Used when the user explicitly chose to merge
-/// only committed work.
-pub fn archive_session_committed_only(
-    canonical: &Path,
-    clone: &Path,
-    session_id: &str,
-) -> crate::errors::Result<()> {
-    if is_working_tree_dirty(clone) {
-        if let Err(e) = discard_uncommitted(clone) {
-            warn!("discard_uncommitted failed for {session_id}: {e}");
-        }
     }
     fetch_session_branch(canonical, clone, session_id)
 }
@@ -1054,9 +932,9 @@ pub fn prune_archive_refs(canonical: &Path, ttl_days: u64) -> crate::errors::Res
     Ok(pruned)
 }
 
-// --- Archive browsing + merging ------------------------------------------
+// --- Archive browsing -----------------------------------------------------
 
-/// An archived session ref in canonical, ready to browse or merge.
+/// An archived session ref in canonical, ready to browse or restore.
 pub struct ArchiveEntry {
     pub session_id: String,
     #[allow(dead_code)] // stored for future display (tooltips, detail view)
@@ -1101,189 +979,6 @@ pub fn list_archive_refs(canonical: &Path) -> crate::errors::Result<Vec<ArchiveE
     }
     entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     Ok(entries)
-}
-
-/// Result of a merge attempt — distinguishes actual merges from no-ops.
-#[derive(Debug, PartialEq)]
-pub enum MergeResult {
-    /// New merge commit created — work was integrated.
-    Merged,
-    /// Archive ref was already an ancestor of HEAD — nothing to merge.
-    AlreadyUpToDate,
-}
-
-/// Merge an archived session ref into canonical's current branch.
-/// Uses `--no-ff --no-edit` to preserve the merge as a distinct commit.
-/// Returns `MergeResult::AlreadyUpToDate` if the archive ref is already
-/// an ancestor of HEAD (i.e. no new work to merge).
-/// Returns an error if there are merge conflicts or the working tree is
-/// dirty — the caller should display the error and let the user resolve
-/// conflicts manually.
-pub fn merge_archive(canonical: &Path, session_id: &str) -> crate::errors::Result<MergeResult> {
-    if !is_git_repo(canonical) {
-        return Err(AlleleError::Git(format!(
-            "merge_archive: not a git repo: {}",
-            canonical.display()
-        )));
-    }
-
-    // Record HEAD before merge to detect no-ops.
-    let head_before = {
-        let mut cmd = git_cmd(Some(canonical));
-        cmd.arg("rev-parse").arg("HEAD");
-        run_git_stdout(cmd, "rev-parse HEAD (pre-merge)")
-            .map_err(|e| AlleleError::Git(e.to_string()))?
-    };
-
-    let ref_name = archive_ref_name(session_id);
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("merge")
-        .arg("--no-ff")
-        .arg("--no-edit")
-        .arg(&ref_name);
-    run_git(cmd, "merge archive").map_err(|e| AlleleError::Git(e.to_string()))?;
-
-    // Check if HEAD actually moved.
-    let head_after = {
-        let mut cmd = git_cmd(Some(canonical));
-        cmd.arg("rev-parse").arg("HEAD");
-        run_git_stdout(cmd, "rev-parse HEAD (post-merge)")
-            .map_err(|e| AlleleError::Git(e.to_string()))?
-    };
-
-    if head_before == head_after {
-        Ok(MergeResult::AlreadyUpToDate)
-    } else {
-        Ok(MergeResult::Merged)
-    }
-}
-
-/// Squash-merge an archived session ref into canonical's current branch.
-///
-/// Uses `git merge --squash` to stage all changes, then creates a single
-/// commit. Returns `MergeResult::AlreadyUpToDate` if the archive ref is
-/// already an ancestor of HEAD.
-pub fn squash_merge_archive(
-    canonical: &Path,
-    session_id: &str,
-) -> crate::errors::Result<MergeResult> {
-    if !is_git_repo(canonical) {
-        return Err(AlleleError::Git(format!(
-            "squash_merge_archive: not a git repo: {}",
-            canonical.display()
-        )));
-    }
-
-    let ref_name = archive_ref_name(session_id);
-
-    // --squash stages the changes but does NOT create a commit.
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("merge").arg("--squash").arg(&ref_name);
-    run_git(cmd, "squash merge archive").map_err(|e| AlleleError::Git(e.to_string()))?;
-
-    // Check if there's anything staged to commit.
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("diff").arg("--cached").arg("--quiet");
-    let has_staged = cmd
-        .output()
-        .map(|o| !o.status.success()) // exit 1 = there are differences
-        .unwrap_or(false);
-
-    if !has_staged {
-        return Ok(MergeResult::AlreadyUpToDate);
-    }
-
-    // Create the squash commit.
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("commit")
-        .arg("--no-edit")
-        .arg("-m")
-        .arg(format!("Squash merge session {session_id}"));
-    run_git(cmd, "squash commit").map_err(|e| AlleleError::Git(e.to_string()))?;
-
-    Ok(MergeResult::Merged)
-}
-
-/// Rebase an archive ref's commits onto canonical's current branch, then
-/// fast-forward merge. Produces linear history.
-///
-/// Steps:
-/// 1. Detach at the archive ref
-/// 2. Rebase onto canonical's branch
-/// 3. Fast-forward canonical's branch to the rebased tip
-///
-/// Returns `MergeResult::AlreadyUpToDate` if the archive ref is already
-/// an ancestor of HEAD.
-pub fn rebase_merge_archive(
-    canonical: &Path,
-    session_id: &str,
-) -> crate::errors::Result<MergeResult> {
-    if !is_git_repo(canonical) {
-        return Err(AlleleError::Git(format!(
-            "rebase_merge_archive: not a git repo: {}",
-            canonical.display()
-        )));
-    }
-
-    let ref_name = archive_ref_name(session_id);
-
-    // Check if archive is already an ancestor of HEAD.
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("merge-base")
-        .arg("--is-ancestor")
-        .arg(&ref_name)
-        .arg("HEAD");
-    if cmd.output().map(|o| o.status.success()).unwrap_or(false) {
-        return Ok(MergeResult::AlreadyUpToDate);
-    }
-
-    // Record which branch we're on so we can return to it.
-    let original_branch = current_branch(canonical).ok_or_else(|| {
-        AlleleError::Git("rebase_merge_archive: cannot determine current branch".to_string())
-    })?;
-
-    // Create a temporary branch from the archive ref for rebasing.
-    let tmp_branch = format!("allele/rebase-tmp/{session_id}");
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("checkout")
-        .arg("-b")
-        .arg(&tmp_branch)
-        .arg(&ref_name);
-    run_git(cmd, "checkout tmp branch for rebase").map_err(|e| AlleleError::Git(e.to_string()))?;
-
-    // Rebase onto the original branch.
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("rebase").arg(&original_branch);
-    if let Err(e) = run_git(cmd, "rebase archive onto target") {
-        // Abort the rebase and return to original branch.
-        let mut abort = git_cmd(Some(canonical));
-        abort.arg("rebase").arg("--abort");
-        let _ = abort.output();
-        let mut co = git_cmd(Some(canonical));
-        co.arg("checkout").arg(&original_branch);
-        let _ = co.output();
-        // Clean up tmp branch.
-        let mut del = git_cmd(Some(canonical));
-        del.arg("branch").arg("-D").arg(&tmp_branch);
-        let _ = del.output();
-        return Err(AlleleError::Git(e.to_string()));
-    }
-
-    // Fast-forward the original branch to the rebased tip.
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("checkout").arg(&original_branch);
-    run_git(cmd, "checkout original branch").map_err(|e| AlleleError::Git(e.to_string()))?;
-
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("merge").arg("--ff-only").arg(&tmp_branch);
-    run_git(cmd, "ff-merge rebased work").map_err(|e| AlleleError::Git(e.to_string()))?;
-
-    // Clean up the temporary branch.
-    let mut cmd = git_cmd(Some(canonical));
-    cmd.arg("branch").arg("-D").arg(&tmp_branch);
-    let _ = cmd.output(); // non-fatal
-
-    Ok(MergeResult::Merged)
 }
 
 // --- Branch introspection -----------------------------------------------
@@ -2900,9 +2595,9 @@ mod tests {
     }
 
     #[test]
-    fn full_round_trip_init_branch_archive_merge() {
-        // End-to-end: init → branch → commit → archive → merge → verify
-        // clean history (no synthetic base commit).
+    fn full_round_trip_init_branch_archive() {
+        // End-to-end: init → branch → commit → archive → verify clean
+        // history (no synthetic base commit).
 
         // 1. Canonical with a file
         let (_cdir, canonical) = make_canonical("original content");
@@ -2941,22 +2636,14 @@ mod tests {
         let archive = resolve_ref(&canonical, &archive_ref_name("e2e01"));
         assert_eq!(archive.as_deref(), Some(session_head.as_str()));
 
-        // 7. Merge the archive into canonical
-        let result = merge_archive(&canonical, "e2e01").unwrap();
-        assert_eq!(result, MergeResult::Merged);
-
-        // 8. Verify: session work file is in canonical's HEAD
-        let files = ls_tree(&canonical, "HEAD");
-        assert!(files.contains(&"session-notes.txt".to_string()));
-
-        // 9. Verify: the session work commit's parent is the original
+        // 7. Verify: the session work commit's parent is the original
         // canonical HEAD — no synthetic base commit in between.
         let mut cmd = git_cmd(Some(&canonical));
         cmd.arg("rev-parse").arg(format!("{session_head}^"));
         let parent = run_git_stdout(cmd, "rev-parse parent (test)").unwrap();
         assert_eq!(parent, canonical_head);
 
-        // 10. Verify: current_branch shows the new session-<shortid> format
+        // 8. Verify: current_branch shows the new session-<shortid> format
         let branch = current_branch(&clone_path).unwrap();
         assert_eq!(branch, "session-e2e01");
     }
@@ -3101,27 +2788,6 @@ mod tests {
     }
 
     #[test]
-    fn merge_archive_detects_noop_when_no_new_commits() {
-        // Session branch with no new commits → merge is "Already up to date"
-        let (_cdir, canonical) = make_canonical("base");
-        let clone_dir = TempDir::new().unwrap();
-        let clone_path = clone_dir.path().to_path_buf();
-        let mut cmd = git_cmd(None);
-        cmd.arg("clone")
-            .arg("--local")
-            .arg(&canonical)
-            .arg(&clone_path);
-        run_git(cmd, "git clone --local (test)").unwrap();
-
-        create_session_branch(&clone_path, "noop01").unwrap();
-        // No commits — session branch is identical to master
-
-        archive_session(&canonical, &clone_path, "noop01").unwrap();
-        let result = merge_archive(&canonical, "noop01").unwrap();
-        assert_eq!(result, MergeResult::AlreadyUpToDate);
-    }
-
-    #[test]
     fn auto_commit_if_dirty_captures_uncommitted_work() {
         let (_cdir, canonical) = make_canonical("base");
         let clone_dir = TempDir::new().unwrap();
@@ -3147,18 +2813,20 @@ mod tests {
         let head_after = head_commit(&clone_path);
         assert_ne!(head_before, head_after);
 
-        // Archive and merge should now find actual work
+        // Archiving should now capture actual work: the archive ref points
+        // at the auto-commit, and that commit's tree carries the file.
         archive_session(&canonical, &clone_path, "dirty01").unwrap();
-        let result = merge_archive(&canonical, "dirty01").unwrap();
-        assert_eq!(result, MergeResult::Merged);
+        let archived = resolve_ref(&canonical, &archive_ref_name("dirty01"));
+        assert_eq!(archived.as_deref(), Some(head_after.as_str()));
 
-        let files = ls_tree(&canonical, "HEAD");
+        let files = ls_tree(&canonical, &head_after);
         assert!(files.contains(&"unsaved.txt".to_string()));
     }
 
     #[test]
     fn archive_session_auto_commits_dirty_clone() {
-        // End-to-end: dirty clone → archive_session auto-commits → merge finds work
+        // End-to-end: dirty clone → archive_session auto-commits → the
+        // archive ref carries the work
         let (_cdir, canonical) = make_canonical("base");
         let clone_dir = TempDir::new().unwrap();
         let clone_path = clone_dir.path().to_path_buf();
@@ -3177,10 +2845,10 @@ mod tests {
         // archive_session should auto-commit before fetching
         archive_session(&canonical, &clone_path, "autocommit01").unwrap();
 
-        let result = merge_archive(&canonical, "autocommit01").unwrap();
-        assert_eq!(result, MergeResult::Merged);
+        let archived = resolve_ref(&canonical, &archive_ref_name("autocommit01"))
+            .expect("archive ref should exist");
 
-        let files = ls_tree(&canonical, "HEAD");
+        let files = ls_tree(&canonical, &archived);
         assert!(files.contains(&"work.txt".to_string()));
     }
 

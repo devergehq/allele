@@ -745,16 +745,6 @@ impl AppState {
             .unwrap_or(false);
         let pin_label = if is_pinned { "Unpin" } else { "Pin" };
 
-        let merge_override = self
-            .projects
-            .get(p_idx)
-            .and_then(|p| p.sessions.get(s_idx))
-            .and_then(|s| s.merge_strategy_override);
-        let merge_label = format!(
-            "Merge: {}",
-            merge_override.map_or("Project default", |m| m.label()),
-        );
-
         let menu_item = |id: &'static str, label: &str, color: Hsla| {
             div()
                 .id(id)
@@ -796,37 +786,6 @@ impl AppState {
                             }
                             .into(),
                         );
-                        cx.notify();
-                    }),
-                ),
-            )
-            .child(
-                menu_item(
-                    "session-ctx-merge-strategy",
-                    &merge_label,
-                    theme().text_primary,
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this: &mut Self, _event, _window, cx| {
-                        cx.stop_propagation();
-                        use crate::settings::MergeStrategy as MS;
-                        if let Some(session) = this
-                            .projects
-                            .get_mut(p_idx)
-                            .and_then(|p| p.sessions.get_mut(s_idx))
-                        {
-                            // Cycle: project default -> Merge -> Squash -> Rebase+merge -> default.
-                            session.merge_strategy_override = match session.merge_strategy_override
-                            {
-                                None => Some(MS::Merge),
-                                Some(MS::Merge) => Some(MS::Squash),
-                                Some(MS::Squash) => Some(MS::RebaseThenMerge),
-                                Some(MS::RebaseThenMerge) => None,
-                            };
-                            this.mark_state_dirty();
-                        }
-                        // Menu stays open so the new value is visible.
                         cx.notify();
                     }),
                 ),

@@ -1427,7 +1427,6 @@ impl AppState {
         let removed = project.sessions.remove(cursor.session_idx);
         let clone_path = removed.clone_path.clone();
         let removed_label = removed.label.clone();
-        let already_merged = removed.merged;
         let removed_session_id = removed.id.clone();
         let removed_browser_tab_id = removed.browser_tab_id;
         let runs_shutdown = removed.orchestration.runs_startup();
@@ -1436,21 +1435,23 @@ impl AppState {
         let session_id_for_task = removed.id.clone();
 
         // Preserve the session's metadata in the archive list so the
-        // sidebar archive browser can show a human-readable label —
-        // but skip this if the session was already merged (work is in canonical).
-        if !already_merged {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            project.archives.push(ArchivedSession {
-                id: removed.id.clone(),
-                project_id: project.id.clone(),
-                label: removed_label.clone(),
-                archived_at: now,
-                merge_error: None,
-            });
-        }
+        // sidebar archive browser can show a human-readable label.
+        //
+        // Unconditional since DEV-686 removed merge-and-close: there is no
+        // longer any path by which a session's work is already in canonical,
+        // so there is nothing to skip for. Always preserving is also the safe
+        // direction — an extra archive entry costs a row, a missing one costs
+        // the only handle on the work.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        project.archives.push(ArchivedSession {
+            id: removed.id.clone(),
+            project_id: project.id.clone(),
+            label: removed_label.clone(),
+            archived_at: now,
+        });
 
         // Register Chrome-tab cleanup as a hook on the PTY: when the
         // terminal is dropped below, the tab closes as part of the same
@@ -2024,7 +2025,6 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
         persisted.last_active,
         std::time::Duration::from_secs(persisted.active_runtime_secs),
         persisted.clone_path.clone(),
-        persisted.merged,
     )
     .with_drawer_tabs(persisted.drawer_tabs(), persisted.drawer_active_tab)
     .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
@@ -2033,7 +2033,6 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
     session.pinned = persisted.pinned;
     session.comment = persisted.comment.clone();
     session.branch_name = persisted.branch_name.clone();
-    session.merge_strategy_override = persisted.merge_strategy_override;
     session.branch_locked = persisted.branch_locked;
     session.orchestration = persisted.orchestration();
     session.origin = persisted.origin.clone();

@@ -39,6 +39,20 @@ Changes on `master` awaiting the next tagged release.
   space back. The collapsed choice persists across restarts, and a bar with
   nothing waiting still renders nothing at all.
 
+### Removed
+- Merge-and-close, and with it Allele's opinion on how session work gets
+  integrated. The session row's "Merge and close" button, the archive
+  browser's "Merge" action, the project-level merge strategy
+  (merge / squash / rebase+merge) and sync-remote-first toggles, and the
+  per-session strategy override in the session header are all gone. A session
+  clones the project and you do the work; what happens to the branch
+  afterwards is yours to decide, and for most people that is already a pull
+  request. The archive browser keeps restore and delete, and discarding a
+  session still archives its work into a canonical git ref first — archiving
+  is now unconditional, since nothing can put a session's work into canonical
+  ahead of time. Existing `settings.json` files carrying `merge_strategy` or
+  `rebase_before_merge` load exactly as before; the keys are ignored.
+
 ### Fixed
 - Allele no longer beachballs while a session is being dispatched. The window
   could stop responding for tens of seconds at a time — worst while a dispatch

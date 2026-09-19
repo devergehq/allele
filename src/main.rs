@@ -1858,7 +1858,6 @@ fn main() {
                                             &entry.session_id[..8.min(entry.session_id.len())]
                                         ),
                                         archived_at: entry.timestamp,
-                                        merge_error: None,
                                     });
                                 }
                             }
@@ -1889,7 +1888,6 @@ fn main() {
                             persisted.last_active,
                             std::time::Duration::from_secs(persisted.active_runtime_secs),
                             persisted.clone_path.clone(),
-                            persisted.merged,
                         )
                         .with_drawer_tabs(persisted.drawer_tabs(), persisted.drawer_active_tab)
                         .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
@@ -1899,7 +1897,6 @@ fn main() {
                         session.pinned = persisted.pinned;
                         session.comment = persisted.comment.clone();
                         session.branch_name = persisted.branch_name.clone();
-                        session.merge_strategy_override = persisted.merge_strategy_override;
                         session.branch_locked = persisted.branch_locked;
                         session.orchestration = persisted.orchestration();
                         conversations::repair_session_pointer(&mut session);
@@ -2132,7 +2129,6 @@ fn main() {
                             dirty_session: None,
                             quit: false,
                             remove_project: None,
-                            dirty_merge: None,
                             delete_archive: None,
                             delete_all_archives: None,
                             armed_at: None,

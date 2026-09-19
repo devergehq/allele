@@ -40,9 +40,7 @@ impl PendingAction {
         matches!(
             self,
             PendingAction::Session(
-                SessionAction::DiscardSession { .. }
-                    | SessionAction::ProceedDirtyMerge { .. }
-                    | SessionAction::ProceedDirtySession(_)
+                SessionAction::DiscardSession { .. } | SessionAction::ProceedDirtySession(_)
             ) | PendingAction::Archive(
                 ArchiveAction::DeleteArchive { .. } | ArchiveAction::DeleteAllArchives { .. }
             ) | PendingAction::Project(ProjectAction::RemoveProject(_))
@@ -88,18 +86,6 @@ pub enum SessionAction {
         session_idx: usize,
     },
     SelectSession {
-        project_idx: usize,
-        session_idx: usize,
-    },
-    /// Merge session work into canonical and close (archive + merge + delete clone).
-    MergeAndClose {
-        project_idx: usize,
-        session_idx: usize,
-    },
-    /// Cancel an in-flight dirty-merge confirmation.
-    CancelDirtyMerge,
-    /// Proceed with merge despite uncommitted changes — discards them first.
-    ProceedDirtyMerge {
         project_idx: usize,
         session_idx: usize,
     },
@@ -166,7 +152,7 @@ pub enum SessionAction {
     },
 }
 
-/// Archive refs — merge / delete / restore a session that has been archived.
+/// Archive refs — delete / restore a session that has been archived.
 #[derive(Debug)]
 pub enum ArchiveAction {
     /// Arm the inline confirmation gate before permanently deleting a ref.
@@ -181,14 +167,9 @@ pub enum ArchiveAction {
     RequestDeleteAllArchives { project_idx: usize },
     /// Cancel the bulk archive deletion confirmation.
     CancelDeleteAllArchives,
-    /// Delete every archive ref for a project without merging any of them.
+    /// Delete every archive ref for a project.
     DeleteAllArchives { project_idx: usize },
-    /// Merge an archived session ref into canonical's working tree.
-    MergeArchive {
-        project_idx: usize,
-        archive_idx: usize,
-    },
-    /// Delete an archive ref without merging.
+    /// Delete an archive ref.
     DeleteArchive {
         project_idx: usize,
         archive_idx: usize,
