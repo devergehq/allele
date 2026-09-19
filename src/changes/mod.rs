@@ -22,9 +22,10 @@ impl AppState {
     /// Record an observed working-tree change count against whichever session
     /// owns `repo`.
     ///
-    /// Both writers of session dirtiness funnel through here — the 15s
-    /// background poller and the changes panel's own refresh — so the sidebar
-    /// dot, the session header, and the panel can never disagree. Matching on
+    /// All three writers of the observed count funnel through here — the 15s
+    /// background tick, the changes panel's own refresh, and
+    /// `ensure_active_changes_observed` — so the session header and the panel
+    /// can never disagree. Matching on
     /// `clone_path` rather than a session index keeps the write correct when
     /// the session list is reordered or a session is removed while a `git
     /// status` is in flight.
@@ -72,6 +73,18 @@ impl AppState {
         let Some(dir) = dir else {
             return;
         };
+
+        // `ensure_changes_fresh` runs immediately before this one and, when the
+        // panel is open, has already kicked a status against this same clone —
+        // and folds its result back through `record_workspace_change_count`.
+        // Without this guard a switch would run two concurrent `git status`
+        // calls on one clone, which on a large repo costs more than the poll
+        // this whole change exists to shrink. The two are guarded by different
+        // fields, so neither sees the other; only this one can see both.
+        if self.right_panel.visible && self.changes.repo_dir.as_ref() == Some(&dir) {
+            return;
+        }
+
         let repo_dir = dir.clone();
         cx.spawn(async move |this, cx| {
             let count = cx
@@ -79,8 +92,18 @@ impl AppState {
                 .spawn(async move { crate::git::working_tree_change_count(&dir) })
                 .await;
             let _ = this.update(cx, |this: &mut AppState, cx| {
-                this.record_workspace_change_count(&repo_dir, count);
-                cx.notify();
+                // Compare before notifying, as the poller does — switching to
+                // an already-clean session should not cost a frame.
+                let current = this
+                    .projects
+                    .iter()
+                    .flat_map(|p| p.sessions.iter())
+                    .find(|s| s.clone_path.as_deref() == Some(&*repo_dir))
+                    .map(|s| s.git_dirty_count);
+                if current != Some(count) {
+                    this.record_workspace_change_count(&repo_dir, count);
+                    cx.notify();
+                }
             });
         })
         .detach();

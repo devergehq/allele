@@ -120,7 +120,8 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                 // registered clones, not with anything the user was doing.
                 //
                 // Nothing needs the breadth any more: the dirty dot that wanted
-                // a flag per session is gone (DEV-686 D2), and the only
+                // a flag per session went with it (decided as DEV-686 D2,
+                // removed here in DEV-684), and the only
                 // remaining consumer is the active session's "{n} changed"
                 // header. The changes drawer folds its own observation back via
                 // `record_workspace_change_count`, so this tick only covers the

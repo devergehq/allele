@@ -560,8 +560,6 @@ pub(crate) fn build_sidebar_items(
 
         // Inline project settings panel
         if state.editing_project_settings == Some(p_idx) {
-            // Helper: a settings row with label + clickable value
-
             // Settings header
             sidebar_items.push(
                 div()

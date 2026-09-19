@@ -22,10 +22,10 @@ pub struct Project {
     pub sessions: Vec<Session>,
     pub loading_sessions: Vec<LoadingSession>,
     /// Archived session metadata — populated from state.json at startup
-    /// and updated on merge/delete actions. The corresponding git refs
+    /// and updated on restore/delete actions. The corresponding git refs
     /// live in canonical as `refs/allele/archive/<session-id>`.
     pub archives: Vec<ArchivedSession>,
-    /// Per-project settings (merge strategy, default branch, etc.).
+    /// Per-project settings (default branch, remote, terminals, etc.).
     pub settings: ProjectSettings,
 }
 

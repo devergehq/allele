@@ -559,9 +559,10 @@ impl Session {
     /// Whether this session's workspace has changes the panel would list.
     ///
     /// `false` while unobserved, so a header can't offer "Review changes" for
-    /// a tree nobody has looked at yet. Replaces the `git_dirty` boolean that
-    /// DEV-686 removed: one observation now serves both the count and the
-    /// question, instead of a second field that could disagree with it.
+    /// a tree nobody has looked at yet. Replaces the `git_dirty` boolean,
+    /// removed in DEV-684 under a decision recorded as DEV-686 D2: one
+    /// observation now serves both the count and the question, instead of a
+    /// second field that could disagree with it.
     pub fn has_changes(&self) -> bool {
         self.git_dirty_count.is_some_and(|n| n > 0)
     }
