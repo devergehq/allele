@@ -61,7 +61,7 @@ impl AppState {
             SessionStatus::ResponseReady => "Ready to review",
         };
         let (action_label, action) =
-            Self::header_action(session.status, session.git_dirty == Some(true), resumable);
+            Self::header_action(session.status, session.has_changes(), resumable);
         // Read the session's own observation, never `self.changes` — that is
         // drawer-scoped state which survives the panel closing, so the header
         // used to report 0 changed on a dirty tree until the panel was opened.
@@ -193,11 +193,6 @@ impl AppState {
                 .text_color(theme().text_faint)
                 .child("Open a project to begin");
         };
-        let changed = project
-            .sessions
-            .iter()
-            .filter(|session| session.git_dirty == Some(true))
-            .count();
         let processes: usize = project
             .sessions
             .iter()
@@ -254,7 +249,6 @@ impl AppState {
                     .flex_wrap()
                     .gap(px(10.0))
                     .child(metric("Sessions", project.sessions.len().to_string()))
-                    .child(metric("Changed workspaces", changed.to_string()))
                     .child(metric("Processes", processes.to_string()))
                     .child(metric("Pull requests", "GitHub not connected".into()))
                     .child(metric("Stacks", "Stack model not available".into())),

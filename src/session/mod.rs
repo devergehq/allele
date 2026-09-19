@@ -474,15 +474,15 @@ pub struct Session {
     pub pinned: bool,
     /// Optional user comment displayed as a subtitle on the session row.
     pub comment: Option<String>,
-    /// Whether the workspace has uncommitted changes. `None` until the
-    /// first background poll completes. Display-only; never persisted.
-    pub git_dirty: Option<bool>,
     /// How many entries the changes panel would list for this workspace.
     /// `None` until first observed — rendered as "—", never as "0 changed",
     /// so the header can't assert a clean tree it hasn't actually seen.
-    /// Written by the background git poller *and* by `refresh_changes`, both
-    /// via `git::working_tree_change_count`'s unit, so the header, the sidebar
-    /// dirty dot, and the panel always agree. Display-only; never persisted.
+    ///
+    /// Only ever observed for the **active** session (DEV-684): the poller
+    /// stopped walking every clone, and the only reader is that session's own
+    /// header. Written by the background tick *and* by `refresh_changes`, both
+    /// via `git::working_tree_change_count`'s unit, so the header and the
+    /// panel always agree. Display-only; never persisted.
     pub git_dirty_count: Option<usize>,
     /// Whether a `Done` or `Suspended` session can be revived with its prior
     /// conversation: its clone is still on disk *and* Claude has a history
@@ -556,6 +556,16 @@ pub struct Session {
 }
 
 impl Session {
+    /// Whether this session's workspace has changes the panel would list.
+    ///
+    /// `false` while unobserved, so a header can't offer "Review changes" for
+    /// a tree nobody has looked at yet. Replaces the `git_dirty` boolean that
+    /// DEV-686 removed: one observation now serves both the count and the
+    /// question, instead of a second field that could disagree with it.
+    pub fn has_changes(&self) -> bool {
+        self.git_dirty_count.is_some_and(|n| n > 0)
+    }
+
     /// Create a new running session with a caller-supplied UUID.
     ///
     /// The caller's UUID becomes the session's identity *and* is passed
@@ -589,7 +599,6 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
-            git_dirty: None,
             git_dirty_count: None,
             resumable: None,
             branch_name: None,
@@ -650,7 +659,6 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
-            git_dirty: None,
             git_dirty_count: None,
             resumable: None,
             branch_name: None,

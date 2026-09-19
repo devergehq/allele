@@ -40,7 +40,6 @@ impl AppState {
             for session in &mut project.sessions {
                 if session.clone_path.as_deref() == Some(repo) {
                     session.git_dirty_count = count;
-                    session.git_dirty = count.map(|n| n > 0);
                 }
             }
         }
