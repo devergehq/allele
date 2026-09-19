@@ -1472,10 +1472,11 @@ impl TerminalView {
                 "Reveal in Finder".to_string(),
                 Box::new(
                     move |_this: &mut TerminalView, _cx: &mut Context<TerminalView>| {
-                        let _ = std::process::Command::new("open")
-                            .arg("-R")
-                            .arg(&path_for_reveal)
-                            .spawn();
+                        let mut command = std::process::Command::new("open");
+                        command.arg("-R").arg(&path_for_reveal);
+                        if let Err(e) = crate::proc::spawn_and_reap(command) {
+                            tracing::warn!("reveal in Finder: spawn failed: {e}");
+                        }
                     },
                 ),
             ));
@@ -1860,7 +1861,11 @@ impl Render for TerminalView {
                     if event.modifiers.platform {
                         if let Some(cell) = this.pixel_to_cell(click_x, click_y) {
                             if let Some((_, _, _, url)) = this.url_at(cell) {
-                                let _ = std::process::Command::new("open").arg(&url).spawn();
+                                let mut command = std::process::Command::new("open");
+                                command.arg(&url);
+                                if let Err(e) = crate::proc::spawn_and_reap(command) {
+                                    tracing::warn!("open url: spawn failed: {e}");
+                                }
                                 return;
                             }
                             if let Some((_, _, _, path, line_col)) = this.path_at(cell) {
@@ -2099,7 +2104,11 @@ impl Render for TerminalView {
 
                     // URL: open immediately in default browser, no menu.
                     if let Some((_, _, _, url)) = this.url_at(cell) {
-                        let _ = std::process::Command::new("open").arg(&url).spawn();
+                        let mut command = std::process::Command::new("open");
+                        command.arg(&url);
+                        if let Err(e) = crate::proc::spawn_and_reap(command) {
+                            tracing::warn!("open url: spawn failed: {e}");
+                        }
                         return;
                     }
 

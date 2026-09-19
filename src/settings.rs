@@ -423,7 +423,7 @@ pub fn spawn_external_editor(
         None => path.display().to_string(),
     };
     command.arg(path_arg);
-    if let Err(e) = command.spawn() {
+    if let Err(e) = crate::proc::spawn_and_reap(command) {
         warn!("Failed to launch external editor '{}': {e}", trimmed);
     }
 }

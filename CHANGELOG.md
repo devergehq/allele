@@ -49,6 +49,14 @@ Changes on `master` awaiting the next tagged release.
   had accumulated rather than with anything you were doing. It is now bounded
   by the single repository you are looking at.
 
+### Fixed
+- Allele no longer leaks processes. Every notification sound, system
+  notification and hand-off to `open` was spawned and then forgotten, and Rust
+  does not clean up a child process you stop holding onto — so each one stayed
+  in the process table as a zombie until the app quit. One long-running machine
+  had accumulated 3,351 of them. They are now waited on, and a test asserts it
+  stays that way.
+
 ### Removed
 - The per-session dirty dot in the sidebar, and its "Uncommitted changes in
   workspace" tooltip, along with the project tile's "Changed workspaces"

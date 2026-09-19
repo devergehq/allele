@@ -30,6 +30,7 @@ mod new_session_modal;
 mod paths;
 mod pending_actions;
 mod platform;
+mod proc;
 mod project;
 mod reader;
 mod remote_browser;
@@ -740,10 +741,11 @@ impl AppState {
     /// Reveal a path in macOS Finder. For files, Finder selects the file
     /// inside its containing folder; for directories, it opens them.
     pub(crate) fn reveal_in_finder(path: &std::path::Path) {
-        let _ = std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn();
+        let mut command = std::process::Command::new("open");
+        command.arg("-R").arg(path);
+        if let Err(e) = crate::proc::spawn_and_reap(command) {
+            tracing::warn!("reveal_in_finder({}): spawn failed: {e}", path.display());
+        }
     }
 
     /// Spawn the user-configured external editor with `path` as an argument.

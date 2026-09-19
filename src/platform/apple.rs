@@ -89,26 +89,26 @@ pub(crate) struct AppleShell;
 
 impl super::SystemShell for AppleShell {
     fn open_url(&self, url: &str) {
-        if let Err(e) = Command::new("open")
+        let mut command = Command::new("open");
+        command
             .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
+            .stderr(Stdio::null());
+        if let Err(e) = crate::proc::spawn_and_reap(command) {
             tracing::warn!("AppleShell::open_url({url}): spawn failed: {e}");
         }
     }
 
     fn reveal_in_files(&self, path: &Path) {
-        if let Err(e) = Command::new("open")
+        let mut command = Command::new("open");
+        command
             .arg("-R")
             .arg(path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
+            .stderr(Stdio::null());
+        if let Err(e) = crate::proc::spawn_and_reap(command) {
             tracing::warn!(
                 "AppleShell::reveal_in_files({}): spawn failed: {e}",
                 path.display()
