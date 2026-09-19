@@ -39,7 +39,23 @@ Changes on `master` awaiting the next tagged release.
   space back. The collapsed choice persists across restarts, and a bar with
   nothing waiting still renders nothing at all.
 
+### Changed
+- The workspace status poller now looks at the session you are on, not all of
+  them. It ran `git status` once per session clone every fifteen seconds; on a
+  machine with eighty-three clones one pass took over two minutes, so it was
+  running essentially without pause, and because `git status` stats every file
+  it held filesystem locks the whole time — which other applications on the
+  machine felt more than Allele did. The cost scaled with how many clones you
+  had accumulated rather than with anything you were doing. It is now bounded
+  by the single repository you are looking at.
+
 ### Removed
+- The per-session dirty dot in the sidebar, and its "Uncommitted changes in
+  workspace" tooltip, along with the project tile's "Changed workspaces"
+  metric. Knowing whether every workspace has uncommitted work was what
+  required walking every clone, and it is the session's business — yours or
+  the agent's — not the app's. The session you are on still shows its changed
+  count in the header, and the changes panel is unaffected.
 - Merge-and-close, and with it Allele's opinion on how session work gets
   integrated. The session row's "Merge and close" button, the archive
   browser's "Merge" action, the project-level merge strategy

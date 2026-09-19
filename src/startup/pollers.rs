@@ -86,8 +86,10 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
     .detach();
 
     // Git workspace-status poller (DEV-9). Every 15s, run a
-    // porcelain status per session clone on the background
-    // executor and update the sidebar dirty indicators.
+    // porcelain status for the *active* session's clone on the
+    // background executor and update its changed count. It
+    // polled every clone and fed a per-session dirty dot until
+    // DEV-684; see the note at the collection site below.
     cx.spawn(async move |this, cx| {
         // The first pass runs immediately. `Session::resumable`
         // starts as `None`, and a rehydrated session's Resume

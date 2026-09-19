@@ -82,6 +82,11 @@ pub(crate) struct ChangesPanelState {
     /// against the active session's clone dir each render to detect that a
     /// refresh is needed (session switch, first open).
     pub(crate) repo_dir: Option<PathBuf>,
+    /// Clone directory the active session's *header count* was last observed
+    /// for. Distinct from `repo_dir`, which tracks the panel's file list and
+    /// only moves while the panel is open — the header is visible either way
+    /// (DEV-684).
+    pub(crate) observed_dir: Option<PathBuf>,
     /// False when `repo_dir` turned out not to be a git work tree.
     pub(crate) is_repo: bool,
     pub(crate) loading: bool,

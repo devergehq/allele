@@ -45,6 +45,47 @@ impl AppState {
         }
     }
 
+    /// Render-time staleness check for the active session's header count.
+    ///
+    /// Sibling to `ensure_changes_fresh` below and guarded the same way — by
+    /// a directory comparison, so it fires at most once per session switch.
+    /// It exists because the two have different visibility: the panel's data
+    /// only matters while the panel is open, but the `{n} changed` header is
+    /// on screen either way.
+    ///
+    /// Before DEV-684 the background tick polled every clone, so switching to
+    /// a session found its count already warm. Now only the active session is
+    /// polled, and `self.active` is assigned from eleven call sites — so the
+    /// observation follows the active session from here rather than from a
+    /// hook on each of them.
+    ///
+    /// The outgoing count is deliberately **not** cleared first. Doing so
+    /// would flash "— changed" on every switch, and the stale value is only
+    /// on screen for the length of one `git status` against one clone
+    /// (measured 20-120ms) rather than the up-to-15s of the tick.
+    pub(crate) fn ensure_active_changes_observed(&mut self, cx: &mut Context<Self>) {
+        let dir = self.active_session().and_then(|s| s.clone_path.clone());
+        if self.changes.observed_dir == dir {
+            return;
+        }
+        self.changes.observed_dir = dir.clone();
+        let Some(dir) = dir else {
+            return;
+        };
+        let repo_dir = dir.clone();
+        cx.spawn(async move |this, cx| {
+            let count = cx
+                .background_executor()
+                .spawn(async move { crate::git::working_tree_change_count(&dir) })
+                .await;
+            let _ = this.update(cx, |this: &mut AppState, cx| {
+                this.record_workspace_change_count(&repo_dir, count);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
     /// Render-time staleness check: when the panel is visible but its data
     /// was loaded for a different directory than the active session's clone
     /// (session switch, first open), kick off a refresh. The guard is the
