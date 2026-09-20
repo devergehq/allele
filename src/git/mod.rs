@@ -510,6 +510,91 @@ fn commits_ahead_of_remote(clone: &Path, remote: &str, name: &str) -> usize {
         .unwrap_or(0)
 }
 
+/// Create a session branch rooted at `base` rather than at the clone's HEAD.
+///
+/// This is the *base* a session starts from, which is a different question
+/// from the one [`checkout_or_create_session_branch`] answers. That function
+/// takes the branch the session will **work on** and hard-resets the clone's
+/// copy of it to the remote; passing a project-wide default there would put
+/// every session on the same branch and have them reset each other. Here the
+/// session still lands on its own `session-<id>`, and `base` only decides
+/// which commit that branch starts at.
+///
+/// The remote is authoritative, for the same reason it is in
+/// `checkout_or_create_session_branch`: a stale local copy of `main` is
+/// exactly the base nobody wants to start from.
+///
+/// 1. Remote has `base` — fetch it, root the session branch at
+///    `<remote>/<base>`.
+/// 2. Remote answered and has no such branch (or the project has no remote) —
+///    root at the local `base`.
+/// 3. Neither — **error**, so session creation aborts. Falling back to HEAD
+///    would silently start the work somewhere the user did not ask for, which
+///    is the failure mode this whole path exists to prevent. A fetch that
+///    *failed* is also an error rather than an absence: the branch may well
+///    exist and we must not guess.
+///
+/// An empty or whitespace-only `base` means "no preference" and roots at HEAD,
+/// so a project setting left blank behaves exactly as it did before.
+pub fn create_session_branch_from(
+    clone: &Path,
+    session_id: &str,
+    base: &str,
+    remote: &str,
+) -> crate::errors::Result<()> {
+    if !is_git_repo(clone) {
+        return Err(AlleleError::Git(format!(
+            "create_session_branch_from: not a git repo: {}",
+            clone.display()
+        )));
+    }
+
+    let name = strip_remote_prefix(base.trim(), remote);
+    if name.is_empty() {
+        return create_session_branch(clone, session_id);
+    }
+
+    let start_point = if has_remote(clone, remote) {
+        match fetch_remote_branch(clone, remote, name) {
+            RemoteBranchFetch::Fetched => Some(format!("{remote}/{name}")),
+            RemoteBranchFetch::NotOnRemote => None,
+            RemoteBranchFetch::Failed(e) => {
+                return Err(AlleleError::Git(format!(
+                    "Could not reach '{remote}' to fetch the base branch '{name}': {e}\n\n\
+                     The session was not created, because starting from a possibly stale \
+                     copy of '{name}' risks basing work on the wrong commit. Check your \
+                     network and git credentials, then try again."
+                )));
+            }
+        }
+    } else {
+        None
+    };
+
+    let start_point = match start_point {
+        Some(remote_ref) => remote_ref,
+        None if local_branch_exists(clone, name) => name.to_string(),
+        None => {
+            return Err(AlleleError::Git(format!(
+                "The project's default branch '{name}' does not exist locally or on \
+                 '{remote}'.\n\n\
+                 The session was not created rather than starting from whatever the \
+                 project happened to have checked out. Fix the default branch in the \
+                 project's settings, or clear it to start from the project's current \
+                 branch."
+            )));
+        }
+    };
+
+    let branch = session_branch_name(session_id);
+    let mut cmd = git_cmd(Some(clone));
+    cmd.arg("checkout").arg("-B").arg(&branch).arg(&start_point);
+    run_git(cmd, "checkout -B (session from base)")
+        .map_err(|e| AlleleError::Git(explain_checkout_failure(name, &e.to_string())))?;
+
+    Ok(())
+}
+
 /// How [`checkout_or_create_session_branch`] resolved the branch for a new
 /// session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2086,6 +2171,78 @@ mod tests {
         assert_eq!(strip_remote_prefix("origin/", "origin"), "origin/");
         // Prefix must be a whole path segment.
         assert_eq!(strip_remote_prefix("originals/x", "origin"), "originals/x");
+    }
+
+    // --- create_session_branch_from (DEV-691) -----------------------------
+
+    #[test]
+    fn session_branch_from_base_roots_at_the_remote_tip() {
+        let (_up_dir, up, _clone_dir, clone) = make_upstream_and_clone("develop");
+        // Move upstream's `develop` on after the clone, so a stale local copy
+        // and the remote tip are different commits.
+        let ahead = commit_file(&up, "v2-on-develop");
+
+        create_session_branch_from(&clone, "sessionid91", "develop", "origin").unwrap();
+
+        // The session is on its OWN branch, never on the base itself — that is
+        // the distinction this function exists for.
+        assert_eq!(current_branch(&clone).as_deref(), Some("session-sessioni"));
+        assert_eq!(head_commit(&clone), ahead, "should start at the remote tip");
+    }
+
+    #[test]
+    fn session_branch_from_base_accepts_a_remote_qualified_name() {
+        let (_up_dir, _up, _clone_dir, clone) = make_upstream_and_clone("develop");
+
+        // "origin/develop" and "develop" name the same branch.
+        create_session_branch_from(&clone, "sessionid92", "origin/develop", "origin").unwrap();
+
+        assert_eq!(current_branch(&clone).as_deref(), Some("session-sessioni"));
+    }
+
+    #[test]
+    fn session_branch_from_base_falls_back_to_a_local_branch() {
+        // No remote at all, so a local branch is the only possible base.
+        let (_dir, path) = make_canonical("hello");
+        let mut co = git_cmd(Some(&path));
+        co.arg("checkout").arg("-b").arg("local-base");
+        run_git(co, "checkout -b (test)").unwrap();
+        let base_tip = commit_file(&path, "on-local-base");
+        let mut back = git_cmd(Some(&path));
+        back.arg("checkout").arg("-");
+        run_git(back, "checkout - (test)").unwrap();
+
+        create_session_branch_from(&path, "sessionid93", "local-base", "origin").unwrap();
+
+        assert_eq!(current_branch(&path).as_deref(), Some("session-sessioni"));
+        assert_eq!(head_commit(&path), base_tip);
+    }
+
+    #[test]
+    fn session_branch_from_unknown_base_fails_closed() {
+        let (_dir, path) = make_canonical("hello");
+
+        let err = create_session_branch_from(&path, "sessionid94", "no-such-branch", "origin")
+            .expect_err("an unresolvable base must abort session creation");
+
+        // Failing closed is the point: silently starting from HEAD would put
+        // the work on a base the user never asked for.
+        assert!(
+            err.to_string().contains("no-such-branch"),
+            "the error should name the branch it could not find: {err}"
+        );
+    }
+
+    #[test]
+    fn session_branch_from_empty_base_roots_at_head() {
+        // A project setting left blank must behave exactly as before.
+        let (_dir, path) = make_canonical("hello");
+        let before = head_commit(&path);
+
+        create_session_branch_from(&path, "sessionid95", "   ", "origin").unwrap();
+
+        assert_eq!(current_branch(&path).as_deref(), Some("session-sessioni"));
+        assert_eq!(head_commit(&path), before);
     }
 
     /// Build an upstream repo plus a clone of it, with `branch` present on both.

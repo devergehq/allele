@@ -40,6 +40,16 @@ Changes on `master` awaiting the next tagged release.
   nothing waiting still renders nothing at all.
 
 ### Changed
+- A project's **default branch** setting now does something. It has been
+  editable, saved and shown as "Project setting" while changing nothing at all;
+  set it and new sessions are based on that branch, fetched from the remote
+  first so you start from the current tip rather than whatever the project
+  happened to have checked out. Naming a branch in the new-session dialog still
+  wins, leaving it blank still starts from the project's current branch, and
+  the session still gets its own branch either way — the default branch is the
+  starting point, not somewhere sessions pile up. If it names a branch that
+  exists neither locally nor on the remote, the session is not created rather
+  than quietly starting somewhere else.
 - The workspace status poller now looks at the session you are on, not all of
   them. It ran `git status` once per session clone every fifteen seconds; on a
   machine with eighty-three clones one pass took over two minutes, so it was
