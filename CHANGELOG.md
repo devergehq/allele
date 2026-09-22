@@ -13,6 +13,8 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+## [0.5.0] - 2026-09-22
+
 ### Added
 - The limits on MCP-dispatched sessions are now configurable. By default a session
   a human started may dispatch, the sessions it dispatches may not, and at most 20
@@ -317,7 +319,8 @@ merge batch. Core proof-of-concept complete and runnable.
   browser with merge/delete actions.
 - Per-session drawer terminal panel and auto-naming of sessions from the first prompt.
 
-[Unreleased]: https://github.com/devergehq/allele/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/devergehq/allele/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/devergehq/allele/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/devergehq/allele/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/devergehq/allele/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/devergehq/allele/compare/v0.1.0...v0.2.0
