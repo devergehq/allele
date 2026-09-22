@@ -13,6 +13,8 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+## [0.5.0] - 2026-09-22
+
 ### Added
 - The limits on MCP-dispatched sessions are now configurable. By default a session
   a human started may dispatch, the sessions it dispatches may not, and at most 20
@@ -23,13 +25,17 @@ Changes on `master` awaiting the next tagged release.
   launch). A refused dispatch now says which depth the caller is at and what the
   limit is, rather than "dispatched sessions may not dispatch", which is no longer
   true in general.
-- Handler-level test fixture (`app_state::fixture::Fixture`): stands an `AppState`
-  up in a headless GPUI window backed by the in-memory repositories, so
-  `PendingAction` handlers can be driven and their persistence *intent* asserted
-  without touching the filesystem. First tests cover the sidebar, project, settings
-  and archive families. Documented as ARCHITECTURE.md §5.6.
 
 ### Changed
+- The transcript has been reworked to read like a document rather than a log of
+  boxed messages. Assistant prose renders as one continuous, measured column
+  with no per-message speaker chrome, and a whole turn's prose flows together as
+  a single document. Markdown headings, lists and tables are laid out on a
+  consistent rhythm, and code fences are syntax-highlighted. Code blocks and
+  diffs scroll sideways instead of wrapping, so long lines stay intact. Routine
+  tool calls collapse into a one-line rail you can expand, and long tool output
+  is clamped with a control to reveal the rest rather than being silently
+  truncated.
 - The attention bar collapses. It now opens with a summary header — a count of
   the sessions waiting on you, and a chevron — and clicking that header folds
   the per-session rows away and back. Even expanded, the list is capped at six
@@ -38,8 +44,6 @@ Changes on `master` awaiting the next tagged release.
   the count is the part worth glancing at, so collapsing keeps it and gives the
   space back. The collapsed choice persists across restarts, and a bar with
   nothing waiting still renders nothing at all.
-
-### Changed
 - A project's **default branch** setting now does something. It has been
   editable, saved and shown as "Project setting" while changing nothing at all;
   set it and new sessions are based on that branch, fetched from the remote
@@ -58,14 +62,6 @@ Changes on `master` awaiting the next tagged release.
   machine felt more than Allele did. The cost scaled with how many clones you
   had accumulated rather than with anything you were doing. It is now bounded
   by the single repository you are looking at.
-
-### Fixed
-- Allele no longer leaks processes. Every notification sound, system
-  notification and hand-off to `open` was spawned and then forgotten, and Rust
-  does not clean up a child process you stop holding onto — so each one stayed
-  in the process table as a zombie until the app quit. One long-running machine
-  had accumulated 3,351 of them. They are now waited on, and a test asserts it
-  stays that way.
 
 ### Removed
 - The per-session dirty dot in the sidebar, and its "Uncommitted changes in
@@ -129,6 +125,17 @@ Changes on `master` awaiting the next tagged release.
   settings and the dispatch limits with it. It is now written to a temporary
   file and moved into place, the way `state.json` always has been, so either
   the new settings are complete on disk or the old ones are untouched.
+- Allele no longer leaks processes. Every notification sound, system
+  notification and hand-off to `open` was spawned and then forgotten, and Rust
+  does not clean up a child process you stop holding onto — so each one stayed
+  in the process table as a zombie until the app quit. One long-running machine
+  had accumulated 3,351 of them. They are now waited on, and a test asserts it
+  stays that way.
+- Clicks in the sidebar no longer reach the terminal underneath. A mouse
+  release was forwarded to the Claude Code TUI even when the press it belonged
+  to had landed on the sidebar, so selecting a session could also trigger
+  whatever sat under the cursor in the terminal. A release is now forwarded
+  only when its matching press was.
 
 ### Security
 - Session event files and prompt sidecars are no longer world-readable. Every
@@ -312,7 +319,8 @@ merge batch. Core proof-of-concept complete and runnable.
   browser with merge/delete actions.
 - Per-session drawer terminal panel and auto-naming of sessions from the first prompt.
 
-[Unreleased]: https://github.com/devergehq/allele/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/devergehq/allele/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/devergehq/allele/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/devergehq/allele/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/devergehq/allele/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/devergehq/allele/compare/v0.1.0...v0.2.0
