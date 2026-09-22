@@ -13,8 +13,8 @@ use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
 use std::rc::Rc;
 
-use crate::reader::highlight::{self, HlLine, TokenColors};
 use crate::rich::column::{mono_width, prose_width, scroll_x};
+use crate::syntax::{self, HlLine, TokenColors};
 use crate::theme::{theme, with_alpha};
 use gpui::{
     div, px, Div, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla, ParentElement as _,
@@ -695,16 +695,11 @@ fn heading_element(
     div().mt(px(top)).mb(px(bottom)).child(text_div)
 }
 
-// Note: this reaches into `reader::highlight`, while `reader` renders Markdown
-// through this module — a cycle between two feature modules. The shared
-// highlighter wants to live in a neutral module both consume; tracked
-// separately rather than widening this change.
-
 /// Cache of highlighted fences, keyed by content + language + palette.
 ///
 /// `render` is documented as safe to call every frame, and GPUI does exactly
 /// that for every visible block. Only the tree-sitter *configuration* is
-/// cached upstream (`reader::ts_highlight`) — `Highlighter::highlight` still
+/// cached upstream (`syntax::tree_sitter`) — `Highlighter::highlight` still
 /// reparses the whole fence on each call, so without this a screenful of code
 /// would be reparsed at frame rate. The palette is part of the key because
 /// token colours are baked into the cached `TextRun`s, so a theme change must
@@ -712,6 +707,12 @@ fn heading_element(
 ///
 /// Thread-local because highlighting runs on the render thread, matching the
 /// grammar cache it sits in front of.
+///
+/// Deliberately kept here rather than moved into `syntax` with the highlighter
+/// (DEV-578). The bound is a number of ENTRIES, which is only a safe bound
+/// because a fence is small. `syntax`'s other consumer is the Reader, whose
+/// inputs are whole files — the same cache there would be an unbounded amount
+/// of memory wearing a bounded-looking limit.
 type FenceCache = HashMap<u64, Rc<Vec<HlLine>>>;
 
 thread_local! {
@@ -749,7 +750,7 @@ fn highlighted_fence(code: &str, ext: &str, colors: TokenColors) -> Rc<Vec<HlLin
         if cache.len() >= FENCE_CACHE_CAPACITY {
             cache.clear();
         }
-        let lines = Rc::new(highlight::highlight(code, ext, colors));
+        let lines = Rc::new(syntax::highlight(code, ext, colors));
         cache.insert(key, Rc::clone(&lines));
         lines
     })
@@ -874,7 +875,7 @@ fn code_block_element(code: String, lang: String, font_size: f32, id: ElementId)
     // guessing a grammar colours code wrongly, which is worse than not at all.
     match ext_for_fence_lang(&lang) {
         Some(ext) => {
-            for line in highlighted_fence(trimmed, ext, highlight::theme_colors()).iter() {
+            for line in highlighted_fence(trimmed, ext, syntax::theme_colors()).iter() {
                 content = content.child(
                     div()
                         .flex_shrink_0()
@@ -1168,8 +1169,8 @@ Mid-stream **unterminated
     fn identical_fences_reuse_the_cached_highlight() {
         // The whole point of the cache: a fence that has not changed must not
         // be reparsed on the next frame.
-        let first = highlighted_fence("fn main() { let x = 1; }", "rs", highlight::theme_colors());
-        let second = highlighted_fence("fn main() { let x = 1; }", "rs", highlight::theme_colors());
+        let first = highlighted_fence("fn main() { let x = 1; }", "rs", syntax::theme_colors());
+        let second = highlighted_fence("fn main() { let x = 1; }", "rs", syntax::theme_colors());
         assert!(
             Rc::ptr_eq(&first, &second),
             "an unchanged fence must be served from the cache"
@@ -1180,7 +1181,7 @@ Mid-stream **unterminated
     fn a_different_palette_misses_the_cache() {
         // Token colours are baked into the cached runs, so a theme swap has to
         // miss rather than serve stale colours.
-        let colors = highlight::theme_colors();
+        let colors = syntax::theme_colors();
         let mut swapped = colors;
         swapped.keyword = colors.string;
         assert_ne!(
@@ -1193,7 +1194,7 @@ Mid-stream **unterminated
     #[test]
     fn the_fence_cache_stays_bounded() {
         for i in 0..(FENCE_CACHE_CAPACITY * 2) {
-            let _ = highlighted_fence(&format!("let x{i} = {i};"), "rs", highlight::theme_colors());
+            let _ = highlighted_fence(&format!("let x{i} = {i};"), "rs", syntax::theme_colors());
         }
         FENCE_CACHE.with(|cache| {
             assert!(

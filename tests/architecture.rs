@@ -247,6 +247,51 @@ fn cfg_target_os_stays_in_platform_module() {
 }
 
 // ---------------------------------------------------------------------------
+// §7.11 / DEV-578 — feature modules must not depend on each other in a cycle
+// ---------------------------------------------------------------------------
+
+/// Files under `src/rich/` permitted to name `crate::reader`. Empty on
+/// purpose: the dependency runs the other way.
+const RICH_REFERENCING_READER_ALLOWLIST: &[&str] = &[];
+
+/// `reader` renders Markdown through `rich::markdown`, which is fine — a
+/// reading surface using the shared Markdown renderer is the dependency
+/// pointing the way it should.
+///
+/// The reverse is not fine. When `rich::markdown` needed syntax highlighting it
+/// reached into `crate::reader::highlight`, and the two feature modules then
+/// depended on each other's internals, with `reader` exposing its own purely so
+/// `rich` could borrow them. Rust permits that, nothing failed, and it would
+/// have quietly got worse — which is why it is a test rather than a convention.
+///
+/// Shared capability goes in a neutral module both can consume. `src/syntax/`
+/// is where the highlighter went.
+#[test]
+fn rich_does_not_reach_into_reader() {
+    let observed: BTreeSet<String> = source_files()
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("src/rich/"))
+        .filter(|(_, path)| {
+            // `crate::reader` only. Inside `src/rich/`, `super::reader` names
+            // `rich::reader` — DEV-31's transcript navigation — which is a
+            // different module that happens to share a name with the Project
+            // Reader. Matching on the bare name would fail on that.
+            read(path).contains("crate::reader")
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+
+    assert_matches_allowlist(
+        &observed,
+        RICH_REFERENCING_READER_ALLOWLIST,
+        "ARCHITECTURE.md §7.11 — `reader` already depends on `rich::markdown`, so a \
+         reference back the other way makes two feature modules depend on each \
+         other's internals. Put the shared capability in a neutral module (see \
+         `src/syntax/`) and have both consume it.",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // §7.6 / DEV-108 — typed errors at API boundaries
 // ---------------------------------------------------------------------------
 
@@ -582,6 +627,7 @@ fn architecture_doc_still_documents_the_enforced_rules() {
         "### 7.4 Don't sprinkle `#[cfg(target_os = \"macos\")]` in business logic",
         "### 7.6 Don't use `anyhow::Result<T>` for new public functions",
         "### 7.7 Don't introduce a new god-object",
+        "### 7.11 Don't make two feature modules depend on each other",
     ] {
         assert!(
             doc.contains(anchor),

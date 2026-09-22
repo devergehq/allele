@@ -6,6 +6,15 @@
 //! needs "readable and navigable", not semantic accuracy (DEV-37), so a fast
 //! heuristic tokenizer that never panics is the right trade-off.
 
+// Neutral by design (DEV-578). This used to live under `reader`, and when the
+// Markdown renderer needed it too, `rich` reached into `reader` while `reader`
+// already rendered Markdown through `rich` — a cycle between two feature
+// modules, with one of them exposing internals purely so the other could
+// borrow them. Highlighting is not a reader concern: it maps an extension to a
+// grammar and produces styled runs, and it now has two consumers.
+
+pub(crate) mod tree_sitter;
+
 use gpui::{Font, FontFeatures, FontStyle, FontWeight, Hsla, SharedString, TextRun};
 
 /// Theme colors a token class maps onto. Filled from `theme()` by the caller
@@ -246,7 +255,7 @@ pub(crate) struct HlLine {
 /// is bundled for `ext`, and falls back to the built-in lexer otherwise — so
 /// unsupported languages still get reasonable coloring, never flat text.
 pub(crate) fn highlight(contents: &str, ext: &str, colors: TokenColors) -> Vec<HlLine> {
-    if let Some(lines) = super::ts_highlight::highlight(contents, ext, &colors) {
+    if let Some(lines) = tree_sitter::highlight(contents, ext, &colors) {
         return lines;
     }
     lexer_highlight(contents, ext, colors)

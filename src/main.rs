@@ -48,6 +48,7 @@ mod startup;
 mod state;
 mod stream;
 mod sync;
+mod syntax;
 mod terminal;
 mod text_input;
 mod theme;
