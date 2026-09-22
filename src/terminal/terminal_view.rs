@@ -93,6 +93,16 @@ pub struct TerminalView {
     element_origin_x: std::sync::Arc<std::sync::atomic::AtomicI32>,
     element_origin_y: std::sync::Arc<std::sync::atomic::AtomicI32>,
     scrollbar_dragging: bool,
+    /// True while the left button is down *and* its press was reported to the
+    /// PTY. Mouse reports have to reach the TUI in matched press/release pairs,
+    /// so `on_mouse_up_out` is ungated by design: a drag that starts in the grid
+    /// and ends over the sidebar must still deliver its release, or the TUI goes
+    /// on believing the button is held. Ungated, it also fired for clicks that
+    /// never touched the terminal — and since `pixel_to_cell` clamps out-of-grid
+    /// coordinates, that stray release landed on the grid row level with the
+    /// cursor, so clicking the sidebar expanded whatever the TUI had on that row
+    /// (DEV-648). This flag is what tells the two apart.
+    left_press_forwarded: bool,
     /// Set the first time a keystroke reaches this terminal, and never
     /// cleared. Shared with the owning `DrawerTab` so the DEV-445 idle
     /// reaper can tell a tab still running exactly what we launched from
@@ -221,6 +231,7 @@ impl TerminalView {
                             -1,
                         )),
                         scrollbar_dragging: false,
+                        left_press_forwarded: false,
                         user_typed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                         cursor_visible: true,
                         last_keypress: Instant::now(),
@@ -431,6 +442,7 @@ impl TerminalView {
             element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             scrollbar_dragging: false,
+            left_press_forwarded: false,
             user_typed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cursor_visible: true,
             last_keypress: Instant::now(),
@@ -1825,6 +1837,9 @@ impl Render for TerminalView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, event: &MouseDownEvent, window, cx| {
+                    // A press that reaches the grid supersedes any earlier one,
+                    // whether or not this one ends up being reported.
+                    this.left_press_forwarded = false;
                     // Any left-click dismisses an open terminal context menu.
                     if this.terminal_context_menu.is_some() {
                         this.terminal_context_menu = None;
@@ -1861,6 +1876,7 @@ impl Render for TerminalView {
                         event.position,
                         event.modifiers,
                     ) {
+                        this.left_press_forwarded = true;
                         return;
                     }
 
@@ -2104,12 +2120,16 @@ impl Render for TerminalView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, event: &MouseUpEvent, _window, cx| {
-                    if this.forward_mouse_button(
-                        MouseButton::Left,
-                        false,
-                        event.position,
-                        event.modifiers,
-                    ) {
+                    // Only the release half of a press this terminal reported is
+                    // owed to the TUI; see `left_press_forwarded` (DEV-648).
+                    if std::mem::take(&mut this.left_press_forwarded)
+                        && this.forward_mouse_button(
+                            MouseButton::Left,
+                            false,
+                            event.position,
+                            event.modifiers,
+                        )
+                    {
                         this.scrollbar_dragging = false;
                         this.selecting = false;
                         return;
@@ -2158,12 +2178,16 @@ impl Render for TerminalView {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, event: &MouseUpEvent, _window, cx| {
-                    if this.forward_mouse_button(
-                        MouseButton::Left,
-                        false,
-                        event.position,
-                        event.modifiers,
-                    ) {
+                    // Only the release half of a press this terminal reported is
+                    // owed to the TUI; see `left_press_forwarded` (DEV-648).
+                    if std::mem::take(&mut this.left_press_forwarded)
+                        && this.forward_mouse_button(
+                            MouseButton::Left,
+                            false,
+                            event.position,
+                            event.modifiers,
+                        )
+                    {
                         this.scrollbar_dragging = false;
                         this.selecting = false;
                         return;
@@ -2195,6 +2219,14 @@ impl Render for TerminalView {
                     }
                 }),
             )
+            // A press outside the grid can never be ours, so it retires any
+            // unmatched press — otherwise a release swallowed by an overlay
+            // would leave the flag set and leak into the next click.
+            .on_mouse_down_out(cx.listener(
+                |this: &mut Self, _event: &MouseDownEvent, _window, _cx| {
+                    this.left_press_forwarded = false;
+                },
+            ))
             .on_scroll_wheel(cx.listener(
                 |this: &mut Self, event: &ScrollWheelEvent, _window, _cx| {
                     let lines = this.scroll_lines_from_event(event);
