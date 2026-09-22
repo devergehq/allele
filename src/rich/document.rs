@@ -150,6 +150,109 @@ impl RichDocument {
     }
 
     /// Narrative annotation for a block, if one was recorded.
+    /// How many blocks starting at `ix` render as a single unit (DEV-574).
+    ///
+    /// `1` for anything that renders on its own. `0` means this block was
+    /// already absorbed by a run that started earlier, so the renderer should
+    /// emit nothing for it. Greater than 1 is a run of settled text blocks
+    /// that belong to one turn and render as one markdown document.
+    ///
+    /// Merging is a *view* concern, which is why this reports a grouping
+    /// rather than rewriting the blocks. The ledger, the jump index and the
+    /// search index all address the same blocks they always did, and a run
+    /// that is still growing does not have to rewrite history as it streams.
+    ///
+    /// A run only ever covers **adjacent** text blocks. That is what makes it
+    /// safe: merging across an intervening tool call would move prose that
+    /// came after the call to before it.
+    pub fn run_len_at(&self, ix: usize) -> usize {
+        if !self.merges_at(ix) {
+            return 1;
+        }
+        if ix > 0 && self.merges_with(ix - 1, ix) {
+            return 0; // absorbed by the run that started earlier
+        }
+        let mut end = ix + 1;
+        while end < self.blocks.len() && self.merges_with(end - 1, end) {
+            end += 1;
+        }
+        end - ix
+    }
+
+    /// Whether the block at `ix` is the kind that can join a run: settled
+    /// prose. A streaming block never merges — it changes on every token, and
+    /// absorbing it would re-measure the whole run each time (DEV-574).
+    fn merges_at(&self, ix: usize) -> bool {
+        matches!(
+            self.blocks.get(ix).map(|b| &b.kind),
+            Some(BlockKind::Text {
+                streaming: false,
+                ..
+            })
+        )
+    }
+
+    /// Whether two adjacent blocks belong to the same run: both settled prose,
+    /// same conversational turn, same owning agent.
+    fn merges_with(&self, a: usize, b: usize) -> bool {
+        if !self.merges_at(a) || !self.merges_at(b) {
+            return false;
+        }
+        let (Some(ba), Some(bb)) = (self.blocks.get(a), self.blocks.get(b)) else {
+            return false;
+        };
+        if ba.parent_agent_id != bb.parent_agent_id {
+            return false;
+        }
+        self.annotation(ba.id).map(|a| a.turn) == self.annotation(bb.id).map(|a| a.turn)
+    }
+
+    /// The markdown source for the run starting at `ix`, joined so that a
+    /// construct split across blocks — a heading in one and its paragraph in
+    /// the next — parses as one document with one spacing context.
+    ///
+    /// A blank line is the separator because it is the one join that cannot
+    /// fuse two block-level constructs into a single one.
+    pub fn run_content(&self, ix: usize, len: usize) -> String {
+        self.blocks
+            .iter()
+            .skip(ix)
+            .take(len)
+            .filter_map(|b| match &b.kind {
+                BlockKind::Text { content, .. } => Some(content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
+    /// Whether the block at `ix` is the first prose of its turn, and so the
+    /// one place that turn's speaker should be named (DEV-574).
+    ///
+    /// One label per turn, not one per block: a turn emits several text blocks
+    /// and a label on each stuttered down the left edge, which is what DEV-572
+    /// removed. But removing it entirely left a block reached by search with no
+    /// visible owner at all, so it comes back here — once, where the turn does.
+    pub fn starts_turn_prose(&self, ix: usize) -> bool {
+        let Some(block) = self.blocks.get(ix) else {
+            return false;
+        };
+        if !matches!(block.kind, BlockKind::Text { .. }) {
+            return false;
+        }
+        if block.parent_agent_id.is_some() {
+            // Subagents are attributed once per run by their own header.
+            return false;
+        }
+        let turn = self.annotation(block.id).map(|a| a.turn);
+        !self.blocks[..ix].iter().rev().any(|earlier| {
+            let same_turn = self.annotation(earlier.id).map(|a| a.turn) == turn;
+            same_turn
+                && earlier.parent_agent_id.is_none()
+                && matches!(earlier.kind, BlockKind::Text { .. })
+        })
+    }
+
     pub fn annotation(&self, id: BlockId) -> Option<&Annotation> {
         self.annotations.get(&id)
     }
@@ -909,5 +1012,189 @@ mod rail_tests {
             !collapsed_of(&doc, write_id),
             "error overrides the force-collapse pref"
         );
+    }
+}
+
+#[cfg(test)]
+mod turn_grouping_tests {
+    use super::*;
+
+    fn text(s: &str) -> RichEvent {
+        RichEvent::TextBlock {
+            text: s.into(),
+            parent_agent_id: None,
+        }
+    }
+
+    fn subagent_text(s: &str, agent: &str) -> RichEvent {
+        RichEvent::TextBlock {
+            text: s.into(),
+            parent_agent_id: Some(agent.into()),
+        }
+    }
+
+    fn tool(id: &str) -> RichEvent {
+        RichEvent::ToolUse {
+            tool_use_id: id.into(),
+            tool_name: "Read".into(),
+            input: serde_json::json!({}),
+            parent_agent_id: None,
+        }
+    }
+
+    /// The run lengths for every index, which is the whole grouping decision
+    /// in one readable line per test.
+    fn runs(doc: &RichDocument) -> Vec<usize> {
+        (0..doc.blocks().len()).map(|i| doc.run_len_at(i)).collect()
+    }
+
+    #[test]
+    fn adjacent_prose_in_one_turn_becomes_a_single_run() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(text("# Heading"));
+        doc.apply_event(text("The paragraph under it."));
+        // prompt renders alone; the two text blocks render as one, and the
+        // second reports 0 because the first already covers it.
+        assert_eq!(runs(&doc), vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn a_split_heading_and_paragraph_share_one_document() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(text("# Heading"));
+        doc.apply_event(text("The paragraph under it."));
+        let merged = doc.run_content(1, 2);
+        assert_eq!(merged, "# Heading\n\nThe paragraph under it.");
+        assert!(
+            merged.contains("\n\n"),
+            "a blank line is the only join that cannot fuse two constructs"
+        );
+    }
+
+    #[test]
+    fn a_tool_call_breaks_the_run() {
+        // Merging across a tool call would move prose that came AFTER the call
+        // to before it. Adjacency is what makes merging safe.
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(text("before"));
+        doc.apply_event(tool("t1"));
+        doc.apply_event(text("after"));
+        assert_eq!(runs(&doc), vec![1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn a_run_never_crosses_a_turn_boundary() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("first".into());
+        doc.apply_event(text("a"));
+        doc.push_user_prompt("second".into());
+        doc.apply_event(text("b"));
+        assert_eq!(runs(&doc), vec![1, 1, 1, 1]);
+    }
+
+    #[test]
+    fn a_run_never_crosses_an_agent_boundary() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(text("main"));
+        doc.apply_event(subagent_text("delegated", "toolu_1"));
+        assert_eq!(runs(&doc), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn two_subagents_do_not_merge_into_each_other() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(subagent_text("from a", "toolu_a"));
+        doc.apply_event(subagent_text("from b", "toolu_b"));
+        assert_eq!(runs(&doc), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn a_streaming_tail_is_never_absorbed() {
+        // If the in-flight block joined the run, every token would re-measure
+        // a screen-tall element in the virtual list.
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(text("settled"));
+        doc.apply_event(RichEvent::TextDelta {
+            text: "still arriving".into(),
+            parent_agent_id: None,
+        });
+        assert_eq!(runs(&doc), vec![1, 1, 1]);
+    }
+
+    #[test]
+    fn a_long_run_reports_its_full_length_once() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        for i in 0..4 {
+            doc.apply_event(text(&format!("part {i}")));
+        }
+        assert_eq!(runs(&doc), vec![1, 4, 0, 0, 0]);
+        assert_eq!(
+            doc.run_content(1, 4),
+            "part 0\n\npart 1\n\npart 2\n\npart 3"
+        );
+    }
+
+    #[test]
+    fn the_speaker_is_named_once_per_turn() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(text("first"));
+        doc.apply_event(tool("t1"));
+        doc.apply_event(text("second"));
+        let anchors: Vec<bool> = (0..doc.blocks().len())
+            .map(|i| doc.starts_turn_prose(i))
+            .collect();
+        assert_eq!(
+            anchors,
+            vec![false, true, false, false],
+            "only the turn's first prose block names the speaker"
+        );
+    }
+
+    #[test]
+    fn each_turn_names_its_speaker_again() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("one".into());
+        doc.apply_event(text("a"));
+        doc.push_user_prompt("two".into());
+        doc.apply_event(text("b"));
+        assert!(doc.starts_turn_prose(1));
+        assert!(doc.starts_turn_prose(3), "a new turn is named again");
+    }
+
+    #[test]
+    fn a_turn_with_no_prose_names_nobody() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(tool("t1"));
+        assert!((0..doc.blocks().len()).all(|i| !doc.starts_turn_prose(i)));
+    }
+
+    #[test]
+    fn subagent_prose_is_not_labelled_as_the_main_agent() {
+        // `render_agent_header` attributes a delegated run once, on its own.
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(subagent_text("delegated", "toolu_1"));
+        assert!(!doc.starts_turn_prose(1));
+    }
+
+    #[test]
+    fn an_absorbed_block_still_holds_its_list_slot() {
+        // Runs are a view grouping, not a model rewrite: the block count is
+        // unchanged, so every index the jump and search indexes hold stays
+        // valid.
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(text("a"));
+        doc.apply_event(text("b"));
+        assert_eq!(doc.blocks().len(), 3, "no block is removed by merging");
     }
 }

@@ -61,6 +61,10 @@ pub struct RichView {
     document: RichDocument,
     compose_bar: Entity<ComposeBar>,
     font_size: f32,
+    /// What to call the agent when a turn's prose is attributed (DEV-574).
+    /// Derived from the session's configured agent, so an OpenCode session
+    /// does not get labelled "Claude".
+    agent_label: SharedString,
     /// Whether the compose bar is locked because a turn is in flight.
     /// Driven externally via `set_busy` — the sidecar view itself never
     /// computes this, since busy state depends on the PTY/transcript
@@ -111,6 +115,7 @@ impl RichView {
         session_id: String,
         font_size: f32,
         tool_visibility: std::collections::HashMap<String, bool>,
+        agent_kind: crate::settings::AgentKind,
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
@@ -153,6 +158,7 @@ impl RichView {
             document,
             compose_bar,
             font_size,
+            agent_label: agent_display_name(agent_kind).into(),
             busy: false,
             list_state,
             index: NarrativeIndex::new(),
@@ -370,6 +376,19 @@ impl RichView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let font_size = self.font_size;
+        // DEV-574: a run of settled text blocks in one turn renders as a single
+        // markdown document. `run_len_at` reports 0 for a block an earlier run
+        // already absorbed — it still occupies its list slot, so every index
+        // the jump and search indexes hold stays valid, it just draws nothing.
+        let run_len = self.document.run_len_at(ix);
+        if run_len == 0 {
+            return div().into_any_element();
+        }
+        let merged = (run_len > 1).then(|| self.document.run_content(ix, run_len));
+        let speaker = self
+            .document
+            .starts_turn_prose(ix)
+            .then(|| self.agent_label.clone());
         let Some(block) = self.document.blocks().get(ix) else {
             return div().into_any_element();
         };
@@ -387,7 +406,7 @@ impl RichView {
             render_agent_header(cur_agent.map(short_agent).unwrap_or_default(), font_size)
         });
 
-        let block_el = render_block(block, annotation, font_size, cx);
+        let block_el = render_block(block, annotation, font_size, merged, speaker, cx);
         // DEV-571: every item shares one centred frame, so the whole feed
         // reads down a single column instead of stretching to the pane. The
         // frame goes here rather than inside `render_block` so that the
@@ -524,12 +543,32 @@ impl Render for RichView {
     }
 }
 
+/// What to call the agent in a turn's speaker label (DEV-574).
+///
+/// Allele normalises Claude, OpenCode and generic agents into the same text
+/// block, so the label has to come from the session's configuration. The
+/// previous hardcoded "Claude" was simply wrong on every block of an OpenCode
+/// session.
+fn agent_display_name(kind: crate::settings::AgentKind) -> &'static str {
+    match kind {
+        crate::settings::AgentKind::Claude => "Claude",
+        crate::settings::AgentKind::Opencode => "OpenCode",
+        crate::settings::AgentKind::Generic => "Agent",
+    }
+}
+
 // ── Block renderers ───────────────────────────────────────────────
 
 fn render_block(
     block: &Block,
     annotation: Option<&Annotation>,
     font_size: f32,
+    // `merged`: Some when this block starts a merged run (DEV-574) — the
+    // joined markdown source for the whole run, replacing this block's own.
+    // `speaker`: Some when this block is the first prose of its turn, and so
+    // the one place that turn's speaker is named.
+    merged: Option<String>,
+    speaker: Option<SharedString>,
     cx: &mut Context<RichView>,
 ) -> Div {
     let indent = if block.parent_agent_id.is_some() {
@@ -571,7 +610,10 @@ fn render_block(
 
     match &block.kind {
         BlockKind::Text { content, streaming } => {
-            wrapper = wrapper.child(render_text_block(content, *streaming, font_size, block_id));
+            let content = merged.as_deref().unwrap_or(content);
+            wrapper = wrapper.child(render_text_block(
+                content, *streaming, font_size, block_id, speaker,
+            ));
         }
         BlockKind::Thinking { content } => {
             wrapper = wrapper.child(render_thinking_block(
@@ -992,19 +1034,20 @@ fn render_text_block(
     streaming: bool,
     font_size: f32,
     block_id: super::document::BlockId,
+    speaker: Option<SharedString>,
 ) -> Div {
     // Claude's prose IS the main content of the transcript — tool calls and
     // thinking are supporting context — so it carries no speaker chrome of its
     // own (DEV-572). A turn emits several text blocks, and a label on each one
     // stuttered down the left edge and stole width from the measure.
     //
-    // Speaker identity comes from contrast instead: the user's prompt is tinted
-    // and accented, and unadorned prose is the agent's. Note "the agent's" and
-    // not "Claude's" — the label this replaces was hardcoded, and a session may
-    // be running OpenCode, so it was wrong on every block rather than absent.
-    // Per-turn attribution belongs with DEV-574, which is where a turn boundary
-    // is known without walking the block list. Delegated subagents already have
-    // it: `render_agent_header` attributes them once per run.
+    // `speaker` is set on the first prose block of a turn and nowhere else
+    // (DEV-574). A label on EVERY block stuttered down the left edge and stole
+    // width from the measure, which is what DEV-572 removed — but removing it
+    // outright left a block reached by search with no visible owner, so it
+    // comes back once per turn. The name is the session's configured agent, not
+    // a hardcoded "Claude", which was wrong on every block of an OpenCode
+    // session. Subagents are attributed separately by `render_agent_header`.
     div()
         .w_full()
         .min_w_0()
@@ -1012,8 +1055,16 @@ fn render_text_block(
         .px(px(10.0))
         .py(px(6.0))
         .flex()
-        .items_start()
-        .child(div().flex_1().min_w_0().child(super::markdown::render(
+        .flex_col()
+        .children(speaker.map(|name| {
+            div()
+                .pb(px(2.0))
+                .text_color(theme().ready)
+                .text_size(px(font_size - 2.0))
+                .font_weight(FontWeight::BOLD)
+                .child(name)
+        }))
+        .child(div().w_full().min_w_0().child(super::markdown::render(
             content,
             streaming,
             font_size,
