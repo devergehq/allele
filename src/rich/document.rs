@@ -6,7 +6,7 @@
 
 use crate::rich::narrative::{Annotation, NarrativeProjector};
 use crate::rich::permissions::{DecisionLog, PermissionAction, PermissionRequest};
-use crate::rich::tool_rail::{classify_tool, default_collapsed};
+use crate::rich::tool_rail::{classify_tool, default_collapsed, RoutineRailSummary};
 use crate::stream::{NoticeKind, RichEvent};
 use std::collections::HashMap;
 
@@ -150,6 +150,93 @@ impl RichDocument {
     }
 
     /// Narrative annotation for a block, if one was recorded.
+    /// The routine-tool run containing `ix`, as `(start, len)` (DEV-575).
+    ///
+    /// `None` when this block is not part of a run worth aggregating. Most
+    /// tool calls in a session are routine reads and shell probes —
+    /// individually low-signal, collectively loud enough to bury the prose
+    /// that carries the turn's meaning. A run of them collapses to one line.
+    ///
+    /// Same grouping shape as [`RichDocument::run_len_at`] over a different
+    /// predicate, deliberately: one mechanism for "these adjacent blocks draw
+    /// as one thing", not two.
+    ///
+    /// A run of one is not a run. Aggregating a single call into "1 read"
+    /// costs a click and saves nothing.
+    pub fn rail_run_at(&self, ix: usize) -> Option<(usize, usize)> {
+        if !self.rails_at(ix) {
+            return None;
+        }
+        let mut start = ix;
+        while start > 0 && self.rails_with(start - 1, start) {
+            start -= 1;
+        }
+        let mut end = ix + 1;
+        while end < self.blocks.len() && self.rails_with(end - 1, end) {
+            end += 1;
+        }
+        (end - start > 1).then_some((start, end - start))
+    }
+
+    /// Whether the block at `ix` can join a rail: a routine tool call that has
+    /// not errored.
+    ///
+    /// An error leaves the rail the moment its result lands. Grouping is
+    /// recomputed from current state on every render, so that happens on its
+    /// own — a failure is never hidden behind a summary line.
+    fn rails_at(&self, ix: usize) -> bool {
+        let Some(block) = self.blocks.get(ix) else {
+            return false;
+        };
+        let BlockKind::ToolCall {
+            tool_name, result, ..
+        } = &block.kind
+        else {
+            return false;
+        };
+        if result.as_ref().is_some_and(|r| r.is_error) {
+            return false;
+        }
+        classify_tool(tool_name).is_routine()
+    }
+
+    /// Whether two adjacent blocks belong to the same rail run: both railable,
+    /// same turn, same owning agent.
+    fn rails_with(&self, a: usize, b: usize) -> bool {
+        if !self.rails_at(a) || !self.rails_at(b) {
+            return false;
+        }
+        let (Some(ba), Some(bb)) = (self.blocks.get(a), self.blocks.get(b)) else {
+            return false;
+        };
+        if ba.parent_agent_id != bb.parent_agent_id {
+            return false;
+        }
+        self.annotation(ba.id).map(|a| a.turn) == self.annotation(bb.id).map(|a| a.turn)
+    }
+
+    /// One-line summary of the rail run at `start`, e.g.
+    /// "6 reads, 2 shell · parser.rs, ledger.rs, …", with the number of calls
+    /// it stands for.
+    ///
+    /// The count comes from the summary rather than the run length so the
+    /// number the reader sees is the number of calls actually folded in.
+    pub fn rail_summary(&self, start: usize, len: usize) -> (String, u32) {
+        let mut summary = RoutineRailSummary::new();
+        for block in self.blocks.iter().skip(start).take(len) {
+            if let BlockKind::ToolCall {
+                tool_name,
+                input_summary,
+                ..
+            } = &block.kind
+            {
+                let target = (!input_summary.trim().is_empty()).then_some(input_summary.as_str());
+                summary.record(tool_name, target);
+            }
+        }
+        (summary.headline(3), summary.total())
+    }
+
     /// How many blocks starting at `ix` render as a single unit (DEV-574).
     ///
     /// `1` for anything that renders on its own. `0` means this block was
@@ -1196,5 +1283,193 @@ mod turn_grouping_tests {
         doc.apply_event(text("a"));
         doc.apply_event(text("b"));
         assert_eq!(doc.blocks().len(), 3, "no block is removed by merging");
+    }
+}
+
+#[cfg(test)]
+mod rail_grouping_tests {
+    use super::*;
+
+    fn tool(id: &str, name: &str, target: &str) -> RichEvent {
+        RichEvent::ToolUse {
+            tool_use_id: id.into(),
+            tool_name: name.into(),
+            input: serde_json::json!({ "file_path": target }),
+            parent_agent_id: None,
+        }
+    }
+
+    fn subagent_tool(id: &str, name: &str, agent: &str) -> RichEvent {
+        RichEvent::ToolUse {
+            tool_use_id: id.into(),
+            tool_name: name.into(),
+            input: serde_json::json!({ "file_path": "/tmp/x.rs" }),
+            parent_agent_id: Some(agent.into()),
+        }
+    }
+
+    fn text(s: &str) -> RichEvent {
+        RichEvent::TextBlock {
+            text: s.into(),
+            parent_agent_id: None,
+        }
+    }
+
+    fn failed(id: &str) -> RichEvent {
+        RichEvent::ToolResult {
+            tool_use_id: id.into(),
+            content: "No such file".into(),
+            is_error: true,
+            parent_agent_id: None,
+        }
+    }
+
+    /// The rail run each index belongs to, as `(start, len)`, which puts the
+    /// whole grouping decision on one readable line per test.
+    fn rails(doc: &RichDocument) -> Vec<Option<(usize, usize)>> {
+        (0..doc.blocks().len())
+            .map(|i| doc.rail_run_at(i))
+            .collect()
+    }
+
+    #[test]
+    fn a_run_of_routine_calls_becomes_one_rail() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(tool("t1", "Read", "/a.rs"));
+        doc.apply_event(tool("t2", "Read", "/b.rs"));
+        doc.apply_event(tool("t3", "Bash", "cargo test"));
+        assert_eq!(
+            rails(&doc),
+            vec![None, Some((1, 3)), Some((1, 3)), Some((1, 3))]
+        );
+    }
+
+    #[test]
+    fn the_summary_counts_by_kind() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(tool("t1", "Read", "/a.rs"));
+        doc.apply_event(tool("t2", "Read", "/b.rs"));
+        doc.apply_event(tool("t3", "Bash", "cargo test"));
+        let (summary, count) = doc.rail_summary(1, 3);
+        assert!(summary.contains("2 reads"), "got {summary}");
+        assert!(summary.contains("1 shell"), "got {summary}");
+        assert_eq!(count, 3, "the count is what was folded in, not the span");
+    }
+
+    #[test]
+    fn a_single_routine_call_is_not_railed() {
+        // Aggregating one call into "1 read" costs a click and saves nothing.
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(tool("t1", "Read", "/a.rs"));
+        assert_eq!(rails(&doc), vec![None, None]);
+    }
+
+    #[test]
+    fn a_mutation_never_joins_a_rail() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(tool("t1", "Read", "/a.rs"));
+        doc.apply_event(tool("t2", "Write", "/b.rs"));
+        doc.apply_event(tool("t3", "Read", "/c.rs"));
+        assert_eq!(rails(&doc), vec![None, None, None, None]);
+    }
+
+    #[test]
+    fn a_notable_call_never_joins_a_rail() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(tool("t1", "Read", "/a.rs"));
+        doc.apply_event(tool("t2", "Task", "delegate"));
+        doc.apply_event(tool("t3", "Read", "/c.rs"));
+        assert_eq!(rails(&doc), vec![None, None, None, None]);
+    }
+
+    #[test]
+    fn an_errored_call_leaves_the_rail_and_splits_it() {
+        // A failure must never sit behind a summary line. When the result
+        // lands the run is recomputed and the error stands on its own.
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(tool("t1", "Read", "/a.rs"));
+        doc.apply_event(tool("t2", "Read", "/missing.rs"));
+        doc.apply_event(tool("t3", "Read", "/c.rs"));
+        assert_eq!(
+            rails(&doc)[1],
+            Some((1, 3)),
+            "all three rail together while none has failed"
+        );
+        doc.apply_event(failed("t2"));
+        assert_eq!(
+            rails(&doc),
+            vec![None, None, None, None],
+            "the failure splits the run, leaving two runs of one — neither railed"
+        );
+    }
+
+    #[test]
+    fn prose_between_two_groups_breaks_the_run() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(tool("t1", "Read", "/a.rs"));
+        doc.apply_event(tool("t2", "Read", "/b.rs"));
+        doc.apply_event(text("some prose"));
+        doc.apply_event(tool("t3", "Read", "/c.rs"));
+        doc.apply_event(tool("t4", "Read", "/d.rs"));
+        assert_eq!(
+            rails(&doc),
+            vec![
+                None,
+                Some((1, 2)),
+                Some((1, 2)),
+                None,
+                Some((4, 2)),
+                Some((4, 2))
+            ]
+        );
+    }
+
+    #[test]
+    fn a_rail_never_crosses_a_turn_boundary() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("first".into());
+        doc.apply_event(tool("t1", "Read", "/a.rs"));
+        doc.push_user_prompt("second".into());
+        doc.apply_event(tool("t2", "Read", "/b.rs"));
+        assert_eq!(rails(&doc), vec![None, None, None, None]);
+    }
+
+    #[test]
+    fn a_rail_never_crosses_an_agent_boundary() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(tool("t1", "Read", "/a.rs"));
+        doc.apply_event(subagent_tool("t2", "Read", "toolu_x"));
+        assert_eq!(rails(&doc), vec![None, None, None]);
+    }
+
+    #[test]
+    fn two_subagents_do_not_rail_together() {
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        doc.apply_event(subagent_tool("t1", "Read", "toolu_a"));
+        doc.apply_event(subagent_tool("t2", "Read", "toolu_b"));
+        assert_eq!(rails(&doc), vec![None, None, None]);
+    }
+
+    #[test]
+    fn every_member_reports_the_same_run() {
+        // The view relies on this: a block asks which run it is in, and only
+        // the start draws the summary.
+        let mut doc = RichDocument::new();
+        doc.push_user_prompt("go".into());
+        for i in 0..5 {
+            doc.apply_event(tool(&format!("t{i}"), "Read", &format!("/{i}.rs")));
+        }
+        for ix in 1..6 {
+            assert_eq!(doc.rail_run_at(ix), Some((1, 5)), "index {ix}");
+        }
     }
 }
