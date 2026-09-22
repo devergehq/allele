@@ -990,7 +990,6 @@ pub(crate) mod fixture {
                         dirty_session: None,
                         quit: false,
                         remove_project: None,
-                        dirty_merge: None,
                         delete_archive: None,
                         delete_all_archives: None,
                         armed_at: None,

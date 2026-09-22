@@ -1239,15 +1239,7 @@ mod tests {
 
     fn suspended_session(id: &str) -> Session {
         let now = SystemTime::now();
-        Session::suspended_from_persisted(
-            id.into(),
-            id.into(),
-            now,
-            now,
-            Duration::ZERO,
-            None,
-            false,
-        )
+        Session::suspended_from_persisted(id.into(), id.into(), now, now, Duration::ZERO, None)
     }
 
     fn archive_entry(id: &str, project_id: &str) -> ArchivedSession {
@@ -1256,7 +1248,6 @@ mod tests {
             project_id: project_id.into(),
             label: id.into(),
             archived_at: 0,
-            merge_error: None,
         }
     }
 
