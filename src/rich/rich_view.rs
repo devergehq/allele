@@ -18,6 +18,7 @@ use crate::theme::{theme, with_alpha};
 use gpui::*;
 use similar::{ChangeTag, TextDiff};
 
+use super::column::{framed, prose_width};
 use super::compose_bar::{ComposeBar, ComposeBarEvent};
 use super::document::{
     short_path, truncate_to_char_boundary, Block, BlockId, BlockKind, RichDocument,
@@ -387,7 +388,12 @@ impl RichView {
         });
 
         let block_el = render_block(block, annotation, font_size, cx);
-        if let Some(header) = agent_header {
+        // DEV-571: every item shares one centred frame, so the whole feed
+        // reads down a single column instead of stretching to the pane. The
+        // frame goes here rather than inside `render_block` so that the
+        // agent header, the run's left border and the role accent bars all
+        // land inside the column with the content they belong to.
+        let content = if let Some(header) = agent_header {
             div()
                 .flex()
                 .flex_col()
@@ -396,7 +402,8 @@ impl RichView {
                 .into_any_element()
         } else {
             block_el.into_any_element()
-        }
+        };
+        framed(font_size, content).into_any_element()
     }
 
     fn render_scrollbar(&self) -> Div {
@@ -981,10 +988,18 @@ fn phase_pill(phase: LocusPhase, font_size: f32) -> Div {
 // ── Text block ────────────────────────────────────────────────────
 
 fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
-    // Claude's prose IS the main content of the transcript — tool calls
-    // and thinking are supporting context. Visually: a speaker pill on
-    // the left mirroring the "You" user-prompt pattern, and generous
-    // vertical rhythm to separate it from surrounding cards.
+    // Claude's prose IS the main content of the transcript — tool calls and
+    // thinking are supporting context — so it carries no speaker chrome of its
+    // own (DEV-572). A turn emits several text blocks, and a label on each one
+    // stuttered down the left edge and stole width from the measure.
+    //
+    // Speaker identity comes from contrast instead: the user's prompt is tinted
+    // and accented, and unadorned prose is the agent's. Note "the agent's" and
+    // not "Claude's" — the label this replaces was hardcoded, and a session may
+    // be running OpenCode, so it was wrong on every block rather than absent.
+    // Per-turn attribution belongs with DEV-574, which is where a turn boundary
+    // is known without walking the block list. Delegated subagents already have
+    // it: `render_agent_header` attributes them once per run.
     div()
         .w_full()
         .min_w_0()
@@ -992,16 +1007,7 @@ fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
         .px(px(10.0))
         .py(px(6.0))
         .flex()
-        .gap(px(8.0))
         .items_start()
-        .child(
-            div()
-                .flex_shrink_0()
-                .text_color(theme().ready)
-                .text_size(px(font_size - 1.0))
-                .font_weight(FontWeight::BOLD)
-                .child("Claude"),
-        )
         .child(
             div()
                 .flex_1()
@@ -1893,9 +1899,9 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
         .px(px(10.0))
         .py(px(6.0))
         .rounded(px(6.0))
-        .bg(with_alpha(theme().accent, 0.08))
+        .bg(with_alpha(theme().accent, 0.12))
         .border_l_2()
-        .border_color(with_alpha(theme().accent, 0.5))
+        .border_color(with_alpha(theme().accent, 0.75))
         .child(
             div()
                 .w_full()
@@ -1915,6 +1921,7 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
                     div()
                         .flex_1()
                         .min_w_0()
+                        .max_w(prose_width(font_size))
                         .text_color(theme().text_primary)
                         .text_size(px(font_size))
                         .child(content.to_string()),
