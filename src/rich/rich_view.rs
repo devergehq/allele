@@ -61,6 +61,12 @@ pub struct RichView {
     document: RichDocument,
     compose_bar: Entity<ComposeBar>,
     font_size: f32,
+    /// Per-block override of whether a tool result is expanded (DEV-576).
+    ///
+    /// An override rather than a set of open blocks, because the default is not
+    /// uniform: a failed call opens by default and everything else clamps, and
+    /// the reader must be able to reverse either.
+    output_open: std::collections::HashMap<super::document::BlockId, bool>,
     /// Rail runs the reader has opened (DEV-575), by the run's first block id.
     ///
     /// Kept here rather than on `Block.collapsed`: whether the rail is open is
@@ -164,6 +170,7 @@ impl RichView {
             document,
             compose_bar,
             font_size,
+            output_open: std::collections::HashMap::new(),
             expanded_rails: std::collections::HashSet::new(),
             agent_label: agent_display_name(agent_kind).into(),
             busy: false,
@@ -435,7 +442,16 @@ impl RichView {
             render_agent_header(cur_agent.map(short_agent).unwrap_or_default(), font_size)
         });
 
-        let block_el = render_block(block, annotation, font_size, merged, speaker, cx);
+        let output_open = self.output_open.get(&block.id).copied();
+        let block_el = render_block(
+            block,
+            annotation,
+            font_size,
+            merged,
+            speaker,
+            output_open,
+            cx,
+        );
         // DEV-571: every item shares one centred frame, so the whole feed
         // reads down a single column instead of stretching to the pane. The
         // frame goes here rather than inside `render_block` so that the
@@ -608,6 +624,8 @@ fn render_block(
     // the one place that turn's speaker is named.
     merged: Option<String>,
     speaker: Option<SharedString>,
+    // `output_open`: the reader's override of this block's output clamp.
+    output_open: Option<bool>,
     cx: &mut Context<RichView>,
 ) -> Div {
     let indent = if block.parent_agent_id.is_some() {
@@ -677,6 +695,7 @@ fn render_block(
                 input_full,
                 block.collapsed,
                 result.as_ref(),
+                output_open,
                 font_size,
                 cx,
             ));
@@ -1251,6 +1270,8 @@ fn render_tool_call(
     input_full: &serde_json::Value,
     collapsed: bool,
     result: Option<&super::document::ToolCallResult>,
+    // The reader's override of this result's clamp, if they set one (DEV-576).
+    output_open: Option<bool>,
     font_size: f32,
     cx: &mut Context<RichView>,
 ) -> Div {
@@ -1319,24 +1340,24 @@ fn render_tool_call(
     }
 
     if let Some(r) = result {
-        if r.is_error {
-            let cleaned = strip_ansi(&r.content);
-            let preview = if cleaned.len() > 200 {
-                format!("{}...", truncate_to_char_boundary(&cleaned, 197))
-            } else {
-                cleaned
-            };
-            card = card.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .mt(px(4.0))
-                    .text_color(theme().danger)
-                    .text_size(px(font_size - 1.0))
-                    .child(preview),
-            );
-        } else if !collapsed && !r.content.trim().is_empty() {
-            card = card.child(render_tool_result_output(&r.content, font_size));
+        // A failure used to take a separate path that hard-truncated to 200
+        // characters with no way to reach the rest — which made "an errored
+        // result opens by default" mean almost nothing, since the part worth
+        // reading was usually already gone. Both paths now clamp, which is
+        // reversible (DEV-576).
+        //
+        // A failure also shows even while the card is collapsed: it is the one
+        // thing a reader scanning a turn must not have to open a card to see.
+        let show = r.is_error || (!collapsed && !r.content.trim().is_empty());
+        if show {
+            card = card.child(render_tool_result_output(
+                block_id,
+                &r.content,
+                r.is_error,
+                output_open,
+                font_size,
+                cx,
+            ));
         }
     }
 
@@ -1527,43 +1548,118 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
 
 // ── Tool result output (shown when expanded) ─────────────────────
 
-const MAX_RESULT_LINES: usize = 80;
+/// Lines of tool output shown before the block clamps (DEV-576).
+///
+/// The old value here was 80, and it did not clamp — it truncated, printing
+/// "…N more lines" with no way to reach them. A `cargo test` run lost its tail
+/// outright. 14 is about a third of a screen: enough to see what a command did,
+/// short enough that a noisy turn stays readable, and now reversible.
+const CLAMP_LINES: usize = 14;
 
-fn render_tool_result_output(content: &str, font_size: f32) -> Div {
+/// Whether output of `line_count` lines should clamp, given whether the reader
+/// has overridden the default and whether the call failed.
+///
+/// A failure opens by default — the whole reason to look at a tool result is
+/// usually that it went wrong — but the reader can still close it, which is why
+/// this takes an override rather than a plain "expanded" flag.
+fn output_is_clamped(line_count: usize, is_error: bool, override_open: Option<bool>) -> bool {
+    if line_count <= CLAMP_LINES {
+        return false;
+    }
+    !override_open.unwrap_or(is_error)
+}
+
+fn render_tool_result_output(
+    block_id: super::document::BlockId,
+    content: &str,
+    is_error: bool,
+    override_open: Option<bool>,
+    font_size: f32,
+    cx: &mut Context<RichView>,
+) -> Div {
     let code_size = font_size - 2.0;
     let cleaned = strip_ansi(content);
     let lines: Vec<&str> = cleaned.lines().collect();
-    let truncated = lines.len() > MAX_RESULT_LINES;
-    let visible = if truncated {
-        &lines[..MAX_RESULT_LINES]
+    let clamped = output_is_clamped(lines.len(), is_error, override_open);
+    let visible: &[&str] = if clamped {
+        &lines[..CLAMP_LINES]
     } else {
         &lines
     };
+    let hidden = lines.len() - visible.len();
+
+    let surface = with_alpha(theme().bg_hover, 0.3);
+    let mut body = div()
+        .w_full()
+        .min_w_0()
+        .px(px(8.0))
+        .py(px(6.0))
+        .text_color(if is_error {
+            theme().danger
+        } else {
+            theme().text_secondary
+        })
+        .text_size(px(code_size))
+        .font_family(crate::theme::FONT_MONO);
+    for line in visible {
+        body = body.child(div().w_full().min_w_0().child(line.to_string()));
+    }
 
     let mut block = div()
         .w_full()
         .min_w_0()
         .mt(px(8.0))
-        .px(px(8.0))
-        .py(px(6.0))
         .rounded(px(6.0))
-        .bg(with_alpha(theme().bg_hover, 0.3))
-        .text_color(theme().text_secondary)
-        .text_size(px(code_size))
-        .font_family(crate::theme::FONT_MONO);
+        .overflow_hidden()
+        .bg(surface)
+        // `relative` so the fade can sit over the last lines. The clamp shows
+        // fewer lines rather than scrolling: a scroll region nested inside the
+        // scrolling feed costs the reader their place in the outer scroll.
+        .relative()
+        .child(body);
 
-    for line in visible {
-        block = block.child(div().w_full().min_w_0().child(line.to_string()));
-    }
-
-    if truncated {
-        let remaining = lines.len() - MAX_RESULT_LINES;
+    if clamped {
         block = block.child(
             div()
-                .mt(px(4.0))
-                .text_color(with_alpha(theme().text_faint, 0.7))
+                .absolute()
+                .bottom(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .h(px(code_size * 2.5))
+                // Purely decorative. A plain div registers no mouse handlers,
+                // so it does not intercept the click on the control below it.
+                .bg(linear_gradient(
+                    180.0,
+                    linear_color_stop(with_alpha(surface, 0.0), 0.0),
+                    linear_color_stop(surface, 1.0),
+                )),
+        );
+    }
+
+    if lines.len() > CLAMP_LINES {
+        let label = if clamped {
+            format!("Show {hidden} more lines")
+        } else {
+            "Show less".to_string()
+        };
+        let now_open = !clamped;
+        block = block.child(
+            div()
+                .id(ElementId::Name(format!("output-toggle-{block_id}").into()))
+                .w_full()
+                .px(px(8.0))
+                .py(px(3.0))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .text_color(theme().accent)
                 .text_size(px(code_size))
-                .child(format!("…{remaining} more lines")),
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.output_open.insert(block_id, !now_open);
+                        cx.notify();
+                    }),
+                ),
         );
     }
 
@@ -2511,5 +2607,55 @@ mod unread_tests {
             unread.mark_viewed(h);
         }
         assert_eq!(count(&doc, &unread), 0, "acknowledging clears unread");
+    }
+}
+
+#[cfg(test)]
+mod clamp_tests {
+    // Imported by name rather than with a glob: this module's `use gpui::*`
+    // brings in gpui's own `test` attribute macro, which shadows the built-in
+    // one and sends `#[test]` into infinite expansion.
+    use super::{output_is_clamped, CLAMP_LINES};
+
+    #[test]
+    fn short_output_never_clamps() {
+        for lines in 0..=CLAMP_LINES {
+            assert!(
+                !output_is_clamped(lines, false, None),
+                "{lines} lines fit and must gain no fade or control"
+            );
+        }
+    }
+
+    #[test]
+    fn long_output_clamps_by_default() {
+        assert!(output_is_clamped(CLAMP_LINES + 1, false, None));
+        assert!(output_is_clamped(5_000, false, None));
+    }
+
+    #[test]
+    fn a_failed_call_opens_by_default() {
+        // The usual reason to read a tool result at all is that it went wrong.
+        assert!(!output_is_clamped(5_000, true, None));
+    }
+
+    #[test]
+    fn a_failed_call_can_still_be_collapsed() {
+        // Which is why this takes an override rather than a plain flag: the
+        // default is not uniform, and both directions must be reversible.
+        assert!(output_is_clamped(5_000, true, Some(false)));
+    }
+
+    #[test]
+    fn the_reader_can_open_a_long_successful_result() {
+        assert!(!output_is_clamped(5_000, false, Some(true)));
+    }
+
+    #[test]
+    fn an_override_cannot_clamp_output_that_already_fits() {
+        // Nothing is hidden, so there is nothing to reveal — a control here
+        // would promise something it cannot deliver.
+        assert!(!output_is_clamped(3, false, Some(false)));
+        assert!(!output_is_clamped(3, true, Some(false)));
     }
 }
