@@ -39,6 +39,60 @@ Changes on `master` awaiting the next tagged release.
   space back. The collapsed choice persists across restarts, and a bar with
   nothing waiting still renders nothing at all.
 
+### Fixed
+- Allele no longer beachballs while a session is being dispatched. The window
+  could stop responding for tens of seconds at a time — worst while a dispatch
+  was provisioning and you were resuming other sessions alongside it — then
+  recover on its own once provisioning finished. Three separate pieces of work
+  were running on the thread that draws the window: a scan of every directory
+  under `~/.claude/projects`, repeated on every frame, to decide whether each
+  session could be resumed; a sweep of `~/.allele/events`, which had grown to
+  months of history; and a rewrite of the whole of `state.json` on every frame
+  that anything had changed. Each is cheap against an idle disk and slow under
+  the load a dispatch generates, which is why the freeze needed both things
+  happening at once before it appeared — and why it went unreproduced for so
+  long when either was tested on its own. Resumability is now remembered and
+  refreshed on a timer, the event directory is pruned, and `state.json` and
+  `settings.json` are written at most twice a second and off the drawing
+  thread. Quitting still flushes everything to disk first.
+- A newly created session reliably receives its first prompt. Dispatched
+  sessions, and ones you start yourself with an opening message, could come up
+  idle having never submitted anything. The prompt was typed into the agent's
+  terminal on a fixed timer that raced the agent's own startup, so it either
+  landed before anything was listening and was swallowed, or arrived as visible
+  escape characters. Claude sessions are now handed the prompt as an argument
+  when the process starts — already submitted before the terminal exists, so
+  there is nothing left to race. Other agents still receive it by typing, but
+  only once their terminal reports that it can accept one, with a bounded wait
+  and retries rather than a single guess.
+- Dispatching a session while another is still being created no longer returns
+  the wrong one. `sessions.create` identified what it had just made by
+  comparing the project's session list before and after the call, which ignored
+  the sessions still being cloned — so with anything else in flight it returned
+  an id belonging to a different caller. The consequences were quiet rather
+  than loud: the new session was recorded as human-created, so it did not count
+  against the dispatch cap and could not be discarded through the MCP tools,
+  and the keystrokes meant to submit its prompt went to another session's
+  terminal instead. Creation now reports the id it actually minted.
+- `settings.json` can no longer be left truncated by a crash. It was written by
+  emptying the file and then writing over it, so losing power or filling the
+  disk in between left it half-written, and the next launch fell back to
+  defaults — taking the project list, the agent configuration, the sync
+  settings and the dispatch limits with it. It is now written to a temporary
+  file and moved into place, the way `state.json` always has been, so either
+  the new settings are complete on disk or the old ones are untouched.
+
+### Security
+- Session event files and prompt sidecars are no longer world-readable. Every
+  session's opening prompt is written to `~/.allele/events`, and those are the
+  briefs sessions are dispatched with, so they routinely carry whatever context
+  you gave them; the event streams beside them record tool names and input
+  summaries. Both were readable by any process running as you, in a directory
+  that was itself listable, and were kept for the life of the session. The
+  directory is now created private, new files are written private, and a sweep
+  at startup tightens whatever an existing install has already accumulated —
+  on the machine this was found on, four months of briefs.
+
 ## [0.4.0] - 2026-08-30
 
 ### Added
