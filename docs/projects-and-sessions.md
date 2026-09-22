@@ -34,9 +34,7 @@ Each project carries a `ProjectSettings` (`src/settings.rs`), persisted in
 
 | Field                 | Purpose                                                                   |
 |-----------------------|---------------------------------------------------------------------------|
-| `default_branch`      | Override auto-detected default branch. `None` → detect, fallback `master`. |
-| `merge_strategy`      | How session work is integrated back into canonical.                       |
-| `rebase_before_merge` | Fetch + rebase canonical onto the remote tip before merging. Default on.  |
+| `default_branch`      | Base branch for new sessions that don't name one. Fetched from the remote first; the session still gets its own `session-<id>` branch. `None` → start from whatever the project has checked out. |
 | `remote`              | Remote name for fetch/rebase. `None` → `origin`.                          |
 | `terminals`           | Drawer terminals spawned for each session (see below).                    |
 | `startup`             | Session-start hook command (see below).                                   |

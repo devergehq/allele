@@ -42,7 +42,7 @@ The core primitives:
   in its own pseudoterminal, rendered inside a GPUI terminal widget.
 - **Git archive refs** — when a session closes, its branch is archived
   under `refs/allele/archive/<id>` on canonical so work is never lost
-  and can be merged back.
+  and can be restored into a new session.
 - **Hook events** — Claude Code's hook system writes JSONL files to
   `~/.allele/events/`. Allele polls them to update session status
   (Running / AwaitingInput / ResponseReady / Done).
@@ -89,7 +89,7 @@ src/
 ├── browser/                # macOS-only Chrome AppleScript driver
 ├── clone/                  # Workspace clone + trash + orphan sweep
 ├── config/                 # allele.json (per-project config) parser
-├── git/                    # git subprocess wrapper (pull, merge, archive)
+├── git/                    # git subprocess wrapper (pull, branch, archive)
 ├── hooks/                  # Hook receiver install + event watcher + dialogs
 ├── project/                # Project struct (source path, sessions, archives)
 ├── scratch_pad/            # Compose overlay entity + clipboard image helper
@@ -314,12 +314,10 @@ with variants for the real failure categories: `Io`, `Json`, `Git`,
 - ✅ `clone::*` — all 7 public fns (`create_session_clone`, `create_clone`,
   `delete_clone`, `trash_base`, `trash_clone`, `purge_trash_older_than_days`,
   `sweep_orphans`)
-- ✅ `git::*` public fns — 15 of them (`pull`,
-  `fetch_and_rebase_onto_remote_branch`, `git_init`, `create_session_branch`,
+- ✅ `git::*` public fns — 11 of them (`pull`, `git_init`, `create_session_branch`,
   `fetch_session_branch`, `auto_commit_if_dirty`, `archive_session`,
-  `delete_ref`, `prune_archive_refs`, `list_archive_refs`, `merge_archive`,
-  `squash_merge_archive`, `rebase_merge_archive`, `rename_session_branch`,
-  `rename_current_branch`)
+  `delete_ref`, `prune_archive_refs`, `list_archive_refs`,
+  `rename_session_branch`, `rename_current_branch`)
 - ⏳ `git::run_git` / `run_git_stdout` internal helpers remain on
   `anyhow::Result` — bridged at each public call site via
   `.map_err(|e| AlleleError::Git(e.to_string()))`. These stay on anyhow by
@@ -718,8 +716,8 @@ Known work not yet landed, in rough priority order:
   it worth doing before someone loses an afternoon to it. Candidates: the
   `Render` impl, the macOS app menu, and the startup task wiring.
 - Adopt `AlleleError` in the remaining `git::*` functions
-  (`fetch_and_rebase_onto_remote_branch`, `auto_commit_if_dirty`,
-  `delete_ref`, `list_archive_refs`, `prune_archive_refs`, etc.)
+  (`auto_commit_if_dirty`, `delete_ref`, `list_archive_refs`,
+  `prune_archive_refs`, etc.)
 - Extend repositories: `ScratchPadRepository`, `ArchivesRepository`
 - `unwrap()` audit in `session_ops.rs` + `pending_actions.rs`
   (started; see `docs/unwrap-audit.md` if present)

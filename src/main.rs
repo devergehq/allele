@@ -30,6 +30,7 @@ mod new_session_modal;
 mod paths;
 mod pending_actions;
 mod platform;
+mod proc;
 mod project;
 mod reader;
 mod remote_browser;
@@ -740,10 +741,11 @@ impl AppState {
     /// Reveal a path in macOS Finder. For files, Finder selects the file
     /// inside its containing folder; for directories, it opens them.
     pub(crate) fn reveal_in_finder(path: &std::path::Path) {
-        let _ = std::process::Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn();
+        let mut command = std::process::Command::new("open");
+        command.arg("-R").arg(path);
+        if let Err(e) = crate::proc::spawn_and_reap(command) {
+            tracing::warn!("reveal_in_finder({}): spawn failed: {e}", path.display());
+        }
     }
 
     /// Spawn the user-configured external editor with `path` as an argument.
@@ -1858,7 +1860,6 @@ fn main() {
                                             &entry.session_id[..8.min(entry.session_id.len())]
                                         ),
                                         archived_at: entry.timestamp,
-                                        merge_error: None,
                                     });
                                 }
                             }
@@ -1889,7 +1890,6 @@ fn main() {
                             persisted.last_active,
                             std::time::Duration::from_secs(persisted.active_runtime_secs),
                             persisted.clone_path.clone(),
-                            persisted.merged,
                         )
                         .with_drawer_tabs(persisted.drawer_tabs(), persisted.drawer_active_tab)
                         .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
@@ -1899,7 +1899,6 @@ fn main() {
                         session.pinned = persisted.pinned;
                         session.comment = persisted.comment.clone();
                         session.branch_name = persisted.branch_name.clone();
-                        session.merge_strategy_override = persisted.merge_strategy_override;
                         session.branch_locked = persisted.branch_locked;
                         session.orchestration = persisted.orchestration();
                         conversations::repair_session_pointer(&mut session);
@@ -2132,7 +2131,6 @@ fn main() {
                             dirty_session: None,
                             quit: false,
                             remove_project: None,
-                            dirty_merge: None,
                             delete_archive: None,
                             delete_all_archives: None,
                             armed_at: None,

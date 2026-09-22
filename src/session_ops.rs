@@ -147,6 +147,10 @@ impl AppState {
         // Spawn the clone on a background task, then finish on the main thread
         let source_for_task = source_path.clone();
         let project_name_for_task = project_name.clone();
+        // The project's default branch, if set, is the base this session's own
+        // branch starts from (DEV-691). Empty means "wherever the project is".
+        let base_branch = project.settings.default_branch.clone();
+        let session_remote = project.settings.resolved_remote().to_string();
         let pull_before_clone = self.user_settings.git_pull_before_new_session;
         let cleanup_paths_for_task = self.user_settings.session_cleanup_paths.clone();
         // Two copies: one moves into the background clonefile closure (where
@@ -244,8 +248,16 @@ impl AppState {
                 // Only do this when clonefile succeeded — when we fell back
                 // to source_path we must NOT mutate canonical's HEAD.
                 if clone_succeeded {
-                    if let Err(e) = git::create_session_branch(&clone_path, &session_id_for_session)
-                    {
+                    let branched = match base_branch.as_deref() {
+                        Some(base) => git::create_session_branch_from(
+                            &clone_path,
+                            &session_id_for_session,
+                            base,
+                            &session_remote,
+                        ),
+                        None => git::create_session_branch(&clone_path, &session_id_for_session),
+                    };
+                    if let Err(e) = branched {
                         warn!("create_session_branch failed for {session_id_for_session}: {e}");
                     }
 
@@ -517,6 +529,9 @@ impl AppState {
         let agent_id_for_task = agent_id.clone();
         let pull_before_clone = self.user_settings.git_pull_before_new_session;
         let cleanup_paths_for_task = self.user_settings.session_cleanup_paths.clone();
+        // An explicitly named branch always wins; the project's default branch
+        // is only the base for sessions that did not name one (DEV-691).
+        let base_branch = project.settings.default_branch.clone();
         let branch_slug = custom_branch_slug;
         // The user picked this branch — auto-naming may relabel the session but
         // must never rename the branch out from under them.
@@ -531,75 +546,92 @@ impl AppState {
         let created_session_id = session_id.clone();
 
         cx.spawn_in(window, async move |this, cx| {
-            let (clone_result, pull_error, branch_warning, branch_error) = cx
-                .background_executor()
-                .spawn(async move {
-                    let pull_error = if pull_before_clone {
-                        match git::pull(&source_for_task) {
-                            Ok(git::PullOutcome::UpToDate) => None,
-                            Ok(git::PullOutcome::Diverged) => {
-                                // Benign: the source branch has local/remote
-                                // divergence and can't fast-forward. Clone from
-                                // current HEAD; no user-facing warning.
-                                info!(
-                                    "git pull on {} skipped: branch diverged from \
+            let (clone_result, pull_error, branch_warning, branch_error) =
+                cx.background_executor()
+                    .spawn(async move {
+                        let pull_error = if pull_before_clone {
+                            match git::pull(&source_for_task) {
+                                Ok(git::PullOutcome::UpToDate) => None,
+                                Ok(git::PullOutcome::Diverged) => {
+                                    // Benign: the source branch has local/remote
+                                    // divergence and can't fast-forward. Clone from
+                                    // current HEAD; no user-facing warning.
+                                    info!(
+                                        "git pull on {} skipped: branch diverged from \
                                      upstream, cloning from current source",
-                                    source_for_task.display()
-                                );
-                                None
-                            }
-                            Err(e) => {
-                                let msg = format!("{e}");
-                                warn!(
-                                    "git pull on {} failed before new session: {msg} \
-                                     (continuing with clone)",
-                                    source_for_task.display()
-                                );
-                                Some(msg)
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    let clone = clone::create_session_clone(
-                        &source_for_task,
-                        &project_name_for_task,
-                        &session_id_for_clone,
-                        &cleanup_paths_for_task,
-                    );
-
-                    // Resolve the session branch here (off the UI thread):
-                    // fetch and reset onto the remote tip if the user named a
-                    // branch, otherwise create a fresh session branch.
-                    let mut branch_warning = None;
-                    let mut branch_error = None;
-                    if let Ok(ref clone_path) = clone {
-                        if clone_path != &source_for_task {
-                            match git::checkout_or_create_session_branch(
-                                clone_path,
-                                &session_id_for_branch,
-                                branch_slug_for_clone.as_deref(),
-                                &session_remote,
-                            ) {
-                                Ok(resolution) => branch_warning = resolution.warning,
-                                Err(e) => {
-                                    warn!(
-                                        "session branch setup failed for \
-                                         {session_id_for_branch}: {e}"
+                                        source_for_task.display()
                                     );
-                                    // Fail closed: opening the session anyway
-                                    // would put work on a base the user did not
-                                    // ask for, which is the whole failure mode
-                                    // this path exists to prevent.
-                                    branch_error = Some(format!("{e}"));
+                                    None
+                                }
+                                Err(e) => {
+                                    let msg = format!("{e}");
+                                    warn!(
+                                        "git pull on {} failed before new session: {msg} \
+                                     (continuing with clone)",
+                                        source_for_task.display()
+                                    );
+                                    Some(msg)
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let clone = clone::create_session_clone(
+                            &source_for_task,
+                            &project_name_for_task,
+                            &session_id_for_clone,
+                            &cleanup_paths_for_task,
+                        );
+
+                        // Resolve the session branch here (off the UI thread):
+                        // fetch and reset onto the remote tip if the user named a
+                        // branch, otherwise create a fresh session branch.
+                        let mut branch_warning = None;
+                        let mut branch_error = None;
+                        if let Ok(ref clone_path) = clone {
+                            if clone_path != &source_for_task {
+                                // No branch named, but the project has a default:
+                                // root the session branch there instead of at the
+                                // clone's HEAD (DEV-691). A named branch still goes
+                                // through the resolver below, unchanged.
+                                let resolved = match (&branch_slug_for_clone, &base_branch) {
+                                    (None, Some(base)) => git::create_session_branch_from(
+                                        clone_path,
+                                        &session_id_for_branch,
+                                        base,
+                                        &session_remote,
+                                    )
+                                    .map(|()| git::SessionBranchResolution {
+                                        outcome: git::SessionBranchOutcome::CreatedNew,
+                                        warning: None,
+                                    }),
+                                    _ => git::checkout_or_create_session_branch(
+                                        clone_path,
+                                        &session_id_for_branch,
+                                        branch_slug_for_clone.as_deref(),
+                                        &session_remote,
+                                    ),
+                                };
+                                match resolved {
+                                    Ok(resolution) => branch_warning = resolution.warning,
+                                    Err(e) => {
+                                        warn!(
+                                            "session branch setup failed for \
+                                         {session_id_for_branch}: {e}"
+                                        );
+                                        // Fail closed: opening the session anyway
+                                        // would put work on a base the user did not
+                                        // ask for, which is the whole failure mode
+                                        // this path exists to prevent.
+                                        branch_error = Some(format!("{e}"));
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    (clone, pull_error, branch_warning, branch_error)
-                })
-                .await;
+                        (clone, pull_error, branch_warning, branch_error)
+                    })
+                    .await;
 
             let _ = this.update_in(cx, move |this: &mut Self, window, cx| {
                 // Branch resolution failed → abort. Tear the clone down, drop
@@ -1427,7 +1459,6 @@ impl AppState {
         let removed = project.sessions.remove(cursor.session_idx);
         let clone_path = removed.clone_path.clone();
         let removed_label = removed.label.clone();
-        let already_merged = removed.merged;
         let removed_session_id = removed.id.clone();
         let removed_browser_tab_id = removed.browser_tab_id;
         let runs_shutdown = removed.orchestration.runs_startup();
@@ -1436,21 +1467,23 @@ impl AppState {
         let session_id_for_task = removed.id.clone();
 
         // Preserve the session's metadata in the archive list so the
-        // sidebar archive browser can show a human-readable label —
-        // but skip this if the session was already merged (work is in canonical).
-        if !already_merged {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            project.archives.push(ArchivedSession {
-                id: removed.id.clone(),
-                project_id: project.id.clone(),
-                label: removed_label.clone(),
-                archived_at: now,
-                merge_error: None,
-            });
-        }
+        // sidebar archive browser can show a human-readable label.
+        //
+        // Unconditional since DEV-686 removed merge-and-close: there is no
+        // longer any path by which a session's work is already in canonical,
+        // so there is nothing to skip for. Always preserving is also the safe
+        // direction — an extra archive entry costs a row, a missing one costs
+        // the only handle on the work.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        project.archives.push(ArchivedSession {
+            id: removed.id.clone(),
+            project_id: project.id.clone(),
+            label: removed_label.clone(),
+            archived_at: now,
+        });
 
         // Register Chrome-tab cleanup as a hook on the PTY: when the
         // terminal is dropped below, the tab closes as part of the same
@@ -2024,7 +2057,6 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
         persisted.last_active,
         std::time::Duration::from_secs(persisted.active_runtime_secs),
         persisted.clone_path.clone(),
-        persisted.merged,
     )
     .with_drawer_tabs(persisted.drawer_tabs(), persisted.drawer_active_tab)
     .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
@@ -2033,7 +2065,6 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
     session.pinned = persisted.pinned;
     session.comment = persisted.comment.clone();
     session.branch_name = persisted.branch_name.clone();
-    session.merge_strategy_override = persisted.merge_strategy_override;
     session.branch_locked = persisted.branch_locked;
     session.orchestration = persisted.orchestration();
     session.origin = persisted.origin.clone();

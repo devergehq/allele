@@ -118,13 +118,13 @@ pub(crate) struct PortableSystemShell;
 impl super::SystemShell for PortableSystemShell {
     fn open_url(&self, url: &str) {
         use std::process::{Command, Stdio};
-        let spawn = Command::new("xdg-open")
+        let mut command = Command::new("xdg-open");
+        command
             .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
-        if let Err(e) = spawn {
+            .stderr(Stdio::null());
+        if let Err(e) = crate::proc::spawn_and_reap(command) {
             tracing::warn!("PortableSystemShell::open_url({url}): xdg-open failed: {e}");
         }
     }

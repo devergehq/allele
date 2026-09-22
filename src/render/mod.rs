@@ -61,7 +61,7 @@ impl AppState {
             SessionStatus::ResponseReady => "Ready to review",
         };
         let (action_label, action) =
-            Self::header_action(session.status, session.git_dirty == Some(true), resumable);
+            Self::header_action(session.status, session.has_changes(), resumable);
         // Read the session's own observation, never `self.changes` — that is
         // drawer-scoped state which survives the panel closing, so the header
         // used to report 0 changed on a dirty tree until the panel was opened.
@@ -193,11 +193,6 @@ impl AppState {
                 .text_color(theme().text_faint)
                 .child("Open a project to begin");
         };
-        let changed = project
-            .sessions
-            .iter()
-            .filter(|session| session.git_dirty == Some(true))
-            .count();
         let processes: usize = project
             .sessions
             .iter()
@@ -254,7 +249,6 @@ impl AppState {
                     .flex_wrap()
                     .gap(px(10.0))
                     .child(metric("Sessions", project.sessions.len().to_string()))
-                    .child(metric("Changed workspaces", changed.to_string()))
                     .child(metric("Processes", processes.to_string()))
                     .child(metric("Pull requests", "GitHub not connected".into()))
                     .child(metric("Stacks", "Stack model not available".into())),
@@ -745,16 +739,6 @@ impl AppState {
             .unwrap_or(false);
         let pin_label = if is_pinned { "Unpin" } else { "Pin" };
 
-        let merge_override = self
-            .projects
-            .get(p_idx)
-            .and_then(|p| p.sessions.get(s_idx))
-            .and_then(|s| s.merge_strategy_override);
-        let merge_label = format!(
-            "Merge: {}",
-            merge_override.map_or("Project default", |m| m.label()),
-        );
-
         let menu_item = |id: &'static str, label: &str, color: Hsla| {
             div()
                 .id(id)
@@ -796,37 +780,6 @@ impl AppState {
                             }
                             .into(),
                         );
-                        cx.notify();
-                    }),
-                ),
-            )
-            .child(
-                menu_item(
-                    "session-ctx-merge-strategy",
-                    &merge_label,
-                    theme().text_primary,
-                )
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(move |this: &mut Self, _event, _window, cx| {
-                        cx.stop_propagation();
-                        use crate::settings::MergeStrategy as MS;
-                        if let Some(session) = this
-                            .projects
-                            .get_mut(p_idx)
-                            .and_then(|p| p.sessions.get_mut(s_idx))
-                        {
-                            // Cycle: project default -> Merge -> Squash -> Rebase+merge -> default.
-                            session.merge_strategy_override = match session.merge_strategy_override
-                            {
-                                None => Some(MS::Merge),
-                                Some(MS::Merge) => Some(MS::Squash),
-                                Some(MS::Squash) => Some(MS::RebaseThenMerge),
-                                Some(MS::RebaseThenMerge) => None,
-                            };
-                            this.mark_state_dirty();
-                        }
-                        // Menu stays open so the new value is visible.
                         cx.notify();
                     }),
                 ),
@@ -1240,6 +1193,9 @@ impl Render for AppState {
         // when the panel is visible but showing data for a different
         // session's clone (first open, session switch). Guarded inside.
         self.ensure_changes_fresh(cx);
+        // Same check for the header's changed count, which is on screen
+        // whether or not the panel is (DEV-684). Guarded inside.
+        self.ensure_active_changes_observed(cx);
 
         let sidebar_w = self.sidebar.width;
         let sidebar_visible = self.sidebar.visible;

@@ -86,8 +86,10 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
     .detach();
 
     // Git workspace-status poller (DEV-9). Every 15s, run a
-    // porcelain status per session clone on the background
-    // executor and update the sidebar dirty indicators.
+    // porcelain status for the *active* session's clone on the
+    // background executor and update its changed count. It
+    // polled every clone and fed a per-session dirty dot until
+    // DEV-684; see the note at the collection site below.
     cx.spawn(async move |this, cx| {
         // The first pass runs immediately. `Session::resumable`
         // starts as `None`, and a rehydrated session's Resume
@@ -109,14 +111,26 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                 // timer is one thing to reason about (DEV-445).
                 this.reap_idle_drawers(cx);
 
-                let mut t = Vec::new();
-                for project in this.projects.iter() {
-                    for session in project.sessions.iter() {
-                        if let Some(cp) = &session.clone_path {
-                            t.push(cp.clone());
-                        }
-                    }
-                }
+                // Only the session the user is actually looking at (DEV-684).
+                //
+                // This used to be every clone with a `clone_path`. On a tree of
+                // 83 clones that measured 153s per pass against a nominal 15s
+                // interval — a 91% duty cycle, permanently, whether or not any
+                // session was active. The cost scaled with the number of
+                // registered clones, not with anything the user was doing.
+                //
+                // Nothing needs the breadth any more: the dirty dot that wanted
+                // a flag per session went with it (decided as DEV-686 D2,
+                // removed here in DEV-684), and the only
+                // remaining consumer is the active session's "{n} changed"
+                // header. The changes drawer folds its own observation back via
+                // `record_workspace_change_count`, so this tick only covers the
+                // case where the drawer was never opened.
+                let t: Vec<_> = this
+                    .active_session()
+                    .and_then(|s| s.clone_path.clone())
+                    .into_iter()
+                    .collect();
                 (t, this.resumable_targets())
             }) else {
                 break; // AppState dropped — app is exiting
@@ -127,10 +141,11 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
 
             // Resumability rides this tick for the same reason
             // idle-drawer parking does. Both are filesystem
-            // work — a porcelain status per clone, and per
-            // session a stat plus a scan of ~/.claude/projects
-            // — so they share one timer and one background hop
-            // rather than each growing a loop of their own.
+            // work — one porcelain status for the active
+            // session, and per session a stat plus a scan of
+            // ~/.claude/projects — so they share one timer and
+            // one background hop rather than each growing a
+            // loop of their own.
             let (results, resumable) = cx
                 .background_executor()
                 .spawn(async move {

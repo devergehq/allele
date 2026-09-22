@@ -84,7 +84,6 @@ const ANYHOW_ALLOWLIST: &[&str] = &[
     "src/assets.rs",
     "src/debug_capture.rs",
     "src/git/mod.rs",
-    "src/pending_actions.rs",
     "src/session_ops.rs",
     "src/settings_window/mod.rs",
     "src/settings_window/sync.rs",

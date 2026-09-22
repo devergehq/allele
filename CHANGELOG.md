@@ -39,6 +39,54 @@ Changes on `master` awaiting the next tagged release.
   space back. The collapsed choice persists across restarts, and a bar with
   nothing waiting still renders nothing at all.
 
+### Changed
+- A project's **default branch** setting now does something. It has been
+  editable, saved and shown as "Project setting" while changing nothing at all;
+  set it and new sessions are based on that branch, fetched from the remote
+  first so you start from the current tip rather than whatever the project
+  happened to have checked out. Naming a branch in the new-session dialog still
+  wins, leaving it blank still starts from the project's current branch, and
+  the session still gets its own branch either way — the default branch is the
+  starting point, not somewhere sessions pile up. If it names a branch that
+  exists neither locally nor on the remote, the session is not created rather
+  than quietly starting somewhere else.
+- The workspace status poller now looks at the session you are on, not all of
+  them. It ran `git status` once per session clone every fifteen seconds; on a
+  machine with eighty-three clones one pass took over two minutes, so it was
+  running essentially without pause, and because `git status` stats every file
+  it held filesystem locks the whole time — which other applications on the
+  machine felt more than Allele did. The cost scaled with how many clones you
+  had accumulated rather than with anything you were doing. It is now bounded
+  by the single repository you are looking at.
+
+### Fixed
+- Allele no longer leaks processes. Every notification sound, system
+  notification and hand-off to `open` was spawned and then forgotten, and Rust
+  does not clean up a child process you stop holding onto — so each one stayed
+  in the process table as a zombie until the app quit. One long-running machine
+  had accumulated 3,351 of them. They are now waited on, and a test asserts it
+  stays that way.
+
+### Removed
+- The per-session dirty dot in the sidebar, and its "Uncommitted changes in
+  workspace" tooltip, along with the project tile's "Changed workspaces"
+  metric. Knowing whether every workspace has uncommitted work was what
+  required walking every clone, and it is the session's business — yours or
+  the agent's — not the app's. The session you are on still shows its changed
+  count in the header, and the changes panel is unaffected.
+- Merge-and-close, and with it Allele's opinion on how session work gets
+  integrated. The session row's "Merge and close" button, the archive
+  browser's "Merge" action, the project-level merge strategy
+  (merge / squash / rebase+merge) and sync-remote-first toggles, and the
+  per-session strategy override in the session header are all gone. A session
+  clones the project and you do the work; what happens to the branch
+  afterwards is yours to decide, and for most people that is already a pull
+  request. The archive browser keeps restore and delete, and discarding a
+  session still archives its work into a canonical git ref first — archiving
+  is now unconditional, since nothing can put a session's work into canonical
+  ahead of time. Existing `settings.json` files carrying `merge_strategy` or
+  `rebase_before_merge` load exactly as before; the keys are ignored.
+
 ### Fixed
 - Allele no longer beachballs while a session is being dispatched. The window
   could stop responding for tens of seconds at a time — worst while a dispatch

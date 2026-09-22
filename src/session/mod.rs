@@ -316,7 +316,6 @@ impl ParkedTab {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OperationErrorKind {
     Resume,
-    MergeAndClose,
     /// The per-project `startup` command timed out and was killed. Retry
     /// re-runs `apply_project_config` for the session.
     Startup,
@@ -443,10 +442,6 @@ pub struct Session {
     /// Whether the bottom drawer is visible for this session. Per-session
     /// so switching sessions preserves each session's drawer state.
     pub drawer_visible: bool,
-    /// Set to `true` after a successful merge-and-close. When the session
-    /// is subsequently removed, `remove_session` skips creating an archive
-    /// entry because the work is already in canonical.
-    pub merged: bool,
     /// Set to `true` once `trigger_auto_naming` has been called for this
     /// session, to prevent spawning duplicate naming tasks.
     pub auto_naming_fired: bool,
@@ -479,17 +474,15 @@ pub struct Session {
     pub pinned: bool,
     /// Optional user comment displayed as a subtitle on the session row.
     pub comment: Option<String>,
-    /// Per-session merge strategy. `None` = use the project's setting.
-    pub merge_strategy_override: Option<crate::settings::MergeStrategy>,
-    /// Whether the workspace has uncommitted changes. `None` until the
-    /// first background poll completes. Display-only; never persisted.
-    pub git_dirty: Option<bool>,
     /// How many entries the changes panel would list for this workspace.
     /// `None` until first observed — rendered as "—", never as "0 changed",
     /// so the header can't assert a clean tree it hasn't actually seen.
-    /// Written by the background git poller *and* by `refresh_changes`, both
-    /// via `git::working_tree_change_count`'s unit, so the header, the sidebar
-    /// dirty dot, and the panel always agree. Display-only; never persisted.
+    ///
+    /// Only ever observed for the **active** session (DEV-684): the poller
+    /// stopped walking every clone, and the only reader is that session's own
+    /// header. Written by the background tick *and* by `refresh_changes`, both
+    /// via `git::working_tree_change_count`'s unit, so the header and the
+    /// panel always agree. Display-only; never persisted.
     pub git_dirty_count: Option<usize>,
     /// Whether a `Done` or `Suspended` session can be revived with its prior
     /// conversation: its clone is still on disk *and* Claude has a history
@@ -563,6 +556,17 @@ pub struct Session {
 }
 
 impl Session {
+    /// Whether this session's workspace has changes the panel would list.
+    ///
+    /// `false` while unobserved, so a header can't offer "Review changes" for
+    /// a tree nobody has looked at yet. Replaces the `git_dirty` boolean,
+    /// removed in DEV-684 under a decision recorded as DEV-686 D2: one
+    /// observation now serves both the count and the question, instead of a
+    /// second field that could disagree with it.
+    pub fn has_changes(&self) -> bool {
+        self.git_dirty_count.is_some_and(|n| n > 0)
+    }
+
     /// Create a new running session with a caller-supplied UUID.
     ///
     /// The caller's UUID becomes the session's identity *and* is passed
@@ -588,7 +592,6 @@ impl Session {
             drawer_parked_at: None,
             last_focused_at: SystemTime::now(),
             drawer_visible: false,
-            merged: false,
             auto_naming_fired: false,
             allocated_port: None,
             resuming_until: None,
@@ -597,8 +600,6 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
-            merge_strategy_override: None,
-            git_dirty: None,
             git_dirty_count: None,
             resumable: None,
             branch_name: None,
@@ -627,7 +628,6 @@ impl Session {
         last_active: SystemTime,
         active_accumulated: Duration,
         clone_path: Option<PathBuf>,
-        merged: bool,
     ) -> Self {
         Self {
             id,
@@ -652,7 +652,6 @@ impl Session {
             drawer_parked_at: None,
             last_focused_at: SystemTime::now(),
             drawer_visible: false,
-            merged,
             auto_naming_fired: false,
             allocated_port: None,
             resuming_until: None,
@@ -661,8 +660,6 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
-            merge_strategy_override: None,
-            git_dirty: None,
             git_dirty_count: None,
             resumable: None,
             branch_name: None,
@@ -1024,7 +1021,6 @@ mod tests {
             now,
             std::time::Duration::ZERO,
             None,
-            false,
         )
     }
 

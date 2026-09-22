@@ -555,12 +555,15 @@ pub fn play_sound(path: &str) {
     #[cfg(target_os = "macos")]
     {
         use std::process::{Command, Stdio};
-        let _ = Command::new("afplay")
+        let mut command = Command::new("afplay");
+        command
             .arg(path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .stderr(Stdio::null());
+        if let Err(e) = crate::proc::spawn_and_reap(command) {
+            tracing::warn!("play_sound({path}): spawn failed: {e}");
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -582,13 +585,16 @@ pub fn show_notification(title: &str, body: &str) {
             escape(body),
             escape(title)
         );
-        let _ = Command::new("osascript")
+        let mut command = Command::new("osascript");
+        command
             .arg("-e")
             .arg(script)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn();
+            .stderr(Stdio::null());
+        if let Err(e) = crate::proc::spawn_and_reap(command) {
+            tracing::warn!("show_notification: spawn failed: {e}");
+        }
     }
 
     #[cfg(not(target_os = "macos"))]
