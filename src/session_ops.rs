@@ -30,7 +30,7 @@ use crate::{agents, browser, clone, config, conversations, git, project, setting
 /// that warning stays put until something replaces it.
 /// Delete a clone without blocking the UI thread: a paced delete of a large
 /// tree takes tens of seconds (DEV-755).
-fn delete_clone_in_background(cx: &mut gpui::App, clone_path: std::path::PathBuf) {
+pub(crate) fn delete_clone_in_background(cx: &mut gpui::App, clone_path: std::path::PathBuf) {
     cx.background_executor()
         .spawn(async move {
             if let Err(e) = clone::delete_clone(&clone_path) {
@@ -1886,7 +1886,7 @@ impl AppState {
             let _ = this.update(cx, |this, cx| {
                 match outcome {
                     Ok(PullOutcome::Ready(session, revision)) => {
-                        this.apply_pulled_session(*session, revision);
+                        this.apply_pulled_session(*session, revision, cx);
                     }
                     Ok(PullOutcome::ProjectMissing(name)) => {
                         this.sync_notice = Some(format!(
@@ -1910,7 +1910,12 @@ impl AppState {
     /// Apply a resolved pulled session: insert it (first pull), replace it and
     /// drop the stale clone (newer revision), or leave it (same/older). Records
     /// the pulled revision as this device's base in the ledger on apply.
-    fn apply_pulled_session(&mut self, session: crate::state::PersistedSession, revision: u64) {
+    fn apply_pulled_session(
+        &mut self,
+        session: crate::state::PersistedSession,
+        revision: u64,
+        cx: &mut Context<Self>,
+    ) {
         let id = session.id.clone();
         let label = session.label.clone();
 
@@ -1938,7 +1943,7 @@ impl AppState {
                 let source = self.projects[pi].source_path.clone();
                 if let Some(clone_path) = old_clone {
                     if clone_path.exists() && clone_path != source {
-                        let _ = clone::delete_clone(&clone_path);
+                        delete_clone_in_background(cx, clone_path);
                     }
                 }
                 self.projects[pi].sessions[si] = session_from_persisted(&session);

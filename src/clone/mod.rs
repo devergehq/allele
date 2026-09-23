@@ -156,6 +156,14 @@ fn clone_top_level(source: &Path, dest: &Path, exclude: &[String]) -> crate::err
             continue;
         }
 
+        // `.git` stays one call: split into chunks, a commit or fetch in the
+        // source mid-clone could leave refs naming objects the clone never
+        // got. Its stall is the price of a consistent repository.
+        if name == ".git" {
+            clonefile_path(&entry.path(), &dest.join(&name), CLONE_NOFOLLOW)?;
+            continue;
+        }
+
         clone_chunked(&entry.path(), &dest.join(&name), &mut pacer)?;
     }
 
@@ -720,6 +728,11 @@ mod tests {
         }
         fs::set_permissions(&ro, fs::Permissions::from_mode(0o555)).unwrap();
         fs::write(root.join("README"), b"hi").unwrap();
+        let objects = root.join(".git/objects");
+        fs::create_dir_all(&objects).unwrap();
+        for i in 0..(CLONE_CHUNK_ENTRIES + 5) {
+            fs::write(objects.join(format!("o{i}")), b"o").unwrap();
+        }
     }
 
     /// Undo the read-only directory [`build_large_tree`] creates, so the
