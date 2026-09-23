@@ -13,6 +13,8 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+## [0.5.1] - 2026-09-23
+
 ### Fixed
 - Creating a session no longer freezes other apps. A workspace clone used to be one
   `clonefile(2)` call per top-level folder, and APFS blocks every other process's file
@@ -328,7 +330,8 @@ merge batch. Core proof-of-concept complete and runnable.
   browser with merge/delete actions.
 - Per-session drawer terminal panel and auto-naming of sessions from the first prompt.
 
-[Unreleased]: https://github.com/devergehq/allele/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/devergehq/allele/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/devergehq/allele/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/devergehq/allele/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/devergehq/allele/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/devergehq/allele/compare/v0.2.0...v0.3.0
