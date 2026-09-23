@@ -13,6 +13,15 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Fixed
+- Creating a session no longer freezes other apps. A workspace clone used to be one
+  `clonefile(2)` call per top-level folder, and APFS blocks every other process's file
+  saves for the whole call — 15 seconds for a large `node_modules`, long enough to
+  beachball any app that saves on its main thread. Clones now run in chunks of at most
+  2,000 entries with a short pause between them (worst stall measured: 0.3 s), one
+  clone at a time. Deleting a workspace is paced the same way, and the post-clone file
+  work no longer runs on Allele's UI thread.
+
 ## [0.5.0] - 2026-09-22
 
 ### Added
