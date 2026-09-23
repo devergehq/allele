@@ -28,6 +28,18 @@ use crate::{agents, browser, clone, config, conversations, git, project, setting
 /// keep announcing a clone that finished long ago. Failure *is* a state — the
 /// session is working directly in the project source with no isolation — so
 /// that warning stays put until something replaces it.
+/// Delete a clone without blocking the UI thread: a paced delete of a large
+/// tree takes tens of seconds (DEV-755).
+fn delete_clone_in_background(cx: &mut gpui::App, clone_path: std::path::PathBuf) {
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(e) = clone::delete_clone(&clone_path) {
+                warn!("failed to delete clone {}: {e}", clone_path.display());
+            }
+        })
+        .detach();
+}
+
 fn clone_operation_result(clone_succeeded: bool) -> OperationResult {
     if clone_succeeded {
         OperationResult::transient("Workspace cloned successfully.")
@@ -160,6 +172,7 @@ impl AppState {
         let session_id_for_session = session_id.clone();
         let display_label_for_task = display_label.clone();
         let agent_id_for_task = agent_id.clone();
+        let source_for_prepare = source_path.clone();
 
         cx.spawn_in(window, async move |this, cx| {
             let (clone_result, pull_error) = cx
@@ -198,6 +211,40 @@ impl AppState {
                         &session_id_for_clone,
                         &cleanup_paths_for_task,
                     );
+
+                    // Everything that touches the clone on disk runs here, off
+                    // the UI thread: a file write there stalls behind any
+                    // other clone holding the volume (DEV-755). Only when the
+                    // clone succeeded — on fallback to the source path we must
+                    // NOT mutate canonical's HEAD.
+                    if let Ok(ref clone_path) = clone {
+                        if clone_path != &source_for_prepare {
+                            clone::prepare_session_workspace(
+                                clone_path,
+                                &session_id_for_clone,
+                                &cleanup_paths_for_task,
+                            );
+
+                            // Create the session branch in the clone rooted at
+                            // HEAD, or at the project's default branch.
+                            let branched = match base_branch.as_deref() {
+                                Some(base) => git::create_session_branch_from(
+                                    clone_path,
+                                    &session_id_for_clone,
+                                    base,
+                                    &session_remote,
+                                ),
+                                None => {
+                                    git::create_session_branch(clone_path, &session_id_for_clone)
+                                }
+                            };
+                            if let Err(e) = branched {
+                                warn!(
+                                    "create_session_branch failed for {session_id_for_clone}: {e}"
+                                );
+                            }
+                        }
+                    }
                     (clone, pull_error)
                 })
                 .await;
@@ -224,53 +271,16 @@ impl AppState {
 
                 let clone_succeeded = clone_path != source_path;
 
-                // Purge stale runtime files (Overmind/Foreman sockets, server
-                // pid files, etc.) that the parent left in the working tree —
-                // clonefile(2) faithfully copied them. Must happen before any
-                // drawer tab spawns its command.
-                if clone_succeeded {
-                    clone::cleanup_stale_runtime(
-                        &clone_path,
-                        &this.user_settings.session_cleanup_paths,
-                    );
-                }
-
                 // Find the project again (indices may have shifted if user removed projects)
                 let Some(project) = this.projects.get_mut(project_idx) else {
-                    let _ = clone::delete_clone(&clone_path);
+                    if clone_succeeded {
+                        delete_clone_in_background(cx, clone_path);
+                    }
                     return;
                 };
 
                 // Remove the loading placeholder
                 project.loading_sessions.retain(|l| l.id != session_id);
-
-                // Create the session branch in the clone rooted at HEAD.
-                // Only do this when clonefile succeeded — when we fell back
-                // to source_path we must NOT mutate canonical's HEAD.
-                if clone_succeeded {
-                    let branched = match base_branch.as_deref() {
-                        Some(base) => git::create_session_branch_from(
-                            &clone_path,
-                            &session_id_for_session,
-                            base,
-                            &session_remote,
-                        ),
-                        None => git::create_session_branch(&clone_path, &session_id_for_session),
-                    };
-                    if let Err(e) = branched {
-                        warn!("create_session_branch failed for {session_id_for_session}: {e}");
-                    }
-
-                    // Write marker file for orphan cleanup identification.
-                    let marker_path = clone_path.join(".allele-session");
-                    if let Err(e) = std::fs::write(&marker_path, &session_id_for_session) {
-                        warn!("failed to write .allele-session marker: {e}");
-                    }
-
-                    // Exclude the marker from git so auto-commit never
-                    // captures it into the session branch.
-                    crate::git::exclude_pattern_in_clone(&clone_path, ".allele-session");
-                }
 
                 // Create the terminal view with the clone as PWD
                 // Materialise the project environment against the clone. `{{unique_port}}`
@@ -626,6 +636,18 @@ impl AppState {
                                         branch_error = Some(format!("{e}"));
                                     }
                                 }
+
+                                // Off the UI thread, for the same reason as the
+                                // branch work above (DEV-755).
+                                if branch_error.is_none() {
+                                    clone::prepare_session_workspace(
+                                        clone_path,
+                                        &session_id_for_branch,
+                                        &cleanup_paths_for_task,
+                                    );
+                                } else {
+                                    let _ = clone::delete_clone(clone_path);
+                                }
                             }
                         }
 
@@ -636,12 +658,8 @@ impl AppState {
             let _ = this.update_in(cx, move |this: &mut Self, window, cx| {
                 // Branch resolution failed → abort. Tear the clone down, drop
                 // the loading placeholder, and tell the user how to fix it.
+                // The background task already deleted the clone.
                 if let Some(msg) = branch_error {
-                    if let Ok(ref p) = clone_result {
-                        if p != &source_path {
-                            let _ = clone::delete_clone(p);
-                        }
-                    }
                     if let Some(project) = this.projects.get_mut(project_idx) {
                         project.loading_sessions.retain(|l| l.id != session_id);
                     }
@@ -673,32 +691,16 @@ impl AppState {
 
                 let clone_succeeded = clone_path != source_path;
 
-                if clone_succeeded {
-                    clone::cleanup_stale_runtime(
-                        &clone_path,
-                        &this.user_settings.session_cleanup_paths,
-                    );
-                }
-
+                // The session branch, stale-runtime sweep and marker were all
+                // handled in the background task above (DEV-755).
                 let Some(project) = this.projects.get_mut(project_idx) else {
-                    let _ = clone::delete_clone(&clone_path);
+                    if clone_succeeded {
+                        delete_clone_in_background(cx, clone_path);
+                    }
                     return;
                 };
 
                 project.loading_sessions.retain(|l| l.id != session_id);
-
-                if clone_succeeded {
-                    // The session branch (existing branch checkout, or a fresh
-                    // branch) was already resolved in the background task above.
-
-                    // Write marker file for orphan cleanup identification.
-                    let marker_path = clone_path.join(".allele-session");
-                    if let Err(e) = std::fs::write(&marker_path, &session_id_for_session) {
-                        warn!("failed to write .allele-session marker: {e}");
-                    }
-
-                    crate::git::exclude_pattern_in_clone(&clone_path, ".allele-session");
-                }
 
                 // Materialise the project environment against the clone. `{{unique_port}}`
                 // is not available here — the port is allocated later, in
