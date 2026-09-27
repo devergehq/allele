@@ -9,6 +9,7 @@
 #   ./script/cut-release.sh 0.4.0              # explicit version
 #   ./script/cut-release.sh minor --dry-run    # show the diff, change nothing
 #   ./script/cut-release.sh minor --pr         # push a branch and open a PR
+#                                              # (from master: creates chore/release-X.Y.Z)
 #   ./script/cut-release.sh minor --tag        # commit on master, tag, push
 #
 # Without --pr or --tag the script stops after the local commit and prints the
@@ -82,6 +83,20 @@ if $DO_TAG && [[ "$BRANCH" != "master" ]]; then
 fi
 if [[ "$BRANCH" == "master" ]] && [[ "$(git rev-parse HEAD)" != "$(git rev-parse origin/master)" ]]; then
     die "master is not in sync with origin/master — pull or push first"
+fi
+
+# --pr from master works on its own release branch, created before any file is
+# touched so the commit can never land on master. Every --pr check runs here,
+# ahead of the bump, so a refusal leaves nothing behind (DEV-762).
+if $DO_PR; then
+    command -v gh >/dev/null || die "--pr needs the gh CLI"
+    if [[ "$BRANCH" == "master" ]]; then
+        PR_BRANCH="chore/release-$VERSION"
+        git rev-parse -q --verify "refs/heads/$PR_BRANCH" >/dev/null \
+            && die "branch $PR_BRANCH already exists locally — delete it or run from it"
+        [[ -z "$(git ls-remote --heads origin "$PR_BRANCH")" ]] \
+            || die "branch $PR_BRANCH already exists on origin"
+    fi
 fi
 
 # --------------------------------------------------------------- the bump ----
@@ -179,6 +194,12 @@ if $DRY_RUN; then
     exit 0
 fi
 
+if $DO_PR && [[ "$BRANCH" == "master" ]]; then
+    git switch --quiet -c "$PR_BRANCH"
+    BRANCH="$PR_BRANCH"
+    info "created branch $BRANCH"
+fi
+
 bump_files
 
 # Cheap consistency check: cargo re-reads the manifest and lockfile together and
@@ -197,8 +218,6 @@ info "committed $(git rev-parse --short HEAD)"
 # --------------------------------------------------------------- publish -----
 
 if $DO_PR; then
-    command -v gh >/dev/null || die "--pr needs the gh CLI"
-    [[ "$BRANCH" != "master" ]] || die "--pr needs a branch other than master"
     git push --quiet -u origin "$BRANCH"
     gh pr create --base master --head "$BRANCH" \
         --title "chore(release): $VERSION" \
@@ -230,7 +249,7 @@ cat <<EOF
 Local commit only. Next, either:
 
   # via a PR (matches how master is normally updated)
-  git checkout -b release-$VERSION && git push -u origin release-$VERSION
+  git checkout -b chore/release-$VERSION && git push -u origin chore/release-$VERSION
   gh pr create --base master --title "chore(release): $VERSION" --fill
   # ...merge, then:
   git checkout master && git pull && git tag $TAG && git push origin $TAG
