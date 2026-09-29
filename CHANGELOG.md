@@ -13,6 +13,17 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Changed
+- The sidebar now says how many sessions have a live agent behind them. Its status bar
+  read `54s · 6 running`, where the first number counted every session in the sidebar —
+  suspended and finished ones included — and the second counted only the ones
+  actively producing output, so with 25+ sessions open neither answered "how many are
+  actually going". It now reads `21/54 active · 6 running`.
+- The active-only hint row leads with what it is doing: "Active only · hiding 54 sessions
+  and 33 projects", not "Active only · 54 sessions, 33 projects hidden". Both numbers were
+  always correct, but the word that gave them their meaning arrived twelve words after the
+  first one, so the count read as sessions shown rather than sessions held back.
+
 ## [0.6.0] - 2026-09-30
 
 ### Added
