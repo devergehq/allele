@@ -250,7 +250,13 @@ impl AppState {
                 (None, None)
             };
 
+            // Classify here, not at render time: `last_pre_tool_use.take()`
+            // above has already consumed the cached tool name, so this is the
+            // last point at which the kind can be determined (DEV-788).
+            let kind = session::classify_attention(tool_name.as_deref(), message.as_deref());
+
             session.attention_context = Some(AttentionContext {
+                kind,
                 tool_name,
                 tool_input_summary: tool_summary,
                 message,
@@ -289,7 +295,19 @@ impl AppState {
             }
             return;
         };
-        if new_status == prior {
+        let idle_nudge_on_finished_turn = absorbs_idle_nudge(
+            prior,
+            new_status,
+            session.attention_context.as_ref().map(|c| c.kind),
+        );
+
+        if new_status == prior || idle_nudge_on_finished_turn {
+            if idle_nudge_on_finished_turn {
+                // Undo the context written above: the session is staying
+                // ResponseReady, and a stale attention context would make the
+                // attention bar list a session that is not in AwaitingInput.
+                session.attention_context = None;
+            }
             // No status transition, but still trigger auto-naming if applicable.
             if let Some((session_id, clone_path, branch_locked)) = auto_name_data {
                 info!("auto-naming: trigger fired for session {session_id}");
@@ -694,5 +712,105 @@ fn summarise_tool_input(tool_name: &str, input: Option<&serde_json::Value>) -> O
         ))
     } else {
         Some(raw)
+    }
+}
+
+/// Whether this transition is the sixty-second idle nudge landing on a session
+/// that has already finished its turn — in which case it is absorbed and the
+/// session keeps `ResponseReady` (DEV-788).
+///
+/// Claude Code fires `Notification` about a minute after `Stop` when the user
+/// has not replied. Taking it at face value repainted every cleanly-finished
+/// session from "ready to review" (mauve star) to "needs input" (peach
+/// triangle) one minute later, which is most of what made twenty-odd waiting
+/// sessions impossible to triage: the status that said *nothing is wrong, look
+/// when you can* was overwritten by the one reserved for *an agent is stuck*.
+///
+/// `ResponseReady` is both accurate and strictly more informative here, so it
+/// stands. This is the guard the rule documented at `hooks/mod.rs` always
+/// claimed existed for the other direction, and never did.
+///
+/// A *blocking* notification is never absorbed: a permission prompt arriving
+/// on a finished session is real news. Only an `Idle` kind is dropped, and a
+/// notification with no attention context at all is treated as blocking,
+/// because under-warning about a stuck agent is the worse error.
+fn absorbs_idle_nudge(
+    prior: session::SessionStatus,
+    new_status: session::SessionStatus,
+    kind: Option<session::AttentionKind>,
+) -> bool {
+    new_status == session::SessionStatus::AwaitingInput
+        && prior == session::SessionStatus::ResponseReady
+        && kind.map(|k| !k.is_blocking()).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod attention_tests {
+    use super::absorbs_idle_nudge;
+    use crate::session::{AttentionKind, SessionStatus};
+
+    #[test]
+    fn idle_nudge_after_a_finished_turn_is_absorbed() {
+        // The headline case: `stop` -> ResponseReady, then 60s later the idle
+        // Notification. The star must survive it.
+        assert!(absorbs_idle_nudge(
+            SessionStatus::ResponseReady,
+            SessionStatus::AwaitingInput,
+            Some(AttentionKind::Idle),
+        ));
+    }
+
+    #[test]
+    fn a_permission_prompt_still_wins_over_response_ready() {
+        // A finished session that then blocks on a permission is real news and
+        // must escalate.
+        assert!(!absorbs_idle_nudge(
+            SessionStatus::ResponseReady,
+            SessionStatus::AwaitingInput,
+            Some(AttentionKind::Permission),
+        ));
+        assert!(!absorbs_idle_nudge(
+            SessionStatus::ResponseReady,
+            SessionStatus::AwaitingInput,
+            Some(AttentionKind::Question),
+        ));
+    }
+
+    #[test]
+    fn missing_context_is_treated_as_blocking() {
+        assert!(!absorbs_idle_nudge(
+            SessionStatus::ResponseReady,
+            SessionStatus::AwaitingInput,
+            None,
+        ));
+    }
+
+    #[test]
+    fn an_idle_nudge_on_a_running_session_is_not_absorbed() {
+        // Only ResponseReady is protected. A session mid-turn that goes quiet
+        // genuinely is waiting for input and should say so.
+        for prior in [
+            SessionStatus::Running,
+            SessionStatus::Idle,
+            SessionStatus::AwaitingInput,
+        ] {
+            assert!(
+                !absorbs_idle_nudge(
+                    prior,
+                    SessionStatus::AwaitingInput,
+                    Some(AttentionKind::Idle)
+                ),
+                "{prior:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn non_attention_transitions_are_untouched() {
+        assert!(!absorbs_idle_nudge(
+            SessionStatus::ResponseReady,
+            SessionStatus::Running,
+            Some(AttentionKind::Idle),
+        ));
     }
 }
