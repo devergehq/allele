@@ -119,17 +119,171 @@ pub struct PreToolUseContext {
     pub tool_input: Option<serde_json::Value>,
 }
 
+/// Why a session in `AwaitingInput` is waiting (DEV-788).
+///
+/// `AwaitingInput` is one status because Claude Code's `Notification` hook is
+/// one event. It covers three situations with very different urgency, and
+/// until this existed they all rendered the same peach triangle — so at
+/// twenty-odd concurrent sessions the only way to find the one that was
+/// actually blocking was to click through all of them.
+///
+/// Deliberately *not* new [`SessionStatus`] variants: those reach the
+/// serde-persisted `PersistedSession::last_known_status`, the dispatch wire
+/// protocol, and sync metadata, and would break any MCP consumer pinned to
+/// the current `awaiting_input` string. The kind is a render-layer concern,
+/// so it rides on the attention context instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttentionKind {
+    /// Claude is blocked on a permission prompt. Enter grants it. Act now.
+    Permission,
+    /// Claude is blocked on a tool that asks a *question* — `AskUserQuestion`,
+    /// `ExitPlanMode`. Enter does not "allow" anything here; it picks whichever
+    /// option the TUI has highlighted, which is why these must never be
+    /// offered the Allow button.
+    Question,
+    /// Nothing is blocked. Claude has finished and is waiting to be given
+    /// something to do. The least urgent of the three.
+    Idle,
+}
+
+impl AttentionKind {
+    /// SVG icon name. Shapes are distinct per kind for the same reason
+    /// [`SessionStatus::icon_name`] gives: state must read without colour
+    /// vision.
+    pub fn icon_name(&self) -> &'static str {
+        use crate::icon::name;
+        match self {
+            AttentionKind::Permission => name::LOCK,
+            AttentionKind::Question => name::HELP_CIRCLE,
+            AttentionKind::Idle => name::CIRCLE,
+        }
+    }
+
+    pub fn color(&self) -> gpui::Hsla {
+        let t = crate::theme::theme();
+        match self {
+            // Keeps `attention` (peach): what used to look urgent and *was*
+            // urgent still looks the same, so the change reads as the other
+            // two kinds moving away from it rather than everything shifting.
+            AttentionKind::Permission => t.attention,
+            AttentionKind::Question => t.info,
+            // Recedes on purpose. Nothing is blocked, so nothing should shout.
+            AttentionKind::Idle => t.text_dim,
+        }
+    }
+
+    /// Short row label for the attention bar.
+    pub fn label(&self) -> &'static str {
+        match self {
+            AttentionKind::Permission => "needs permission",
+            AttentionKind::Question => "waiting on your answer",
+            AttentionKind::Idle => "waiting for a prompt",
+        }
+    }
+
+    /// Whether the agent is genuinely stuck until a human acts.
+    ///
+    /// Drives the attention bar's headline count and the sidebar's
+    /// attention-first sort. `Idle` is excluded: a session with nothing to do
+    /// is not a blocker, and counting it as one is what made a bar reading
+    /// "18 sessions waiting for your input" impossible to triage.
+    pub fn is_blocking(&self) -> bool {
+        !matches!(self, AttentionKind::Idle)
+    }
+}
+
+/// Tools that block on an *answer* rather than a permission grant.
+///
+/// These arrive as `"Claude needs your permission"` like any other prompt (49
+/// of 364 permission notifications in a 156-session sample were
+/// `AskUserQuestion`), so the message cannot separate them — only the tool
+/// name can.
+fn is_question_tool(tool: &str) -> bool {
+    matches!(tool, "AskUserQuestion" | "ExitPlanMode")
+}
+
+/// Classify an `AwaitingInput` wait from the notification message and the
+/// tool cached by the preceding `PreToolUse`.
+///
+/// Ordering is driven by what Claude Code actually emits, measured over
+/// ~3,300 notification events across 156 session logs on 29 September 2026:
+///
+/// | message | count | cached tool |
+/// |---|---|---|
+/// | `Claude is waiting for your input` | 2,870 | empty in 2,858 |
+/// | `Claude needs your permission`     | 364   | the blocked tool in 361 |
+/// | *(absent)*                         | 107   | empty in 88 |
+///
+/// The message is therefore the *strongest* signal and is consulted first —
+/// it correctly overrides a cache that a missing `PostToolUse` left stale
+/// (observed: an idle nudge with `Bash` still cached).
+///
+/// It is not consulted *alone*, because it is Claude Code's UI copy and an
+/// upstream rewording would silently reclassify every permission prompt with
+/// no test failing. Unrecognised copy — including third-party `Notification`
+/// output such as a TTS plugin's "finished" announcement — falls through to
+/// the structural signal: a tool still in the cache means something is
+/// blocked on it, an empty cache means nothing is.
+pub fn classify_attention(tool_name: Option<&str>, message: Option<&str>) -> AttentionKind {
+    let msg = message.unwrap_or_default().to_ascii_lowercase();
+
+    // Recognised idle copy wins outright, even over a stale cache.
+    if msg.contains("waiting for your input") {
+        return AttentionKind::Idle;
+    }
+    // A question tool is a question whatever the message says.
+    if tool_name.map(is_question_tool).unwrap_or(false) {
+        return AttentionKind::Question;
+    }
+    if msg.contains("permission") || msg.contains("approval") {
+        return AttentionKind::Permission;
+    }
+    // Unrecognised or absent copy: trust the cache.
+    if tool_name.is_some() {
+        AttentionKind::Permission
+    } else {
+        AttentionKind::Idle
+    }
+}
+
 /// Rich context about what a session is waiting for when in `AwaitingInput`
 /// state. Populated from the hook payload on Notification events, cleared
 /// when the session transitions out of AwaitingInput.
 #[derive(Debug, Clone)]
 pub struct AttentionContext {
+    /// Why the session is waiting. Computed once, at the moment the context
+    /// is built, because the tool name it depends on is *consumed* out of
+    /// `last_pre_tool_use` there and is not available to a later caller.
+    pub kind: AttentionKind,
     /// The tool Claude wants to run (e.g. "Bash", "Edit", "Read").
     pub tool_name: Option<String>,
     /// Brief summary of the tool input (e.g. "npm install", "src/main.rs").
     pub tool_input_summary: Option<String>,
     /// Notification message text from Claude Code.
     pub message: Option<String>,
+}
+
+impl AttentionContext {
+    /// The message, but only when it says something the row does not already.
+    ///
+    /// Claude Code's own two strings are generic — "Claude needs your
+    /// permission", "Claude is waiting for your input" — and
+    /// [`AttentionKind::label`] states the same thing more briefly, so
+    /// echoing them wastes the one line of horizontal space the attention bar
+    /// has. Anything else came from a third-party `Notification` hook (a TTS
+    /// plugin's announcement, a review bot's summary) and is the only place
+    /// that content appears in the UI at all.
+    pub fn informative_message(&self) -> Option<&str> {
+        let msg = self.message.as_deref()?.trim();
+        if msg.is_empty() {
+            return None;
+        }
+        let lower = msg.to_ascii_lowercase();
+        if lower.contains("waiting for your input") || lower.contains("needs your permission") {
+            return None;
+        }
+        Some(msg)
+    }
 }
 
 /// Status of a session
@@ -1215,5 +1369,166 @@ mod tests {
         assert_eq!(s.elapsed_display(), "3m 7s");
         s.active_accumulated = Duration::from_secs(2 * 3600 + 13 * 60);
         assert_eq!(s.elapsed_display(), "2h 13m");
+    }
+
+    // ── AttentionKind classification (DEV-788) ───────────────────────
+    //
+    // Every case below is a shape observed in the real event log
+    // (~3,300 notifications across 156 session logs, 29 September 2026),
+    // not an invented one. The counts in the comments are the observed
+    // frequencies, so a future reader can tell a load-bearing case from a
+    // long-tail one.
+
+    use super::{classify_attention, AttentionKind};
+
+    #[test]
+    fn idle_nudge_with_empty_cache_is_idle() {
+        // 2,858 occurrences — by far the commonest notification there is.
+        assert_eq!(
+            classify_attention(None, Some("Claude is waiting for your input")),
+            AttentionKind::Idle
+        );
+    }
+
+    #[test]
+    fn idle_nudge_beats_a_stale_tool_cache() {
+        // 2 occurrences: a `PostToolUse` that never landed left `Bash` cached
+        // when the idle nudge arrived. Structure-first would call this a
+        // permission prompt; the message is right and must win.
+        assert_eq!(
+            classify_attention(Some("Bash"), Some("Claude is waiting for your input")),
+            AttentionKind::Idle
+        );
+    }
+
+    #[test]
+    fn permission_prompt_with_cached_tool_is_permission() {
+        // 159 Bash + 130 MCP tools + a handful of Write/Edit.
+        assert_eq!(
+            classify_attention(Some("Bash"), Some("Claude needs your permission")),
+            AttentionKind::Permission
+        );
+        assert_eq!(
+            classify_attention(
+                Some("mcp__linear-mcp__linear_graphql"),
+                Some("Claude needs your permission")
+            ),
+            AttentionKind::Permission
+        );
+    }
+
+    #[test]
+    fn permission_prompt_survives_an_empty_cache() {
+        // 3 occurrences — the notification arrived without a PreToolUse we saw.
+        assert_eq!(
+            classify_attention(None, Some("Claude needs your permission")),
+            AttentionKind::Permission
+        );
+    }
+
+    #[test]
+    fn question_tools_are_questions_despite_permission_copy() {
+        // 49 occurrences. This is the whole reason the kind exists: Claude Code
+        // announces `AskUserQuestion` as a permission request, so the message
+        // cannot separate it, and Enter here picks a highlighted option rather
+        // than granting anything.
+        assert_eq!(
+            classify_attention(
+                Some("AskUserQuestion"),
+                Some("Claude needs your permission")
+            ),
+            AttentionKind::Question
+        );
+        assert_eq!(
+            classify_attention(Some("ExitPlanMode"), Some("Claude needs your permission")),
+            AttentionKind::Question
+        );
+    }
+
+    #[test]
+    fn absent_message_falls_back_to_the_cache() {
+        // 107 notifications carried no message at all: 88 with an empty cache
+        // (idle) and 19 with a tool still cached (blocked on it).
+        assert_eq!(classify_attention(None, None), AttentionKind::Idle);
+        assert_eq!(
+            classify_attention(Some("Bash"), None),
+            AttentionKind::Permission
+        );
+    }
+
+    #[test]
+    fn reworded_permission_copy_still_classifies_structurally() {
+        // The fragility guard. If Claude Code renames its notification copy,
+        // an unrecognised message must fall through to the cache rather than
+        // silently reclassifying every permission prompt as idle.
+        assert_eq!(
+            classify_attention(Some("Bash"), Some("Claude would like to run a command")),
+            AttentionKind::Permission
+        );
+    }
+
+    #[test]
+    fn third_party_notifications_do_not_read_as_blocked() {
+        // Observed: a TTS plugin and a review bot both emit `Notification`
+        // events with their own copy. Before DEV-788 these flipped the session
+        // to a peach triangle; nothing about them is blocking.
+        for msg in [
+            "Explore Apm Solutions finished",
+            "Session paused",
+            "Claude Code login successful",
+        ] {
+            assert_eq!(
+                classify_attention(None, Some(msg)),
+                AttentionKind::Idle,
+                "{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn informative_message_drops_claude_codes_own_copy() {
+        use super::AttentionContext;
+        let ctx = |m: Option<&str>| AttentionContext {
+            kind: AttentionKind::Idle,
+            tool_name: None,
+            tool_input_summary: None,
+            message: m.map(str::to_string),
+        };
+        assert_eq!(
+            ctx(Some("Claude is waiting for your input")).informative_message(),
+            None
+        );
+        assert_eq!(
+            ctx(Some("Claude needs your permission")).informative_message(),
+            None
+        );
+        assert_eq!(ctx(None).informative_message(), None);
+        assert_eq!(ctx(Some("   ")).informative_message(), None);
+        // Third-party hook output is the only place this text is ever shown.
+        assert_eq!(
+            ctx(Some("Explore Apm Solutions finished")).informative_message(),
+            Some("Explore Apm Solutions finished")
+        );
+    }
+
+    #[test]
+    fn only_idle_is_non_blocking() {
+        assert!(AttentionKind::Permission.is_blocking());
+        assert!(AttentionKind::Question.is_blocking());
+        assert!(!AttentionKind::Idle.is_blocking());
+    }
+
+    #[test]
+    fn every_kind_has_its_own_shape() {
+        // The accessibility contract: colour is not the differentiator.
+        let shapes = [
+            AttentionKind::Permission.icon_name(),
+            AttentionKind::Question.icon_name(),
+            AttentionKind::Idle.icon_name(),
+        ];
+        let mut unique = shapes.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), shapes.len(), "two kinds share an icon");
     }
 }

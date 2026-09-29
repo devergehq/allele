@@ -15,7 +15,7 @@ use crate::actions::{
 };
 use crate::app_state::AppState;
 use crate::project::Project;
-use crate::session::SessionStatus;
+use crate::session::{AttentionKind, SessionStatus};
 use crate::SimpleTooltip;
 
 /// Left indents matching the rows each confirmation strip sits beneath, so the
@@ -691,12 +691,24 @@ pub(crate) fn build_sidebar_items(
             let s = &project.sessions[idx];
             let attention: u8 = if promote {
                 match s.status {
-                    SessionStatus::AwaitingInput => 0,
-                    SessionStatus::ResponseReady => 1,
-                    _ => 2,
+                    // Not every AwaitingInput is a blocker (DEV-788). A session
+                    // waiting on a permission or a question is promoted above a
+                    // finished one; a session with nothing to do sorts *below*
+                    // it, because "ready to review" is the more useful signal.
+                    SessionStatus::AwaitingInput => {
+                        match s.attention_context.as_ref().map(|c| c.kind) {
+                            Some(AttentionKind::Permission) => 0,
+                            Some(AttentionKind::Question) => 1,
+                            Some(AttentionKind::Idle) => 3,
+                            // No context: treat as blocking, the safer default.
+                            None => 0,
+                        }
+                    }
+                    SessionStatus::ResponseReady => 2,
+                    _ => 4,
                 }
             } else {
-                2
+                4
             };
             (attention, !s.pinned, idx)
         });
@@ -729,8 +741,20 @@ pub(crate) fn build_sidebar_items(
             }
 
             let is_suspended = session.status == SessionStatus::Suspended;
-            let status_color = session.status.color();
-            let status_icon = session.status.icon_name();
+            // A session in AwaitingInput takes its shape and colour from *why*
+            // it is waiting (DEV-788): a padlock for a permission prompt, a
+            // question mark for a tool asking something, a receding dot for
+            // "nothing to do". The status-level triangle remains the fallback
+            // for an AwaitingInput with no context attached.
+            let attention_kind = (session.status == SessionStatus::AwaitingInput)
+                .then(|| session.attention_context.as_ref().map(|c| c.kind))
+                .flatten();
+            let status_color = attention_kind
+                .map(|k| k.color())
+                .unwrap_or_else(|| session.status.color());
+            let status_icon = attention_kind
+                .map(|k| k.icon_name())
+                .unwrap_or_else(|| session.status.icon_name());
             // Prefer the auto-named label once it's no longer a
             // placeholder ("Claude N" / "Shell N").  Fall back to the
             // terminal's OSC title only while waiting for auto-naming,
