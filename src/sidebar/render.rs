@@ -199,6 +199,32 @@ pub(crate) fn active_only_hidden_counts(
     (sessions, hidden_projects)
 }
 
+/// How many sessions across every project have a live agent behind them.
+///
+/// Counted through [`session_survives_active_only`] rather than by calling
+/// [`SessionStatus::is_active`] again, so this number and the rows the sidebar
+/// draws cannot disagree — a count that drifts from the filter is the defect
+/// DEV-789 exists to fix.
+///
+/// The cursor exception is deliberately not applied. The filter pins the
+/// selected row visible even when it is `Suspended`, which keeps a failed
+/// resume reachable; it does not make that session live, and a count that
+/// ticked up by one because of where the cursor happens to sit would be
+/// reporting the UI's state rather than the machine's.
+///
+/// Consequence worth knowing: this and [`active_only_hidden_counts`] therefore
+/// do **not** sum to the session total while a `Suspended` or `Done` row is
+/// selected — that row is on screen, counted neither live nor hidden. Both
+/// numbers are right about their own question; the pair is not a partition.
+/// Keep them out of one sentence that invites subtracting them.
+pub(crate) fn active_session_count(projects: &[Project]) -> usize {
+    projects
+        .iter()
+        .flat_map(|p| p.sessions.iter())
+        .filter(|s| session_survives_active_only(s.status, false))
+        .count()
+}
+
 pub(crate) fn build_sidebar_items(
     state: &mut AppState,
     _window: &mut Window,
@@ -1401,7 +1427,8 @@ mod tests {
     // `use gpui::*`, whose glob shadows the standard `#[test]` attribute with
     // gpui's own `test` macro. See src/session/mod.rs for the same note.
     use super::{
-        active_only_hidden_counts, project_survives_active_only, session_survives_active_only,
+        active_only_hidden_counts, active_session_count, project_survives_active_only,
+        session_survives_active_only,
     };
     use crate::actions::SessionCursor;
     use crate::project::Project;
@@ -1549,5 +1576,60 @@ mod tests {
     fn hidden_counts_are_zero_when_everything_is_live() {
         let projects = vec![project(&LIVE)];
         assert_eq!(active_only_hidden_counts(&projects, None), (0, 0));
+    }
+
+    // ── live session count (DEV-789) ───────────────────────────────
+
+    #[test]
+    fn active_count_counts_only_sessions_with_a_live_agent() {
+        let projects = vec![
+            project(&LIVE),
+            project(&[SessionStatus::Suspended, SessionStatus::Done]),
+        ];
+        assert_eq!(active_session_count(&projects), LIVE.len());
+    }
+
+    /// The invariant that keeps the status bar and the hint row honest: with no
+    /// row pinned by the cursor, every session is either counted as active or
+    /// counted as hidden, never both and never neither. If a future status
+    /// lands on one side of `is_active()` and not the other, this is what
+    /// fails.
+    ///
+    /// Scoped to `None` on purpose — see `active_session_count`'s doc comment.
+    /// A pinned inactive row is visible, so it is counted neither way, and the
+    /// two figures legitimately stop summing.
+    #[test]
+    fn active_count_plus_hidden_count_is_every_session_with_no_row_pinned() {
+        let projects = vec![
+            project(&[SessionStatus::Suspended, SessionStatus::Done]),
+            project(&[SessionStatus::Suspended, SessionStatus::Running]),
+            project(&LIVE),
+        ];
+        let total: usize = projects.iter().map(|p| p.sessions.len()).sum();
+        let (hidden_sessions, _) = active_only_hidden_counts(&projects, None);
+        assert_eq!(active_session_count(&projects) + hidden_sessions, total);
+    }
+
+    #[test]
+    fn active_count_ignores_the_selected_session() {
+        // Selecting the Suspended row keeps it on screen, but it is not live
+        // and must not be counted as such — so 1 active, and the hidden tally
+        // drops it too. The two deliberately fail to account for all 2 here;
+        // the pinned row is visible without being either.
+        let projects = vec![project(&[SessionStatus::Suspended, SessionStatus::Running])];
+        assert_eq!(active_session_count(&projects), 1);
+        assert_eq!(active_only_hidden_counts(&projects, cursor(0, 0)), (0, 0));
+    }
+
+    /// `hidden_projects` counts projects where *every* session is hidden, so it
+    /// is not a container for `hidden_sessions`. The hint row's copy must say
+    /// "and", not "in" — this pins the fact that made "in" false.
+    #[test]
+    fn hidden_sessions_can_span_more_projects_than_are_hidden() {
+        let projects = vec![
+            project(&[SessionStatus::Done, SessionStatus::Done]),
+            project(&[SessionStatus::Running, SessionStatus::Done]),
+        ];
+        assert_eq!(active_only_hidden_counts(&projects, None), (3, 1));
     }
 }

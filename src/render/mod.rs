@@ -1085,6 +1085,26 @@ impl Render for AppState {
         // Build sidebar items: for each project, a header then its sessions
         let sidebar_items = crate::sidebar::render::build_sidebar_items(self, window, cx);
 
+        // The hint row's copy leads with "hiding" so the qualifier reaches the
+        // numbers. Trailing it — "54 sessions, 33 projects hidden" — put twelve
+        // words between the first count and the word that gave it meaning, and
+        // it read as a count of what was on screen (DEV-789).
+        //
+        // "and", not "in": the two tallies are independent, and the project one
+        // counts only projects where *every* session is hidden. "3 sessions in
+        // 1 project" would be false whenever the hidden sessions span a project
+        // that kept a live row — which is the common case, not a corner one.
+        let hidden_session_noun = if hidden_sessions == 1 {
+            "session"
+        } else {
+            "sessions"
+        };
+        let hidden_project_noun = if hidden_projects == 1 {
+            "project"
+        } else {
+            "projects"
+        };
+
         // Active-only hint row — rendered only when the filter is actually
         // holding something back. `None` collapses to zero children.
         let active_only_hint: Option<AnyElement> = (active_only && hidden_sessions > 0).then(|| {
@@ -1110,10 +1130,12 @@ impl Render for AppState {
                         .text_color(theme().text_dim)
                         .child(if hidden_projects > 0 {
                             format!(
-                                "Active only · {hidden_sessions} sessions, {hidden_projects} projects hidden"
+                                "Active only · hiding {hidden_sessions} {hidden_session_noun} and {hidden_projects} {hidden_project_noun}"
                             )
                         } else {
-                            format!("Active only · {hidden_sessions} sessions hidden")
+                            format!(
+                                "Active only · hiding {hidden_sessions} {hidden_session_noun}"
+                            )
                         }),
                 )
                 .child(
@@ -1143,6 +1165,11 @@ impl Render for AppState {
         // Status summary
         let total_projects = self.projects.len();
         let total_sessions: usize = self.projects.iter().map(|p| p.sessions.len()).sum();
+        // Sessions with a live agent behind them (DEV-789). Shown over the
+        // total rather than beside it: a bare session number next to
+        // `{running}` is read as "live sessions", which is what made the old
+        // `{n}s` misleading.
+        let active_sessions = crate::sidebar::render::active_session_count(&self.projects);
         let running: usize = self
             .projects
             .iter()
@@ -1421,15 +1448,30 @@ impl Render for AppState {
                             .flex_row()
                             .gap(px(8.0))
                             .items_center()
-                            .child(format!(
-                                "{total_projects}p · {total_sessions}s · {running} running · {fps} fps"
-                            ));
+                            // The counts come first and the attention chips
+                            // follow, so an unconstrained text child clips the
+                            // chips off the right edge — losing the bar's
+                            // highest-signal element to its least. The counts
+                            // alone already overrun SIDEBAR_MIN_WIDTH (160px),
+                            // so ellipsis them and let the chips hold their
+                            // ground.
+                            .child(
+                                div()
+                                    .min_w(px(0.0))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(format!(
+                                        "{total_projects}p · {active_sessions}/{total_sessions} active · {running} running · {fps} fps"
+                                    )),
+                            );
 
                         if awaiting > 0 {
                             bar = bar.child(
                                 div()
                                     .flex()
                                     .flex_row()
+                                    .flex_shrink_0()
                                     .items_center()
                                     .gap(px(4.0))
                                     .text_color(SessionStatus::AwaitingInput.color())
@@ -1446,6 +1488,7 @@ impl Render for AppState {
                                 div()
                                     .flex()
                                     .flex_row()
+                                    .flex_shrink_0()
                                     .items_center()
                                     .gap(px(4.0))
                                     .text_color(SessionStatus::ResponseReady.color())
