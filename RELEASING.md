@@ -35,10 +35,11 @@ over rare, giant ones so the auto-generated notes stay readable.
 > ```sh
 > ./script/cut-release.sh minor --dry-run   # show the diff, change nothing
 > ./script/cut-release.sh minor --pr        # push a branch and open the prep PR
+>                                            # (from master it creates chore/release-X.Y.Z)
 > ./script/cut-release.sh minor --tag       # on master: commit, tag, push
 > ```
 >
-> It refuses to run on a dirty tree, on a `master` out of sync with `origin`, when the
+> Every refusal happens before any file is edited. It refuses to run on a dirty tree, on a `master` out of sync with `origin`, when the
 > tag already exists, or when `[Unreleased]` is empty, and `--tag` re-checks the
 > invariant below before tagging. The manual steps remain the reference for what it does.
 
