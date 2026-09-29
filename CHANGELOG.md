@@ -13,6 +13,28 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Added
+- The sidebar now shows *why* a session is waiting, not just that it is. A session
+  blocked on a permission prompt gets a padlock, one blocked on a question — an
+  `AskUserQuestion` or a plan approval — gets a question mark, and one that simply has
+  nothing to do gets a receding dot. Shapes differ, not only colours, so the three read
+  apart without colour vision. Blocked sessions sort above idle ones, and the attention
+  bar's headline splits them: "3 sessions blocked on you · 15 waiting for a prompt"
+  rather than one number that could mean either.
+
+### Fixed
+- A session that finished its turn no longer degrades to "needs input" a minute later.
+  Claude Code fires an idle notification about sixty seconds after a response ends, and
+  Allele took it at face value, repainting the mauve "ready to review" star as the peach
+  "blocked" triangle. With many sessions open this made the two states impossible to
+  tell apart. The idle nudge is now absorbed while a session is ready to review; a real
+  permission prompt still escalates.
+- The attention bar's **Allow** button no longer appears on prompts where pressing Enter
+  is not "allow". It is gated on the tool having a name, and `AskUserQuestion` has one —
+  so one click silently selected whichever option happened to be highlighted, with
+  nothing recording that an answer had been given or which it was. Allow is now offered
+  for permission prompts only.
+
 ## [0.5.1] - 2026-09-23
 
 ### Fixed

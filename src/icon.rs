@@ -21,8 +21,10 @@ pub mod name {
     pub const FILE_TEXT: &str = "file-text";
     pub const FILTER: &str = "filter";
     pub const HELIX: &str = "helix";
+    pub const HELP_CIRCLE: &str = "help-circle";
     pub const IMAGE: &str = "image";
     pub const LOADER: &str = "loader";
+    pub const LOCK: &str = "lock";
     pub const PAPERCLIP: &str = "paperclip";
     pub const PAUSE: &str = "pause";
     pub const PIN: &str = "pin";
