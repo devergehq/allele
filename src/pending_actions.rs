@@ -124,11 +124,24 @@ impl AppState {
                 agent_id,
                 initial_prompt,
                 orchestration,
+                group,
             } => {
-                // The new id is deliberately dropped: a human's session is
-                // followed by watching the sidebar, not by an awaiting caller.
-                // Dispatch is the path that needs it — see dispatch::create.
-                let _ = self.add_session_to_project_with_details(
+                // Interned *before* the session is created, so the group is
+                // recorded against the project even if the clone then fails —
+                // which is what keeps a group's position stable rather than
+                // dependent on whether a provisioning attempt succeeded.
+                let interned = group.as_deref().and_then(|raw| {
+                    self.projects
+                        .get_mut(project_idx)
+                        .and_then(|p| p.intern_group(raw).ok())
+                        .flatten()
+                });
+                // The id is dropped by the sidebar path — a human's session is
+                // followed by watching the sidebar, not by an awaiting caller —
+                // but the group needs it: the clone lands asynchronously, so the
+                // name is parked against the id and claimed at materialisation
+                // (DEV-853). Dispatch needs the id too; see dispatch::create.
+                let new_id = self.add_session_to_project_with_details(
                     project_idx,
                     label,
                     branch_slug,
@@ -138,6 +151,10 @@ impl AppState {
                     window,
                     cx,
                 );
+                if let (Some(id), Some(group)) = (new_id, interned) {
+                    self.pending_session_groups.insert(id, group);
+                }
+                self.mark_state_dirty();
             }
             SessionAction::CloseSessionKeepClone {
                 project_idx,
@@ -332,6 +349,19 @@ impl AppState {
                 if from != to {
                     if let Some(project) = self.projects.get_mut(project_idx) {
                         if from < project.sessions.len() && to < project.sessions.len() {
+                            // Reordering is within a group only (DEV-853).
+                            // Moving a session between groups is DEV-937, and
+                            // until it lands a cross-group drop must do nothing
+                            // rather than regroup the session silently — the
+                            // drag gesture says "put it here", and honouring the
+                            // position while also changing its group would do
+                            // something the user did not ask for.
+                            if !crate::sidebar::groups::same_group_opt(
+                                project.sessions[from].group.as_deref(),
+                                project.sessions[to].group.as_deref(),
+                            ) {
+                                return;
+                            }
                             let session = project.sessions.remove(from);
                             project.sessions.insert(to, session);
                             // Remap the active cursor through the move.
@@ -397,15 +427,39 @@ impl AppState {
                 comment,
                 pinned,
                 orchestration,
+                group,
             } => {
+                // Interned against the project before the session is touched,
+                // because both need the same `&mut` and the project's order is
+                // what decides the spelling the session stores (DEV-853).
+                let interned = match self.projects.get_mut(project_idx) {
+                    Some(project) => match group.as_deref() {
+                        Some(raw) => project.intern_group(raw).ok().flatten(),
+                        // Clearing the field removes the session from its group.
+                        // The *name* stays in the project's order, so the group
+                        // reappears in place if it refills.
+                        None => None,
+                    },
+                    None => None,
+                };
                 if let Some(session) = self
                     .projects
                     .get_mut(project_idx)
                     .and_then(|p| p.sessions.get_mut(session_idx))
                 {
+                    let group_changed = session.group.as_deref() != interned.as_deref();
                     session.label = label.clone();
                     session.comment = comment;
                     session.pinned = pinned;
+                    session.group = interned;
+                    // A group change reorders the sidebar while leaving every
+                    // count untouched, so the structural stamp cannot see it and
+                    // an armed discard prompt would silently relocate to
+                    // whichever row moved into its index. Same reasoning as
+                    // `ReorderSession` — see `confirmation_is_stale`.
+                    if group_changed {
+                        self.confirming.dismiss_armed();
+                    }
                     // Takes effect from the next resume: `apply_project_config`
                     // reads it there. Deliberately does not retroactively start
                     // or tear down anything for the running session.
@@ -1250,7 +1304,7 @@ mod tests {
     // which brings gpui's own `test` attribute into scope and sends the
     // `#[gpui::test]` expansion into infinite recursion.
     use crate::actions::{
-        ArchiveAction, ProjectAction, SessionCursor, SettingsAction, SidebarAction,
+        ArchiveAction, ProjectAction, SessionAction, SessionCursor, SettingsAction, SidebarAction,
     };
     use crate::app_state::fixture::{Fixture, FixtureSpec};
     use crate::project::Project;
@@ -1472,5 +1526,243 @@ mod tests {
         fx.checkpoint(cx);
         assert_eq!(fx.state.save_count(), 0);
         assert_eq!(fx.settings.save_count(), 0);
+    }
+
+    // ── DEV-853: session groups ────────────────────────────────────────
+    //
+    // The session family is otherwise untested (ARCHITECTURE.md §8) because its
+    // handlers spawn PTYs and shell out to git. These two do neither: a group
+    // edit is a state transition, and a refused reorder is the absence of one.
+    // `branch_slug: None` keeps `ApplySessionEdit` off the git path.
+
+    fn edit_group(cursor: SessionCursor, label: &str, group: Option<&str>) -> SessionAction {
+        SessionAction::ApplySessionEdit {
+            project_idx: cursor.project_idx,
+            session_idx: cursor.session_idx,
+            label: label.to_string(),
+            branch_slug: None,
+            comment: None,
+            pinned: false,
+            orchestration: crate::session::Orchestration::Nothing,
+            group: group.map(str::to_string),
+        }
+    }
+
+    fn grouped_project(groups: &[Option<&str>]) -> Project {
+        let mut project = project_named("tc-portal");
+        for (i, group) in groups.iter().enumerate() {
+            let mut session = suspended_session(&format!("s{i}"));
+            session.group = group.map(str::to_string);
+            if let Some(name) = group {
+                project.group_order.intern(name);
+            }
+            project.sessions.push(session);
+        }
+        project
+    }
+
+    fn group_of(fx: &Fixture, cursor: SessionCursor, cx: &mut TestAppContext) -> Option<String> {
+        fx.update(cx, |state, _w, _cx| {
+            state.projects[cursor.project_idx].sessions[cursor.session_idx]
+                .group
+                .clone()
+        })
+    }
+
+    /// The acceptance criterion: editing a session's group moves it to that
+    /// group at once, and the project records the name so the sidebar can order
+    /// it.
+    #[gpui::test]
+    fn editing_a_session_assigns_its_group_and_records_the_name(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[None])], cx);
+        let cursor = SessionCursor {
+            project_idx: 0,
+            session_idx: 0,
+        };
+
+        let dirty = fx.dispatch(edit_group(cursor, "Review #9586", Some("review")), cx);
+
+        assert_eq!(group_of(&fx, cursor, cx).as_deref(), Some("review"));
+        assert_eq!(
+            fx.update(cx, |state, _w, _cx| state.projects[0]
+                .group_names()
+                .to_vec()),
+            ["review"],
+            "the project must record the name, or the sidebar cannot order the group"
+        );
+        assert!(
+            dirty.0,
+            "a group lives in state.json, so the handler must mark state dirty"
+        );
+    }
+
+    /// Clearing the field returns the session to the ungrouped block — but the
+    /// *name* stays in the project's order, which is what makes a group that
+    /// empties and refills come back in its old position.
+    #[gpui::test]
+    fn clearing_the_group_ungroups_the_session_but_keeps_the_name(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")])], cx);
+        let cursor = SessionCursor {
+            project_idx: 0,
+            session_idx: 0,
+        };
+
+        fx.dispatch(edit_group(cursor, "Review #9586", None), cx);
+
+        assert_eq!(group_of(&fx, cursor, cx), None);
+        assert_eq!(
+            fx.update(cx, |state, _w, _cx| state.projects[0]
+                .group_names()
+                .to_vec()),
+            ["review"],
+            "the group's place in the order survives losing its last session"
+        );
+    }
+
+    /// `Review` typed into a project that already has `review` joins it, and is
+    /// stored in the project's spelling rather than the one just typed.
+    #[gpui::test]
+    fn a_differently_cased_group_joins_the_existing_one(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review"), None])], cx);
+        let second = SessionCursor {
+            project_idx: 0,
+            session_idx: 1,
+        };
+
+        fx.dispatch(edit_group(second, "Review #9590", Some("REVIEW")), cx);
+
+        assert_eq!(
+            group_of(&fx, second, cx).as_deref(),
+            Some("review"),
+            "stored in the first spelling the project saw"
+        );
+        assert_eq!(
+            fx.update(cx, |state, _w, _cx| state.projects[0]
+                .group_names()
+                .to_vec()),
+            ["review"],
+            "one group, not two"
+        );
+    }
+
+    /// An over-length name cannot reach here through the modals, which refuse to
+    /// submit. If one ever does, the session is left as it was rather than being
+    /// put in a truncated group nobody named.
+    #[gpui::test]
+    fn an_over_length_group_leaves_the_session_alone(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")])], cx);
+        let cursor = SessionCursor {
+            project_idx: 0,
+            session_idx: 0,
+        };
+        let too_long = "r".repeat(crate::sidebar::groups::GROUP_NAME_MAX_LEN + 1);
+
+        fx.dispatch(edit_group(cursor, "Review #9586", Some(&too_long)), cx);
+
+        assert_eq!(group_of(&fx, cursor, cx), None, "refused, not truncated");
+        assert_eq!(
+            fx.update(cx, |state, _w, _cx| state.projects[0]
+                .group_names()
+                .to_vec()),
+            ["review"],
+            "and the refused name is not recorded as a group"
+        );
+    }
+
+    fn session_ids(fx: &Fixture, cx: &mut TestAppContext) -> Vec<String> {
+        fx.update(cx, |state, _w, _cx| {
+            state.projects[0]
+                .sessions
+                .iter()
+                .map(|s| s.id.clone())
+                .collect()
+        })
+    }
+
+    /// Dragging to reorder still works between two sessions in the same group.
+    #[gpui::test]
+    fn reordering_within_a_group_still_works(cx: &mut TestAppContext) {
+        let fx =
+            Fixture::with_projects(vec![grouped_project(&[Some("review"), Some("review")])], cx);
+
+        fx.dispatch(
+            SessionAction::ReorderSession {
+                project_idx: 0,
+                from: 1,
+                to: 0,
+            },
+            cx,
+        );
+
+        assert_eq!(session_ids(&fx, cx), ["s1", "s0"]);
+    }
+
+    /// And between two ungrouped sessions, exactly as it did before groups
+    /// existed — the ungrouped block is a run of rows like any other.
+    #[gpui::test]
+    fn reordering_within_the_ungrouped_block_still_works(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[None, None])], cx);
+
+        fx.dispatch(
+            SessionAction::ReorderSession {
+                project_idx: 0,
+                from: 1,
+                to: 0,
+            },
+            cx,
+        );
+
+        assert_eq!(session_ids(&fx, cx), ["s1", "s0"]);
+    }
+
+    /// Dropping a session onto one in a different group does nothing. Moving a
+    /// session between groups is DEV-937; until it lands, honouring the position
+    /// while silently changing the group would do something nobody asked for.
+    #[gpui::test]
+    fn reordering_across_groups_does_nothing(cx: &mut TestAppContext) {
+        let fx =
+            Fixture::with_projects(vec![grouped_project(&[Some("review"), Some("linear")])], cx);
+
+        fx.dispatch(
+            SessionAction::ReorderSession {
+                project_idx: 0,
+                from: 1,
+                to: 0,
+            },
+            cx,
+        );
+
+        assert_eq!(session_ids(&fx, cx), ["s0", "s1"], "the drop is a no-op");
+        assert_eq!(
+            group_of(
+                &fx,
+                SessionCursor {
+                    project_idx: 0,
+                    session_idx: 1
+                },
+                cx
+            )
+            .as_deref(),
+            Some("linear"),
+            "and it must not have been regrouped either"
+        );
+    }
+
+    /// The other half: a grouped session and an ungrouped one are in different
+    /// groups, so that drop is a no-op too.
+    #[gpui::test]
+    fn reordering_between_a_group_and_the_ungrouped_block_does_nothing(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[None, Some("review")])], cx);
+
+        fx.dispatch(
+            SessionAction::ReorderSession {
+                project_idx: 0,
+                from: 1,
+                to: 0,
+            },
+            cx,
+        );
+
+        assert_eq!(session_ids(&fx, cx), ["s0", "s1"]);
     }
 }

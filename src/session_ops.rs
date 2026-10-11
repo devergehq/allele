@@ -830,6 +830,14 @@ impl AppState {
                 if let Some(origin) = this.pending_dispatch_origins.remove(&session.id) {
                     session.origin = origin;
                 }
+                // Same for the sidebar group (DEV-853) — and for the same
+                // reason: the clone lands asynchronously, so the group cannot be
+                // set by the call that asked for it. The name was already
+                // interned against the project when it was parked, so what comes
+                // back here is the project's spelling.
+                if let Some(group) = this.pending_session_groups.remove(&session.id) {
+                    session.group = Some(group);
+                }
                 let dispatched = session.origin.is_dispatched();
 
                 let Some(project) = this.projects.get_mut(project_idx) else {
@@ -2075,6 +2083,10 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
     session.branch_locked = persisted.branch_locked;
     session.orchestration = persisted.orchestration();
     session.origin = persisted.origin.clone();
+    // `session.group` is deliberately left `None`: a pulled session arrives
+    // ungrouped (DEV-853), and `SessionBundleMeta::to_persisted` already drops
+    // the field on the way in. Stated here so this reads as a decision rather
+    // than a field someone forgot.
     session
 }
 

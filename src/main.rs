@@ -691,6 +691,8 @@ impl AppState {
                 session.comment.as_deref().unwrap_or(""),
                 session.pinned,
                 session.orchestration,
+                session.group.as_deref().unwrap_or(""),
+                project.group_names().to_vec(),
             )
         });
 
@@ -706,6 +708,7 @@ impl AppState {
                         comment,
                         pinned,
                         orchestration,
+                        group,
                     } => {
                         this.edit_session_modal = None;
                         this.pending_action = Some(
@@ -717,6 +720,7 @@ impl AppState {
                                 comment: comment.clone(),
                                 pinned: *pinned,
                                 orchestration: *orchestration,
+                                group: group.clone(),
                             }
                             .into(),
                         );
@@ -823,6 +827,18 @@ impl AppState {
             persisted
                 .archived_sessions
                 .extend(project.archives.iter().cloned());
+            // Written even when no session currently carries a name, which is
+            // the point: a group that empties must come back in its old
+            // position after a restart, so the order is persisted rather than
+            // re-derived from the sessions on load (DEV-853).
+            if !project.group_order.names().is_empty() {
+                persisted
+                    .project_group_order
+                    .push(crate::state::ProjectGroupOrder {
+                        project_id: project.id.clone(),
+                        groups: project.group_order.names().to_vec(),
+                    });
+            }
         }
         persisted.last_active_session_id = self.active.and_then(|cursor| {
             self.projects
@@ -947,6 +963,15 @@ impl AppState {
             .map(|p| git::list_local_branches(&p.source_path))
             .unwrap_or_default();
 
+        // Group names this project already has, so the Group field can offer
+        // them rather than letting `review` and `reviews` both get created
+        // (DEV-853).
+        let existing_groups = self
+            .projects
+            .get(project_idx)
+            .map(|p| p.group_names().to_vec())
+            .unwrap_or_default();
+
         let entity = cx.new(|cx| {
             new_session_modal::NewSessionModal::new(
                 cx,
@@ -955,6 +980,7 @@ impl AppState {
                 default_agent_idx,
                 default_label,
                 existing_branches,
+                existing_groups,
             )
         });
 
@@ -969,6 +995,7 @@ impl AppState {
                         agent_id,
                         initial_prompt,
                         orchestration,
+                        group,
                     } => {
                         this.new_session_modal = None;
                         this.pending_action = Some(
@@ -979,6 +1006,7 @@ impl AppState {
                                 agent_id: agent_id.clone(),
                                 initial_prompt: initial_prompt.clone(),
                                 orchestration: *orchestration,
+                                group: group.clone(),
                             }
                             .into(),
                         );
@@ -1832,6 +1860,19 @@ fn main() {
                         })
                         .collect();
 
+                    // Rehydrate each project's sidebar group order (DEV-853).
+                    // Before the sessions below, so a restored session's group
+                    // is already a name the project knows.
+                    for stored in &loaded_state_for_window.project_group_order {
+                        if let Some(project) =
+                            projects.iter_mut().find(|p| p.id == stored.project_id)
+                        {
+                            project.group_order = crate::sidebar::groups::GroupOrder::from_names(
+                                stored.groups.clone(),
+                            );
+                        }
+                    }
+
                     // Rehydrate archived sessions from state.json so the
                     // archive browser shows human-readable labels.
                     for archived in &loaded_state_for_window.archived_sessions {
@@ -1898,6 +1939,14 @@ fn main() {
                         .with_conversation_choice_explicit(persisted.conversation_choice_explicit);
                         session.pinned = persisted.pinned;
                         session.comment = persisted.comment.clone();
+                        // Interned rather than assigned, so a group present on a
+                        // session but missing from the stored order — a
+                        // hand-edited file, or one written by a build that
+                        // crashed between the two writes — still gets a place in
+                        // the order instead of sorting last forever (DEV-853).
+                        if let Some(group) = persisted.group.as_deref() {
+                            session.group = project.intern_group(group).ok().flatten();
+                        }
                         session.branch_name = persisted.branch_name.clone();
                         session.branch_locked = persisted.branch_locked;
                         session.orchestration = persisted.orchestration();
@@ -2184,6 +2233,7 @@ fn main() {
                         // Captured on the first render (see `Render`).
                         main_window: None,
                         pending_dispatch_origins: Default::default(), // DEV-415
+                        pending_session_groups: Default::default(),   // DEV-853
                     }
                 })
             },

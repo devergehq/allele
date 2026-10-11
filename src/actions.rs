@@ -67,6 +67,10 @@ pub enum SessionAction {
         /// Skip the project's startup command, drawer terminals, preview URL,
         /// and shutdown command for this session. See DEV-400.
         orchestration: crate::session::Orchestration,
+        /// Sidebar group for the new session, trimmed; `None` for ungrouped
+        /// (DEV-853). Not yet interned — the handler resolves it against the
+        /// project so the first spelling the project saw is the one stored.
+        group: Option<String>,
     },
     /// Kill the PTY, keep the clone, mark Suspended. Next click cold-resumes.
     CloseSessionKeepClone {
@@ -149,6 +153,9 @@ pub enum SessionAction {
         comment: Option<String>,
         pinned: bool,
         orchestration: crate::session::Orchestration,
+        /// Sidebar group, trimmed; `None` clears it and returns the session to
+        /// the ungrouped block (DEV-853). Interned by the handler.
+        group: Option<String>,
     },
 }
 

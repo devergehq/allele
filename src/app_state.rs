@@ -348,6 +348,18 @@ pub(crate) struct AppState {
     /// were quit in between.
     pub(crate) pending_dispatch_origins:
         std::collections::HashMap<String, crate::session::SessionOrigin>,
+    /// Sidebar group for sessions still being provisioned (DEV-853).
+    ///
+    /// Parked by session id and applied when the session materialises, exactly
+    /// as `pending_dispatch_origins` above and for the same reason: a clone
+    /// lands asynchronously, so the modal — or the dispatch — that chose the
+    /// group has returned long before there is a `Session` to put it on.
+    ///
+    /// Values are already interned against the owning project, so what lands on
+    /// the session is the project's canonical spelling. An entry is dropped if
+    /// provisioning never completes, which costs a short string per failed
+    /// clone — the same trade `pending_dispatch_origins` makes.
+    pub(crate) pending_session_groups: std::collections::HashMap<String, String>,
     /// Transient warning shown when `git pull` on the source root fails
     /// before session creation. Auto-dismissed after a few seconds.
     pub(crate) pull_warning: Option<String>,
@@ -1005,6 +1017,7 @@ pub(crate) mod fixture {
                     settings_window: None,
                     main_window: None,
                     pending_dispatch_origins: Default::default(),
+                    pending_session_groups: Default::default(),
                     pull_warning: None,
                     sync_notice: None,
                     main_tab: MainTab::Claude,

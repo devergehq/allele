@@ -13,6 +13,19 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Added
+- Sessions can sit in a named **group** in the sidebar. With 36 sessions running — 56 in one
+  project — the flat list could not answer "which of these is waiting on me", and the
+  sessions a dispatcher started were mixed in with the ones being driven by hand. A group is
+  just an optional name on a session: set it in New Session, in Edit Session, or by passing
+  `group` to `allele_sessions_create`, and a group exists because a session carries its name.
+  Ungrouped sessions still come first with no header, so a project nobody has grouped looks
+  exactly as it did. Each group gets a header saying how many of its sessions are running,
+  finished and blocked. Groups hold the order the project first saw them, across restarts and
+  across a group emptying and refilling, and blocked and pinned sessions sort *inside* their
+  group rather than being pulled out of it — the attention bar already covers the alert.
+  `allele_sessions_list` and `allele_sessions_status` report each session's group.
+
 ### Changed
 - The sidebar now says how many sessions have a live agent behind them. Its status bar
   read `54s · 6 running`, where the first number counted every session in the sidebar —

@@ -150,6 +150,7 @@ mod tests {
             agent_id: None,
             pinned: false,
             comment: None,
+            group: None,
             branch_name: Some("fix-auth".into()),
             branch_locked: false,
             skip_orchestration: false,

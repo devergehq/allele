@@ -108,6 +108,24 @@ pub struct CreateRequest {
     /// [`crate::dispatch::address::dispatch_preamble`].
     #[serde(default)]
     pub caller_reply_to: Option<String>,
+    /// Sidebar group to place the new session in (DEV-853).
+    ///
+    /// Free text, trimmed; at most 40 characters, refused with
+    /// [`ErrorCode::BadRequest`] above that. `None` — or absent, or empty —
+    /// leaves the session ungrouped, which is where every session sat before
+    /// groups existed.
+    ///
+    /// **Matched ignoring case against the project's existing groups**, and the
+    /// first spelling that project saw is the one stored and displayed: a
+    /// dispatcher passing `Review` into a project that already has `review`
+    /// joins it rather than creating a second group. Scoped to one project, so
+    /// the same name in two projects is two groups.
+    ///
+    /// This is the half of the contract DEV-938 (Locus) is written against —
+    /// one group per dispatch mode, so a dispatcher's reviewers sit together
+    /// instead of scattered through 56 sessions.
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 /// Dispatched sessions start bare unless they ask for more (DEV-441).
@@ -126,13 +144,32 @@ fn default_dispatch_orchestration() -> Orchestration {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Response {
-    Projects { projects: Vec<ProjectSummary> },
-    Sessions { sessions: Vec<SessionSummary> },
-    Status { session: SessionSummary },
-    Created { session: CreatedSession },
-    Discarded { session: DiscardedSession },
-    Interrupted { session: InterruptedSession },
-    Error { code: ErrorCode, message: String },
+    Projects {
+        projects: Vec<ProjectSummary>,
+    },
+    Sessions {
+        sessions: Vec<SessionSummary>,
+    },
+    /// Boxed because [`SessionSummary`] is the largest thing on this wire, and
+    /// `dispatch::manage::claim` returns a `Response` as its `Err`. Unboxed, one
+    /// 136-byte variant set the size of every `Result<_, Response>` in the
+    /// module. Invisible on the wire — serde treats `Box<T>` as `T`.
+    Status {
+        session: Box<SessionSummary>,
+    },
+    Created {
+        session: CreatedSession,
+    },
+    Discarded {
+        session: DiscardedSession,
+    },
+    Interrupted {
+        session: InterruptedSession,
+    },
+    Error {
+        code: ErrorCode,
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -275,6 +312,14 @@ pub struct SessionSummary {
     /// `None` for a suspended session, or one whose socket allele cannot find.
     #[serde(default)]
     pub reply_to: Option<String>,
+    /// The session's sidebar group, `null` when it has none (DEV-853).
+    ///
+    /// In the owning project's spelling, which may differ in case from what a
+    /// caller passed to `sessions.create` — the project's first spelling wins.
+    /// A dispatcher reads this to tell which of its own workers it is looking
+    /// at without keeping a map of session ids to the work it sent.
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 /// Why a request failed.
@@ -341,6 +386,7 @@ mod tests {
                 orchestration: Orchestration::StartupOnly,
                 caller_session_id: Some("caller".into()),
                 caller_reply_to: Some("uds:/tmp/cc-socks/65452.sock".into()),
+                group: Some("review".into()),
             }),
         ];
         for r in reqs {
@@ -417,6 +463,76 @@ mod tests {
         let r: CreateRequest =
             serde_json::from_str(r#"{"project":"p","name":"n","prompt":"go"}"#).expect("parses");
         assert_eq!(r.caller_reply_to, None);
+    }
+
+    /// A caller that passes no group gets a session in no group — the shape
+    /// every session had before DEV-853, and the default DEV-938 relies on for
+    /// dispatches that are not mode-scoped.
+    #[test]
+    fn create_without_a_group_is_ungrouped() {
+        let r: CreateRequest =
+            serde_json::from_str(r#"{"project":"p","name":"n","prompt":"go"}"#).expect("parses");
+        assert_eq!(r.group, None);
+    }
+
+    /// `group` travels as a plain optional string. Asserted on the wire because
+    /// DEV-938 is being built against this spelling in another repository, so a
+    /// rename here breaks a consumer rather than only a test.
+    #[test]
+    fn create_carries_the_group_as_an_optional_string() {
+        let r: CreateRequest =
+            serde_json::from_str(r#"{"project":"p","name":"n","prompt":"go","group":"review"}"#)
+                .expect("parses");
+        assert_eq!(r.group.as_deref(), Some("review"));
+    }
+
+    fn summary() -> SessionSummary {
+        SessionSummary {
+            session_id: "s1".into(),
+            name: "Review #9586".into(),
+            project: "tc-portal".into(),
+            state: SessionState::Running,
+            state_age_secs: 12,
+            dispatched: true,
+            depth: 1,
+            reply_to: None,
+            group: None,
+        }
+    }
+
+    /// `sessions.list` and `sessions.status` must report the group, and must
+    /// report it as `null` rather than omitting the key — a caller checking
+    /// `summary["group"]` should not have to tell "ungrouped" from "this allele
+    /// is too old to know about groups".
+    #[test]
+    fn a_summary_reports_its_group_as_null_when_absent() {
+        let encoded = serde_json::to_value(summary()).expect("serialises");
+        assert_eq!(encoded["group"], serde_json::Value::Null);
+
+        let grouped = SessionSummary {
+            group: Some("review".into()),
+            ..summary()
+        };
+        assert_eq!(
+            serde_json::to_value(&grouped).expect("serialises")["group"],
+            "review"
+        );
+    }
+
+    /// Boxing `Status`'s payload is an in-memory detail and must stay one: a
+    /// consumer reads `{"result":"status","session":{…}}` either way.
+    #[test]
+    fn boxing_the_status_payload_does_not_reach_the_wire() {
+        let response = Response::Status {
+            session: Box::new(summary()),
+        };
+        let encoded = serde_json::to_value(&response).expect("serialises");
+        assert_eq!(encoded["result"], "status");
+        assert_eq!(encoded["session"]["session_id"], "s1");
+        assert_eq!(
+            serde_json::from_value::<Response>(encoded).expect("parses"),
+            response
+        );
     }
 
     /// The wire vocabulary is snake_case and must stay stable independently of
