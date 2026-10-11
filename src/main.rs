@@ -1945,7 +1945,19 @@ fn main() {
                         // crashed between the two writes — still gets a place in
                         // the order instead of sorting last forever (DEV-853).
                         if let Some(group) = persisted.group.as_deref() {
-                            session.group = project.intern_group(group).ok().flatten();
+                            match project.intern_group(group) {
+                                Ok(name) => session.group = name,
+                                // A name longer than the limit can only come
+                                // from a hand-edited file. Logged rather than
+                                // dropped in silence: the session loads
+                                // ungrouped, and the warning says why its group
+                                // went missing.
+                                Err(e) => warn!(
+                                    "session {} has an unusable group ({}) — loading it ungrouped",
+                                    persisted.id,
+                                    e.message()
+                                ),
+                            }
                         }
                         session.branch_name = persisted.branch_name.clone();
                         session.branch_locked = persisted.branch_locked;

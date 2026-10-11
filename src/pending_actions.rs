@@ -131,10 +131,18 @@ impl AppState {
                 // which is what keeps a group's position stable rather than
                 // dependent on whether a provisioning attempt succeeded.
                 let interned = group.as_deref().and_then(|raw| {
-                    self.projects
-                        .get_mut(project_idx)
-                        .and_then(|p| p.intern_group(raw).ok())
-                        .flatten()
+                    match self.projects.get_mut(project_idx)?.intern_group(raw) {
+                        Ok(name) => name,
+                        // Unreachable from the modal, which refuses to submit.
+                        // The session is still created — refusing the group is
+                        // not a reason to refuse the workspace — it just starts
+                        // ungrouped, which is the state it would have had if
+                        // the field had been left empty.
+                        Err(e) => {
+                            warn!("ignoring group on new session: {}", e.message());
+                            None
+                        }
+                    }
                 });
                 // The id is dropped by the sidebar path — a human's session is
                 // followed by watching the sidebar, not by an awaiting caller —
@@ -432,13 +440,30 @@ impl AppState {
                 // Interned against the project before the session is touched,
                 // because both need the same `&mut` and the project's order is
                 // what decides the spelling the session stores (DEV-853).
+                //
+                // Three outcomes, and collapsing any two of them loses a case:
+                // a name to store, "clear it" (the field was emptied), and
+                // "refuse it" (over-length). `Ok(None)` and `Err` are both
+                // "no name", which is why the refusal has to be read out
+                // separately — otherwise a rejected name silently *ungroups*
+                // the session, doing damage the caller did not ask for on the
+                // path that was supposed to change nothing.
                 let interned = match self.projects.get_mut(project_idx) {
                     Some(project) => match group.as_deref() {
-                        Some(raw) => project.intern_group(raw).ok().flatten(),
+                        Some(raw) => match project.intern_group(raw) {
+                            Ok(name) => Some(name),
+                            // Unreachable from either modal (both refuse to
+                            // submit) and from dispatch (it validates before
+                            // provisioning). Kept correct for the next caller.
+                            Err(e) => {
+                                warn!("ignoring group on session edit: {}", e.message());
+                                None
+                            }
+                        },
                         // Clearing the field removes the session from its group.
                         // The *name* stays in the project's order, so the group
                         // reappears in place if it refills.
-                        None => None,
+                        None => Some(None),
                     },
                     None => None,
                 };
@@ -447,11 +472,17 @@ impl AppState {
                     .get_mut(project_idx)
                     .and_then(|p| p.sessions.get_mut(session_idx))
                 {
-                    let group_changed = session.group.as_deref() != interned.as_deref();
+                    // `None` here is the refusal: leave the group exactly as it
+                    // was rather than writing anything.
+                    let group_changed = interned
+                        .as_ref()
+                        .is_some_and(|new| session.group.as_deref() != new.as_deref());
                     session.label = label.clone();
                     session.comment = comment;
                     session.pinned = pinned;
-                    session.group = interned;
+                    if let Some(new_group) = interned {
+                        session.group = new_group;
+                    }
                     // A group change reorders the sidebar while leaving every
                     // count untouched, so the structural stamp cannot see it and
                     // an armed discard prompt would silently relocate to
@@ -1646,8 +1677,13 @@ mod tests {
     }
 
     /// An over-length name cannot reach here through the modals, which refuse to
-    /// submit. If one ever does, the session is left as it was rather than being
-    /// put in a truncated group nobody named.
+    /// submit, nor through dispatch, which validates before provisioning. If one
+    /// ever does, the session keeps the group it had.
+    ///
+    /// The distinction this guards: `Ok(None)` ("the user cleared the field")
+    /// and `Err` ("that name is unusable") are both "no name", and collapsing
+    /// them made a rejected edit *ungroup* the session — damage on the path that
+    /// was meant to change nothing.
     #[gpui::test]
     fn an_over_length_group_leaves_the_session_alone(cx: &mut TestAppContext) {
         let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")])], cx);
@@ -1659,13 +1695,37 @@ mod tests {
 
         fx.dispatch(edit_group(cursor, "Review #9586", Some(&too_long)), cx);
 
-        assert_eq!(group_of(&fx, cursor, cx), None, "refused, not truncated");
+        assert_eq!(
+            group_of(&fx, cursor, cx).as_deref(),
+            Some("review"),
+            "refused — so the session keeps the group it had, rather than losing it"
+        );
         assert_eq!(
             fx.update(cx, |state, _w, _cx| state.projects[0]
                 .group_names()
                 .to_vec()),
             ["review"],
             "and the refused name is not recorded as a group"
+        );
+    }
+
+    /// The other half of the same distinction: an *empty* field really does
+    /// clear the group. Without this beside the test above, a fix that simply
+    /// never wrote `None` would pass.
+    #[gpui::test]
+    fn an_empty_group_field_still_clears_the_group(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")])], cx);
+        let cursor = SessionCursor {
+            project_idx: 0,
+            session_idx: 0,
+        };
+
+        fx.dispatch(edit_group(cursor, "Review #9586", Some("   ")), cx);
+
+        assert_eq!(
+            group_of(&fx, cursor, cx),
+            None,
+            "whitespace is an empty field, which is how a session leaves its group"
         );
     }
 

@@ -278,17 +278,25 @@ fn render_group_header(header: &GroupHeader) -> AnyElement {
         .items_center()
         .justify_between()
         .child(
+            // Truncates rather than refusing to shrink. A group name is free
+            // text up to 40 characters and the sidebar is user-resizable, so a
+            // `flex_shrink_0` name would push the counts out entirely at a
+            // narrow width — removing the one thing this header exists to say.
+            // Matches how the session rows below treat their labels.
             div()
-                .flex_shrink_0()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
                 .text_size(px(10.0))
                 .font_weight(FontWeight::SEMIBOLD)
                 .text_color(theme().text_faint)
                 .child(header.name.to_uppercase()),
         )
         .children(counts.summary().map(|summary| {
+            // The counts hold their width instead: they are short, bounded, and
+            // the reason to look at the header at all.
             div()
-                .min_w(px(0.0))
-                .overflow_hidden()
+                .flex_shrink_0()
                 .text_size(px(10.0))
                 .text_color(theme().text_dim)
                 .child(summary)
@@ -935,12 +943,33 @@ pub(crate) fn build_sidebar_items(
                     DraggedSession {
                         project_idx: p_idx,
                         session_idx: s_idx,
+                        group: session.group.clone(),
                     },
                     move |_drag, _offset, _window, cx| {
                         cx.new(|_| crate::DragPreview(row_drag_label.clone()))
                     },
                 )
-                .drag_over::<DraggedSession>(|style, _, _, _| style.bg(theme().bg_hover_soft))
+                // Only light up as a drop target if the drop would do
+                // something. A cross-group reorder is refused (DEV-853), and an
+                // affordance offered for a drop that is then discarded reads as
+                // a lost event rather than a deliberate refusal. Dragging
+                // *between* groups is DEV-937; until it lands, the row simply
+                // does not invite it.
+                .drag_over::<DraggedSession>({
+                    let row_group = session.group.clone();
+                    move |style, dragged: &DraggedSession, _, _| {
+                        if dragged.project_idx == p_idx
+                            && groups::same_group_opt(
+                                dragged.group.as_deref(),
+                                row_group.as_deref(),
+                            )
+                        {
+                            style.bg(theme().bg_hover_soft)
+                        } else {
+                            style
+                        }
+                    }
+                })
                 .on_drop(cx.listener(
                     move |this: &mut AppState, dragged: &DraggedSession, _window, cx| {
                         // Same-project reorder only — sessions are clones of
