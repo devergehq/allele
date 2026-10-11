@@ -1535,7 +1535,7 @@ mod tests {
     // gpui's own `test` macro. See src/session/mod.rs for the same note.
     use super::{
         active_only_hidden_counts, active_session_count, project_survives_active_only,
-        session_survives_active_only,
+        session_matches_filter, session_survives_active_only,
     };
     use crate::actions::SessionCursor;
     use crate::project::Project;
@@ -1738,5 +1738,52 @@ mod tests {
             project(&[SessionStatus::Running, SessionStatus::Done]),
         ];
         assert_eq!(active_only_hidden_counts(&projects, None), (3, 1));
+    }
+
+    // ── DEV-853: the filter matches a group's name ─────────────────────
+
+    /// `filter` arrives lowercased from `AppState::sidebar_filter`, so these
+    /// pass it the way the sidebar does.
+    fn matches(label: &str, group: Option<&str>, filter: &str) -> bool {
+        session_matches_filter(label, None, group, "tc-portal", filter)
+    }
+
+    /// The acceptance criterion: typing a group's name shows that group's
+    /// sessions, even when the name appears nowhere else on the row.
+    #[test]
+    fn typing_a_group_name_matches_its_sessions() {
+        assert!(matches("Claude 14", Some("review"), "review"));
+        assert!(
+            !matches("Claude 14", Some("linear"), "review"),
+            "a session in another group must not be dragged in with it"
+        );
+    }
+
+    /// Matching is case-insensitive here too, so a filter does not depend on
+    /// the user remembering which spelling the project settled on.
+    #[test]
+    fn the_group_filter_ignores_case() {
+        assert!(matches("Claude 14", Some("Review"), "review"));
+    }
+
+    /// An ungrouped session has no group to match on, and must not match a
+    /// group filter just because it has no group.
+    #[test]
+    fn an_ungrouped_session_matches_no_group_filter() {
+        assert!(!matches("Claude 14", None, "review"));
+    }
+
+    /// The pre-existing matches still work: label, comment and project name.
+    #[test]
+    fn the_other_filter_matches_are_unchanged() {
+        assert!(matches("Review #9586", None, "9586"), "label");
+        assert!(
+            session_matches_filter("Claude 14", Some("wip on auth"), None, "tc-portal", "auth"),
+            "comment"
+        );
+        assert!(
+            matches("Claude 14", None, "tc-portal"),
+            "a matching project keeps all its sessions, as it did before groups"
+        );
     }
 }
