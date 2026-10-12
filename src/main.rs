@@ -1142,11 +1142,15 @@ impl AppState {
         // migrate/seed script resolves the same toolchain the session will
         // (DEV-485). `cfg` is already loaded, so no second config read.
         let inherited_path = std::env::var("PATH").ok();
-        let startup_env = config::ProjectEnv::from_config(&cfg, &project_settings).materialise(
+        let mut startup_env = config::ProjectEnv::from_config(&cfg, &project_settings).materialise(
             port,
             &clone_path,
             inherited_path.as_deref(),
         );
+        // A startup script is arbitrary shell, so it is a spawn door like the
+        // agent and the drawer: one that runs `claude` from a redirected
+        // instance would otherwise reach the live app (DEV-950).
+        paths::overlay_child_home(&mut startup_env);
 
         if let Some(startup_cmd) = startup {
             // Show initial status in sidebar while startup runs.

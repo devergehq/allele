@@ -721,7 +721,7 @@ is the Project Reader; `crate::rich::reader` is DEV-31's transcript navigation,
 which `rich_view` uses via `super::reader`. The rule matches `crate::reader`
 only, because matching the bare name flags the wrong one.
 
-### 7.12 Don't leave a spawned agent to guess the data root
+### 7.12 Don't leave anything Allele spawns to guess the data root
 
 An agent Allele spawns re-derives Allele's root from scratch, and nothing
 in its situation tells it which instance started it. `--mcp-serve`
@@ -738,6 +738,31 @@ reasons, and the second is the one that bites: a second resolution chain
 is how §7.8 happened, and `paths::init` fixes a process-global `OnceLock`
 that one test in this binary already sets — an adapter reading it would
 be racing that test, untestable in one branch and flaky in the other.
+
+**The rule is every child, not every agent.** DEV-947 wired the agent and
+left three doors open, and each reproduced its symptom by a different
+route — the worst of them a drawer terminal, where no adapter runs at
+all, so a `claude` typed in the drawer of a sandbox window drove the live
+app (DEV-950, reproduced before it was fixed). There are now three places
+the root is applied, all reading the one function:
+
+| What | Where | Covers |
+| -- | -- | -- |
+| agent PTY | `AgentAdapter::event_integration`, via `build_command` | every adapter — the trait **default exports it**, so an adapter that overrides nothing still carries it |
+| any terminal | `terminal::pty_terminal::pty_env` | drawer shells, the agent PTY, anything added later |
+| `startup` / `shutdown` | `paths::overlay_child_home` at both call sites | project scripts, which are arbitrary shell |
+
+An exception list is what went wrong the first time, so there isn't one.
+A binary that ignores `ALLELE_HOME` loses nothing by being handed it,
+which is why a `Generic` agent gets it too (decided 12 Oct 2026).
+
+**Ordering is a real choice.** The root goes on *after* the project's
+declared environment (§DEV-485) in both the PTY and the script paths, so
+a project that declares `ALLELE_HOME` cannot point a drawer shell at an
+instance this app is not. That follows the precedence those sites already
+had — project config loses to wiring the app needs to be right — and it
+only bites when there is an instance root to win with: on an ordinary
+launch the value is `None` and a declared one stands.
 
 It has three answers, and the third is the one nobody predicts:
 
@@ -756,7 +781,11 @@ inverted. `launch_root_from` already reads a blank as no answer, which is
 what makes stating one the way to say "the real home" out loud.
 
 This is the spawn half of §7.8; neither half is sufficient alone, and
-before DEV-947 only the flag half existed.
+before DEV-947 only the flag half existed. Deliberately still outside it:
+`naming::call_claude` and `call_opencode`, one-shot `-p` calls with no
+session and no allele tools in reach (`--tools none` for Claude), and the
+external editor command. They spawn no agent and open no door to an
+instance.
 
 ## 8. Open follow-ups
 
@@ -767,18 +796,6 @@ Known work not yet landed, in rough priority order:
   change* being wrong rather than as accumulated debt, which is what makes
   it worth doing before someone loses an afternoon to it. Candidates: the
   `Render` impl, the macOS app menu, and the startup task wiring.
-- Carry the data root to the *other* things Allele spawns, the way §7.12
-  has the Claude adapter carry it. Three doors are still open, each the
-  DEV-947 symptom by a different route, and all three were found in that
-  change's own self-review rather than in the field:
-  **drawer terminals** get no root at all (`PtyTerminal::spawn` takes
-  `extra_env`, and a `claude` typed in a drawer of a sandbox window
-  reaches the live app); **`GenericAdapter`** uses the default
-  `event_integration` and drops it, which matters for a generic entry
-  pointing at a `claude` wrapper; and **`OpencodeAdapter`** ignores its
-  parameter, which costs nothing only while no machine registers an
-  `allele` MCP server with opencode. The adapter parameter is already
-  there in all three cases — this is wiring, not design.
 - Adopt `AlleleError` in the remaining `git::*` functions
   (`auto_commit_if_dirty`, `delete_ref`, `list_archive_refs`,
   `prune_archive_refs`, etc.)

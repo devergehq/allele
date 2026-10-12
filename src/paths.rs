@@ -182,6 +182,31 @@ fn child_home_env_from(
     }
 }
 
+/// Overlay this instance's root onto an environment list bound for a child
+/// process, replacing any entry already there.
+///
+/// For the `startup`/`shutdown` commands, whose environment is a list rather
+/// than a process's own (`config::ProjectEnv::materialise`). They are arbitrary
+/// shell, so they are a spawn door like any other: one that runs `claude`, or
+/// anything else that resolves Allele's root, would otherwise reach the live app
+/// from a redirected instance — the same sentence as DEV-947 and DEV-950, and
+/// the reason the rule here is *every* child Allele spawns, with no list of
+/// exceptions to keep up to date.
+///
+/// Appended last, so a project-declared `ALLELE_HOME` loses to the instance's
+/// own root; `PtyTerminal::spawn` orders it the same way and says why.
+pub fn overlay_child_home(env: &mut Vec<(String, String)>) {
+    overlay_child_home_with(env, child_home_env());
+}
+
+/// The pure core of [`overlay_child_home`], with the answer passed in.
+fn overlay_child_home_with(env: &mut Vec<(String, String)>, answer: Option<String>) {
+    if let Some(root) = answer {
+        env.retain(|(k, _)| k != HOME_ENV);
+        env.push((HOME_ENV.to_string(), root));
+    }
+}
+
 // --- Allele-owned paths ---------------------------------------------------
 
 /// `<root>/.allele` — the base for most of Allele's data, and the directory
@@ -405,6 +430,48 @@ mod tests {
             launch_root_from(None, false, Some(String::new()), Some(PathBuf::from("/h"))),
             Some(PathBuf::from("/h")),
         );
+    }
+
+    /// The `startup`/`shutdown` door (DEV-950). Those commands get a list, not
+    /// a process environment, and the root goes on the end of it: a project
+    /// that declares `ALLELE_HOME` must not aim a teardown script at an
+    /// instance this app is not, which is the same precedence
+    /// `PtyTerminal::spawn` applies to a drawer shell.
+    #[test]
+    fn the_root_is_overlaid_last_and_replaces_a_declared_one() {
+        let mut env = vec![
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            (HOME_ENV.to_string(), "/tmp/declared".to_string()),
+        ];
+        overlay_child_home_with(&mut env, Some("/private/tmp/dev950".to_string()));
+        assert_eq!(
+            env,
+            vec![
+                ("PATH".to_string(), "/usr/bin".to_string()),
+                (HOME_ENV.to_string(), "/private/tmp/dev950".to_string()),
+            ],
+        );
+    }
+
+    /// An ordinary launch leaves the list exactly as the project declared it —
+    /// including a declared root, which only loses to an instance root that
+    /// actually exists.
+    #[test]
+    fn an_ordinary_launch_overlays_nothing() {
+        let declared = vec![(HOME_ENV.to_string(), "/tmp/declared".to_string())];
+        let mut env = declared.clone();
+        overlay_child_home_with(&mut env, None);
+        assert_eq!(env, declared);
+    }
+
+    /// A blank still has to be stated, for a script as for an agent: it is how
+    /// an instance on the real home tells a child to ignore the `ALLELE_HOME`
+    /// this process inherited.
+    #[test]
+    fn a_blank_root_is_overlaid_as_a_blank() {
+        let mut env = vec![(HOME_ENV.to_string(), "/tmp/inherited".to_string())];
+        overlay_child_home_with(&mut env, Some(String::new()));
+        assert_eq!(env, vec![(HOME_ENV.to_string(), String::new())]);
     }
 
     /// The export is whatever `launch_root` resolved, which is already
