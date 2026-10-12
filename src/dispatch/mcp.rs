@@ -20,6 +20,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
@@ -34,7 +35,15 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 ///
 /// Checked before any GUI setup: this mode must open no window. It is a client
 /// of a *running* Allele, not a second one.
-pub fn exit_if_serving() {
+///
+/// `root` is the data root [`crate::paths::launch_root`] resolved from
+/// `--sandbox`, `--home` and `ALLELE_HOME`, and fixing it here is what points
+/// the control socket at the instance the caller asked for. Before DEV-943 this
+/// ran above that decision, so a client launched with `--sandbox` reached the
+/// *live* app: the socket resolved against the default root, and nothing in the
+/// reply said which instance had answered. Taken by reference because an
+/// ordinary launch comes through here too and should not pay for a clone.
+pub fn exit_if_serving(root: &Option<PathBuf>) {
     if !std::env::args().any(|arg| arg == "--mcp-serve") {
         return;
     }
@@ -42,6 +51,9 @@ pub fn exit_if_serving() {
     // stream here, and one stray log line desynchronises the client's parser
     // — a failure that looks like a malformed server rather than a log.
     crate::errors::init_tracing_stderr();
+    // Then the root, before `serve()` resolves a single path. Only the line
+    // above may come first, and only because it writes to stderr.
+    crate::paths::init(root.clone());
     std::process::exit(serve());
 }
 
@@ -335,6 +347,77 @@ fn round_trip(request: &Value) -> Result<Response, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which control socket each `--mcp-serve` launch picks (DEV-943).
+    ///
+    /// Composed from the functions `main` and [`exit_if_serving`] actually use —
+    /// `cli::classify`, `paths::launch_root_from`, `server::control_socket_in` —
+    /// rather than rebuilding a path here. ARCHITECTURE.md §7.8 records the last
+    /// bug on this path: "Every unit test passed with the bug present." A test
+    /// that computed the expected socket itself would have done the same, since
+    /// the defect was in the *order* two correct functions ran.
+    ///
+    /// `exit_if_serving` itself cannot be called here — it ends in
+    /// `process::exit` — so the hand-off that feeds this root in is covered by
+    /// driving the built binary, not by this test.
+    #[test]
+    fn the_socket_follows_the_launch_root() {
+        use crate::cli::{classify, Launch};
+        use crate::dispatch::server::control_socket_in;
+        use crate::paths::launch_root_from;
+        use std::path::PathBuf;
+
+        let home = PathBuf::from("/Users/test");
+        let socket_for = |args: &[&str], home_env: Option<&str>| -> PathBuf {
+            let Launch::Gui {
+                home: flag,
+                sandbox,
+            } = classify(args)
+            else {
+                panic!("{args:?} is a recognised launch");
+            };
+            let root = launch_root_from(
+                flag,
+                sandbox,
+                home_env.map(str::to_string),
+                Some(home.clone()),
+            )
+            .expect("a root");
+            control_socket_in(&root)
+        };
+
+        // `--sandbox`: the sandbox instance's socket, which is the whole bug.
+        assert_eq!(
+            socket_for(&["--mcp-serve", "--sandbox"], None),
+            home.join(".allele-sandbox/.allele/control.sock"),
+        );
+        // `ALLELE_HOME` with no flag.
+        assert_eq!(
+            socket_for(&["--mcp-serve"], Some("/tmp/env-home")),
+            PathBuf::from("/tmp/env-home/.allele/control.sock"),
+        );
+        // Neither: the live app, exactly as before DEV-943. The regression that
+        // would matter most is this one silently moving.
+        assert_eq!(
+            socket_for(&["--mcp-serve"], None),
+            home.join(".allele/control.sock"),
+        );
+        // `--home` is the third way to name a root, and beats the environment.
+        assert_eq!(
+            socket_for(
+                &["--mcp-serve", "--home", "/tmp/flag-home"],
+                Some("/tmp/env-home"),
+            ),
+            PathBuf::from("/tmp/flag-home/.allele/control.sock"),
+        );
+        // A sandboxed client never falls back to the live socket, even with
+        // `ALLELE_HOME` set: that fallback is what sent a create to the wrong
+        // instance.
+        assert_ne!(
+            socket_for(&["--mcp-serve", "--sandbox"], Some("/tmp/env-home")),
+            socket_for(&["--mcp-serve"], None),
+        );
+    }
 
     /// Every advertised tool must map to a control-socket op — an MCP client
     /// that calls a listed tool and gets "unknown tool" is worse than one that
