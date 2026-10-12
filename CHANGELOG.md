@@ -11,7 +11,24 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 ## [Unreleased]
 
-Changes on `master` awaiting the next tagged release.
+### Fixed
+- Everything else Allele spawns now carries the data root too, not just the
+  agent: a **drawer terminal**, a **`Generic`** agent, an **opencode** agent,
+  and a project's `startup`/`shutdown` scripts. 0.7.1 handed the root to the
+  Claude adapter and left three doors open, each reproducing the same symptom
+  by a different route. The drawer was the one that bit: no adapter runs for a
+  bare shell, and a redirected instance has no `ALLELE_HOME` in its own
+  environment for one to inherit, so `claude` typed in the drawer of a
+  `--sandbox` window resolved the real home and listed the **live** app's
+  projects — reproduced live before the fix. A `Generic` agent is handed the
+  root the same as Claude: it may be an arbitrary binary the variable means
+  nothing to, but the case that matters is a generic entry wrapping `claude`,
+  which would otherwise keep exactly the behaviour 0.7.1 fixed. An ordinary
+  launch still exports nothing.
+- A project that declares its own `ALLELE_HOME` in `allele.json` no longer
+  overrides the instance's root for the terminals and scripts that project
+  spawns. It only loses when there is an instance root to lose to — on an
+  ordinary launch the declared value still stands.
 
 ### Fixed
 - A redirected instance's sessions now write their hook events under **that**

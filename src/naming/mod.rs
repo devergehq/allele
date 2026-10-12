@@ -209,6 +209,7 @@ fn system_prompt(count: usize) -> String {
 
 fn call_claude(binary: &str, config: &NamingModelConfig, prompt: &str) -> Result<String, String> {
     let mut cmd = Command::new(binary);
+    push_root(&mut cmd);
     cmd.arg("-p");
     cmd.arg("--tools").arg("none");
     if let Some(model) = &config.model {
@@ -238,8 +239,24 @@ fn call_claude(binary: &str, config: &NamingModelConfig, prompt: &str) -> Result
     Ok(stdout)
 }
 
+/// Hand a naming child this instance's data root, the same as every other
+/// child Allele spawns (DEV-950).
+///
+/// These two are the weakest case for it — one shot, no session, and `claude`
+/// is called `--tools none` so it can reach nothing anyway. `opencode run` has
+/// no such restriction, and is safe only while nothing registers an `allele`
+/// MCP server with opencode. "Safe by an accident we are documenting elsewhere
+/// as temporary" is not a reason to carve an exception, and an exception list
+/// is what left three spawn doors open the first time.
+fn push_root(cmd: &mut Command) {
+    if let Some(root) = crate::paths::child_home_env() {
+        cmd.env(crate::paths::HOME_ENV, root);
+    }
+}
+
 fn call_opencode(binary: &str, config: &NamingModelConfig, prompt: &str) -> Result<String, String> {
     let mut cmd = Command::new(binary);
+    push_root(&mut cmd);
     cmd.arg("run");
     if let Some(model) = &config.model {
         cmd.arg("--model").arg(model);

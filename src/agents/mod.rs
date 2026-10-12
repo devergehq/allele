@@ -111,6 +111,29 @@ pub struct EventIntegration {
     pub env: Vec<(String, String)>,
 }
 
+impl EventIntegration {
+    /// Export this instance's data root to the agent, when there is one to
+    /// export.
+    ///
+    /// Every adapter makes this exact push, so it lives here rather than three
+    /// times over: the agent launches the `allele` MCP server from a global
+    /// registration whose args are a bare `--mcp-serve`, so this variable is
+    /// the only thing telling that server which instance asked. `None` is an
+    /// ordinary launch and must export nothing — see
+    /// [`crate::paths::child_home_env`] for all three answers.
+    ///
+    /// `pub(crate)` because [`AgentAdapter`] is public and its doc tells an
+    /// overriding implementor to call this. An adapter in a submodule could not,
+    /// and the compiler would say nothing — it would just silently drop the
+    /// root, which is the DEV-950 bug exactly.
+    pub(crate) fn push_root(&mut self, allele_home: Option<&str>) {
+        if let Some(root) = allele_home {
+            self.env
+                .push((crate::paths::HOME_ENV.to_string(), root.to_string()));
+        }
+    }
+}
+
 /// Per-kind command-building behaviour.
 #[allow(dead_code)]
 pub trait AgentAdapter: Send + Sync {
@@ -154,7 +177,8 @@ pub trait AgentAdapter: Send + Sync {
     }
 
     /// Spawn-time wiring that activates event emission: extra CLI args
-    /// and/or env vars applied to the session's PTY. Default: none.
+    /// and/or env vars applied to the session's PTY. Default: the data root
+    /// and nothing else.
     ///
     /// `allele_home` is what this instance's root says to a child — the root
     /// when redirected, a blank when an inherited one has to be cleared, and
@@ -163,8 +187,16 @@ pub trait AgentAdapter: Send + Sync {
     /// opinion about which instance it belongs to, and so every branch is
     /// testable: `paths::init` fixes a process-global root that one test in
     /// this binary already sets, and tests run in parallel threads (DEV-947).
-    fn event_integration(&self, _ctx: &SpawnCtx, _allele_home: Option<&str>) -> EventIntegration {
-        EventIntegration::default()
+    ///
+    /// The default **exports it** rather than dropping it, which is the whole
+    /// of DEV-950 for [`GenericAdapter`]: this method used to take the root and
+    /// throw it away, so an adapter that had no events to wire up also had no
+    /// idea which instance it belonged to, silently. An adapter that overrides
+    /// this is responsible for its own [`EventIntegration::push_root`] call.
+    fn event_integration(&self, _ctx: &SpawnCtx, allele_home: Option<&str>) -> EventIntegration {
+        let mut integ = EventIntegration::default();
+        integ.push_root(allele_home);
+        integ
     }
 
     /// Translate one native event `kind` string (as written to the shared
@@ -252,11 +284,7 @@ impl AgentAdapter for ClaudeAdapter {
         if let Some(hooks) = ctx.hooks_settings_path {
             integ.args = vec!["--settings".into(), hooks.into()];
         }
-        if let Some(root) = allele_home {
-            integ
-                .env
-                .push((crate::paths::HOME_ENV.to_string(), root.to_string()));
-        }
+        integ.push_root(allele_home);
         integ
     }
 
@@ -330,11 +358,12 @@ impl AgentAdapter for OpencodeAdapter {
     /// allele session it belongs to and where to write events. Each session
     /// runs in its own clone/process, so the id is unambiguous per PTY.
     ///
-    /// `allele_home` is unused: opencode gets its events directory as an
-    /// absolute path already derived from the root, and no `allele` MCP server
-    /// is registered with opencode on any machine yet. The day one is, this
-    /// wants the same `ALLELE_HOME` push the Claude adapter makes (DEV-947).
-    fn event_integration(&self, ctx: &SpawnCtx, _allele_home: Option<&str>) -> EventIntegration {
+    /// The root travels too. The events directory it gets below is an absolute
+    /// path already derived from the root, so opencode's *own* wiring was never
+    /// the exposure — a tool opencode launches is. Nothing registers an
+    /// `allele` MCP server with opencode today, so this costs nothing now and
+    /// stops costing something the day one does (DEV-950).
+    fn event_integration(&self, ctx: &SpawnCtx, allele_home: Option<&str>) -> EventIntegration {
         let mut env = vec![("ALLELE_SESSION_ID".to_string(), ctx.session_id.to_string())];
         if let Some(dir) = crate::hooks::events_dir() {
             env.push((
@@ -342,10 +371,12 @@ impl AgentAdapter for OpencodeAdapter {
                 dir.to_string_lossy().to_string(),
             ));
         }
-        EventIntegration {
+        let mut integ = EventIntegration {
             args: Vec::new(),
             env,
-        }
+        };
+        integ.push_root(allele_home);
+        integ
     }
 
     /// Map the canonical `kind` strings the allele opencode plugin writes
@@ -383,6 +414,14 @@ impl AgentAdapter for GenericAdapter {
     fn build_new_session_args(&self, _ctx: &SpawnCtx, extra: &[String]) -> Vec<String> {
         extra.to_vec()
     }
+
+    // No `event_integration` override: a generic agent has no events to wire
+    // up, and the trait default now exports the data root. That it *should* be
+    // exported was the open question on DEV-950, decided 12 Oct 2026 — yes, the
+    // same as Claude. The agent is an arbitrary binary, so the variable may mean
+    // nothing to it; the case that settles it is a generic entry pointing at a
+    // `claude` wrapper, which without the root keeps exactly the behaviour
+    // DEV-947 fixed. A binary that ignores it loses nothing by being handed it.
 }
 
 /// Whether this agent takes a first prompt as a command-line argument.
@@ -962,27 +1001,128 @@ mod tests {
             .any(|(k, v)| k == "ALLELE_SESSION_ID" && v == "sid-xyz"));
     }
 
+    /// A generic agent emits no events and needs no spawn wiring — and still
+    /// has to be told which instance spawned it. The `None` arm is an ordinary
+    /// launch, which must stay empty; the root arm is DEV-950, decided 12 Oct
+    /// 2026: yes, a `Generic` agent is handed the root, the same as Claude,
+    /// because the case that matters is a generic entry wrapping `claude`.
     #[test]
-    fn generic_adapter_ignores_all_events() {
+    fn generic_adapter_ignores_all_events_but_still_carries_the_root() {
         let a = GenericAdapter;
         assert_eq!(a.interpret_event("stop").lifecycle, Lifecycle::Ignore);
         assert_eq!(
             a.interpret_event("session_start").lifecycle,
             Lifecycle::Ignore
         );
-        assert!(a
-            .event_integration(
-                &SpawnCtx {
-                    session_id: "x",
-                    label: "y",
-                    hooks_settings_path: None,
-                    has_history: false,
-                    initial_prompt: None,
-                },
-                None,
-            )
-            .env
-            .is_empty());
+        let ctx = SpawnCtx {
+            session_id: "x",
+            label: "y",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: None,
+        };
+        assert!(
+            a.event_integration(&ctx, None).env.is_empty(),
+            "an ordinary launch exports nothing",
+        );
+        let integ = a.event_integration(&ctx, Some("/tmp/dev950-root"));
+        assert_eq!(
+            integ.env,
+            vec![(
+                crate::paths::HOME_ENV.to_string(),
+                "/tmp/dev950-root".to_string()
+            )],
+        );
+        assert!(
+            integ.args.is_empty(),
+            "a generic agent still takes no extra flags: {:?}",
+            integ.args
+        );
+    }
+
+    /// The root arrives beside opencode's own wiring, not instead of it. Its
+    /// plugin needs the session id and events dir to report status at all, so a
+    /// regression that swapped one for the other would be silent (DEV-950).
+    #[test]
+    fn opencode_event_integration_exports_a_redirected_root() {
+        let a = OpencodeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "opencode 1",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, Some("/tmp/dev950-root"));
+        assert_eq!(
+            integ
+                .env
+                .iter()
+                .find(|(k, _)| k == crate::paths::HOME_ENV)
+                .map(|(_, v)| v.as_str()),
+            Some("/tmp/dev950-root"),
+        );
+        assert_eq!(
+            integ
+                .env
+                .iter()
+                .find(|(k, _)| k == "ALLELE_SESSION_ID")
+                .map(|(_, v)| v.as_str()),
+            Some("sid-123"),
+        );
+    }
+
+    /// And the deliberate half, for opencode as for Claude: an ordinary launch
+    /// exports no root, so a live session carries no answer to a question
+    /// nobody asked.
+    #[test]
+    fn opencode_event_integration_exports_no_root_on_an_ordinary_launch() {
+        let a = OpencodeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "opencode 1",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, None);
+        assert!(
+            !integ.env.iter().any(|(k, _)| k == crate::paths::HOME_ENV),
+            "no root on an ordinary launch: {:?}",
+            integ.env
+        );
+    }
+
+    /// A blank is this instance saying "the real home" out loud, and it has to
+    /// survive for the doors DEV-950 opened as well as Claude's: an adapter that
+    /// treated a blank as nothing would let a child resolve an `ALLELE_HOME`
+    /// this process inherited and then overrode with `--home`.
+    #[test]
+    fn the_new_doors_pass_a_blank_root_through() {
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "probe",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: None,
+        };
+        for (what, integ) in [
+            ("generic", GenericAdapter.event_integration(&ctx, Some(""))),
+            (
+                "opencode",
+                OpencodeAdapter.event_integration(&ctx, Some("")),
+            ),
+        ] {
+            assert_eq!(
+                integ
+                    .env
+                    .iter()
+                    .find(|(k, _)| k == crate::paths::HOME_ENV)
+                    .map(|(_, v)| v.as_str()),
+                Some(""),
+                "{what} dropped the blank root",
+            );
+        }
     }
 
     #[test]

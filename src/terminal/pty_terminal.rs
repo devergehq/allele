@@ -151,6 +151,51 @@ pub struct PtyTerminal {
     cleanup_hooks: Vec<CleanupHook>,
 }
 
+/// The environment every PTY starts with, in precedence order: terminal
+/// capability vars, the project's declared environment on top of those, and
+/// this instance's data root over both. The command's own `env` is merged on
+/// top of all of it back in [`PtyTerminal::spawn`], so for an agent PTY the
+/// adapter's value is the one that lands — the same root, resolved by the same
+/// [`crate::paths::child_home_env`] call, which is why the two cannot disagree.
+///
+/// The root is last deliberately. `extra_env` is the project's own declaration
+/// (DEV-485), and a project that declares `ALLELE_HOME` would otherwise point a
+/// drawer shell — and the `claude` someone types in it — at an instance this
+/// app is not, which is the bug one layer down. It follows the precedence this
+/// block always had: project config loses a collision with wiring the app needs
+/// to be right. On an ordinary launch `allele_home` is `None` and a declared
+/// value stands, so the override only bites where correctness demands it.
+///
+/// Drawer shells get it for the same reason the agent PTY does and could not
+/// get it the same way: no adapter runs for a bare shell, so
+/// `AgentAdapter::event_integration` never sees one (DEV-950). Doing it here
+/// covers the drawer, the agent PTY and any terminal added later, in one place.
+fn pty_env(extra_env: Vec<(String, String)>, allele_home: Option<&str>) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    env.insert("TERM".to_string(), "xterm-256color".to_string());
+    env.insert("COLORTERM".to_string(), "truecolor".to_string());
+    // Ensure locale is set for proper unicode rendering
+    env.insert("LANG".to_string(), "en_AU.UTF-8".to_string());
+    env.insert("LC_ALL".to_string(), "en_AU.UTF-8".to_string());
+    // Force Claude Code into alt-screen render mode (its own internal
+    // scrollback) so primary-screen CSI 2J + cursor-positioning repaints
+    // don't duplicate viewport content into our terminal scrollback.
+    // Harmless for non-CC processes that ignore the variable.
+    env.insert("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string());
+
+    // Project-declared vars land before the command's own, so an adapter
+    // integration var always wins a collision with project config.
+    for (k, v) in extra_env {
+        env.insert(k, v);
+    }
+
+    if let Some(root) = allele_home {
+        env.insert(crate::paths::HOME_ENV.to_string(), root.to_string());
+    }
+
+    env
+}
+
 impl PtyTerminal {
     /// Create a terminal running a specific command in a specific directory
     /// `extra_env` is applied on top of the inherited environment before the
@@ -177,24 +222,11 @@ impl PtyTerminal {
         let term = Term::new(term_config, &size, listener.clone());
         let term = Arc::new(FairMutex::new(term));
 
-        // Build environment — ensure terminal capability is set correctly
-        let mut env = HashMap::new();
-        env.insert("TERM".to_string(), "xterm-256color".to_string());
-        env.insert("COLORTERM".to_string(), "truecolor".to_string());
-        // Ensure locale is set for proper unicode rendering
-        env.insert("LANG".to_string(), "en_AU.UTF-8".to_string());
-        env.insert("LC_ALL".to_string(), "en_AU.UTF-8".to_string());
-        // Force Claude Code into alt-screen render mode (its own internal
-        // scrollback) so primary-screen CSI 2J + cursor-positioning repaints
-        // don't duplicate viewport content into our terminal scrollback.
-        // Harmless for non-CC processes that ignore the variable.
-        env.insert("CLAUDE_CODE_NO_FLICKER".to_string(), "1".to_string());
-
-        // Project-declared vars land before the command's own, so an adapter
-        // integration var always wins a collision with project config.
-        for (k, v) in extra_env {
-            env.insert(k, v);
-        }
+        // Build the environment every PTY starts with. Split out so the layering
+        // is testable without a pty: the root a drawer shell is told is the only
+        // thing standing between `claude` typed in a sandbox window and the live
+        // app, and that is not something to leave to a manual check (DEV-950).
+        let mut env = pty_env(extra_env, crate::paths::child_home_env().as_deref());
 
         // Build the shell configuration. Adapter-supplied env vars are
         // merged into the PTY environment here so agent event integrations
@@ -430,7 +462,85 @@ fn kill_process_groups(groups: Vec<libc::pid_t>) {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::target_groups;
+    use super::{pty_env, target_groups};
+
+    fn declared(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    /// The drawer door of DEV-950: a bare shell in a redirected instance has to
+    /// be told which instance it is in, because no adapter runs for it and the
+    /// instance's own environment has no `ALLELE_HOME` to inherit — so a
+    /// `claude` typed in the drawer of a sandbox window drove the live app.
+    #[test]
+    fn a_redirected_root_reaches_every_pty() {
+        let env = pty_env(Vec::new(), Some("/private/tmp/dev950"));
+        assert_eq!(
+            env.get(crate::paths::HOME_ENV).map(String::as_str),
+            Some("/private/tmp/dev950"),
+        );
+        // Beside the terminal wiring, never instead of it.
+        assert_eq!(env.get("TERM").map(String::as_str), Some("xterm-256color"));
+    }
+
+    /// The other half, and the deliberate one: an ordinary launch exports no
+    /// root, so no live session's terminal carries one.
+    #[test]
+    fn an_ordinary_launch_puts_no_root_in_a_pty() {
+        let env = pty_env(declared(&[("FOO", "bar")]), None);
+        assert!(
+            !env.contains_key(crate::paths::HOME_ENV),
+            "ordinary launch exported a root: {env:?}",
+        );
+        assert_eq!(env.get("FOO").map(String::as_str), Some("bar"));
+    }
+
+    /// The ordering choice, pinned. `extra_env` is the project's own
+    /// declaration (DEV-485) and the root goes on last, so a project cannot
+    /// point a drawer shell at an instance this app is not. The precedence is
+    /// the one this block always had: project config loses to wiring the app
+    /// needs to be right.
+    #[test]
+    fn a_project_declared_root_loses_to_the_instance_root() {
+        let env = pty_env(
+            declared(&[(crate::paths::HOME_ENV, "/private/tmp/dev950-WRONG")]),
+            Some("/private/tmp/dev950"),
+        );
+        assert_eq!(
+            env.get(crate::paths::HOME_ENV).map(String::as_str),
+            Some("/private/tmp/dev950"),
+        );
+    }
+
+    /// …and on an ordinary launch there is no instance root to win with, so a
+    /// project that declares one still gets what it asked for. That asymmetry
+    /// is the reason the override above is safe to make.
+    #[test]
+    fn a_project_declared_root_stands_on_an_ordinary_launch() {
+        let env = pty_env(
+            declared(&[(crate::paths::HOME_ENV, "/private/tmp/somewhere-else")]),
+            None,
+        );
+        assert_eq!(
+            env.get(crate::paths::HOME_ENV).map(String::as_str),
+            Some("/private/tmp/somewhere-else"),
+        );
+    }
+
+    /// A blank is not an absence: it is this instance saying "the real home"
+    /// out loud, so a child cannot resolve an `ALLELE_HOME` the parent itself
+    /// inherited and then overrode with `--home` (DEV-947's inversion).
+    #[test]
+    fn a_blank_root_is_exported_as_a_blank() {
+        let env = pty_env(Vec::new(), Some(""));
+        assert_eq!(
+            env.get(crate::paths::HOME_ENV).map(String::as_str),
+            Some(""),
+        );
+    }
 
     /// An agent PTY execs the binary directly, so the forked pid *is* the
     /// foreground group. One entry, not a duplicate signal.
