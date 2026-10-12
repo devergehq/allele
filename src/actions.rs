@@ -67,6 +67,10 @@ pub enum SessionAction {
         /// Skip the project's startup command, drawer terminals, preview URL,
         /// and shutdown command for this session. See DEV-400.
         orchestration: crate::session::Orchestration,
+        /// Sidebar group for the new session, trimmed; `None` for ungrouped
+        /// (DEV-853). Not yet interned — the handler resolves it against the
+        /// project so the first spelling the project saw is the one stored.
+        group: Option<String>,
     },
     /// Kill the PTY, keep the clone, mark Suspended. Next click cold-resumes.
     CloseSessionKeepClone {
@@ -149,6 +153,9 @@ pub enum SessionAction {
         comment: Option<String>,
         pinned: bool,
         orchestration: crate::session::Orchestration,
+        /// Sidebar group, trimmed; `None` clears it and returns the session to
+        /// the ungrouped block (DEV-853). Interned by the handler.
+        group: Option<String>,
     },
 }
 
@@ -388,10 +395,20 @@ pub struct SessionCursor {
 }
 
 /// Drag payload for a session row (sidebar drag-and-drop reorder).
-#[derive(Clone, Copy)]
+///
+/// No longer `Copy`: the group is carried so a row can decide whether it is a
+/// legal drop target while the drag is still in the air. The sidebar refuses a
+/// cross-group reorder (DEV-853), and without this the payload every row saw
+/// said nothing about where the dragged session came from — so every row lit up
+/// as a target and half of them then did nothing.
+#[derive(Clone)]
 pub(crate) struct DraggedSession {
     pub project_idx: usize,
     pub session_idx: usize,
+    /// The dragged session's group, for the drop-target highlight only.
+    /// `ReorderSession` re-reads both groups from the indices and remains the
+    /// authority — this is an affordance, not a permission.
+    pub group: Option<String>,
 }
 
 /// Drag payload for a project header.

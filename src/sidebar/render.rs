@@ -16,6 +16,7 @@ use crate::actions::{
 use crate::app_state::AppState;
 use crate::project::Project;
 use crate::session::{AttentionKind, SessionStatus};
+use crate::sidebar::groups::{self, GroupCounts, GroupHeader};
 use crate::SimpleTooltip;
 
 /// Left indents matching the rows each confirmation strip sits beneath, so the
@@ -170,6 +171,31 @@ pub(crate) fn project_survives_active_only(
         })
 }
 
+/// Does this session survive the text filter?
+///
+/// Takes the four strings the decision rests on rather than a `Session`, so it
+/// can be checked without a window — and so the project-level and session-level
+/// passes cannot drift apart, which is how a project with no visible sessions
+/// ends up drawn with a header and nothing under it.
+///
+/// `filter` is already lowercased by the caller (`AppState::sidebar_filter`).
+///
+/// A **group** name matches (DEV-853): typing a group's name shows that group's
+/// sessions, which is the whole point of having named them. A matching *project*
+/// name keeps all its sessions, as it did before groups existed.
+pub(crate) fn session_matches_filter(
+    label: &str,
+    comment: Option<&str>,
+    group: Option<&str>,
+    project_name: &str,
+    filter: &str,
+) -> bool {
+    label.to_lowercase().contains(filter)
+        || comment.is_some_and(|c| c.to_lowercase().contains(filter))
+        || group.is_some_and(|g| g.to_lowercase().contains(filter))
+        || project_name.to_lowercase().contains(filter)
+}
+
 /// How many sessions and projects the active-only filter would hide, as
 /// `(sessions, projects)`. Drives the hint row's "N hidden" copy.
 ///
@@ -225,6 +251,59 @@ pub(crate) fn active_session_count(projects: &[Project]) -> usize {
         .count()
 }
 
+/// A group header row: the group's name, and how many of its sessions are
+/// running, finished and blocked (DEV-853).
+///
+/// Sits between the project header's indent and the session rows' — the rows it
+/// owns are indented past it, so the hierarchy reads without a connecting line.
+/// Upper-cased and letter-spaced rather than bold, matching the ARCHIVES
+/// section header: it is a divider, and a second bold weight under the project
+/// name would compete with it for the eye.
+///
+/// Takes no listeners. Collapsing, renaming and reordering a group from this
+/// row is DEV-937; until then the header is a label, and making it look
+/// clickable would promise something that does nothing.
+fn render_group_header(header: &GroupHeader) -> AnyElement {
+    let counts: GroupCounts = header.counts;
+    div()
+        .w_full()
+        .pl(px(16.0))
+        .pr(px(12.0))
+        .pt(px(6.0))
+        .pb(px(2.0))
+        .bg(theme().bg_surface)
+        .flex()
+        .flex_row()
+        .gap(px(8.0))
+        .items_center()
+        .justify_between()
+        .child(
+            // Truncates rather than refusing to shrink. A group name is free
+            // text up to 40 characters and the sidebar is user-resizable, so a
+            // `flex_shrink_0` name would push the counts out entirely at a
+            // narrow width — removing the one thing this header exists to say.
+            // Matches how the session rows below treat their labels.
+            div()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme().text_faint)
+                .child(header.name.to_uppercase()),
+        )
+        .children(counts.summary().map(|summary| {
+            // The counts hold their width instead: they are short, bounded, and
+            // the reason to look at the header at all.
+            div()
+                .flex_shrink_0()
+                .text_size(px(10.0))
+                .text_color(theme().text_dim)
+                .child(summary)
+        }))
+        .into_any_element()
+}
+
 pub(crate) fn build_sidebar_items(
     state: &mut AppState,
     _window: &mut Window,
@@ -264,12 +343,17 @@ pub(crate) fn build_sidebar_items(
         if filtering {
             let project_matches = project_name.to_lowercase().contains(filter);
             let any_session_matches = project.sessions.iter().any(|s| {
-                s.label.to_lowercase().contains(filter)
-                    || s.comment
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(filter)
+                session_matches_filter(
+                    &s.label,
+                    s.comment.as_deref(),
+                    s.group.as_deref(),
+                    // Deliberately not `project_name`: this pass asks whether
+                    // any *session* matches, and passing the project name in
+                    // would make every session match whenever the project does,
+                    // which the `project_matches` check beside it already covers.
+                    "",
+                    filter,
+                )
             });
             if !project_matches && !any_session_matches {
                 continue;
@@ -739,32 +823,63 @@ pub(crate) fn build_sidebar_items(
             (attention, !s.pinned, idx)
         });
 
-        for s_idx in session_order {
+        // Which rows will actually be drawn. Decided before grouping, so a
+        // group whose every row is hidden by the active-only toggle or the
+        // filter contributes no block — and therefore no header — and the counts
+        // on the headers that remain describe the rows beside them rather than a
+        // membership the user cannot see (the DEV-789 lesson, see
+        // `active_session_count`).
+        let visible: Vec<usize> = session_order
+            .into_iter()
+            .filter(|&s_idx| {
+                let session = &project.sessions[s_idx];
+                let is_active = active_cursor
+                    == Some(SessionCursor {
+                        project_idx: p_idx,
+                        session_idx: s_idx,
+                    });
+                if active_only && !session_survives_active_only(session.status, is_active) {
+                    return false;
+                }
+                !filtering
+                    || session_matches_filter(
+                        &session.label,
+                        session.comment.as_deref(),
+                        session.group.as_deref(),
+                        &project.name,
+                        filter,
+                    )
+            })
+            .collect();
+
+        // Ungrouped rows first with no header, then each group under one, in the
+        // order the project first saw them (DEV-853). The sort above is left
+        // untouched and simply partitioned, which is what keeps attention and
+        // pinning ordering sessions *inside* their group rather than across the
+        // project.
+        let ordered_rows = groups::draw_order(groups::group_blocks(
+            &visible,
+            |s_idx| project.sessions[s_idx].group.clone(),
+            |s_idx| {
+                let session = &project.sessions[s_idx];
+                groups::attention_of(
+                    session.status,
+                    session.attention_context.as_ref().map(|c| c.kind),
+                )
+            },
+            &project.group_order,
+        ));
+
+        for (group_header, s_idx) in ordered_rows {
+            if let Some(header) = group_header {
+                sidebar_items.push(render_group_header(&header));
+            }
+
             let session = &project.sessions[s_idx];
 
             let is_active = active_cursor
                 .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
                 .unwrap_or(false);
-
-            // Active-only: drop sessions with no live agent behind them.
-            if active_only && !session_survives_active_only(session.status, is_active) {
-                continue;
-            }
-
-            // Skip sessions that don't match the filter.
-            if filtering {
-                let label_matches = session.label.to_lowercase().contains(filter);
-                let comment_matches = session
-                    .comment
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(filter);
-                let project_matches = project.name.to_lowercase().contains(filter);
-                if !label_matches && !comment_matches && !project_matches {
-                    continue;
-                }
-            }
 
             let is_suspended = session.status == SessionStatus::Suspended;
             // A session in AwaitingInput takes its shape and colour from *why*
@@ -828,12 +943,33 @@ pub(crate) fn build_sidebar_items(
                     DraggedSession {
                         project_idx: p_idx,
                         session_idx: s_idx,
+                        group: session.group.clone(),
                     },
                     move |_drag, _offset, _window, cx| {
                         cx.new(|_| crate::DragPreview(row_drag_label.clone()))
                     },
                 )
-                .drag_over::<DraggedSession>(|style, _, _, _| style.bg(theme().bg_hover_soft))
+                // Only light up as a drop target if the drop would do
+                // something. A cross-group reorder is refused (DEV-853), and an
+                // affordance offered for a drop that is then discarded reads as
+                // a lost event rather than a deliberate refusal. Dragging
+                // *between* groups is DEV-937; until it lands, the row simply
+                // does not invite it.
+                .drag_over::<DraggedSession>({
+                    let row_group = session.group.clone();
+                    move |style, dragged: &DraggedSession, _, _| {
+                        if dragged.project_idx == p_idx
+                            && groups::same_group_opt(
+                                dragged.group.as_deref(),
+                                row_group.as_deref(),
+                            )
+                        {
+                            style.bg(theme().bg_hover_soft)
+                        } else {
+                            style
+                        }
+                    }
+                })
                 .on_drop(cx.listener(
                     move |this: &mut AppState, dragged: &DraggedSession, _window, cx| {
                         // Same-project reorder only — sessions are clones of
@@ -1428,7 +1564,7 @@ mod tests {
     // gpui's own `test` macro. See src/session/mod.rs for the same note.
     use super::{
         active_only_hidden_counts, active_session_count, project_survives_active_only,
-        session_survives_active_only,
+        session_matches_filter, session_survives_active_only,
     };
     use crate::actions::SessionCursor;
     use crate::project::Project;
@@ -1631,5 +1767,52 @@ mod tests {
             project(&[SessionStatus::Running, SessionStatus::Done]),
         ];
         assert_eq!(active_only_hidden_counts(&projects, None), (3, 1));
+    }
+
+    // ── DEV-853: the filter matches a group's name ─────────────────────
+
+    /// `filter` arrives lowercased from `AppState::sidebar_filter`, so these
+    /// pass it the way the sidebar does.
+    fn matches(label: &str, group: Option<&str>, filter: &str) -> bool {
+        session_matches_filter(label, None, group, "tc-portal", filter)
+    }
+
+    /// The acceptance criterion: typing a group's name shows that group's
+    /// sessions, even when the name appears nowhere else on the row.
+    #[test]
+    fn typing_a_group_name_matches_its_sessions() {
+        assert!(matches("Claude 14", Some("review"), "review"));
+        assert!(
+            !matches("Claude 14", Some("linear"), "review"),
+            "a session in another group must not be dragged in with it"
+        );
+    }
+
+    /// Matching is case-insensitive here too, so a filter does not depend on
+    /// the user remembering which spelling the project settled on.
+    #[test]
+    fn the_group_filter_ignores_case() {
+        assert!(matches("Claude 14", Some("Review"), "review"));
+    }
+
+    /// An ungrouped session has no group to match on, and must not match a
+    /// group filter just because it has no group.
+    #[test]
+    fn an_ungrouped_session_matches_no_group_filter() {
+        assert!(!matches("Claude 14", None, "review"));
+    }
+
+    /// The pre-existing matches still work: label, comment and project name.
+    #[test]
+    fn the_other_filter_matches_are_unchanged() {
+        assert!(matches("Review #9586", None, "9586"), "label");
+        assert!(
+            session_matches_filter("Claude 14", Some("wip on auth"), None, "tc-portal", "auth"),
+            "comment"
+        );
+        assert!(
+            matches("Claude 14", None, "tc-portal"),
+            "a matching project keeps all its sessions, as it did before groups"
+        );
     }
 }

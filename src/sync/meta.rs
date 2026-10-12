@@ -176,6 +176,12 @@ impl SessionBundleMeta {
             agent_id: self.agent_id.clone(),
             pinned: self.pinned,
             comment: self.comment.clone(),
+            // A pulled session arrives ungrouped (DEV-853). Groups are scoped
+            // to one project on one machine, and the bundle carries no group —
+            // so the alternative would be inventing a group on the target
+            // machine from a name that means nothing there. Out of scope by
+            // decision, not by omission.
+            group: None,
             branch_name: self.branch_name.clone(),
             branch_locked: false,
             skip_orchestration: self.skip_orchestration,
@@ -272,6 +278,7 @@ mod tests {
             agent_id: Some("claude".into()),
             pinned: true,
             comment: Some("wip on auth".into()),
+            group: Some("review".into()),
             branch_name: Some("fix-auth-5dc47535".into()),
             branch_locked: true,
             skip_orchestration: true,
@@ -335,6 +342,10 @@ mod tests {
         assert!(back.drawer_tab_names.is_empty());
         assert_eq!(back.drawer_active_tab, 0);
         assert!(!back.branch_locked);
+        // A group is scoped to one project on one machine, and the bundle does
+        // not carry it — so a pulled session lands ungrouped rather than in a
+        // group whose name means nothing on this machine (DEV-853).
+        assert_eq!(back.group, None);
         // A lightweight session must stay lightweight after a sync hop —
         // otherwise the first resume on the target machine runs *that*
         // machine's project scripts, which is what the user opted out of.

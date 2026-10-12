@@ -269,6 +269,17 @@ fn begin(
         (code, message)
     })?;
 
+    // Validated *before* a workspace is provisioned, so a refused group does
+    // not leave a clone and a branch behind for a request that failed. Interned
+    // in the same step, which is what makes `Review` join an existing `review`
+    // rather than creating a second group (DEV-853).
+    let group = match request.group.as_deref() {
+        Some(raw) => state.projects[project_idx]
+            .intern_group(raw)
+            .map_err(|e| (ErrorCode::BadRequest, e.message()))?,
+        None => None,
+    };
+
     let name = unique_name(state, request.name.trim());
     let by_label = request
         .caller_session_id
@@ -343,6 +354,13 @@ fn begin(
     state
         .pending_dispatch_origins
         .insert(session_id.clone(), origin);
+    // Likewise the group: the clone lands asynchronously, so there is no
+    // `Session` to set it on yet. Claimed at materialisation (DEV-853).
+    if let Some(group) = group {
+        state
+            .pending_session_groups
+            .insert(session_id.clone(), group);
+    }
 
     Ok(Started {
         session_id,

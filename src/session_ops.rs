@@ -830,6 +830,14 @@ impl AppState {
                 if let Some(origin) = this.pending_dispatch_origins.remove(&session.id) {
                     session.origin = origin;
                 }
+                // Same for the sidebar group (DEV-853) — and for the same
+                // reason: the clone lands asynchronously, so the group cannot be
+                // set by the call that asked for it. The name was already
+                // interned against the project when it was parked, so what comes
+                // back here is the project's spelling.
+                if let Some(group) = this.pending_session_groups.remove(&session.id) {
+                    session.group = Some(group);
+                }
                 let dispatched = session.origin.is_dispatched();
 
                 let Some(project) = this.projects.get_mut(project_idx) else {
@@ -1946,7 +1954,8 @@ impl AppState {
                         delete_clone_in_background(cx, clone_path);
                     }
                 }
-                self.projects[pi].sessions[si] = session_from_persisted(&session);
+                self.projects[pi].sessions[si] =
+                    replace_preserving_local(&self.projects[pi].sessions[si], &session);
                 self.sync_notice = Some(format!(
                     "Updated \u{201c}{label}\u{201d} to revision {revision} — open it to load the work."
                 ));
@@ -2075,7 +2084,32 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
     session.branch_locked = persisted.branch_locked;
     session.orchestration = persisted.orchestration();
     session.origin = persisted.origin.clone();
+    // `session.group` is deliberately left `None`: a pulled session arrives
+    // ungrouped (DEV-853), and `SessionBundleMeta::to_persisted` already drops
+    // the field on the way in. Stated here so this reads as a decision rather
+    // than a field someone forgot.
     session
+}
+
+/// Build the replacement row for a session this machine already has, carrying
+/// across the state the bundle does not.
+///
+/// A *new* pulled session arrives ungrouped because nothing here has filed it
+/// yet (DEV-853). Replacing one that already exists is the opposite case:
+/// someone put it in a group on this machine, and a sync hop must not quietly
+/// take it out of one — if it was the group's only member, the header would
+/// vanish too, and the loss persists on the next state write.
+///
+/// `pinned` and `comment` survive this path only because the bundle carries
+/// them. `group` does not travel, so it has to be carried by hand, and anything
+/// else added later that is local-only belongs here beside it.
+fn replace_preserving_local(
+    existing: &Session,
+    pulled: &crate::state::PersistedSession,
+) -> Session {
+    let mut replacement = session_from_persisted(pulled);
+    replacement.group = existing.group.clone();
+    replacement
 }
 
 /// Owned result of a background pull, handed back to the main thread.
@@ -2272,4 +2306,62 @@ fn sync_up_blocking(
 
     ledger.save()?;
     Ok(revision)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_preserving_local;
+    use crate::session::Session;
+    use crate::state::PersistedSession;
+    use std::time::{Duration, SystemTime};
+
+    fn local(group: Option<&str>) -> Session {
+        let now = SystemTime::now();
+        let mut s = Session::suspended_from_persisted(
+            "s1".into(),
+            "Review #9586".into(),
+            now,
+            now,
+            Duration::ZERO,
+            None,
+        );
+        s.group = group.map(str::to_string);
+        s
+    }
+
+    /// A bundle never carries a group, so `to_persisted` always produces one
+    /// with `group: None` — which is exactly what makes the replace path
+    /// dangerous.
+    fn pulled() -> PersistedSession {
+        let json = r#"{
+            "id": "s1",
+            "project_id": "p1",
+            "label": "Review #9586",
+            "clone_path": null,
+            "last_known_status": "Suspended",
+            "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "drawer_tab_names": [],
+            "drawer_active_tab": 0
+        }"#;
+        serde_json::from_str(json).expect("parses")
+    }
+
+    /// Pulling a newer revision of a session this machine already has must not
+    /// take it out of its group. The group is local state the bundle knows
+    /// nothing about; replacing the row wholesale silently dropped it, and if
+    /// the session was its group's only member the header went with it.
+    #[test]
+    fn pulling_a_newer_revision_keeps_the_local_group() {
+        let replacement = replace_preserving_local(&local(Some("review")), &pulled());
+        assert_eq!(replacement.group.as_deref(), Some("review"));
+    }
+
+    /// And a session that was ungrouped here stays ungrouped — the pull cannot
+    /// invent a group either.
+    #[test]
+    fn pulling_over_an_ungrouped_session_leaves_it_ungrouped() {
+        let replacement = replace_preserving_local(&local(None), &pulled());
+        assert_eq!(replacement.group, None);
+    }
 }

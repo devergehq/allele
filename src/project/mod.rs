@@ -1,5 +1,6 @@
 use crate::session::Session;
 use crate::settings::ProjectSettings;
+use crate::sidebar::groups::{GroupNameTooLong, GroupOrder};
 use crate::state::ArchivedSession;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -27,6 +28,13 @@ pub struct Project {
     pub archives: Vec<ArchivedSession>,
     /// Per-project settings (default branch, remote, terminals, etc.).
     pub settings: ProjectSettings,
+    /// Sidebar group names, in the order this project first saw them (DEV-853).
+    ///
+    /// Per project because a group belongs to one project: the same name in two
+    /// projects is two groups. Stored and rehydrated from `state.json` rather
+    /// than derived from the sessions, which is what lets a group that empties
+    /// and refills come back in its old position instead of jumping to the end.
+    pub group_order: GroupOrder,
 }
 
 impl Project {
@@ -39,7 +47,26 @@ impl Project {
             loading_sessions: Vec::new(),
             archives: Vec::new(),
             settings: ProjectSettings::default(),
+            group_order: GroupOrder::default(),
         }
+    }
+
+    /// Clean a group name and resolve it to this project's spelling of it,
+    /// recording a new group at the end of the order.
+    ///
+    /// The single entry point for assigning a group, so "the first spelling
+    /// wins" cannot be bypassed by a caller that merely trims. `Ok(None)` means
+    /// the session is ungrouped — an empty field is how the edit modal removes a
+    /// session from its group, so it is a value and not an error.
+    pub fn intern_group(&mut self, raw: &str) -> Result<Option<String>, GroupNameTooLong> {
+        Ok(crate::sidebar::groups::normalise(raw)?.map(|name| self.group_order.intern(&name)))
+    }
+
+    /// Group names this project already has, newest last — what the Group field
+    /// in both modals offers, so `review` and `reviews` do not become two groups
+    /// by accident.
+    pub fn group_names(&self) -> &[String] {
+        self.group_order.names()
     }
 
     /// Derive a display name from the source path basename.

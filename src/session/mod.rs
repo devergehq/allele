@@ -628,6 +628,18 @@ pub struct Session {
     pub pinned: bool,
     /// Optional user comment displayed as a subtitle on the session row.
     pub comment: Option<String>,
+    /// Optional group name this session sits under in the sidebar (DEV-853).
+    ///
+    /// Free text, trimmed, at most [`crate::sidebar::groups::GROUP_NAME_MAX_LEN`]
+    /// characters; `None` means the session is ungrouped and renders exactly as
+    /// every session did before groups existed. Stored in the owning project's
+    /// spelling — assignment goes through
+    /// [`crate::project::Project::intern_group`], so `Review` typed after
+    /// `review` is stored as `review` and the two are one group.
+    ///
+    /// Scoped to one project: the same name in two projects is two groups, and
+    /// nothing here is derived from who dispatched the session.
+    pub group: Option<String>,
     /// How many entries the changes panel would list for this workspace.
     /// `None` until first observed — rendered as "—", never as "0 changed",
     /// so the header can't assert a clean tree it hasn't actually seen.
@@ -754,6 +766,7 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
+            group: None,
             git_dirty_count: None,
             resumable: None,
             branch_name: None,
@@ -814,6 +827,7 @@ impl Session {
             agent_id: None,
             pinned: false,
             comment: None,
+            group: None,
             git_dirty_count: None,
             resumable: None,
             branch_name: None,

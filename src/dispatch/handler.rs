@@ -69,7 +69,7 @@ fn sessions_status(state: &AppState, session_id: &str, cx: &gpui::App) -> Respon
     for project in state.projects.iter() {
         if let Some(session) = project.sessions.iter().find(|s| s.id == session_id) {
             return Response::Status {
-                session: summarise(session, &project.name, cx),
+                session: Box::new(summarise(session, &project.name, cx)),
             };
         }
     }
@@ -160,5 +160,8 @@ fn summarise(session: &Session, project: &str, cx: &gpui::App) -> SessionSummary
         // replace the agent process, and a remembered address would then name
         // a socket that is gone. See DEV-440.
         reply_to: address::for_session(session, cx),
+        // The project's spelling, not whatever the creating call passed —
+        // see `CreateRequest::group` (DEV-853).
+        group: session.group.clone(),
     }
 }

@@ -98,6 +98,15 @@ pub struct PersistedSession {
     /// Optional user comment displayed as a subtitle on the session row.
     #[serde(default)]
     pub comment: Option<String>,
+    /// Sidebar group name, in the owning project's spelling (DEV-853).
+    ///
+    /// `serde(default)` so a `state.json` written before groups existed loads
+    /// with every session ungrouped — and therefore with a sidebar that looks
+    /// exactly as it did, since an ungrouped session is drawn without a header.
+    /// Skipped when absent so a project that uses no groups does not grow the
+    /// file by a null per session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Current git branch name (e.g. "fix-auth-5dc47535"). Used for orphan
     /// cleanup identification now that branches don't carry the allele/session/ prefix.
     #[serde(default)]
@@ -225,6 +234,7 @@ impl PersistedSession {
             agent_id: session.agent_id.clone(),
             pinned: session.pinned,
             comment: session.comment.clone(),
+            group: session.group.clone(),
             branch_name: session.branch_name.clone(),
             branch_locked: session.branch_locked,
             // Derived, for older Allele versions reading this file.
@@ -265,6 +275,24 @@ pub struct ScratchPadEntry {
     pub created_at: SystemTime,
 }
 
+/// One project's sidebar group names, in the order it first saw them (DEV-853).
+///
+/// Stored apart from the sessions on purpose. Deriving the order from whichever
+/// groups currently have members would make a `review` group that empties and
+/// refills reappear at the end of the list, and the whole point of a stored
+/// order is that a group holds its place — so a dispatcher's group stays at the
+/// top across the whole day rather than only while it has a worker running.
+///
+/// Append-only. Reordering, renaming and removing names is DEV-937.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectGroupOrder {
+    /// Owning project ID (links to `ProjectSave.id` in settings.json).
+    pub project_id: String,
+    /// Group names, first-seen first. The spelling here is the canonical one:
+    /// it is what the sidebar header displays and what sessions store.
+    pub groups: Vec<String>,
+}
+
 /// Per-project entry cap for scratch pad history. Prevents state.json
 /// from growing unbounded for long-lived projects.
 pub const SCRATCH_HISTORY_PER_PROJECT_LIMIT: usize = 50;
@@ -284,6 +312,17 @@ pub struct PersistedState {
     /// Consumers filter by `project_id` to show per-project history.
     #[serde(default)]
     pub scratch_pad_history: Vec<ScratchPadEntry>,
+    /// Sidebar group order per project (DEV-853). A `Vec` rather than a map, to
+    /// match the three collections above and keep the pretty-printed file
+    /// diffable.
+    ///
+    /// `serde(default)` for the same reason as `PersistedSession::group`: a file
+    /// written before groups existed has no order to restore, and an absent key
+    /// must load rather than fail. An older Allele reading a newer file ignores
+    /// this key and shows the flat list it already showed — the same
+    /// degrade-forwards contract as `skip_orchestration` and `drawer_tab_names`.
+    #[serde(default)]
+    pub project_group_order: Vec<ProjectGroupOrder>,
 }
 
 impl PersistedState {
@@ -567,6 +606,111 @@ mod tests {
         }"#;
         let session: PersistedSession = serde_json::from_str(json).expect("parses");
         assert_eq!(session.orchestration(), crate::session::Orchestration::Full);
+    }
+
+    // ── DEV-853: session groups ────────────────────────────────────────
+
+    /// The acceptance criterion: a `state.json` written before this change
+    /// loads with every session ungrouped, and the sidebar looks as it did.
+    /// `LEGACY_TABS` predates groups by several features, which is the point.
+    #[test]
+    fn a_pre_group_state_file_loads_every_session_ungrouped() {
+        let session: PersistedSession = serde_json::from_str(LEGACY_TABS)
+            .expect("a file written before groups existed must still load");
+        assert_eq!(session.group, None);
+
+        let state: PersistedState = serde_json::from_str("{}").expect("an empty state loads");
+        assert!(
+            state.project_group_order.is_empty(),
+            "no stored order means no groups, not a parse failure"
+        );
+    }
+
+    /// A session's group survives the file format, so a restart puts it back in
+    /// its group rather than in the ungrouped block.
+    #[test]
+    fn a_session_group_survives_a_round_trip() {
+        let json = r#"{
+            "id": "4989c913-0000-0000-0000-000000000000",
+            "project_id": "proj-1",
+            "label": "Review #9586",
+            "clone_path": null,
+            "last_known_status": "Suspended",
+            "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "drawer_tab_names": [],
+            "drawer_active_tab": 0,
+            "group": "review"
+        }"#;
+        let session: PersistedSession = serde_json::from_str(json).expect("parses");
+        assert_eq!(session.group.as_deref(), Some("review"));
+
+        let back: PersistedSession =
+            serde_json::from_str(&serde_json::to_string(&session).expect("serialises"))
+                .expect("re-parses");
+        assert_eq!(back.group.as_deref(), Some("review"));
+    }
+
+    /// An ungrouped session must not write a `group` key at all. Most sessions
+    /// are ungrouped, and at 56 per project a null each is noise in a file a
+    /// person reads by hand.
+    #[test]
+    fn an_ungrouped_session_writes_no_group_key() {
+        let session: PersistedSession = serde_json::from_str(LEGACY_TABS).expect("parses");
+        let encoded = serde_json::to_value(&session).expect("serialises");
+        assert!(
+            encoded.get("group").is_none(),
+            "an absent group is absent from the file"
+        );
+    }
+
+    /// Groups and their order survive a restart.
+    #[test]
+    fn the_per_project_group_order_survives_a_round_trip() {
+        let json = r#"{
+            "sessions": [],
+            "project_group_order": [
+                { "project_id": "proj-1", "groups": ["dispatcher", "review", "linear"] },
+                { "project_id": "proj-2", "groups": ["review"] }
+            ]
+        }"#;
+        let state: PersistedState = serde_json::from_str(json).expect("parses");
+        assert_eq!(state.project_group_order.len(), 2);
+        assert_eq!(
+            state.project_group_order[0].groups,
+            ["dispatcher", "review", "linear"],
+            "order is the order the project first saw them, not alphabetical"
+        );
+
+        let back: PersistedState =
+            serde_json::from_str(&serde_json::to_string(&state).expect("serialises"))
+                .expect("re-parses");
+        assert_eq!(
+            back.project_group_order[0].groups,
+            ["dispatcher", "review", "linear"]
+        );
+        assert_eq!(back.project_group_order[1].project_id, "proj-2");
+    }
+
+    /// The persisted half of "a group that empties and refills reappears in its
+    /// earlier position, including after a restart": the stored order keeps a
+    /// name no live session carries. If the order were derived from the sessions
+    /// on save, `review` would be dropped here and would come back last.
+    #[test]
+    fn an_emptied_group_keeps_its_place_in_the_stored_order() {
+        let json = r#"{
+            "sessions": [],
+            "project_group_order": [
+                { "project_id": "proj-1", "groups": ["review", "linear"] }
+            ]
+        }"#;
+        let state: PersistedState = serde_json::from_str(json).expect("parses");
+        let order = &state.project_group_order[0].groups;
+        assert_eq!(
+            order.iter().position(|g| g == "review"),
+            Some(0),
+            "no session carries review, and it still holds the first slot"
+        );
     }
 
     /// And a session that opted out round-trips through the file format.

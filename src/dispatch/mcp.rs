@@ -110,7 +110,9 @@ fn tool_definitions() -> Value {
                  sidebar. `reply_to` is a `uds:` address derived from the session's process: \
                  pass it straight to SendMessage. It survives renaming and cannot collide. \
                  A session finds its own address by looking up its own session_id here; \
-                 ListAgents does not list self.",
+                 ListAgents does not list self. Each session also carries its `group` — \
+                 the sidebar group it sits in, or null — so a dispatcher can tell its own \
+                 workers apart without keeping a map of session ids to the work it sent.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
         },
         {
@@ -120,7 +122,8 @@ fn tool_definitions() -> Value {
                  means it is blocked on a permission prompt and nobody is coming unless a \
                  human acts; `state_age_secs` says how long it has been that way. `reply_to` \
                  is a `uds:` address usable directly as SendMessage's `to` — use it instead \
-                 of resolving `name`, which addresses the process name rather than this one.",
+                 of resolving `name`, which addresses the process name rather than this one. \
+                 `group` is the sidebar group the session sits in, or null.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -164,6 +167,20 @@ fn tool_definitions() -> Value {
                                         project's startup command — a provisioned database, \
                                         say — before its tests will run, or full to also open \
                                         the drawer terminals and preview.",
+                    },
+                    "group": {
+                        "type": "string",
+                        "description": "Optional sidebar group to place the session in, so a \
+                                        dispatcher's workers sit together instead of scattered \
+                                        through every other session in the project. Free text, \
+                                        trimmed, at most 40 characters. Matched ignoring case \
+                                        against the project's existing groups, and the first \
+                                        spelling that project saw is the one shown — so \
+                                        'Review' passed into a project that already has \
+                                        'review' joins it rather than creating a second group. \
+                                        Omit it to leave the session ungrouped. One group per \
+                                        kind of work reads better than one per dispatch: \
+                                        'review' beats 'review #9586'.",
                     },
                 },
                 "required": ["project", "name", "prompt"],
@@ -372,6 +389,40 @@ mod tests {
     fn unknown_tools_are_rejected() {
         let params = json!({ "name": "allele_delete_everything", "arguments": {} });
         assert!(call_tool(&params).unwrap_err().starts_with("unknown tool"));
+    }
+
+    /// `group` must be advertised and optional. DEV-938 passes it per dispatch
+    /// mode, and a required field would break every caller that does not.
+    #[test]
+    fn create_advertises_an_optional_group() {
+        let tools = tool_definitions();
+        let create = tools
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|t| t["name"] == "allele_sessions_create")
+            .expect("create is advertised");
+        let props = create["inputSchema"]["properties"]
+            .as_object()
+            .expect("properties");
+        assert_eq!(props["group"]["type"], "string");
+        let required = create["inputSchema"]["required"]
+            .as_array()
+            .expect("required");
+        assert!(
+            !required.iter().any(|r| r == "group"),
+            "group is optional — a session without one is ungrouped"
+        );
+        // `additionalProperties: false` means an unadvertised `group` would be
+        // rejected by a strict client before it ever reached allele.
+        assert_eq!(create["inputSchema"]["additionalProperties"], false);
+        assert!(
+            props["group"]["description"]
+                .as_str()
+                .expect("description")
+                .contains("40"),
+            "the limit belongs in the schema a caller reads, not only in the refusal"
+        );
     }
 
     /// The create tool must not advertise a permission-mode parameter: it was

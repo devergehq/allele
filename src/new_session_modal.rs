@@ -4,6 +4,7 @@
 use crate::accessibility::DENSE_CONTROL_MIN_HEIGHT;
 use crate::icon::{icon, name as icons};
 use crate::session::Orchestration;
+use crate::sidebar::groups::GroupNameTooLong;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::theme;
 use gpui::*;
@@ -18,6 +19,10 @@ pub enum NewSessionModalEvent {
         agent_id: Option<String>,
         initial_prompt: Option<String>,
         orchestration: Orchestration,
+        /// Sidebar group for the new session, trimmed; `None` for ungrouped.
+        /// Not interned — the handler resolves it against the project so the
+        /// project's first spelling wins (DEV-853).
+        group: Option<String>,
     },
     Close,
 }
@@ -38,6 +43,65 @@ const EDIT_ORCHESTRATION_SEGMENT_IDS: [&str; 3] = [
 ];
 
 impl EventEmitter<NewSessionModalEvent> for NewSessionModal {}
+
+/// The Group field's state, shared by both modals (DEV-853).
+///
+/// Holds the input, the project's existing names and the live validation
+/// result. Both modals render it with their own listeners — the handful of GPUI
+/// lines is duplicated, as the orchestration segments already are, because the
+/// listeners are typed to the owning modal. Every *decision* lives here or in
+/// [`crate::sidebar::groups`], so the duplicated part decides nothing.
+struct GroupField {
+    input: Entity<TextInput>,
+    /// Group names the owning project already has, offered as suggestions so
+    /// `review` and `reviews` do not become two groups by accident.
+    existing: Vec<String>,
+    /// Character count when the typed name is over the limit, `None` otherwise.
+    /// Recomputed on every keystroke; blocks submit while set.
+    too_long: Option<usize>,
+}
+
+impl GroupField {
+    fn new(cx: &mut App, current: &str, existing: Vec<String>) -> Self {
+        let current: SharedString = current.to_string().into();
+        let input = cx.new(|cx| TextInput::new(cx, current, "none — type to create a group"));
+        Self {
+            input,
+            existing,
+            too_long: None,
+        }
+    }
+
+    /// Re-run validation against the current text. Must be called after
+    /// `set_text_silent` too: that deliberately does not fire `Changed`, so a
+    /// suggestion clicked into the field would otherwise leave a stale hint.
+    fn recompute(&mut self, cx: &mut App) {
+        let text = self.input.read(cx).text().to_string();
+        self.too_long = match crate::sidebar::groups::normalise(&text) {
+            Ok(_) => None,
+            Err(e) => Some(e.chars),
+        };
+    }
+
+    /// The trimmed name to submit, or `None` for ungrouped. `Err` while the
+    /// field is over-length, which is what stops submit.
+    fn value(&self, cx: &App) -> Result<Option<String>, GroupNameTooLong> {
+        crate::sidebar::groups::normalise(self.input.read(cx).text())
+    }
+
+    /// The refusal line shown under the field, naming the limit.
+    fn error_message(&self) -> Option<String> {
+        self.too_long
+            .map(|chars| GroupNameTooLong { chars }.message())
+    }
+
+    fn suggestions(&self, cx: &App) -> Vec<String> {
+        crate::sidebar::groups::suggestions(&self.existing, self.input.read(cx).text())
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+    }
+}
 
 /// What the branch-name field currently resolves to, used to render a live
 /// hint under the input so the user knows whether they're checking out an
@@ -67,6 +131,8 @@ pub struct NewSessionModal {
     branch_hint: BranchHint,
     /// How much of the project's setup the new session runs. See DEV-415.
     orchestration: Orchestration,
+    /// Optional sidebar group for the new session (DEV-853).
+    group: GroupField,
     focus_handle: FocusHandle,
 }
 
@@ -78,11 +144,25 @@ impl NewSessionModal {
         default_agent_idx: usize,
         default_label: String,
         existing_branches: Vec<String>,
+        existing_groups: Vec<String>,
     ) -> Self {
         let name_input = cx.new(|cx| TextInput::new(cx, "", default_label.to_string()));
         let branch_input =
             cx.new(|cx| TextInput::new(cx, "", "auto-generated, or type an existing branch"));
         let prompt_input = cx.new(|cx| TextInput::new(cx, "", "optional"));
+        let group = GroupField::new(cx, "", existing_groups);
+
+        cx.subscribe(
+            &group.input,
+            |this: &mut Self, _input, event: &TextInputEvent, cx| match event {
+                TextInputEvent::Submitted => this.submit(cx),
+                TextInputEvent::Changed => {
+                    this.group.recompute(cx);
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
 
         // When name input is submitted (Enter), treat as form submit.
         cx.subscribe(
@@ -124,6 +204,7 @@ impl NewSessionModal {
             existing_branches,
             branch_hint: BranchHint::Empty,
             orchestration: Orchestration::default(),
+            group,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -148,6 +229,15 @@ impl NewSessionModal {
     }
 
     fn submit(&mut self, cx: &mut Context<Self>) {
+        // Refused, not truncated. Truncating would put the session in a group
+        // the user did not name, and silently splitting a group is worse than
+        // making them shorten the name.
+        let Ok(group) = self.group.value(cx) else {
+            self.group.recompute(cx);
+            cx.notify();
+            return;
+        };
+
         let label = {
             let text = self.name_input.read(cx).text().to_string();
             if text.trim().is_empty() {
@@ -189,6 +279,7 @@ impl NewSessionModal {
             agent_id,
             initial_prompt,
             orchestration: self.orchestration,
+            group,
         });
     }
 
@@ -286,6 +377,78 @@ impl NewSessionModal {
                  no shutdown when the session closes."
             }
         }
+    }
+
+    /// The Group field's body: the input, a refusal line when the name is too
+    /// long, and clickable rows for the group names the project already has
+    /// (DEV-853).
+    ///
+    /// `id_prefix` keeps element ids unique across the two modals, which share
+    /// this. `on_pick` is given the chosen name; each modal writes it into its
+    /// own field, because `set_text_silent` needs the modal's `Context`.
+    fn group_field_body(
+        id_prefix: &'static str,
+        field: &GroupField,
+        suggestions: Vec<String>,
+        on_pick: impl Fn(&SharedString, &mut Window, &mut App) + 'static,
+    ) -> Div {
+        // One `Rc` so each chip's listener can hold a handle. `cx.listener`
+        // hands back a closure that is not `Clone`, and one chip per existing
+        // group all need the same callback.
+        let on_pick: std::rc::Rc<dyn Fn(&SharedString, &mut Window, &mut App)> =
+            std::rc::Rc::new(on_pick);
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(px(3.0))
+            .child(Self::input_frame(field.input.clone()));
+
+        if let Some(message) = field.error_message() {
+            body = body.child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme().danger)
+                    .child(message),
+            );
+        }
+
+        if !suggestions.is_empty() {
+            let mut chips = div().flex().flex_row().flex_wrap().gap(px(4.0)).child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme().text_faint)
+                    .child("in this project:"),
+            );
+            for (idx, name) in suggestions.into_iter().enumerate() {
+                let picked: SharedString = name.clone().into();
+                let on_pick = on_pick.clone();
+                chips = chips.child(
+                    div()
+                        .id(SharedString::from(format!("{id_prefix}-group-sugg-{idx}")))
+                        .cursor_pointer()
+                        .px(px(6.0))
+                        .py(px(1.0))
+                        .rounded(px(10.0))
+                        .border_1()
+                        .border_color(theme().border_default)
+                        .bg(theme().bg_sunken)
+                        .text_size(px(10.0))
+                        .text_color(theme().text_primary)
+                        .hover(|s| s.bg(theme().bg_hover))
+                        .child(name)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            move |_ev, window: &mut Window, cx: &mut App| {
+                                cx.stop_propagation();
+                                on_pick(&picked, window, cx);
+                            },
+                        ),
+                );
+            }
+            body = body.child(chips);
+        }
+
+        body
     }
 
     fn input_frame(child: Entity<TextInput>) -> Div {
@@ -472,6 +635,30 @@ impl Render for NewSessionModal {
                         "Initial prompt",
                         Self::input_frame(self.prompt_input.clone()),
                     ))
+                    // Sidebar group (DEV-853). Free text: a group exists
+                    // because a session carries its name, so there is no list
+                    // to pick from — only the project's existing names, offered
+                    // so `review` and `reviews` do not both get created.
+                    .child(Self::render_form_row(
+                        "Group",
+                        Self::group_field_body(
+                            "new-session",
+                            &self.group,
+                            self.group.suggestions(cx),
+                            cx.listener(|this: &mut Self, name: &SharedString, _w, cx| {
+                                this.group
+                                    .input
+                                    .update(cx, |input, cx| {
+                                        input.set_text_silent(name.clone(), cx)
+                                    });
+                                // `set_text_silent` fires no `Changed`, so the
+                                // hint would otherwise keep describing the text
+                                // the user replaced.
+                                this.group.recompute(cx);
+                                cx.notify();
+                            }),
+                        ),
+                    ))
                     // Project setup opt-out. Lives beside the other creation
                     // choices because it is one: a session for a question does
                     // not want the project's dev servers. See DEV-400.
@@ -615,6 +802,9 @@ pub enum EditSessionModalEvent {
         comment: Option<String>,
         pinned: bool,
         orchestration: Orchestration,
+        /// Sidebar group, trimmed; `None` clears it and returns the session to
+        /// the ungrouped block (DEV-853).
+        group: Option<String>,
     },
     Close,
 }
@@ -632,6 +822,9 @@ pub struct EditSessionModal {
     /// it, Retry Startup would be a permanent silent no-op for a session created
     /// without startup, with no recovery short of recreating it. See DEV-400.
     orchestration: Orchestration,
+    /// The session's sidebar group. Clearing the field removes the session from
+    /// its group (DEV-853).
+    group: GroupField,
     focus_handle: FocusHandle,
 }
 
@@ -649,6 +842,8 @@ impl EditSessionModal {
         current_comment: &str,
         pinned: bool,
         orchestration: Orchestration,
+        current_group: &str,
+        existing_groups: Vec<String>,
     ) -> Self {
         let label_owned: SharedString = current_label.to_string().into();
         let branch_owned: SharedString = current_branch_slug.to_string().into();
@@ -656,6 +851,19 @@ impl EditSessionModal {
         let name_input = cx.new(|cx| TextInput::new(cx, label_owned, "Session name"));
         let branch_input = cx.new(|cx| TextInput::new(cx, branch_owned, "Branch name"));
         let comment_input = cx.new(|cx| TextInput::new(cx, comment_owned, "Add a comment…"));
+        let group = GroupField::new(cx, current_group, existing_groups);
+
+        cx.subscribe(
+            &group.input,
+            |this: &mut Self, _input, event: &TextInputEvent, cx| match event {
+                TextInputEvent::Submitted => this.submit(cx),
+                TextInputEvent::Changed => {
+                    this.group.recompute(cx);
+                    cx.notify();
+                }
+            },
+        )
+        .detach();
 
         cx.subscribe(
             &name_input,
@@ -693,6 +901,7 @@ impl EditSessionModal {
             comment_input,
             pinned,
             orchestration,
+            group,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -706,6 +915,14 @@ impl EditSessionModal {
         if label.is_empty() {
             return;
         }
+
+        // Over-length is refused here too, for the same reason as the new-session
+        // modal: a truncated name is a different group.
+        let Ok(group) = self.group.value(cx) else {
+            self.group.recompute(cx);
+            cx.notify();
+            return;
+        };
 
         let branch_slug = {
             let text = self.branch_input.read(cx).text().trim().to_string();
@@ -733,6 +950,7 @@ impl EditSessionModal {
             comment,
             pinned: self.pinned,
             orchestration: self.orchestration,
+            group,
         });
     }
 
@@ -863,6 +1081,24 @@ impl Render for EditSessionModal {
                     .child(NewSessionModal::render_form_row(
                         "Comment",
                         NewSessionModal::input_frame(self.comment_input.clone()),
+                    ))
+                    // Clearing this field is how a session leaves its group.
+                    // The group's *name* keeps its place in the project's order,
+                    // so the group reappears where it was if it refills.
+                    .child(NewSessionModal::render_form_row(
+                        "Group",
+                        NewSessionModal::group_field_body(
+                            "edit-session",
+                            &self.group,
+                            self.group.suggestions(cx),
+                            cx.listener(|this: &mut Self, name: &SharedString, _w, cx| {
+                                this.group.input.update(cx, |input, cx| {
+                                    input.set_text_silent(name.clone(), cx)
+                                });
+                                this.group.recompute(cx);
+                                cx.notify();
+                            }),
+                        ),
                     ))
                     .child(NewSessionModal::render_form_row(
                         "Pinned",
