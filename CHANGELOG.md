@@ -13,6 +13,8 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+## [0.7.0] - 2026-10-12
+
 ### Added
 - Sessions can sit in a named **group** in the sidebar. With 36 sessions running — 56 in one
   project — the flat list could not answer "which of these is waiting on me", and the
@@ -378,7 +380,8 @@ merge batch. Core proof-of-concept complete and runnable.
   browser with merge/delete actions.
 - Per-session drawer terminal panel and auto-naming of sessions from the first prompt.
 
-[Unreleased]: https://github.com/devergehq/allele/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/devergehq/allele/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/devergehq/allele/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/devergehq/allele/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/devergehq/allele/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/devergehq/allele/compare/v0.4.0...v0.5.0
