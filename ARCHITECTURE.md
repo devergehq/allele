@@ -721,6 +721,43 @@ is the Project Reader; `crate::rich::reader` is DEV-31's transcript navigation,
 which `rich_view` uses via `super::reader`. The rule matches `crate::reader`
 only, because matching the bare name flags the wrong one.
 
+### 7.12 Don't leave a spawned agent to guess the data root
+
+An agent Allele spawns re-derives Allele's root from scratch, and nothing
+in its situation tells it which instance started it. `--mcp-serve`
+resolves the control socket through `paths::launch_root`, and the
+registration Claude Code launches that server from — one global entry in
+`~/.claude.json`, shared by every session on the machine — passes it no
+flags. So the root has to arrive **per session**, on the spawned
+process's environment, or not at all.
+
+`paths::child_home_env()` is that value. `agents::build_command`
+resolves it once and hands it to `AgentAdapter::event_integration`;
+adapters take it as a parameter and never read `paths` themselves. Two
+reasons, and the second is the one that bites: a second resolution chain
+is how §7.8 happened, and `paths::init` fixes a process-global `OnceLock`
+that one test in this binary already sets — an adapter reading it would
+be racing that test, untestable in one branch and flaky in the other.
+
+It has three answers, and the third is the one nobody predicts:
+
+| this instance | the child is told |
+| -- | -- |
+| redirected | the root |
+| the real home, nothing inherited | nothing — `launch_root` still owns that decision |
+| the real home, but it inherited an `ALLELE_HOME` | a **blank** |
+
+The blank exists because a child inherits the environment but not the
+precedence. `--home` and `--sandbox` beat `ALLELE_HOME` for the process
+that reads the flag; a child only sees the variable. So an instance
+launched `--home $HOME` from a terminal inside a sandbox session would
+run against the real home and hand its agent the sandbox — DEV-947
+inverted. `launch_root_from` already reads a blank as no answer, which is
+what makes stating one the way to say "the real home" out loud.
+
+This is the spawn half of §7.8; neither half is sufficient alone, and
+before DEV-947 only the flag half existed.
+
 ## 8. Open follow-ups
 
 Known work not yet landed, in rough priority order:
@@ -730,6 +767,18 @@ Known work not yet landed, in rough priority order:
   change* being wrong rather than as accumulated debt, which is what makes
   it worth doing before someone loses an afternoon to it. Candidates: the
   `Render` impl, the macOS app menu, and the startup task wiring.
+- Carry the data root to the *other* things Allele spawns, the way §7.12
+  has the Claude adapter carry it. Three doors are still open, each the
+  DEV-947 symptom by a different route, and all three were found in that
+  change's own self-review rather than in the field:
+  **drawer terminals** get no root at all (`PtyTerminal::spawn` takes
+  `extra_env`, and a `claude` typed in a drawer of a sandbox window
+  reaches the live app); **`GenericAdapter`** uses the default
+  `event_integration` and drops it, which matters for a generic entry
+  pointing at a `claude` wrapper; and **`OpencodeAdapter`** ignores its
+  parameter, which costs nothing only while no machine registers an
+  `allele` MCP server with opencode. The adapter parameter is already
+  there in all three cases — this is wiring, not design.
 - Adopt `AlleleError` in the remaining `git::*` functions
   (`auto_commit_if_dirty`, `delete_ref`, `list_archive_refs`,
   `prune_archive_refs`, etc.)

@@ -120,9 +120,65 @@ pub fn root() -> Option<PathBuf> {
 /// True when this process is running against a root other than the real home.
 /// Drives the "this is not your live instance" marker in the UI.
 pub fn is_redirected() -> bool {
-    match (root(), dirs::home_dir()) {
-        (Some(r), Some(h)) => r != h,
-        _ => false,
+    exported_root().is_some()
+}
+
+/// The root to hand a child process, or `None` when this launch is using the
+/// real home.
+///
+/// A spawned agent re-derives Allele's root from scratch and has no way to ask
+/// which instance started it: `--mcp-serve` resolves the control socket through
+/// [`launch_root`], and the registration Claude Code launches it from passes no
+/// flags at all. So a session opened inside a redirected instance drove the
+/// **live** app until the root travelled with it (DEV-947).
+///
+/// `None` on an ordinary launch is the deliberate half. Exporting the real home
+/// would pin a root that [`launch_root`] is still entitled to decide — the
+/// child would carry an answer rather than the absence of a question.
+pub fn exported_root() -> Option<PathBuf> {
+    exported_root_from(root(), dirs::home_dir())
+}
+
+/// The pure core of [`exported_root`], with both inputs explicit — the same
+/// split, and for the same reason, as [`launch_root_from`].
+fn exported_root_from(root: Option<PathBuf>, real_home: Option<PathBuf>) -> Option<PathBuf> {
+    match (root, real_home) {
+        (Some(r), Some(h)) if r != h => Some(r),
+        _ => None,
+    }
+}
+
+/// What a spawned child's `ALLELE_HOME` must say: the root when this instance
+/// is redirected, a **blank** when it is not but this process inherited one,
+/// and nothing at all otherwise.
+///
+/// The blank is the half that is easy to miss. `--home` and `--sandbox` beat
+/// `ALLELE_HOME` for *this* process ([`launch_root_from`]), but a child
+/// inherits the environment, not the precedence — so an instance launched as
+/// `--home $HOME` from a terminal inside a sandbox session would run against
+/// the real home while handing its agent the sandbox root, the inversion of
+/// DEV-947. [`launch_root_from`] already reads a blank value as no answer,
+/// which is what makes stating one the way to say "the real home" out loud.
+pub fn child_home_env() -> Option<String> {
+    child_home_env_from(
+        root(),
+        dirs::home_dir(),
+        std::env::var_os(HOME_ENV).is_some(),
+    )
+}
+
+/// The pure core of [`child_home_env`]. `inherited` is whether [`HOME_ENV`] is
+/// set on *this* process, which is the only reason a non-redirected launch has
+/// anything to say.
+fn child_home_env_from(
+    root: Option<PathBuf>,
+    real_home: Option<PathBuf>,
+    inherited: bool,
+) -> Option<String> {
+    match exported_root_from(root, real_home) {
+        Some(r) => Some(r.to_string_lossy().into_owned()),
+        None if inherited => Some(String::new()),
+        None => None,
     }
 }
 
@@ -293,6 +349,77 @@ mod tests {
         );
         assert!(written.starts_with(&sandbox));
         let _ = std::fs::remove_dir_all(&sandbox);
+    }
+
+    /// What a child process is told, and what it is deliberately not told.
+    /// `exported_root` is the root travelling with a spawned agent (DEV-947);
+    /// on an ordinary launch there is nothing to say, and saying the real home
+    /// anyway would pin a decision `launch_root` still owns.
+    #[test]
+    fn a_redirected_root_is_exported_and_the_real_home_is_not() {
+        let home = PathBuf::from("/Users/someone");
+        assert_eq!(
+            exported_root_from(
+                Some(PathBuf::from("/Users/someone/.allele-sandbox")),
+                Some(home.clone())
+            ),
+            Some(PathBuf::from("/Users/someone/.allele-sandbox")),
+        );
+        assert_eq!(
+            exported_root_from(Some(home.clone()), Some(home.clone())),
+            None
+        );
+        // No home to compare against reads as not redirected, exactly as
+        // `is_redirected` has always read it.
+        assert_eq!(exported_root_from(Some(home.clone()), None), None);
+        assert_eq!(exported_root_from(None, Some(home)), None);
+    }
+
+    /// A child inherits the environment but not the precedence, so an
+    /// ordinary launch that is *itself* carrying an `ALLELE_HOME` has to say
+    /// so — blank, which `launch_root_from` reads as no answer — rather than
+    /// let the child resolve an instance this one is not.
+    #[test]
+    fn an_inherited_root_is_cleared_rather_than_passed_on() {
+        let home = PathBuf::from("/Users/someone");
+        let sandbox = PathBuf::from("/Users/someone/.allele-sandbox");
+
+        // Redirected: say the root, whether or not one was inherited.
+        assert_eq!(
+            child_home_env_from(Some(sandbox.clone()), Some(home.clone()), false),
+            Some(sandbox.to_string_lossy().into_owned()),
+        );
+        // Not redirected, nothing inherited: nothing to say.
+        assert_eq!(
+            child_home_env_from(Some(home.clone()), Some(home.clone()), false),
+            None,
+        );
+        // Not redirected, but this process inherited a root: say the real home
+        // out loud, or the child would resolve the inherited one.
+        assert_eq!(
+            child_home_env_from(Some(home.clone()), Some(home), true),
+            Some(String::new()),
+        );
+        // And a blank is what `launch_root` already reads as no answer.
+        assert_eq!(
+            launch_root_from(None, false, Some(String::new()), Some(PathBuf::from("/h"))),
+            Some(PathBuf::from("/h")),
+        );
+    }
+
+    /// The export is whatever `launch_root` resolved, which is already
+    /// absolute — so the child and the parent cannot resolve one relative
+    /// `--home` against two different working directories.
+    #[test]
+    fn the_exported_root_is_the_absolute_one_launch_root_resolved() {
+        let resolved =
+            launch_root(Some(PathBuf::from("relative-root")), false).expect("a root was asked for");
+        assert!(resolved.is_absolute(), "{}", resolved.display());
+        let home = dirs::home_dir().expect("test host has a home directory");
+        assert_eq!(
+            exported_root_from(Some(resolved.clone()), Some(home)),
+            Some(resolved),
+        );
     }
 
     /// `--sandbox` is relative to the real home, never to whatever root is

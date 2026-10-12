@@ -155,7 +155,15 @@ pub trait AgentAdapter: Send + Sync {
 
     /// Spawn-time wiring that activates event emission: extra CLI args
     /// and/or env vars applied to the session's PTY. Default: none.
-    fn event_integration(&self, _ctx: &SpawnCtx) -> EventIntegration {
+    ///
+    /// `allele_home` is what this instance's root says to a child — the root
+    /// when redirected, a blank when an inherited one has to be cleared, and
+    /// `None` when there is nothing to say ([`crate::paths::child_home_env`]).
+    /// It is passed in rather than read from `paths` so the adapter has no
+    /// opinion about which instance it belongs to, and so every branch is
+    /// testable: `paths::init` fixes a process-global root that one test in
+    /// this binary already sets, and tests run in parallel threads (DEV-947).
+    fn event_integration(&self, _ctx: &SpawnCtx, _allele_home: Option<&str>) -> EventIntegration {
         EventIntegration::default()
     }
 
@@ -231,10 +239,23 @@ impl AgentAdapter for ClaudeAdapter {
     /// Event emission is activated by pointing `claude --settings` at the
     /// installed hooks file. The path is threaded in via `SpawnCtx` so tests
     /// (and callers) stay in control of it.
-    fn event_integration(&self, ctx: &SpawnCtx) -> EventIntegration {
+    ///
+    /// A redirected instance also exports its root. Claude Code hands its own
+    /// environment to every stdio MCP server it launches, and the `allele`
+    /// server is registered globally as a bare `--mcp-serve` with no root in
+    /// it — so without this the agent in a `--sandbox` window resolved the real
+    /// home and drove the **live** app, creating sessions there (DEV-947).
+    /// Nothing is exported on an ordinary launch: see
+    /// [`crate::paths::exported_root`].
+    fn event_integration(&self, ctx: &SpawnCtx, allele_home: Option<&str>) -> EventIntegration {
         let mut integ = EventIntegration::default();
         if let Some(hooks) = ctx.hooks_settings_path {
             integ.args = vec!["--settings".into(), hooks.into()];
+        }
+        if let Some(root) = allele_home {
+            integ
+                .env
+                .push((crate::paths::HOME_ENV.to_string(), root.to_string()));
         }
         integ
     }
@@ -308,7 +329,12 @@ impl AgentAdapter for OpencodeAdapter {
     /// inside the opencode process and reads these env vars to know which
     /// allele session it belongs to and where to write events. Each session
     /// runs in its own clone/process, so the id is unambiguous per PTY.
-    fn event_integration(&self, ctx: &SpawnCtx) -> EventIntegration {
+    ///
+    /// `allele_home` is unused: opencode gets its events directory as an
+    /// absolute path already derived from the root, and no `allele` MCP server
+    /// is registered with opencode on any machine yet. The day one is, this
+    /// wants the same `ALLELE_HOME` push the Claude adapter makes (DEV-947).
+    fn event_integration(&self, ctx: &SpawnCtx, _allele_home: Option<&str>) -> EventIntegration {
         let mut env = vec![("ALLELE_SESSION_ID".to_string(), ctx.session_id.to_string())];
         if let Some(dir) = crate::hooks::events_dir() {
             env.push((
@@ -436,7 +462,11 @@ pub fn build_command(agent: &AgentConfig, ctx: &SpawnCtx, resume: bool) -> Optio
     };
     // Layer in the adapter's event-integration wiring (Claude's --settings,
     // opencode's ALLELE_SESSION_ID env, …) so status reporting works.
-    let integration = adapter.event_integration(ctx);
+    //
+    // The root is resolved here and nowhere else. Every caller of this function
+    // would otherwise have to resolve it too, and DEV-943 was a second
+    // resolution chain disagreeing with the first.
+    let integration = adapter.event_integration(ctx, crate::paths::child_home_env().as_deref());
     args.extend(integration.args);
 
     // The prompt goes last, after every flag, because it is positional — and
@@ -805,7 +835,7 @@ mod tests {
             has_history: false,
             initial_prompt: None,
         };
-        let integ = a.event_integration(&ctx);
+        let integ = a.event_integration(&ctx, None);
         assert!(integ.args.is_empty(), "opencode needs no extra CLI args");
         let sid = integ
             .env
@@ -813,6 +843,106 @@ mod tests {
             .find(|(k, _)| k == "ALLELE_SESSION_ID")
             .map(|(_, v)| v.as_str());
         assert_eq!(sid, Some("sid-123"));
+    }
+
+    /// A session spawned by a **redirected** instance has to be told which
+    /// instance that is. Claude Code passes its environment to the stdio MCP
+    /// servers it launches, and the `allele` server is registered globally as a
+    /// bare `--mcp-serve`, so the root in this env is the only thing standing
+    /// between an agent in a `--sandbox` window and the live app (DEV-947).
+    #[test]
+    fn claude_event_integration_exports_a_redirected_root() {
+        let a = ClaudeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "Claude 1",
+            hooks_settings_path: Some("/tmp/hooks.json"),
+            has_history: false,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, Some("/tmp/allele-sandbox-root"));
+        assert_eq!(
+            integ
+                .env
+                .iter()
+                .find(|(k, _)| k == crate::paths::HOME_ENV)
+                .map(|(_, v)| v.as_str()),
+            Some("/tmp/allele-sandbox-root"),
+        );
+        // The hooks flag is what the env was added beside, not instead of.
+        assert_eq!(
+            integ.args,
+            vec!["--settings".to_string(), "/tmp/hooks.json".to_string()],
+        );
+    }
+
+    /// The other half, and the deliberate one: an ordinary launch exports no
+    /// root at all. Exporting the real home would pin a root `paths` is still
+    /// entitled to decide, and would make every live session carry an answer
+    /// to a question nobody asked.
+    #[test]
+    fn claude_event_integration_exports_no_root_on_an_ordinary_launch() {
+        let a = ClaudeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "Claude 1",
+            hooks_settings_path: Some("/tmp/hooks.json"),
+            has_history: false,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, None);
+        assert!(
+            integ.env.is_empty(),
+            "an ordinary launch must export nothing: {:?}",
+            integ.env
+        );
+        assert_eq!(
+            integ.args,
+            vec!["--settings".to_string(), "/tmp/hooks.json".to_string()],
+        );
+    }
+
+    /// A blank is not an absence: it is this instance saying "the real home"
+    /// out loud, so a child cannot resolve an `ALLELE_HOME` the parent itself
+    /// inherited and then overrode with `--home` (DEV-947, self-review).
+    #[test]
+    fn claude_event_integration_passes_a_blank_root_through() {
+        let a = ClaudeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "Claude 1",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, Some(""));
+        assert_eq!(
+            integ.env,
+            vec![(crate::paths::HOME_ENV.to_string(), String::new())],
+        );
+    }
+
+    /// A **resumed** session re-spawns the agent, so it needs the root for the
+    /// same reason a fresh one does: `build_command` layers the integration in
+    /// on both paths, and this is what pins that.
+    #[test]
+    fn claude_resume_integration_carries_the_root_too() {
+        let a = ClaudeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "Claude 1",
+            hooks_settings_path: None,
+            has_history: true,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, Some("/tmp/alt-root"));
+        assert_eq!(
+            integ.env,
+            vec![(
+                crate::paths::HOME_ENV.to_string(),
+                "/tmp/alt-root".to_string()
+            )],
+        );
     }
 
     #[test]
@@ -841,13 +971,16 @@ mod tests {
             Lifecycle::Ignore
         );
         assert!(a
-            .event_integration(&SpawnCtx {
-                session_id: "x",
-                label: "y",
-                hooks_settings_path: None,
-                has_history: false,
-                initial_prompt: None,
-            })
+            .event_integration(
+                &SpawnCtx {
+                    session_id: "x",
+                    label: "y",
+                    hooks_settings_path: None,
+                    has_history: false,
+                    initial_prompt: None,
+                },
+                None,
+            )
             .env
             .is_empty());
     }

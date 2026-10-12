@@ -69,11 +69,22 @@ For a root of your own choosing, `--home <dir>` (or the `ALLELE_HOME`
 environment variable — the flag wins). Both are refused together, since they
 disagree about where to run and guessing risks writing to the live tree.
 
-To drive a test instance **from an agent**, the MCP server needs the same flag:
+The **agent session** you open inside the test instance reaches it without any
+of this: Allele exports the root to the agent it spawns as `ALLELE_HOME`, Claude
+Code passes its environment to the MCP servers it launches, and `--mcp-serve`
+resolves its control socket from that root. Two catches worth knowing, because
+both are silent. The server is whatever binary `~/.claude.json` registers, so
+**a stale build there ignores the root** and the agent lands on your live app
+anyway — `initialize` reports the build (`serverInfo.version`), and there is no
+`--version` flag, so that reply is the check. And the root travels on the
+*agent* process: a `claude` you start by hand in a **drawer terminal** is not
+that process and still reaches your live app.
+
+To drive a test instance from an agent **somewhere else** — a client you launch
+by hand, outside any Allele window — the server needs the flag:
 `Allele --mcp-serve --sandbox` (or `--home <dir>`, or `ALLELE_HOME` in its
-environment). `--mcp-serve` resolves its control socket from the root it is
-given, so a plain `--mcp-serve` reaches your live instance no matter which
-instance the agent is meant to be testing.
+environment). A plain `--mcp-serve` with nothing in its environment reaches your
+live instance, by design.
 
 A redirected instance is marked **SANDBOX** in its window title and beside the
 sidebar heading, because two identical windows side by side is its own hazard.
