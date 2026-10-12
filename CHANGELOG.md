@@ -14,6 +14,22 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Fixed
+- A session Allele spawns now inherits the data root of the instance that
+  spawned it, so an agent working in a `--sandbox` (or `--home`, or
+  `ALLELE_HOME`) window drives **that** instance rather than your live one.
+  Claude Code hands its own environment to the MCP servers it launches, and the
+  `allele` server is registered globally as a bare `--mcp-serve` with no root in
+  it — so an agent in a sandbox window resolved the real home and reached the
+  live app, where `allele_sessions_create` would have started a real session
+  that nobody opened there. The root travels as `ALLELE_HOME` on the spawned
+  agent's environment, on a fresh session and on a resume; an ordinary launch
+  exports nothing, because the real home is the root Allele is still entitled
+  to resolve for itself — unless it inherited an `ALLELE_HOME` of its own, in
+  which case it states a blank, so a child cannot resolve a root its parent
+  was launched with a flag to override. Nothing outside Allele is redirected: `~/.claude.json`
+  still registers a bare `--mcp-serve`. **The server binary must itself be new
+  enough to honour the root** — a `--mcp-serve` built before the fix below
+  ignores it, so a stale binary registered there still reaches the live app.
 - `--mcp-serve` now resolves its control socket from the same data root the app
   would use, so `allele --mcp-serve --sandbox` (or `ALLELE_HOME=<dir>`, or
   `--home <dir>`) reaches *that* instance. It previously took over the process
