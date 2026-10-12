@@ -44,8 +44,10 @@ The core primitives:
   under `refs/allele/archive/<id>` on canonical so work is never lost
   and can be restored into a new session.
 - **Hook events** — Claude Code's hook system writes JSONL files to
-  `~/.allele/events/`. Allele polls them to update session status
-  (Running / AwaitingInput / ResponseReady / Done).
+  `<root>/.allele/events/`. Allele polls them to update session status
+  (Running / AwaitingInput / ResponseReady / Done). The directory is
+  substituted into the receiver script at install time, so a redirected
+  instance's sessions report to *that* instance (DEV-951).
 
 Everything else in the codebase exists to make those four things
 ergonomic.

@@ -13,6 +13,30 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Fixed
+- A redirected instance's sessions now write their hook events under **that**
+  instance's root, so `allele_sessions_create` against a `--sandbox`, `--home`
+  or `ALLELE_HOME` instance confirms normally instead of reporting
+  `prompt_delivery_unconfirmed` after 120 seconds. The receiver script
+  hard-coded `$HOME/.allele/events`, and Allele has watched
+  `<root>/.allele/events` since DEV-487 — so every redirected instance's events
+  landed in the live tree while the instance watched an empty directory, and the
+  status change a create waits on could never arrive. The agent had in fact
+  received its prompt and answered, which made the error false rather than
+  merely pessimistic, and an orchestrator that retried on it would start a
+  second session alongside a live one. The events directory is now substituted
+  into the script at install time, the way the receiver's own absolute path
+  already was. The receiver is rewritten on every launch, so an existing install
+  picks this up on next start with no settings migration; an ordinary launch
+  keeps writing to `~/.allele/events` exactly as before.
+- A data root containing a space now works at all. Claude Code evaluates a hook
+  `command` through a shell, and the receiver's path was interpolated into
+  `hooks.json` unquoted — so under `--home "/Users/me/My Roots/alpha"` the
+  command word-split into a path that does not exist, no hook ever fired, and
+  the symptom was indistinguishable from the fix above: no status transitions,
+  and every create burning its full 120s budget. Both the receiver path and the
+  events directory are now shell-quoted.
+
 ## [0.7.1] - 2026-10-12
 
 ### Fixed
