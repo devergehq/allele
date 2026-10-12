@@ -134,10 +134,25 @@ pub enum SessionAction {
         session_idx: usize,
     },
     /// Move a session within its project (drag-and-drop reorder).
+    ///
+    /// Since DEV-937 a drop on a row in a *different* group also retags the
+    /// session to that row's group, so the gesture means "put it here" in full
+    /// rather than only within one group.
     ReorderSession {
         project_idx: usize,
         from: usize,
         to: usize,
+    },
+    /// Put a session in a group, or take it out of one (DEV-937).
+    ///
+    /// Emitted by dropping a session row on a group header — a header has no
+    /// position among the rows, so this changes the group and nothing else. The
+    /// name is interned by the handler, as every other assignment is.
+    RegroupSession {
+        project_idx: usize,
+        session_idx: usize,
+        /// `None` returns the session to the ungrouped block.
+        group: Option<String>,
     },
     /// Toggle the pinned state of a session.
     TogglePinSession {
@@ -233,6 +248,35 @@ pub enum SidebarAction {
     SelectChangedFile { path: String, staged: bool },
     /// Close the changes panel's diff pane (deselect the file row).
     ClearChangesSelection,
+    /// Move a group to another slot in its project's order — the drop half of
+    /// dragging one group header onto another (DEV-937).
+    ///
+    /// Slots, not group indices: the ungrouped block occupies one, so a group
+    /// dropped on the slot above it lands above it. Names rather than indices
+    /// because a context menu or a drag can outlive the list it was opened
+    /// against; a name that is gone is a no-op.
+    ReorderGroup {
+        project_idx: usize,
+        from: String,
+        to: String,
+    },
+    /// Move a group one slot up or down — the header menu's two entries.
+    MoveGroup {
+        project_idx: usize,
+        name: String,
+        direction: crate::sidebar::groups::MoveDirection,
+    },
+    /// Fold a group's rows away, or unfold them. Emitted by clicking the header
+    /// and by its menu entry.
+    ToggleGroupCollapsed { project_idx: usize, name: String },
+    /// Begin renaming a group from its header: arms the inline field and focuses
+    /// it.
+    StartGroupRename { project_idx: usize, name: String },
+    /// Commit the inline rename buffer. Renames the group for every session in
+    /// it; a refusal is shown beside the field and the field stays open.
+    CommitGroupRename,
+    /// Abandon the inline rename, leaving the group as it was.
+    CancelGroupRename,
 }
 
 /// Project lifecycle — add, remove, relocate.
@@ -396,21 +440,30 @@ pub struct SessionCursor {
 
 /// Drag payload for a session row (sidebar drag-and-drop reorder).
 ///
-/// No longer `Copy`: the group is carried so a row can decide whether it is a
-/// legal drop target while the drag is still in the air. The sidebar refuses a
-/// cross-group reorder (DEV-853), and without this the payload every row saw
-/// said nothing about where the dragged session came from — so every row lit up
-/// as a target and half of them then did nothing.
-#[derive(Clone)]
+/// `Copy` again as of DEV-937. DEV-853 added the dragged session's group so a
+/// row could decline to light up for a cross-group drop it would then discard.
+/// Such a drop now retags the session, so every row in the same project is a
+/// landing target and the payload has nothing left to decide.
+#[derive(Clone, Copy)]
 pub(crate) struct DraggedSession {
     pub project_idx: usize,
     pub session_idx: usize,
-    /// The dragged session's group, for the drop-target highlight only.
-    /// `ReorderSession` re-reads both groups from the indices and remains the
-    /// authority — this is an affordance, not a permission.
-    pub group: Option<String>,
 }
 
 /// Drag payload for a project header.
 #[derive(Clone, Copy)]
 pub(crate) struct DraggedProject(pub usize);
+
+/// Drag payload for a group header (DEV-937).
+///
+/// Carries the project so a group cannot be dropped into another project's
+/// order — groups are per-project by definition, and the same name in two
+/// projects is two groups.
+///
+/// There is no payload for the ungrouped block: it draws no header, so there is
+/// nothing to pick up. It is moved by moving named groups past it.
+#[derive(Clone)]
+pub(crate) struct DraggedGroup {
+    pub project_idx: usize,
+    pub name: String,
+}

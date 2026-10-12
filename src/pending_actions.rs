@@ -13,7 +13,7 @@ use crate::actions::{
     ArchiveAction, BrowserAction, DrawerAction, OverlayAction, PendingAction, ProjectAction,
     SessionAction, SessionCursor, SettingsAction, SidebarAction,
 };
-use crate::app_state::AppState;
+use crate::app_state::{AppState, GroupRename};
 use crate::project::Project;
 use crate::session::{Session, SessionStatus};
 use crate::settings::{ProjectSave, Settings};
@@ -27,6 +27,33 @@ impl AppState {
         };
         // Dismiss the session context menu on any action.
         self.session_context_menu = None;
+        // The group header's menu goes the same way, including on the actions
+        // it is itself the source of — clicking an entry is the last thing that
+        // menu does.
+        self.group_headers.context_menu = None;
+        // And an open rename is abandoned by doing anything else at all.
+        //
+        // Typing in the field dispatches nothing, so this cannot eat a
+        // keystroke; every action that reaches here is a click somewhere else,
+        // and the tail of this function then gives focus back to the active
+        // terminal. Without it the field kept drawing its caret and its accent
+        // border while Enter and Escape went to the agent — a control that looks
+        // live and is not. The drawer's inline rename escapes the same trap only
+        // because it is scoped to the active session cursor and vanishes when
+        // that moves; a group header has no equivalent scoping.
+        //
+        // It also closes a staleness that keying on the group's name could not:
+        // `GroupRename::project_idx` is a raw index, and a project reorder is
+        // itself an action, so a rename can no longer outlive the project it was
+        // armed in and commit against another one's group of the same name.
+        if !matches!(
+            action,
+            PendingAction::Sidebar(
+                SidebarAction::CommitGroupRename | SidebarAction::CancelGroupRename
+            )
+        ) {
+            self.group_headers.rename = None;
+        }
 
         // A prompt armed against a shape the sidebar no longer has cannot be
         // trusted: its index may now address a different session, project, or
@@ -357,19 +384,35 @@ impl AppState {
                 if from != to {
                     if let Some(project) = self.projects.get_mut(project_idx) {
                         if from < project.sessions.len() && to < project.sessions.len() {
-                            // Reordering is within a group only (DEV-853).
-                            // Moving a session between groups is DEV-937, and
-                            // until it lands a cross-group drop must do nothing
-                            // rather than regroup the session silently — the
-                            // drag gesture says "put it here", and honouring the
-                            // position while also changing its group would do
-                            // something the user did not ask for.
-                            if !crate::sidebar::groups::same_group_opt(
-                                project.sessions[from].group.as_deref(),
-                                project.sessions[to].group.as_deref(),
-                            ) {
-                                return;
-                            }
+                            // A drop on a row in another group does both halves
+                            // of what the gesture says: put the session here,
+                            // and put it in the group "here" belongs to
+                            // (DEV-937). DEV-853 refused the whole drop instead,
+                            // because regrouping had no UI behind it yet; the
+                            // regroup is now the feature.
+                            //
+                            // Through `intern_group`, like every other
+                            // assignment path, so a spelling from a hand-edited
+                            // `state.json` is normalised to the project's own on
+                            // the way across and an unusable one cannot reach
+                            // the order. Rehydration already interns every
+                            // stored group, so the refusal is a backstop rather
+                            // than a path — but this was the one assignment
+                            // reaching the order without a check.
+                            let target = project.sessions[to].group.clone();
+                            let next = match target.as_deref().map(|raw| project.intern_group(raw))
+                            {
+                                Some(Ok(name)) => name,
+                                None => None,
+                                Some(Err(over)) => {
+                                    warn!(
+                                        "Refused a drop onto a row whose group is unusable: {}",
+                                        over.message()
+                                    );
+                                    return;
+                                }
+                            };
+                            project.sessions[from].group = next;
                             let session = project.sessions.remove(from);
                             project.sessions.insert(to, session);
                             // Remap the active cursor through the move.
@@ -394,6 +437,45 @@ impl AppState {
                             cx.notify();
                         }
                     }
+                }
+            }
+            SessionAction::RegroupSession {
+                project_idx,
+                session_idx,
+                group,
+            } => {
+                let mut changed = false;
+                if let Some(project) = self.projects.get_mut(project_idx) {
+                    if session_idx < project.sessions.len() {
+                        // Interned through the project, so a header drop obeys
+                        // the same "first spelling wins" rule as the modals.
+                        // Interning can append a name to the order *without*
+                        // changing the session's own group, and that new slot is
+                        // lost on the next restart if only the session is
+                        // checked for a change.
+                        let known = project.group_order.names().len();
+                        let next = match group.as_deref().map(|raw| project.intern_group(raw)) {
+                            Some(Ok(name)) => name,
+                            None => None,
+                            // Unreachable from a header drop — the name comes
+                            // from a group that exists, so it is already within
+                            // the limit. Refused rather than truncated if it
+                            // ever becomes reachable.
+                            Some(Err(over)) => {
+                                warn!("Refused a regroup: {}", over.message());
+                                return;
+                            }
+                        };
+                        let order_grew = project.group_order.names().len() != known;
+                        let session = &mut project.sessions[session_idx];
+                        changed = order_grew || session.group != next;
+                        session.group = next;
+                    }
+                }
+                if changed {
+                    self.confirming.dismiss_armed();
+                    self.mark_state_dirty();
+                    cx.notify();
                 }
             }
             SessionAction::CopySessionPath {
@@ -882,11 +964,43 @@ impl AppState {
         }
     }
 
+    /// Apply a committed group rename: the order keeps the group's slot, and
+    /// every session in the group moves to the new spelling.
+    ///
+    /// Both halves or neither. [`crate::sidebar::groups::GroupOrder::rename`] is
+    /// the only thing here that can refuse, so it runs first — by the time the
+    /// sessions are rewritten the name is known good and the two cannot end up
+    /// disagreeing about what the group is called.
+    fn rename_group(&mut self, rename: &GroupRename) -> Result<(), String> {
+        use crate::sidebar::groups::{same_group, RenameRefused};
+        let Some(project) = self.projects.get_mut(rename.project_idx) else {
+            return Err(RenameRefused::Unknown.message());
+        };
+        let to = project
+            .group_order
+            .rename(&rename.from, &rename.buffer)
+            .map_err(|refused| refused.message())?;
+        // Every member session, not only the ones on screen. A group *is* the
+        // set of sessions carrying its name, so a name left behind on a row
+        // hidden by the filter or the active-only toggle would split one group
+        // into two the moment that row came back.
+        for session in &mut project.sessions {
+            if session
+                .group
+                .as_deref()
+                .is_some_and(|g| same_group(g, &rename.from))
+            {
+                session.group = Some(to.clone());
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn handle_sidebar_action(
         &mut self,
         action: SidebarAction,
-        _skip_refocus: &mut bool,
-        _window: &mut Window,
+        skip_refocus: &mut bool,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match action {
@@ -916,6 +1030,117 @@ impl AppState {
             }
             SidebarAction::RefreshChanges => {
                 self.refresh_changes(cx);
+            }
+            // ── group management (DEV-937) ─────────────────────────────
+            //
+            // Every one of these is keyed on a group *name*, and every one
+            // no-ops when the name is gone. A header's menu or a drag can
+            // outlive the group it names: rename it from another window, or let
+            // its last session finish, and an index would address whichever
+            // group had moved into that slot.
+            SidebarAction::ReorderGroup {
+                project_idx,
+                from,
+                to,
+            } => {
+                let mut moved = false;
+                if let Some(project) = self.projects.get_mut(project_idx) {
+                    let order = &mut project.group_order;
+                    // Slot indices, so a group dropped where the ungrouped
+                    // block sits takes that position and pushes the ungrouped
+                    // block down — which is the only way the ungrouped block
+                    // moves, having no header to drag.
+                    if let (Some(from), Some(to)) =
+                        (order.slot_of(Some(&from)), order.slot_of(Some(&to)))
+                    {
+                        moved = order.move_slot(from, to);
+                    }
+                }
+                if moved {
+                    self.mark_state_dirty();
+                    cx.notify();
+                }
+            }
+            SidebarAction::MoveGroup {
+                project_idx,
+                name,
+                direction,
+            } => {
+                let mut moved = false;
+                if let Some(project) = self.projects.get_mut(project_idx) {
+                    moved = project.group_order.move_group(&name, direction);
+                }
+                if moved {
+                    self.mark_state_dirty();
+                    cx.notify();
+                }
+            }
+            SidebarAction::ToggleGroupCollapsed { project_idx, name } => {
+                let mut toggled = false;
+                if let Some(project) = self.projects.get_mut(project_idx) {
+                    if project.group_order.position(&name).is_some() {
+                        project.group_order.toggle_collapsed(&name);
+                        toggled = true;
+                    }
+                }
+                if toggled {
+                    // Folding rows away changes which rows exist, so an armed
+                    // confirmation strip is no longer pointing where it was.
+                    self.confirming.dismiss_armed();
+                    self.mark_state_dirty();
+                    cx.notify();
+                }
+            }
+            SidebarAction::StartGroupRename { project_idx, name } => {
+                // The field is about to take focus; the usual "give the terminal
+                // its focus back" tail would take it straight off again.
+                *skip_refocus = true;
+                let known = self
+                    .projects
+                    .get(project_idx)
+                    .and_then(|p| p.group_order.canonical(&name).map(str::to_string));
+                if let Some(from) = known {
+                    self.group_headers.rename = Some(GroupRename {
+                        project_idx,
+                        buffer: from.clone(),
+                        from,
+                        refusal: None,
+                    });
+                    let fh = self
+                        .group_headers
+                        .rename_focus
+                        .get_or_insert_with(|| cx.focus_handle())
+                        .clone();
+                    fh.focus(window, cx);
+                    cx.notify();
+                }
+            }
+            SidebarAction::CommitGroupRename => {
+                *skip_refocus = true;
+                if let Some(rename) = self.group_headers.rename.take() {
+                    match self.rename_group(&rename) {
+                        Ok(()) => {
+                            self.mark_state_dirty();
+                        }
+                        Err(refusal) => {
+                            // The field stays open carrying what was typed, so a
+                            // name can be corrected rather than retyped.
+                            self.group_headers.rename = Some(GroupRename {
+                                refusal: Some(refusal),
+                                ..rename
+                            });
+                            if let Some(fh) = self.group_headers.rename_focus.clone() {
+                                fh.focus(window, cx);
+                            }
+                        }
+                    }
+                    cx.notify();
+                }
+            }
+            SidebarAction::CancelGroupRename => {
+                *skip_refocus = true;
+                self.group_headers.rename = None;
+                cx.notify();
             }
             SidebarAction::SelectChangedFile { path, staged } => {
                 self.changes.selected = Some((path.clone(), staged));
@@ -1775,11 +2000,17 @@ mod tests {
         assert_eq!(session_ids(&fx, cx), ["s1", "s0"]);
     }
 
-    /// Dropping a session onto one in a different group does nothing. Moving a
-    /// session between groups is DEV-937; until it lands, honouring the position
-    /// while silently changing the group would do something nobody asked for.
+    // ── DEV-937: a cross-group drop retags ─────────────────────────────
+    //
+    // DEV-853 refused these two drops outright, because regrouping had no UI
+    // behind it: honouring the position while silently changing the group would
+    // have done something nobody asked for. DEV-937 is that UI, so the drop now
+    // means both halves of what the gesture says.
+
+    /// The acceptance criterion: dropping a session on a row in another group
+    /// moves it there, and lands it at that row's position.
     #[gpui::test]
-    fn reordering_across_groups_does_nothing(cx: &mut TestAppContext) {
+    fn dropping_a_session_on_another_groups_row_retags_it(cx: &mut TestAppContext) {
         let fx =
             Fixture::with_projects(vec![grouped_project(&[Some("review"), Some("linear")])], cx);
 
@@ -1792,26 +2023,26 @@ mod tests {
             cx,
         );
 
-        assert_eq!(session_ids(&fx, cx), ["s0", "s1"], "the drop is a no-op");
+        assert_eq!(session_ids(&fx, cx), ["s1", "s0"], "and it took the slot");
         assert_eq!(
             group_of(
                 &fx,
                 SessionCursor {
                     project_idx: 0,
-                    session_idx: 1
+                    session_idx: 0
                 },
                 cx
             )
             .as_deref(),
-            Some("linear"),
-            "and it must not have been regrouped either"
+            Some("review"),
+            "the dragged session joined the group it was dropped into"
         );
     }
 
-    /// The other half: a grouped session and an ungrouped one are in different
-    /// groups, so that drop is a no-op too.
+    /// The other half: a drop on an ungrouped row clears the session's group and
+    /// returns it to the ungrouped block.
     #[gpui::test]
-    fn reordering_between_a_group_and_the_ungrouped_block_does_nothing(cx: &mut TestAppContext) {
+    fn dropping_a_session_on_an_ungrouped_row_clears_its_group(cx: &mut TestAppContext) {
         let fx = Fixture::with_projects(vec![grouped_project(&[None, Some("review")])], cx);
 
         fx.dispatch(
@@ -1823,6 +2054,483 @@ mod tests {
             cx,
         );
 
-        assert_eq!(session_ids(&fx, cx), ["s0", "s1"]);
+        assert_eq!(session_ids(&fx, cx), ["s1", "s0"]);
+        assert_eq!(
+            group_of(
+                &fx,
+                SessionCursor {
+                    project_idx: 0,
+                    session_idx: 0
+                },
+                cx
+            ),
+            None,
+            "dropped among the ungrouped rows, so it is ungrouped"
+        );
+    }
+
+    /// A retag stores the project's own spelling, not the one the row happened
+    /// to carry — `state.json` is hand-editable and sync carries no group, so a
+    /// row can hold a spelling allele never interned.
+    #[gpui::test]
+    fn a_retag_stores_the_projects_spelling(cx: &mut TestAppContext) {
+        let mut project = grouped_project(&[Some("review"), Some("linear")]);
+        // As a hand-edited file could leave it.
+        project.sessions[0].group = Some("REVIEW".to_string());
+
+        let fx = Fixture::with_projects(vec![project], cx);
+        fx.dispatch(
+            SessionAction::ReorderSession {
+                project_idx: 0,
+                from: 1,
+                to: 0,
+            },
+            cx,
+        );
+
+        assert_eq!(
+            group_of(
+                &fx,
+                SessionCursor {
+                    project_idx: 0,
+                    session_idx: 0
+                },
+                cx
+            )
+            .as_deref(),
+            Some("review"),
+            "interned to the project's spelling on the way across"
+        );
+    }
+
+    /// A drop on a group *header* changes the group and nothing else — a header
+    /// sits between rows rather than among them, so it implies no position.
+    #[gpui::test]
+    fn dropping_a_session_on_a_header_regroups_without_moving_it(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(
+            vec![grouped_project(&[None, Some("review"), Some("linear")])],
+            cx,
+        );
+
+        fx.dispatch(
+            SessionAction::RegroupSession {
+                project_idx: 0,
+                session_idx: 0,
+                group: Some("linear".to_string()),
+            },
+            cx,
+        );
+
+        assert_eq!(
+            session_ids(&fx, cx),
+            ["s0", "s1", "s2"],
+            "the manual order is untouched"
+        );
+        assert_eq!(
+            group_of(
+                &fx,
+                SessionCursor {
+                    project_idx: 0,
+                    session_idx: 0
+                },
+                cx
+            )
+            .as_deref(),
+            Some("linear")
+        );
+    }
+
+    /// Dropping a session on the ungrouped block clears its group.
+    #[gpui::test]
+    fn regrouping_with_no_name_returns_a_session_to_the_ungrouped_block(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")])], cx);
+
+        fx.dispatch(
+            SessionAction::RegroupSession {
+                project_idx: 0,
+                session_idx: 0,
+                group: None,
+            },
+            cx,
+        );
+
+        assert_eq!(
+            group_of(
+                &fx,
+                SessionCursor {
+                    project_idx: 0,
+                    session_idx: 0
+                },
+                cx
+            ),
+            None
+        );
+    }
+
+    /// A regroup to a name the project has never seen records it, so the
+    /// sidebar has a slot to draw the new group in.
+    #[gpui::test]
+    fn regrouping_to_a_new_name_records_it_in_the_order(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")])], cx);
+
+        fx.dispatch(
+            SessionAction::RegroupSession {
+                project_idx: 0,
+                session_idx: 0,
+                group: Some("linear".to_string()),
+            },
+            cx,
+        );
+
+        let names = fx.update(cx, |state, _w, _cx| {
+            state.projects[0].group_order.names().to_vec()
+        });
+        assert_eq!(names, ["review", "linear"]);
+    }
+
+    // ── DEV-937: group order, collapse and rename ──────────────────────
+
+    fn order_slots(fx: &Fixture, cx: &mut TestAppContext) -> Vec<String> {
+        fx.update(cx, |state, _w, _cx| {
+            state.projects[0]
+                .group_order
+                .slots()
+                .into_iter()
+                .map(|slot| match slot {
+                    crate::sidebar::groups::GroupSlot::Ungrouped => "·".to_string(),
+                    crate::sidebar::groups::GroupSlot::Named(name) => name,
+                })
+                .collect()
+        })
+    }
+
+    /// The acceptance criterion: dragging one header onto another reorders the
+    /// two groups.
+    #[gpui::test]
+    fn dragging_a_group_onto_another_reorders_them(cx: &mut TestAppContext) {
+        let fx =
+            Fixture::with_projects(vec![grouped_project(&[Some("review"), Some("linear")])], cx);
+
+        fx.dispatch(
+            SidebarAction::ReorderGroup {
+                project_idx: 0,
+                from: "linear".to_string(),
+                to: "review".to_string(),
+            },
+            cx,
+        );
+
+        assert_eq!(order_slots(&fx, cx), ["·", "linear", "review"]);
+    }
+
+    /// Moving the top group up puts it above the ungrouped block — which is how
+    /// that block is positioned, having no header of its own to drag.
+    #[gpui::test]
+    fn moving_the_first_group_up_puts_it_above_the_ungrouped_block(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(
+            vec![grouped_project(&[None, Some("review"), Some("linear")])],
+            cx,
+        );
+
+        fx.dispatch(
+            SidebarAction::MoveGroup {
+                project_idx: 0,
+                name: "review".to_string(),
+                direction: crate::sidebar::groups::MoveDirection::Up,
+            },
+            cx,
+        );
+
+        assert_eq!(order_slots(&fx, cx), ["review", "·", "linear"]);
+    }
+
+    /// The acceptance criterion's backstop: a group cannot be dragged into
+    /// another project. The sidebar already declines to light up a header from
+    /// another project (`DraggedGroup` carries the project it came from), and
+    /// the handler declines too — a name that this project's order does not
+    /// have is a no-op, not a move of whatever sits in that slot.
+    #[gpui::test]
+    fn a_group_from_another_project_cannot_be_moved_into_this_one(cx: &mut TestAppContext) {
+        let mut other = grouped_project(&[Some("linear")]);
+        other.name = "other-project".to_string();
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")]), other], cx);
+
+        fx.dispatch(
+            SidebarAction::ReorderGroup {
+                project_idx: 0,
+                from: "linear".to_string(),
+                to: "review".to_string(),
+            },
+            cx,
+        );
+
+        assert_eq!(order_slots(&fx, cx), ["·", "review"]);
+        let other_names = fx.update(cx, |state, _w, _cx| {
+            state.projects[1].group_order.names().to_vec()
+        });
+        assert_eq!(
+            other_names,
+            ["linear"],
+            "and the other project is untouched"
+        );
+    }
+
+    /// A group that is gone — renamed elsewhere, or never recorded — is a
+    /// no-op rather than a move of whatever sits in its slot.
+    #[gpui::test]
+    fn moving_a_group_the_project_does_not_have_does_nothing(cx: &mut TestAppContext) {
+        let fx =
+            Fixture::with_projects(vec![grouped_project(&[Some("review"), Some("linear")])], cx);
+
+        fx.dispatch(
+            SidebarAction::MoveGroup {
+                project_idx: 0,
+                name: "gone".to_string(),
+                direction: crate::sidebar::groups::MoveDirection::Up,
+            },
+            cx,
+        );
+
+        assert_eq!(order_slots(&fx, cx), ["·", "review", "linear"]);
+    }
+
+    #[gpui::test]
+    fn toggling_a_group_collapses_then_expands_it(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")])], cx);
+        let collapsed = |cx: &mut TestAppContext| {
+            fx.update(cx, |state, _w, _cx| {
+                state.projects[0].group_order.is_collapsed("review")
+            })
+        };
+
+        assert!(!collapsed(cx), "groups start expanded");
+        fx.dispatch(
+            SidebarAction::ToggleGroupCollapsed {
+                project_idx: 0,
+                name: "review".to_string(),
+            },
+            cx,
+        );
+        assert!(collapsed(cx));
+        fx.dispatch(
+            SidebarAction::ToggleGroupCollapsed {
+                project_idx: 0,
+                name: "review".to_string(),
+            },
+            cx,
+        );
+        assert!(!collapsed(cx), "and clicking again unfolds it");
+    }
+
+    /// The acceptance criterion: renaming a group from its header renames it for
+    /// every session in it — including ones the sidebar is not currently showing.
+    #[gpui::test]
+    fn renaming_a_group_renames_it_for_every_session_in_it(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(
+            vec![grouped_project(&[Some("review"), Some("review"), None])],
+            cx,
+        );
+
+        fx.dispatch(
+            SidebarAction::StartGroupRename {
+                project_idx: 0,
+                name: "review".to_string(),
+            },
+            cx,
+        );
+        fx.update(cx, |state, _w, _cx| {
+            state
+                .group_headers
+                .rename
+                .as_mut()
+                .expect("the rename is open")
+                .buffer = "code review".to_string();
+        });
+        fx.dispatch(SidebarAction::CommitGroupRename, cx);
+
+        let groups = fx.update(cx, |state, _w, _cx| {
+            state.projects[0]
+                .sessions
+                .iter()
+                .map(|s| s.group.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            groups,
+            [
+                Some("code review".to_string()),
+                Some("code review".to_string()),
+                None
+            ]
+        );
+        assert_eq!(
+            order_slots(&fx, cx),
+            ["·", "code review"],
+            "and the group kept its slot"
+        );
+    }
+
+    /// A rename onto another group's name would merge two groups. Refused, with
+    /// the reason left beside the field so the name can be corrected.
+    #[gpui::test]
+    fn renaming_a_group_onto_another_is_refused(cx: &mut TestAppContext) {
+        let fx =
+            Fixture::with_projects(vec![grouped_project(&[Some("review"), Some("linear")])], cx);
+
+        fx.dispatch(
+            SidebarAction::StartGroupRename {
+                project_idx: 0,
+                name: "review".to_string(),
+            },
+            cx,
+        );
+        fx.update(cx, |state, _w, _cx| {
+            state
+                .group_headers
+                .rename
+                .as_mut()
+                .expect("the rename is open")
+                .buffer = "LINEAR".to_string();
+        });
+        fx.dispatch(SidebarAction::CommitGroupRename, cx);
+
+        let refusal = fx.update(cx, |state, _w, _cx| {
+            state
+                .group_headers
+                .rename
+                .as_ref()
+                .map(|r| r.refusal.clone())
+        });
+        assert!(
+            refusal.flatten().is_some_and(|m| m.contains("linear")),
+            "the field stays open and names the group in the way"
+        );
+        assert_eq!(
+            order_slots(&fx, cx),
+            ["·", "review", "linear"],
+            "and nothing was merged"
+        );
+    }
+
+    /// An open rename is abandoned by doing anything else. Without this the
+    /// field kept drawing its caret while Enter and Escape went to the agent's
+    /// terminal — a control that looks live and is not, with no way out but to
+    /// open the menu again.
+    #[gpui::test]
+    fn doing_anything_else_abandons_an_open_rename(cx: &mut TestAppContext) {
+        let fx =
+            Fixture::with_projects(vec![grouped_project(&[Some("review"), Some("linear")])], cx);
+
+        fx.dispatch(
+            SidebarAction::StartGroupRename {
+                project_idx: 0,
+                name: "review".to_string(),
+            },
+            cx,
+        );
+        assert!(fx.update(cx, |state, _w, _cx| state.group_headers.rename.is_some()));
+
+        // Clicking another group's header, say.
+        fx.dispatch(
+            SidebarAction::ToggleGroupCollapsed {
+                project_idx: 0,
+                name: "linear".to_string(),
+            },
+            cx,
+        );
+        assert!(
+            fx.update(cx, |state, _w, _cx| state.group_headers.rename.is_none()),
+            "the field is gone, not left looking live"
+        );
+    }
+
+    /// …but not by the two actions the field itself emits, or committing would
+    /// find nothing to commit.
+    #[gpui::test]
+    fn committing_a_rename_is_not_treated_as_doing_something_else(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")])], cx);
+
+        fx.dispatch(
+            SidebarAction::StartGroupRename {
+                project_idx: 0,
+                name: "review".to_string(),
+            },
+            cx,
+        );
+        fx.update(cx, |state, _w, _cx| {
+            state
+                .group_headers
+                .rename
+                .as_mut()
+                .expect("the rename is open")
+                .buffer = "linear".to_string();
+        });
+        fx.dispatch(SidebarAction::CommitGroupRename, cx);
+
+        assert_eq!(order_slots(&fx, cx), ["·", "linear"]);
+    }
+
+    /// A regroup that leaves the session's own group alone but teaches the
+    /// project a new name still has to be saved, or the slot is lost on the next
+    /// restart.
+    #[gpui::test]
+    fn a_regroup_that_only_grows_the_order_is_still_persisted(cx: &mut TestAppContext) {
+        let mut project = grouped_project(&[Some("review")]);
+        // A spelling the order never interned, as a hand-edited file could
+        // leave it.
+        project.sessions[0].group = Some("ops".to_string());
+        let fx = Fixture::with_projects(vec![project], cx);
+
+        // The dirty flag as the dispatcher left it: a later read would see it
+        // already drained by the render tick that follows.
+        let (state_dirty, _) = fx.dispatch(
+            SessionAction::RegroupSession {
+                project_idx: 0,
+                session_idx: 0,
+                group: Some("ops".to_string()),
+            },
+            cx,
+        );
+
+        assert_eq!(order_slots(&fx, cx), ["·", "review", "ops"]);
+        assert!(state_dirty, "the new slot has to reach state.json");
+    }
+
+    /// Correcting the canonical spelling is a rename, not a collision — it is
+    /// the only way out of a spelling whoever typed the name first chose.
+    #[gpui::test]
+    fn respelling_a_group_in_another_case_is_allowed(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")])], cx);
+
+        fx.dispatch(
+            SidebarAction::StartGroupRename {
+                project_idx: 0,
+                name: "review".to_string(),
+            },
+            cx,
+        );
+        fx.update(cx, |state, _w, _cx| {
+            state
+                .group_headers
+                .rename
+                .as_mut()
+                .expect("the rename is open")
+                .buffer = "Review".to_string();
+        });
+        fx.dispatch(SidebarAction::CommitGroupRename, cx);
+
+        assert_eq!(order_slots(&fx, cx), ["·", "Review"]);
+        assert_eq!(
+            group_of(
+                &fx,
+                SessionCursor {
+                    project_idx: 0,
+                    session_idx: 0
+                },
+                cx
+            )
+            .as_deref(),
+            Some("Review")
+        );
     }
 }

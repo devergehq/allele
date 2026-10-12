@@ -103,6 +103,43 @@ pub(crate) struct ChangesPanelState {
     pub(crate) diff_gen: u64,
 }
 
+/// An in-progress group rename, driven from the group header (DEV-937).
+///
+/// Holds the name it started from rather than a slot index: a rename is
+/// committed a keystroke later than it was begun, and by then the order may have
+/// been permuted by a drag or the group emptied — a stale index would rename
+/// whichever group now sits there.
+pub(crate) struct GroupRename {
+    pub(crate) project_idx: usize,
+    /// The group's name when the rename began. The handler matches on this.
+    pub(crate) from: String,
+    /// What has been typed so far.
+    pub(crate) buffer: String,
+    /// Why the last commit attempt was refused, shown beside the field. The
+    /// field stays open on a refusal so the name can be corrected rather than
+    /// retyped — the same shape as the Group field in both modals.
+    pub(crate) refusal: Option<String>,
+}
+
+/// Sidebar group headers: their right-click menu and their inline rename
+/// (DEV-937).
+///
+/// One struct rather than three loose `AppState` fields, because they are one
+/// interaction: the menu is what starts a rename, and only one header can be
+/// doing either at a time.
+#[derive(Default)]
+pub(crate) struct GroupHeaderState {
+    /// Right-click menu on a group header: (project index, group name, click
+    /// position). The name, not a slot, for the same reason as
+    /// [`GroupRename::from`].
+    pub(crate) context_menu: Option<(usize, String, Point<Pixels>)>,
+    /// Active inline rename. When `Some`, that header renders an editable name.
+    pub(crate) rename: Option<GroupRename>,
+    /// Focus handle for the inline rename field, created lazily on first use —
+    /// the same lifecycle as [`DrawerState::rename_focus`].
+    pub(crate) rename_focus: Option<FocusHandle>,
+}
+
 /// Drawer terminal geometry + inline-rename state.
 pub(crate) struct DrawerState {
     pub(crate) height: f32,
@@ -406,6 +443,8 @@ pub(crate) struct AppState {
     pub(crate) session_context_menu: Option<(SessionCursor, Point<Pixels>)>,
     /// Right-click context menu for a project header: (project_idx, position).
     pub(crate) project_context_menu: Option<(usize, Point<Pixels>)>,
+    /// Right-click menu and inline rename for a sidebar group header (DEV-937).
+    pub(crate) group_headers: GroupHeaderState,
     /// "Edit session" modal for renaming/commenting an existing session.
     pub(crate) edit_session_modal: Option<Entity<new_session_modal::EditSessionModal>>,
     /// Interactive naming modal — shown when NamingMode::Interactive generates suggestions.
@@ -1038,6 +1077,7 @@ pub(crate) mod fixture {
                     sidebar_filter: String::new(),
                     session_context_menu: None,
                     project_context_menu: None,
+                    group_headers: Default::default(),
                     edit_session_modal: None,
                     naming_modal: None,
                     conversation_picker: None,

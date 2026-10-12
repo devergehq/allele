@@ -11,9 +11,10 @@ use gpui::*;
 
 use crate::accessibility::DENSE_CONTROL_MIN_HEIGHT;
 use crate::actions::{
-    ArchiveAction, DraggedProject, DraggedSession, ProjectAction, SessionAction, SessionCursor,
+    ArchiveAction, DraggedGroup, DraggedProject, DraggedSession, ProjectAction, SessionAction,
+    SessionCursor, SidebarAction,
 };
-use crate::app_state::AppState;
+use crate::app_state::{AppState, GroupRename};
 use crate::project::Project;
 use crate::session::{AttentionKind, SessionStatus};
 use crate::sidebar::groups::{self, GroupCounts, GroupHeader};
@@ -260,12 +261,37 @@ pub(crate) fn active_session_count(projects: &[Project]) -> usize {
 /// section header: it is a divider, and a second bold weight under the project
 /// name would compete with it for the eye.
 ///
-/// Takes no listeners. Collapsing, renaming and reordering a group from this
-/// row is DEV-937; until then the header is a label, and making it look
-/// clickable would promise something that does nothing.
-fn render_group_header(header: &GroupHeader) -> AnyElement {
+/// Every gesture the group has lives here (DEV-937):
+///
+/// | Gesture | Effect |
+/// | -- | -- |
+/// | Click | Fold the group's rows away, or unfold them |
+/// | Drag onto another header | Move this group to that slot |
+/// | Drop a session row on it | Move that session into this group |
+/// | Right-click | Move up / move down / collapse / rename |
+///
+/// **Collapse is an `on_click`, not an `on_mouse_down`.** The header is also
+/// draggable, and a mouse-down fires at the start of a drag — so collapsing on
+/// mouse-down would fold the group away every time you picked it up to move it.
+/// GPUI takes the pending mouse-down when a drag begins, so a click and a drag
+/// are mutually exclusive; `on_click` needs the `.id()` this row now carries.
+///
+/// `rename` is `Some` only when *this* header is the one being renamed. While it
+/// is, the name becomes an inline field and the click and drag handlers are not
+/// attached at all — a click meant for the text must not fold the group under it.
+fn render_group_header(
+    header: &GroupHeader,
+    p_idx: usize,
+    rename: Option<&GroupRenameField>,
+    cx: &mut Context<AppState>,
+) -> AnyElement {
     let counts: GroupCounts = header.counts;
-    div()
+    let name = header.name.clone();
+    let collapsed = header.collapsed;
+    let renaming = rename.is_some();
+
+    let mut row = div()
+        .id(SharedString::from(format!("group-{p_idx}-{name}")))
         .w_full()
         .pl(px(16.0))
         .pr(px(12.0))
@@ -274,34 +300,254 @@ fn render_group_header(header: &GroupHeader) -> AnyElement {
         .bg(theme().bg_surface)
         .flex()
         .flex_row()
-        .gap(px(8.0))
+        .gap(px(6.0))
         .items_center()
         .justify_between()
-        .child(
-            // Truncates rather than refusing to shrink. A group name is free
-            // text up to 40 characters and the sidebar is user-resizable, so a
-            // `flex_shrink_0` name would push the counts out entirely at a
-            // narrow width — removing the one thing this header exists to say.
-            // Matches how the session rows below treat their labels.
+        // A session dropped here joins this group. No position is implied — a
+        // header sits between rows rather than among them — so this is a
+        // regroup and nothing else, unlike a drop on a row.
+        .drag_over::<DraggedSession>(move |style, dragged: &DraggedSession, _, _| {
+            if dragged.project_idx == p_idx {
+                style.bg(theme().bg_hover_soft)
+            } else {
+                style
+            }
+        })
+        .on_drop(cx.listener({
+            let name = name.clone();
+            move |this: &mut AppState, dragged: &DraggedSession, _window, cx| {
+                // Same project only: a session is a clone of its project's repo
+                // and cannot change parents, so neither can its group.
+                if dragged.project_idx == p_idx {
+                    this.pending_action = Some(
+                        SessionAction::RegroupSession {
+                            project_idx: p_idx,
+                            session_idx: dragged.session_idx,
+                            group: Some(name.clone()),
+                        }
+                        .into(),
+                    );
+                    cx.notify();
+                }
+            }
+        }))
+        // A group dragged from another project is not a drop target: the same
+        // name in two projects is two groups, and an order is per project.
+        .drag_over::<DraggedGroup>(move |style, dragged: &DraggedGroup, _, _| {
+            if dragged.project_idx == p_idx {
+                style.bg(theme().bg_hover_soft)
+            } else {
+                style
+            }
+        })
+        .on_drop(cx.listener({
+            let name = name.clone();
+            move |this: &mut AppState, dragged: &DraggedGroup, _window, cx| {
+                if dragged.project_idx == p_idx {
+                    this.pending_action = Some(
+                        SidebarAction::ReorderGroup {
+                            project_idx: p_idx,
+                            from: dragged.name.clone(),
+                            to: name.clone(),
+                        }
+                        .into(),
+                    );
+                    cx.notify();
+                }
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener({
+                let name = name.clone();
+                move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.session_context_menu = None;
+                    this.project_context_menu = None;
+                    this.group_headers.context_menu = Some((p_idx, name.clone(), event.position));
+                    cx.notify();
+                }
+            }),
+        );
+
+    if !renaming {
+        row = row
+            .cursor_pointer()
+            .hover(|s| s.bg(theme().bg_raised))
+            .on_drag(
+                DraggedGroup {
+                    project_idx: p_idx,
+                    name: name.clone(),
+                },
+                {
+                    let preview = name.clone();
+                    move |_drag, _offset, _window, cx| {
+                        cx.new(|_| crate::DragPreview(preview.to_uppercase()))
+                    }
+                },
+            )
+            .on_click(cx.listener({
+                let name = name.clone();
+                move |this: &mut AppState, _event, _window, cx| {
+                    this.pending_action = Some(
+                        SidebarAction::ToggleGroupCollapsed {
+                            project_idx: p_idx,
+                            name: name.clone(),
+                        }
+                        .into(),
+                    );
+                    cx.notify();
+                }
+            }));
+    }
+
+    row.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .child(icon(
+                if collapsed {
+                    icons::CHEVRON_RIGHT
+                } else {
+                    icons::CHEVRON_DOWN
+                },
+                10.0,
+                theme().text_faint,
+            ))
+            .child(match rename {
+                Some(field) => render_group_rename_field(field, cx),
+                None => render_group_name(&name),
+            }),
+    )
+    .children(counts.summary().map(|summary| {
+        // The counts hold their width instead: they are short, bounded, and
+        // the reason to look at the header at all.
+        div()
+            .flex_shrink_0()
+            .text_size(px(10.0))
+            .text_color(theme().text_dim)
+            .child(summary)
+    }))
+    .into_any_element()
+}
+
+/// An in-progress group rename, and the focus handle the field needs.
+///
+/// The handle lives on `AppState` beside the rename itself but is created
+/// lazily, so it is passed in rather than looked up — the render path holds an
+/// immutable borrow of `AppState` and cannot create one.
+struct GroupRenameField<'a> {
+    state: &'a GroupRename,
+    focus: Option<FocusHandle>,
+}
+
+/// The header's name as an inline editable field.
+///
+/// Character-by-character on `on_key_down`, the same shape as the drawer's
+/// inline tab rename (`drawer/mod.rs`) rather than a `TextInput` entity: a
+/// `TextInput` is an entity per field, and a sidebar can hold one header being
+/// renamed but any number of headers.
+///
+/// A refusal keeps the field open with what was typed still in it, so a name
+/// over the limit or already taken can be corrected rather than retyped. Typing
+/// clears the refusal — it was about the name as it stood, not about the group.
+fn render_group_rename_field(field: &GroupRenameField, cx: &mut Context<AppState>) -> AnyElement {
+    let refusal = field.state.refusal.clone();
+    // A zero-width field would collapse to the caret alone and look broken.
+    let display = if field.state.buffer.is_empty() {
+        " ".to_string()
+    } else {
+        field.state.buffer.clone()
+    };
+    let mut input = div()
+        .min_w(px(60.0))
+        .px(px(4.0))
+        .border_1()
+        .border_color(if refusal.is_some() {
+            theme().danger
+        } else {
+            theme().accent
+        })
+        .rounded(px(4.0))
+        .bg(theme().bg_surface)
+        .text_size(px(10.0))
+        .text_color(theme().text_primary)
+        .child(format!("{display}▎"));
+
+    if let Some(fh) = field.focus.clone() {
+        input = input.track_focus(&fh).on_key_down(cx.listener(
+            |this: &mut AppState, event: &KeyDownEvent, _window, cx| {
+                let key = event.keystroke.key.as_str();
+                let mods = &event.keystroke.modifiers;
+                match key {
+                    "enter" => {
+                        this.pending_action = Some(SidebarAction::CommitGroupRename.into());
+                        cx.notify();
+                    }
+                    "escape" => {
+                        this.pending_action = Some(SidebarAction::CancelGroupRename.into());
+                        cx.notify();
+                    }
+                    "backspace" => {
+                        if let Some(rename) = this.group_headers.rename.as_mut() {
+                            rename.buffer.pop();
+                            rename.refusal = None;
+                            cx.notify();
+                        }
+                    }
+                    _ => {
+                        if let Some(ref ch) = event.keystroke.key_char {
+                            if !mods.control && !mods.platform {
+                                if let Some(rename) = this.group_headers.rename.as_mut() {
+                                    rename.buffer.push_str(ch);
+                                    rename.refusal = None;
+                                    cx.notify();
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        ));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .min_w(px(0.0))
+        .child(input)
+        .children(refusal.map(|message| {
             div()
-                .min_w(px(0.0))
-                .overflow_hidden()
-                .text_ellipsis()
-                .text_size(px(10.0))
-                .font_weight(FontWeight::SEMIBOLD)
-                .text_color(theme().text_faint)
-                .child(header.name.to_uppercase()),
-        )
-        .children(counts.summary().map(|summary| {
-            // The counts hold their width instead: they are short, bounded, and
-            // the reason to look at the header at all.
-            div()
-                .flex_shrink_0()
-                .text_size(px(10.0))
-                .text_color(theme().text_dim)
-                .child(summary)
+                .text_size(px(9.0))
+                .text_color(theme().danger)
+                .child(message)
         }))
         .into_any_element()
+}
+
+/// The group's name as a label.
+fn render_group_name(name: &str) -> AnyElement {
+    (
+        // Truncates rather than refusing to shrink. A group name is free
+        // text up to 40 characters and the sidebar is user-resizable, so a
+        // `flex_shrink_0` name would push the counts out entirely at a
+        // narrow width — removing the one thing this header exists to say.
+        // Matches how the session rows below treat their labels.
+        div()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .text_ellipsis()
+            .text_size(px(10.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme().text_faint)
+            .child(name.to_uppercase())
+    )
+    .into_any_element()
 }
 
 pub(crate) fn build_sidebar_items(
@@ -323,6 +569,9 @@ pub(crate) fn build_sidebar_items(
     let filter = &state.sidebar_filter;
     let filtering = !filter.is_empty();
     let active_only = state.user_settings.sidebar_active_only;
+    // Cloned up front: the walk below holds an immutable borrow of `state`,
+    // and the handle is created lazily by `StartGroupRename` rather than here.
+    let group_rename_focus = state.group_headers.rename_focus.clone();
 
     for (p_idx, project) in state.projects.iter().enumerate() {
         let project_name = project.name.clone();
@@ -852,12 +1101,16 @@ pub(crate) fn build_sidebar_items(
             })
             .collect();
 
-        // Ungrouped rows first with no header, then each group under one, in the
-        // order the project first saw them (DEV-853). The sort above is left
-        // untouched and simply partitioned, which is what keeps attention and
-        // pinning ordering sessions *inside* their group rather than across the
-        // project.
-        let ordered_rows = groups::draw_order(groups::group_blocks(
+        // Blocks in the project's recorded slot order, the ungrouped block among
+        // them (DEV-853, slots in DEV-937). The sort above is left untouched and
+        // simply partitioned, which is what keeps attention and pinning ordering
+        // sessions *inside* their group rather than across the project.
+        //
+        // Three passes, and the order of the last two matters: counts are taken
+        // over the whole visible group, *then* a collapsed group's rows are
+        // folded away. Counting after folding would print `0 running` on a
+        // header whose group is busy.
+        let blocks = groups::group_blocks(
             &visible,
             |s_idx| project.sessions[s_idx].group.clone(),
             |s_idx| {
@@ -868,12 +1121,36 @@ pub(crate) fn build_sidebar_items(
                 )
             },
             &project.group_order,
+        );
+        let active_in_project = active_cursor
+            .filter(|c| c.project_idx == p_idx)
+            .map(|c| c.session_idx);
+        let ordered_rows = groups::draw_order(groups::collapse_blocks(
+            blocks,
+            &project.group_order,
+            active_in_project,
         ));
 
         for (group_header, s_idx) in ordered_rows {
             if let Some(header) = group_header {
-                sidebar_items.push(render_group_header(&header));
+                // `Some` only while this very header is the one being renamed.
+                let renaming = state
+                    .group_headers
+                    .rename
+                    .as_ref()
+                    .filter(|r| r.project_idx == p_idx && groups::same_group(&r.from, &header.name))
+                    .map(|rename| GroupRenameField {
+                        state: rename,
+                        focus: group_rename_focus.clone(),
+                    });
+                sidebar_items.push(render_group_header(&header, p_idx, renaming.as_ref(), cx));
             }
+
+            // `None` is a collapsed group's header-only row: the group folded
+            // every row away, and the header above is the whole of it.
+            let Some(s_idx) = s_idx else {
+                continue;
+            };
 
             let session = &project.sessions[s_idx];
 
@@ -943,31 +1220,22 @@ pub(crate) fn build_sidebar_items(
                     DraggedSession {
                         project_idx: p_idx,
                         session_idx: s_idx,
-                        group: session.group.clone(),
                     },
                     move |_drag, _offset, _window, cx| {
                         cx.new(|_| crate::DragPreview(row_drag_label.clone()))
                     },
                 )
-                // Only light up as a drop target if the drop would do
-                // something. A cross-group reorder is refused (DEV-853), and an
-                // affordance offered for a drop that is then discarded reads as
-                // a lost event rather than a deliberate refusal. Dragging
-                // *between* groups is DEV-937; until it lands, the row simply
-                // does not invite it.
-                .drag_over::<DraggedSession>({
-                    let row_group = session.group.clone();
-                    move |style, dragged: &DraggedSession, _, _| {
-                        if dragged.project_idx == p_idx
-                            && groups::same_group_opt(
-                                dragged.group.as_deref(),
-                                row_group.as_deref(),
-                            )
-                        {
-                            style.bg(theme().bg_hover_soft)
-                        } else {
-                            style
-                        }
+                // Every row in the same project is a landing target now
+                // (DEV-937): a drop on a row in another group reorders *and*
+                // retags, so there is no drop here that is quietly discarded.
+                // DEV-853 had to check the dragged session's group, because a
+                // cross-group drop did nothing and an affordance for it read as
+                // a lost event rather than a refusal.
+                .drag_over::<DraggedSession>(move |style, dragged: &DraggedSession, _, _| {
+                    if dragged.project_idx == p_idx {
+                        style.bg(theme().bg_hover_soft)
+                    } else {
+                        style
                     }
                 })
                 .on_drop(cx.listener(
