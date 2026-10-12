@@ -1593,14 +1593,15 @@ fn install_panic_hook() {
 }
 
 fn main() {
-    // `--mcp-serve` never returns; it must claim stdout before anything logs.
-    dispatch::mcp::exit_if_serving();
-
     // Refuse unrecognised arguments before anything with a side effect runs.
     // Allele has no CLI, and everything below this point — tracing, the
     // descriptor ceiling, the orphan sweep, `state.json` — assumes it is the
     // app. `allele sessions status <id>` used to reach all of it and open a
     // second window. See `cli` for why that is worse than it looks.
+    //
+    // This is the one thing that may precede the `--mcp-serve` hand-off below:
+    // `classify` is pure, and a refusal goes to stderr. See ARCHITECTURE.md
+    // §7.8 for what that ordering protects.
     let (home_override, sandbox_mode) =
         match cli::classify(&std::env::args().skip(1).collect::<Vec<_>>()) {
             cli::Launch::Usage { code } => {
@@ -1610,15 +1611,19 @@ fn main() {
             cli::Launch::Gui { home, sandbox } => (home, sandbox),
         };
 
-    // Fix the data root before ANYTHING reads a path or spawns a child. Every
-    // line below — tracing, the panic hook, the orphan sweep, state.json, the
-    // MCP control socket — resolves through `paths`, so a root chosen any later
-    // would leave half the process writing to one tree and half to another.
-    let root = if sandbox_mode {
-        paths::default_sandbox_root()
-    } else {
-        home_override
-    };
+    // Decide the data root before ANYTHING reads a path or spawns a child.
+    // Every line below — tracing, the panic hook, the orphan sweep, state.json,
+    // the MCP control socket — resolves through `paths`, so a root chosen any
+    // later would leave half the process writing to one tree and half to
+    // another.
+    let root = paths::launch_root(home_override, sandbox_mode);
+
+    // `--mcp-serve` never returns; it must claim stdout before anything logs.
+    // It is handed the *same* root value the app would use, which is what makes
+    // a sandboxed MCP client reach the sandbox rather than the live app
+    // (DEV-943). It seeds nothing and starts nothing: it is a client.
+    dispatch::mcp::exit_if_serving(&root);
+
     paths::init(root);
     if sandbox_mode {
         sandbox::seed();

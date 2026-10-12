@@ -69,6 +69,12 @@ For a root of your own choosing, `--home <dir>` (or the `ALLELE_HOME`
 environment variable — the flag wins). Both are refused together, since they
 disagree about where to run and guessing risks writing to the live tree.
 
+To drive a test instance **from an agent**, the MCP server needs the same flag:
+`Allele --mcp-serve --sandbox` (or `--home <dir>`, or `ALLELE_HOME` in its
+environment). `--mcp-serve` resolves its control socket from the root it is
+given, so a plain `--mcp-serve` reaches your live instance no matter which
+instance the agent is meant to be testing.
+
 A redirected instance is marked **SANDBOX** in its window title and beside the
 sidebar heading, because two identical windows side by side is its own hazard.
 

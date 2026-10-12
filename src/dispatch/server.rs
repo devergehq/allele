@@ -30,7 +30,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::time::Duration;
 
@@ -51,8 +51,20 @@ pub struct ControlRequest {
     pub reply: Sender<Response>,
 }
 
+/// File name of the control socket under `<root>/.allele`.
+const SOCKET_NAME: &str = "control.sock";
+
 pub fn socket_path() -> Option<PathBuf> {
-    Some(crate::hooks::base_dir()?.join("control.sock"))
+    Some(control_socket_in(&crate::paths::root()?))
+}
+
+/// The control socket an explicit root would serve.
+///
+/// [`socket_path`] is defined in terms of it so the two cannot drift, and a
+/// test can ask which socket a given launch picks without fixing the
+/// process-global root (DEV-943).
+pub(crate) fn control_socket_in(root: &Path) -> PathBuf {
+    crate::paths::allele_dir_in(root).join(SOCKET_NAME)
 }
 
 /// Bind the control socket and start accepting.

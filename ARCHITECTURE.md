@@ -628,13 +628,28 @@ written there desynchronises the client's parser, and the symptom points
 at the wrong layer entirely — it presents as a malformed server, so the
 next person debugs the protocol code rather than the logging.
 
-`dispatch::mcp::exit_if_serving()` runs before anything else in `main`
-and installs `errors::init_tracing_stderr()`. Keep it first, and keep any
-new MCP-mode diagnostics on stderr. This applies to anything built over
-stdio, not just this server.
+`dispatch::mcp::exit_if_serving()` installs `errors::init_tracing_stderr()`
+as its first side effect, and nothing above it in `main` may write to
+stdout or log. Keep any new MCP-mode diagnostics on stderr. This applies to
+anything built over stdio, not just this server.
 
-Every unit test passed with the bug present. It was found by driving the
-server by hand.
+Exactly two things precede it, both deliberately: `cli::classify` and
+`paths::launch_root`. Both are pure — they return a value, a refusal goes
+to stderr, and neither touches the filesystem. They have to come first for
+the opposite reason: the server resolves its control socket through
+`paths`, so before DEV-943 — when the hand-off really was the first line
+of `main` — an MCP client launched with `--sandbox` or `ALLELE_HOME`
+silently served the **live** app. The ordering is therefore a pair of
+constraints, not one: decide the root above the hand-off, claim stdout
+inside it, and put nothing else in between.
+
+Every unit test passed with the stdout bug present, and every unit test
+passed with the wrong-root bug present too. Both were found by driving the
+server by hand — a test that rebuilds an expected value cannot see a
+defect that lives in the order two correct functions run. `cargo test`
+covers which socket each launch picks
+(`dispatch::mcp::tests::the_socket_follows_the_launch_root`); it cannot
+cover `exit_if_serving` itself, which ends in `process::exit`.
 
 ### 7.9 Don't let the control socket raise UI
 

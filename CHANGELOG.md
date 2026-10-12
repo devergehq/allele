@@ -13,6 +13,17 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Fixed
+- `--mcp-serve` now resolves its control socket from the same data root the app
+  would use, so `allele --mcp-serve --sandbox` (or `ALLELE_HOME=<dir>`, or
+  `--home <dir>`) reaches *that* instance. It previously took over the process
+  before the root was chosen and always connected to the live app, which made
+  `--sandbox` — the documented way to try a change without disturbing the
+  instance you are working in — silently untrue for anything driving Allele
+  over MCP. An agent testing against a sandbox could create a real session in
+  the live app. A sandboxed client whose instance is not running now reports
+  that sandbox's socket as missing rather than falling back to the live one.
+
 ## [0.7.0] - 2026-10-12
 
 ### Added
