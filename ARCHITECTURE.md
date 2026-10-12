@@ -781,11 +781,15 @@ inverted. `launch_root_from` already reads a blank as no answer, which is
 what makes stating one the way to say "the real home" out loud.
 
 This is the spawn half of §7.8; neither half is sufficient alone, and
-before DEV-947 only the flag half existed. Deliberately still outside it:
-`naming::call_claude` and `call_opencode`, one-shot `-p` calls with no
-session and no allele tools in reach (`--tools none` for Claude), and the
-external editor command. They spawn no agent and open no door to an
-instance.
+before DEV-947 only the flag half existed. The naming calls
+(`naming::call_claude`, `call_opencode`) are the weakest case for the
+rule and follow it anyway: one shot, no session, and `claude` runs
+`--tools none`. But `opencode run` carries no such restriction and is
+safe only while nothing registers an `allele` MCP server with opencode —
+which is the same temporary accident this section says the opencode
+adapter should not rely on. The external editor command is the one
+genuine exclusion: it opens a file, and spawns nothing that resolves a
+root.
 
 ## 8. Open follow-ups
 

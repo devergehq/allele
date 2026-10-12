@@ -153,7 +153,10 @@ pub struct PtyTerminal {
 
 /// The environment every PTY starts with, in precedence order: terminal
 /// capability vars, the project's declared environment on top of those, and
-/// this instance's data root last of all.
+/// this instance's data root over both. The command's own `env` is merged on
+/// top of all of it back in [`PtyTerminal::spawn`], so for an agent PTY the
+/// adapter's value is the one that lands — the same root, resolved by the same
+/// [`crate::paths::child_home_env`] call, which is why the two cannot disagree.
 ///
 /// The root is last deliberately. `extra_env` is the project's own declaration
 /// (DEV-485), and a project that declares `ALLELE_HOME` would otherwise point a

@@ -121,7 +121,12 @@ impl EventIntegration {
     /// the only thing telling that server which instance asked. `None` is an
     /// ordinary launch and must export nothing — see
     /// [`crate::paths::child_home_env`] for all three answers.
-    fn push_root(&mut self, allele_home: Option<&str>) {
+    ///
+    /// `pub(crate)` because [`AgentAdapter`] is public and its doc tells an
+    /// overriding implementor to call this. An adapter in a submodule could not,
+    /// and the compiler would say nothing — it would just silently drop the
+    /// root, which is the DEV-950 bug exactly.
+    pub(crate) fn push_root(&mut self, allele_home: Option<&str>) {
         if let Some(root) = allele_home {
             self.env
                 .push((crate::paths::HOME_ENV.to_string(), root.to_string()));
