@@ -51,6 +51,25 @@ pub fn launch_root(home: Option<PathBuf>, sandbox: bool) -> Option<PathBuf> {
         std::env::var(HOME_ENV).ok(),
         dirs::home_dir(),
     )
+    .map(absolutise)
+}
+
+/// Make a root absolute against the current directory.
+///
+/// `--home` and `ALLELE_HOME` are taken as given, and a relative one used to be
+/// harmless because exactly one process resolved it. Now that `--mcp-serve`
+/// resolves the same string, two processes started from different working
+/// directories would address two different trees — and the client would report
+/// a running instance as missing, naming a path that looks right from both.
+///
+/// Lexical, never canonical: the root routinely does not exist yet on a first
+/// launch, and a failure to absolutise leaves it alone rather than inventing a
+/// root.
+fn absolutise(root: PathBuf) -> PathBuf {
+    if root.is_absolute() {
+        return root;
+    }
+    std::path::absolute(&root).unwrap_or(root)
 }
 
 /// The pure core of [`launch_root`], with every input explicit.
@@ -326,6 +345,24 @@ mod tests {
             launch_root_from(None, false, None, Some(home.clone())),
             Some(home),
         );
+    }
+
+    /// Two processes resolving the same relative `--home` from different
+    /// working directories would otherwise address two different trees, and
+    /// `--mcp-serve` made that reachable: the client would report a running
+    /// instance as missing and name a path that looks right from both.
+    #[test]
+    fn a_relative_root_is_made_absolute() {
+        let already = PathBuf::from("/tmp/alt");
+        assert_eq!(absolutise(already.clone()), already, "left alone");
+
+        let made = absolutise(PathBuf::from("alt"));
+        assert!(made.is_absolute(), "{} is not absolute", made.display());
+        assert!(made.ends_with("alt"));
+
+        // And through the chain a launch actually uses.
+        let root = launch_root(Some(PathBuf::from("alt")), false).expect("a root");
+        assert!(root.is_absolute(), "{} is not absolute", root.display());
     }
 
     /// An `ALLELE_HOME` that is set but blank is not a root. Treating it as one

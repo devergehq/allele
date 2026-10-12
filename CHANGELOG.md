@@ -20,9 +20,15 @@ Changes on `master` awaiting the next tagged release.
   before the root was chosen and always connected to the live app, which made
   `--sandbox` — the documented way to try a change without disturbing the
   instance you are working in — silently untrue for anything driving Allele
-  over MCP. An agent testing against a sandbox could create a real session in
+  over MCP: an agent aiming at a sandbox could have created a real session in
   the live app. A sandboxed client whose instance is not running now reports
   that sandbox's socket as missing rather than falling back to the live one.
+  **The MCP registration is unchanged**, so a client must still be *launched*
+  with the flag (or the environment variable) to reach a redirected instance —
+  a bare `--mcp-serve`, including the one `~/.claude.json` registers globally,
+  still reaches the live app by design. A relative `--home`/`ALLELE_HOME` is
+  now made absolute, so the app and the server cannot resolve it against two
+  different working directories.
 
 ## [0.7.0] - 2026-10-12
 
