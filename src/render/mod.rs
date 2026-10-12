@@ -24,6 +24,7 @@ use crate::app_state::{
 use crate::icon::{icon, name as icons};
 use crate::project::{self};
 use crate::session::SessionStatus;
+use crate::sidebar::groups;
 use crate::theme::{theme, with_alpha};
 use crate::{
     browser, debug_capture, git, naming, new_session_modal, transcript, HeaderAction, SimpleTooltip,
@@ -714,6 +715,172 @@ impl AppState {
             menu,
             |this: &mut Self, cx| {
                 this.project_context_menu = None;
+                cx.notify();
+            },
+            cx,
+        ));
+        root
+    }
+
+    /// Floating right-click menu for a sidebar group header (DEV-937).
+    ///
+    /// Offers every move the header's drag and click gestures offer, because
+    /// neither is discoverable: nothing about a header says it can be picked up
+    /// or folded, and a right-click is where a macOS user looks to find out.
+    ///
+    /// Keyed on the group's **name**, as the drag payload is. A menu can outlive
+    /// the group it was opened on — rename it from another window, or let its
+    /// last session finish — and a slot index would then address whichever group
+    /// had moved into that slot.
+    ///
+    /// "Move Up" and "Move Down" are drawn greyed at the ends of the list rather
+    /// than hidden, so the list of entries does not change shape as a group
+    /// travels. Note "ends of the *slot* list": the group above the top group is
+    /// the ungrouped block, which is how that block is moved at all.
+    fn render_group_context_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut root = div();
+        let Some((p_idx, name, position)) = self.group_headers.context_menu.clone() else {
+            return root;
+        };
+        let Some(project) = self.projects.get(p_idx) else {
+            return root;
+        };
+        let order = &project.group_order;
+        let Some(slot) = order.slot_of(Some(&name)) else {
+            return root;
+        };
+        let can_move_up = slot > 0;
+        let can_move_down = slot + 1 < order.names().len() + 1;
+        let collapse_label = if order.is_collapsed(&name) {
+            "Expand"
+        } else {
+            "Collapse"
+        };
+
+        let menu_item = |id: &'static str, label: &str, color: Hsla| {
+            div()
+                .id(id)
+                .px(px(14.0))
+                .py(px(6.0))
+                .text_size(px(12.0))
+                .text_color(color)
+                .cursor_pointer()
+                .hover(|s| s.bg(theme().bg_hover))
+                .child(label.to_string())
+        };
+        let separator = || div().w_full().h(px(1.0)).my(px(4.0)).bg(theme().bg_raised);
+
+        let move_entry = |id: &'static str,
+                          label: &str,
+                          enabled: bool,
+                          direction: groups::MoveDirection,
+                          name: String,
+                          cx: &mut Context<Self>| {
+            let item = menu_item(
+                id,
+                label,
+                if enabled {
+                    theme().text_primary
+                } else {
+                    theme().text_ghost
+                },
+            );
+            if !enabled {
+                return item.cursor_default();
+            }
+            item.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this: &mut Self, _event, _window, cx| {
+                    cx.stop_propagation();
+                    this.pending_action = Some(
+                        SidebarAction::MoveGroup {
+                            project_idx: p_idx,
+                            name: name.clone(),
+                            direction,
+                        }
+                        .into(),
+                    );
+                    cx.notify();
+                }),
+            )
+        };
+
+        let menu = div()
+            .flex()
+            .flex_col()
+            .min_w(px(200.0))
+            .py(px(4.0))
+            .bg(theme().bg_surface)
+            .border_1()
+            .border_color(theme().border_default)
+            .rounded(px(6.0))
+            .shadow_lg()
+            .on_mouse_down_out(cx.listener(|this: &mut Self, _event, _window, cx| {
+                this.group_headers.context_menu = None;
+                cx.notify();
+            }))
+            .child(move_entry(
+                "group-ctx-up",
+                "Move Up",
+                can_move_up,
+                groups::MoveDirection::Up,
+                name.clone(),
+                cx,
+            ))
+            .child(move_entry(
+                "group-ctx-down",
+                "Move Down",
+                can_move_down,
+                groups::MoveDirection::Down,
+                name.clone(),
+                cx,
+            ))
+            .child(separator())
+            .child(
+                menu_item("group-ctx-collapse", collapse_label, theme().text_primary)
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener({
+                            let name = name.clone();
+                            move |this: &mut Self, _event, _window, cx| {
+                                cx.stop_propagation();
+                                this.pending_action = Some(
+                                    SidebarAction::ToggleGroupCollapsed {
+                                        project_idx: p_idx,
+                                        name: name.clone(),
+                                    }
+                                    .into(),
+                                );
+                                cx.notify();
+                            }
+                        }),
+                    ),
+            )
+            .child(
+                menu_item("group-ctx-rename", "Rename…", theme().text_primary).on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener({
+                        let name = name.clone();
+                        move |this: &mut Self, _event, _window, cx| {
+                            cx.stop_propagation();
+                            this.pending_action = Some(
+                                SidebarAction::StartGroupRename {
+                                    project_idx: p_idx,
+                                    name: name.clone(),
+                                }
+                                .into(),
+                            );
+                            cx.notify();
+                        }
+                    }),
+                ),
+            );
+
+        root = root.child(self.dismissable_popover(
+            position,
+            menu,
+            |this: &mut Self, cx| {
+                this.group_headers.context_menu = None;
                 cx.notify();
             },
             cx,
@@ -2197,6 +2364,7 @@ impl Render for AppState {
 
         outer = outer.child(self.render_session_context_menu(cx));
         outer = outer.child(self.render_project_context_menu(cx));
+        outer = outer.child(self.render_group_context_menu(cx));
 
         // If a session has naming suggestions pending and no modal is open, spawn one.
         if self.naming_modal.is_none() {

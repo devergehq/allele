@@ -830,13 +830,17 @@ impl AppState {
             // Written even when no session currently carries a name, which is
             // the point: a group that empties must come back in its old
             // position after a restart, so the order is persisted rather than
-            // re-derived from the sessions on load (DEV-853).
+            // re-derived from the sessions on load (DEV-853). The ungrouped
+            // block's slot and the folded groups ride along, so a reordered or
+            // collapsed sidebar comes back as it was left (DEV-937).
             if !project.group_order.names().is_empty() {
                 persisted
                     .project_group_order
                     .push(crate::state::ProjectGroupOrder {
                         project_id: project.id.clone(),
                         groups: project.group_order.names().to_vec(),
+                        ungrouped_at: project.group_order.ungrouped_at(),
+                        collapsed: project.group_order.collapsed_names().to_vec(),
                     });
             }
         }
@@ -1867,9 +1871,12 @@ fn main() {
                         if let Some(project) =
                             projects.iter_mut().find(|p| p.id == stored.project_id)
                         {
-                            project.group_order = crate::sidebar::groups::GroupOrder::from_names(
-                                stored.groups.clone(),
-                            );
+                            project.group_order =
+                                crate::sidebar::groups::GroupOrder::from_persisted(
+                                    stored.groups.clone(),
+                                    stored.ungrouped_at,
+                                    stored.collapsed.clone(),
+                                );
                         }
                     }
 
@@ -2214,6 +2221,7 @@ fn main() {
                         new_session_modal: None,
                         session_context_menu: None,
                         project_context_menu: None,
+                        group_headers: Default::default(),
                         edit_session_modal: None,
                         naming_modal: None,
                         conversation_picker: None,
