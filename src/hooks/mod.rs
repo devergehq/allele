@@ -4,7 +4,7 @@
 // `claude --settings <path>`. That settings file declares hooks for
 // Notification, Stop, UserPromptSubmit, SessionStart, and SessionEnd —
 // all pointing at a tiny shell receiver script that appends one JSONL
-// line per event to `~/.allele/events/<session_id>.jsonl`.
+// line per event to `<root>/.allele/events/<session_id>.jsonl`.
 //
 // A background polling task in main.rs reads those files every 250ms,
 // parses new lines, and updates the matching session's status. The
@@ -25,16 +25,33 @@ pub fn base_dir() -> Option<PathBuf> {
     crate::paths::allele_dir()
 }
 
-pub fn hooks_settings_path() -> Option<PathBuf> {
-    Some(base_dir()?.join("hooks.json"))
-}
-
-pub fn receiver_script_path() -> Option<PathBuf> {
-    Some(base_dir()?.join("bin").join("hook-receiver.sh"))
-}
-
+/// The events directory of *this* instance — what the watcher reads, and what
+/// [`install_in`] substitutes into the receiver so the two cannot disagree.
 pub fn events_dir() -> Option<PathBuf> {
-    Some(base_dir()?.join("events"))
+    Some(events_dir_in(&base_dir()?))
+}
+
+// The three paths below take an explicit `<root>/.allele` rather than reading
+// the process-global root, so [`install_in`] can be driven against a base that
+// is not this process's. Same split, and for the same reason, as
+// `paths::allele_dir_in`: `paths::init` fixes a `OnceLock` that one test in this
+// binary already sets, so a test that needed to redirect the root to see what
+// the installer writes could not exist. That is precisely the test DEV-951 was
+// missing, and why the hard-coded `$HOME` survived a root-awareness pass.
+//
+// `hooks.json` and the receiver script have no caller outside the installer, so
+// they have no process-global accessor at all — one derivation each, used once.
+
+fn hooks_settings_path_in(base: &Path) -> PathBuf {
+    base.join("hooks.json")
+}
+
+fn receiver_script_path_in(base: &Path) -> PathBuf {
+    base.join("bin").join("hook-receiver.sh")
+}
+
+fn events_dir_in(base: &Path) -> PathBuf {
+    base.join("events")
 }
 
 /// Restrict the events directory and everything already in it to the owner,
@@ -83,16 +100,23 @@ fn restrict_events_dir(_dir: &Path) -> usize {
     0
 }
 
-/// Shell body for the receiver script. Written verbatim to disk on startup.
+/// The literal [`RECEIVER_SCRIPT_TEMPLATE`] substitutes the instance's events
+/// directory for. Chosen so it cannot contain `"#` and therefore cannot
+/// terminate the raw string the template is written as.
+const EVENTS_DIR_PLACEHOLDER: &str = "@@ALLELE_EVENTS_DIR@@";
+
+/// Shell body for the receiver script, with [`EVENTS_DIR_PLACEHOLDER`] standing
+/// in for the events directory. Rendered by [`build_receiver_script`] and
+/// written to disk on every startup.
 ///
 /// Deliberately minimal:
 /// - reads JSON from stdin
 /// - extracts session_id (jq preferred, sed fallback)
 /// - appends one JSONL line (ts + kind) to the per-session events file
 /// - exits 0 on any error so hooks never block claude
-const RECEIVER_SCRIPT: &str = r#"#!/bin/bash
-# allele hook receiver — forwards Claude Code hook events to
-# per-session JSONL files under ~/.allele/events/.
+const RECEIVER_SCRIPT_TEMPLATE: &str = r#"#!/bin/bash
+# allele hook receiver — forwards Claude Code hook events to per-session
+# JSONL files under the events directory of the instance that installed it.
 # Managed by the Allele app. Do not edit by hand — it will be
 # regenerated on next launch.
 
@@ -102,7 +126,17 @@ set -u
 # an agent runs cannot read another session's brief (DEV-605).
 umask 077
 kind="${1:-unknown}"
-events_dir="$HOME/.allele/events"
+# The events directory of the instance that installed this copy, substituted
+# at install time. A redirected instance — `--sandbox`, `--home <dir>` or
+# `ALLELE_HOME=<dir>` — installs its own copy under its own root, so there is
+# exactly one correct value per copy and nothing to resolve at run time.
+#
+# This read `$HOME/.allele/events` until DEV-951. Every redirected instance
+# therefore wrote its sessions' events into the *live* tree while watching its
+# own, which stayed empty — so a status change could never be observed there
+# and every `allele_sessions_create` into one spent its whole 120s budget and
+# returned `prompt_delivery_unconfirmed`, while the agent was in fact running.
+events_dir=@@ALLELE_EVENTS_DIR@@
 mkdir -p "$events_dir" 2>/dev/null || exit 0
 
 # Read the hook payload from stdin (non-blocking; claude always sends JSON)
@@ -164,10 +198,36 @@ fi
 exit 0
 "#;
 
+/// Quote a path for interpolation into a POSIX shell script.
+///
+/// The root arrives from `--home` or `ALLELE_HOME`, so it is arbitrary user
+/// input: unquoted, a space would split the assignment and a `$` would expand
+/// against the agent's environment. Single quotes suppress every expansion,
+/// and an embedded single quote is closed, escaped and reopened — the standard
+/// `'\''` dance, which is the only character single-quoting cannot carry.
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', r"'\''"))
+}
+
+/// Render the receiver script for one instance's events directory.
+fn build_receiver_script(events_dir: &Path) -> String {
+    RECEIVER_SCRIPT_TEMPLATE.replace(EVENTS_DIR_PLACEHOLDER, &shell_quote(events_dir))
+}
+
 /// Generate the settings JSON that Allele passes to `claude --settings`.
 /// Uses an absolute receiver-script path so the hook works regardless of the
 /// session's cwd (each session runs in its own APFS clone).
-fn build_hooks_json(receiver: &str) -> serde_json::Value {
+///
+/// Takes the path rather than a string, and quotes it here, so there is one
+/// place that can get it wrong. Claude Code evaluates a hook `command` through
+/// a shell — verified by running `claude -p` against a hand-written settings
+/// file on a directory with a space in it: the quoted form fired, the bare form
+/// never fired at all. So an unquoted receiver under a root like
+/// `--home "/Users/me/My Roots/alpha"` word-splits into a path that does not
+/// exist, no hook ever runs, and the symptom is indistinguishable from DEV-951
+/// itself: no status transitions, and every create burning its 120s budget.
+fn build_hooks_json(receiver: &Path) -> serde_json::Value {
+    let receiver = shell_quote(receiver);
     let make_hook = |arg: &str| {
         serde_json::json!({
             "hooks": [
@@ -206,24 +266,35 @@ fn build_hooks_json(receiver: &str) -> serde_json::Value {
 /// `claude --settings`.
 pub fn install_if_missing() -> crate::errors::Result<PathBuf> {
     let base = base_dir().ok_or_else(|| AlleleError::Hooks("no home directory".to_string()))?;
-    fs::create_dir_all(&base)?;
+    install_in(&base)
+}
+
+/// The installer proper, against an explicit `<root>/.allele`.
+///
+/// Split from [`install_if_missing`] so the events directory the written script
+/// names can be pinned against a *redirected* root rather than whatever the
+/// process-global one happens to be. DEV-951 was invisible to every test that
+/// could only ever see one root.
+fn install_in(base: &Path) -> crate::errors::Result<PathBuf> {
+    fs::create_dir_all(base)?;
     fs::create_dir_all(base.join("bin"))?;
-    fs::create_dir_all(base.join("events"))?;
+    let events = events_dir_in(base);
+    fs::create_dir_all(&events)?;
 
     // Tighten on every launch, not just at creation: an existing install has
     // months of 0644 briefs that the receiver's umask alone would never fix.
-    if let Some(dir) = events_dir() {
-        let tightened = restrict_events_dir(&dir);
-        if tightened > 0 {
-            info!("hooks: made {tightened} existing event files owner-only");
-        }
+    let tightened = restrict_events_dir(&events);
+    if tightened > 0 {
+        info!("hooks: made {tightened} existing event files owner-only");
     }
 
     // Write the receiver script every time — it's tiny and this guarantees
-    // the on-disk copy matches the source in case we ship a fix.
-    let receiver_path = receiver_script_path()
-        .ok_or_else(|| AlleleError::Hooks("no home directory".to_string()))?;
-    fs::write(&receiver_path, RECEIVER_SCRIPT)?;
+    // the on-disk copy matches the source in case we ship a fix. It is also
+    // what carries the DEV-951 events-directory fix to an install that already
+    // exists, on its next launch and with no `_allele_version` bump: the
+    // version marker gates nothing here, because nothing is conditional.
+    let receiver_path = receiver_script_path_in(base);
+    fs::write(&receiver_path, build_receiver_script(&events))?;
 
     #[cfg(unix)]
     {
@@ -235,10 +306,8 @@ pub fn install_if_missing() -> crate::errors::Result<PathBuf> {
 
     // Write (or rewrite) hooks.json. We always rewrite so the receiver path
     // is current and the version marker is up-to-date.
-    let hooks_path =
-        hooks_settings_path().ok_or_else(|| AlleleError::Hooks("no home directory".to_string()))?;
-    let receiver_abs = receiver_path.to_string_lossy().to_string();
-    let hooks_json = build_hooks_json(&receiver_abs);
+    let hooks_path = hooks_settings_path_in(base);
+    let hooks_json = build_hooks_json(&receiver_path);
     fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_json)?)?;
 
     Ok(hooks_path)
@@ -682,12 +751,215 @@ mod tests {
     /// The umask is what keeps *new* files owner-only; the startup sweep only
     /// repairs history. A receiver script without it silently reopens the hole
     /// for every session created from then on.
+    ///
+    /// Asserted on the *rendered* script rather than the template: the template
+    /// is no longer what reaches disk, and a test that stopped following the
+    /// renderer would stop testing the file that actually runs.
     #[test]
     fn the_receiver_script_sets_an_owner_only_umask() {
         assert!(
-            RECEIVER_SCRIPT.contains("umask 077"),
+            build_receiver_script(Path::new("/tmp/any/events")).contains("umask 077"),
             "the generated receiver must not write group- or world-readable event files"
         );
+    }
+
+    /// A fresh directory under the temp dir, unique per process and per tag so
+    /// `cargo test`'s threads cannot collide over one path.
+    fn unique_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("allele-dev951-{}-{tag}", std::process::id()));
+        fs::remove_dir_all(&dir).ok();
+        fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
+
+    /// The regression DEV-951 fixed. The receiver hard-coded
+    /// `$HOME/.allele/events`, so a redirected instance wrote its sessions'
+    /// events into the **live** tree while watching its own, which stayed empty
+    /// — and `dispatch::create` confirms a create by observing a status change
+    /// those events drive, so every create into a redirected instance spent its
+    /// whole 120s budget and returned `prompt_delivery_unconfirmed`.
+    ///
+    /// Pinned against a redirected root, because a root that happens to be the
+    /// real home cannot tell the two behaviours apart — which is exactly why
+    /// the bug survived.
+    #[test]
+    fn the_installed_receiver_names_the_roots_own_events_directory() {
+        let root = unique_dir("install");
+        let base = root.join(".allele");
+
+        let hooks_path = install_in(&base).expect("install should succeed");
+
+        let script = fs::read_to_string(receiver_script_path_in(&base)).expect("receiver on disk");
+        let events = events_dir_in(&base);
+        assert!(
+            script.contains(&format!("events_dir='{}'", events.display())),
+            "the receiver does not name {}",
+            events.display(),
+        );
+        // Comment lines are exempt on purpose: the script documents the literal
+        // it used to carry, and that history is worth keeping readable. What must
+        // not come back is a *resolved* path built out of the home directory.
+        let home_in_code = script
+            .lines()
+            .find(|l| l.contains("$HOME") && !l.trim_start().starts_with('#'));
+        assert!(
+            home_in_code.is_none(),
+            "the receiver still resolves a directory out of $HOME: {home_in_code:?}",
+        );
+        assert!(
+            !script.contains(EVENTS_DIR_PLACEHOLDER),
+            "the placeholder was left unsubstituted — every event would land in \
+             a directory named after it, and nothing would say so",
+        );
+
+        // hooks.json names the receiver under *this* root, and the version
+        // marker is deliberately untouched: nothing here is conditional on it,
+        // so an existing install picks the fix up on its next launch.
+        let hooks: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).expect("hooks.json"))
+                .expect("hooks.json is json");
+        assert_eq!(hooks["_allele_version"], 5, "no version bump is needed");
+        let command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("a session_start command");
+        assert_eq!(
+            command,
+            format!(
+                "'{}' session_start",
+                receiver_script_path_in(&base).display()
+            ),
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// Text assertions pin what the script *says*. This pins what it *does*:
+    /// run the installed receiver on a real hook payload and look for the event
+    /// file under the redirected root.
+    ///
+    /// The root deliberately carries a space and a single quote. A data root is
+    /// whatever `--home` was handed, and an unquoted substitution would either
+    /// split the assignment or write somewhere nobody named.
+    #[test]
+    fn the_installed_receiver_writes_into_the_redirected_root() {
+        let root = unique_dir("exec dir with a space and an 'apostrophe'");
+        let base = root.join(".allele");
+        install_in(&base).expect("install should succeed");
+
+        let mut child = std::process::Command::new(receiver_script_path_in(&base))
+            .arg("session_start")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn the receiver");
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .expect("receiver stdin")
+                .write_all(br#"{"session_id":"dev951-probe","cwd":"/tmp/work"}"#)
+                .expect("write the payload");
+        }
+        let out = child.wait_with_output().expect("receiver should exit");
+        assert!(
+            out.status.success(),
+            "receiver exited {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr),
+        );
+
+        let written = events_dir_in(&base).join("dev951-probe.jsonl");
+        let line = fs::read_to_string(&written)
+            .unwrap_or_else(|e| panic!("no event file at {}: {e}", written.display()));
+        assert!(
+            line.contains(r#""kind":"session_start""#),
+            "unexpected event line: {line}",
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// An ordinary launch must be unchanged. `<home>/.allele/events` is exactly
+    /// where the old literal `$HOME/.allele/events` expanded to, so the rendered
+    /// script names the same directory every current install already writes to.
+    ///
+    /// Asserted on the rendered script rather than by installing: installing
+    /// against the real home would write over the user's live hooks, and a test
+    /// that disturbs the instance you are developing in is its own bug.
+    #[test]
+    fn an_ordinary_launch_still_names_the_home_events_directory() {
+        let home = dirs::home_dir().expect("test host has a home directory");
+        let script = build_receiver_script(&events_dir_in(&crate::paths::allele_dir_in(&home)));
+
+        assert!(
+            script.contains(&format!("events_dir='{}/.allele/events'", home.display())),
+            "an ordinary launch would stop writing where it always has",
+        );
+    }
+
+    /// A root with a space broke the chain by a second route, found in review of
+    /// this change rather than in the field. Claude Code evaluates a hook
+    /// `command` through a shell, so an unquoted receiver path word-split into a
+    /// path that does not exist, no hook fired at all, and the symptom was
+    /// indistinguishable from DEV-951's own: no status transitions and every
+    /// create burning its 120s budget.
+    ///
+    /// Driven through `sh -c`, the way Claude Code drives it. The sibling test
+    /// above uses `Command::new`, which does no word-splitting and therefore
+    /// cannot see this — on its own it would have given false assurance that a
+    /// spaced root works end to end.
+    #[test]
+    fn the_hook_command_survives_a_root_with_a_space() {
+        let root = unique_dir("root with a space");
+        let base = root.join(".allele");
+        let hooks_path = install_in(&base).expect("install should succeed");
+
+        let hooks: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&hooks_path).expect("hooks.json"))
+                .expect("hooks.json is json");
+        let command = hooks["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+            .as_str()
+            .expect("a session_start command")
+            .to_string();
+
+        let payload = r#"{"session_id":"spaced"}"#;
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf '%s' '{payload}' | {command}"))
+            .output()
+            .expect("run the hook command through a shell");
+        assert!(
+            out.status.success(),
+            "the shell could not run {command}: {}",
+            String::from_utf8_lossy(&out.stderr),
+        );
+
+        let written = events_dir_in(&base).join("spaced.jsonl");
+        assert!(
+            written.exists(),
+            "the hook command never reached the receiver: {command}",
+        );
+
+        fs::remove_dir_all(&root).ok();
+    }
+
+    /// `--home` takes an arbitrary path and the receiver is a shell script, so a
+    /// space, a `$` or a quote in the root must not change where it writes or
+    /// what it evaluates.
+    #[test]
+    fn a_hostile_root_is_quoted_rather_than_expanded() {
+        assert_eq!(shell_quote(Path::new("/tmp/plain")), "'/tmp/plain'");
+        assert_eq!(
+            shell_quote(Path::new("/tmp/with space")),
+            "'/tmp/with space'"
+        );
+        // Would otherwise expand against the agent's environment at run time.
+        assert_eq!(shell_quote(Path::new("/tmp/$HOME/x")), "'/tmp/$HOME/x'");
+        assert_eq!(shell_quote(Path::new("/tmp/`id`")), "'/tmp/`id`'");
+        // The one character single-quoting cannot carry: close, escape, reopen.
+        assert_eq!(shell_quote(Path::new("/tmp/it's")), r"'/tmp/it'\''s'");
     }
 
     /// An events directory holding `<id>.jsonl` and `<id>.prompt` per id, each
