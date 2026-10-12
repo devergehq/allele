@@ -2200,6 +2200,37 @@ mod tests {
         assert_eq!(order_slots(&fx, cx), ["review", "·", "linear"]);
     }
 
+    /// The acceptance criterion's backstop: a group cannot be dragged into
+    /// another project. The sidebar already declines to light up a header from
+    /// another project (`DraggedGroup` carries the project it came from), and
+    /// the handler declines too — a name that this project's order does not
+    /// have is a no-op, not a move of whatever sits in that slot.
+    #[gpui::test]
+    fn a_group_from_another_project_cannot_be_moved_into_this_one(cx: &mut TestAppContext) {
+        let mut other = grouped_project(&[Some("linear")]);
+        other.name = "other-project".to_string();
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")]), other], cx);
+
+        fx.dispatch(
+            SidebarAction::ReorderGroup {
+                project_idx: 0,
+                from: "linear".to_string(),
+                to: "review".to_string(),
+            },
+            cx,
+        );
+
+        assert_eq!(order_slots(&fx, cx), ["·", "review"]);
+        let other_names = fx.update(cx, |state, _w, _cx| {
+            state.projects[1].group_order.names().to_vec()
+        });
+        assert_eq!(
+            other_names,
+            ["linear"],
+            "and the other project is untouched"
+        );
+    }
+
     /// A group that is gone — renamed elsewhere, or never recorded — is a
     /// no-op rather than a move of whatever sits in its slot.
     #[gpui::test]
