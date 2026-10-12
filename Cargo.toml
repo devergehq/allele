@@ -1,6 +1,6 @@
 [package]
 name = "allele"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 description = "Claude Code session manager — APFS clone management for parallel variant workflows"
 

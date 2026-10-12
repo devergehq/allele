@@ -11,6 +11,10 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 ## [Unreleased]
 
+Changes on `master` awaiting the next tagged release.
+
+## [0.7.2] - 2026-10-13
+
 ### Fixed
 - Everything else Allele spawns now carries the data root too, not just the
   agent: a **drawer terminal**, a **`Generic`** agent, an **opencode** agent,
@@ -29,8 +33,6 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
   overrides the instance's root for the terminals and scripts that project
   spawns. It only loses when there is an instance root to lose to — on an
   ordinary launch the declared value still stands.
-
-### Fixed
 - A redirected instance's sessions now write their hook events under **that**
   instance's root, so `allele_sessions_create` against a `--sandbox`, `--home`
   or `ALLELE_HOME` instance confirms normally instead of reporting
@@ -467,7 +469,8 @@ merge batch. Core proof-of-concept complete and runnable.
   browser with merge/delete actions.
 - Per-session drawer terminal panel and auto-naming of sessions from the first prompt.
 
-[Unreleased]: https://github.com/devergehq/allele/compare/v0.7.1...HEAD
+[Unreleased]: https://github.com/devergehq/allele/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/devergehq/allele/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/devergehq/allele/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/devergehq/allele/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/devergehq/allele/compare/v0.5.1...v0.6.0
