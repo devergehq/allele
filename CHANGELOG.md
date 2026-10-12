@@ -13,6 +13,8 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+## [0.7.1] - 2026-10-12
+
 ### Fixed
 - A session Allele spawns now inherits the data root of the instance that
   spawned it, so an agent working in a `--sandbox` (or `--home`, or
@@ -424,7 +426,8 @@ merge batch. Core proof-of-concept complete and runnable.
   browser with merge/delete actions.
 - Per-session drawer terminal panel and auto-naming of sessions from the first prompt.
 
-[Unreleased]: https://github.com/devergehq/allele/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/devergehq/allele/compare/v0.7.1...HEAD
+[0.7.1]: https://github.com/devergehq/allele/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/devergehq/allele/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/devergehq/allele/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/devergehq/allele/compare/v0.5.0...v0.5.1
