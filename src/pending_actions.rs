@@ -31,6 +31,29 @@ impl AppState {
         // it is itself the source of — clicking an entry is the last thing that
         // menu does.
         self.group_headers.context_menu = None;
+        // And an open rename is abandoned by doing anything else at all.
+        //
+        // Typing in the field dispatches nothing, so this cannot eat a
+        // keystroke; every action that reaches here is a click somewhere else,
+        // and the tail of this function then gives focus back to the active
+        // terminal. Without it the field kept drawing its caret and its accent
+        // border while Enter and Escape went to the agent — a control that looks
+        // live and is not. The drawer's inline rename escapes the same trap only
+        // because it is scoped to the active session cursor and vanishes when
+        // that moves; a group header has no equivalent scoping.
+        //
+        // It also closes a staleness that keying on the group's name could not:
+        // `GroupRename::project_idx` is a raw index, and a project reorder is
+        // itself an action, so a rename can no longer outlive the project it was
+        // armed in and commit against another one's group of the same name.
+        if !matches!(
+            action,
+            PendingAction::Sidebar(
+                SidebarAction::CommitGroupRename | SidebarAction::CancelGroupRename
+            )
+        ) {
+            self.group_headers.rename = None;
+        }
 
         // A prompt armed against a shape the sidebar no longer has cannot be
         // trusted: its index may now address a different session, project, or
@@ -368,13 +391,28 @@ impl AppState {
                             // because regrouping had no UI behind it yet; the
                             // regroup is now the feature.
                             //
-                            // Interned rather than copied, so a spelling from a
-                            // hand-edited `state.json` is normalised to the
-                            // project's own on the way across.
+                            // Through `intern_group`, like every other
+                            // assignment path, so a spelling from a hand-edited
+                            // `state.json` is normalised to the project's own on
+                            // the way across and an unusable one cannot reach
+                            // the order. Rehydration already interns every
+                            // stored group, so the refusal is a backstop rather
+                            // than a path — but this was the one assignment
+                            // reaching the order without a check.
                             let target = project.sessions[to].group.clone();
-                            project.sessions[from].group = target
-                                .as_deref()
-                                .map(|name| project.group_order.intern(name));
+                            let next = match target.as_deref().map(|raw| project.intern_group(raw))
+                            {
+                                Some(Ok(name)) => name,
+                                None => None,
+                                Some(Err(over)) => {
+                                    warn!(
+                                        "Refused a drop onto a row whose group is unusable: {}",
+                                        over.message()
+                                    );
+                                    return;
+                                }
+                            };
+                            project.sessions[from].group = next;
                             let session = project.sessions.remove(from);
                             project.sessions.insert(to, session);
                             // Remap the active cursor through the move.
@@ -411,6 +449,11 @@ impl AppState {
                     if session_idx < project.sessions.len() {
                         // Interned through the project, so a header drop obeys
                         // the same "first spelling wins" rule as the modals.
+                        // Interning can append a name to the order *without*
+                        // changing the session's own group, and that new slot is
+                        // lost on the next restart if only the session is
+                        // checked for a change.
+                        let known = project.group_order.names().len();
                         let next = match group.as_deref().map(|raw| project.intern_group(raw)) {
                             Some(Ok(name)) => name,
                             None => None,
@@ -423,8 +466,9 @@ impl AppState {
                                 return;
                             }
                         };
+                        let order_grew = project.group_order.names().len() != known;
                         let session = &mut project.sessions[session_idx];
-                        changed = session.group != next;
+                        changed = order_grew || session.group != next;
                         session.group = next;
                     }
                 }
@@ -2366,6 +2410,90 @@ mod tests {
             ["·", "review", "linear"],
             "and nothing was merged"
         );
+    }
+
+    /// An open rename is abandoned by doing anything else. Without this the
+    /// field kept drawing its caret while Enter and Escape went to the agent's
+    /// terminal — a control that looks live and is not, with no way out but to
+    /// open the menu again.
+    #[gpui::test]
+    fn doing_anything_else_abandons_an_open_rename(cx: &mut TestAppContext) {
+        let fx =
+            Fixture::with_projects(vec![grouped_project(&[Some("review"), Some("linear")])], cx);
+
+        fx.dispatch(
+            SidebarAction::StartGroupRename {
+                project_idx: 0,
+                name: "review".to_string(),
+            },
+            cx,
+        );
+        assert!(fx.update(cx, |state, _w, _cx| state.group_headers.rename.is_some()));
+
+        // Clicking another group's header, say.
+        fx.dispatch(
+            SidebarAction::ToggleGroupCollapsed {
+                project_idx: 0,
+                name: "linear".to_string(),
+            },
+            cx,
+        );
+        assert!(
+            fx.update(cx, |state, _w, _cx| state.group_headers.rename.is_none()),
+            "the field is gone, not left looking live"
+        );
+    }
+
+    /// …but not by the two actions the field itself emits, or committing would
+    /// find nothing to commit.
+    #[gpui::test]
+    fn committing_a_rename_is_not_treated_as_doing_something_else(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[Some("review")])], cx);
+
+        fx.dispatch(
+            SidebarAction::StartGroupRename {
+                project_idx: 0,
+                name: "review".to_string(),
+            },
+            cx,
+        );
+        fx.update(cx, |state, _w, _cx| {
+            state
+                .group_headers
+                .rename
+                .as_mut()
+                .expect("the rename is open")
+                .buffer = "linear".to_string();
+        });
+        fx.dispatch(SidebarAction::CommitGroupRename, cx);
+
+        assert_eq!(order_slots(&fx, cx), ["·", "linear"]);
+    }
+
+    /// A regroup that leaves the session's own group alone but teaches the
+    /// project a new name still has to be saved, or the slot is lost on the next
+    /// restart.
+    #[gpui::test]
+    fn a_regroup_that_only_grows_the_order_is_still_persisted(cx: &mut TestAppContext) {
+        let mut project = grouped_project(&[Some("review")]);
+        // A spelling the order never interned, as a hand-edited file could
+        // leave it.
+        project.sessions[0].group = Some("ops".to_string());
+        let fx = Fixture::with_projects(vec![project], cx);
+
+        // The dirty flag as the dispatcher left it: a later read would see it
+        // already drained by the render tick that follows.
+        let (state_dirty, _) = fx.dispatch(
+            SessionAction::RegroupSession {
+                project_idx: 0,
+                session_idx: 0,
+                group: Some("ops".to_string()),
+            },
+            cx,
+        );
+
+        assert_eq!(order_slots(&fx, cx), ["·", "review", "ops"]);
+        assert!(state_dirty, "the new slot has to reach state.json");
     }
 
     /// Correcting the canonical spelling is a rename, not a collision — it is

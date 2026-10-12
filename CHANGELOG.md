@@ -29,7 +29,9 @@ Changes on `master` awaiting the next tagged release.
   another to reorder them; click a header to fold its rows away, leaving the header and its
   running / finished / blocked counts; drop a session row on a header, or on a row in
   another group, to move that session into it, and on an ungrouped row to take it out of
-  every group. The header's right-click menu offers the same without dragging — move up,
+  every group — when a project has no ungrouped session there is no such row to drop on, and
+  Edit Session is still the way to clear a group. The header's right-click menu offers the
+  same without dragging — move up,
   move down, collapse, rename — and renaming a group renames it for every session in it. The
   ungrouped block has a position among the groups rather than always being first: it draws no
   header, so it is placed by moving groups past it. The order, the ungrouped block's position
