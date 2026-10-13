@@ -47,10 +47,10 @@ name: CI
 #
 # Runners: the Linux job (`rustfmt`) runs on Ubicloud, label
 # `ubicloud-standard-2`, provisioned through the organisation's Ubicloud GitHub
-# app — the org's GitHub Actions minutes are exhausted. The macOS jobs stay on
-# GitHub's `macos-14`, because Ubicloud has no macOS runners. Ubicloud's x64
-# image is built from GitHub's `actions/runner-images` templates, so a moved job
-# needs no other change, and moving one back is the label alone.
+# app. The macOS jobs stay on GitHub's `macos-14`, because Ubicloud has no
+# macOS runners. Ubicloud's x64 image is built from GitHub's
+# `actions/runner-images` templates, so a moved job needs no other change, and
+# moving one back is the label alone.
 
 on:
   pull_request:
