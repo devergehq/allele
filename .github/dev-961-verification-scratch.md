@@ -5,3 +5,5 @@ Throwaway. This branch and its pull request exist only to exercise the new
 Nothing here is ever merged.
 
 Push 1 — opened as a draft.
+
+Push 2 — pushed while still a draft.
