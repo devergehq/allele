@@ -6,9 +6,21 @@ name: CI
 # Runs only on a pull request that is *ready*: a push to a draft starts a run
 # whose jobs all skip, marking a pull request ready runs everything, and a
 # merge to `master` runs nothing because the ready pull request's run already
-# covered that tree (DEV-961). `workflow_dispatch` re-runs the lot by hand on
-# any branch. Every job carries the gate, because `on:` alone cannot express
-# "not while it is a draft".
+# covered that tree (DEV-961). `workflow_dispatch` starts the lot by hand
+# against a branch's current head. Every job carries the gate, because `on:`
+# alone cannot express "not while it is a draft".
+#
+# `converted_to_draft` is in the list so that sending a pull request back to a
+# draft *stops* it: the event starts a run whose jobs all skip, and because
+# that run shares this workflow's concurrency group with whatever is already
+# running for the same pull request, `cancel-in-progress` cancels the in-flight
+# one. Without the type the event fires nothing at all and a run that nobody
+# wants any more carries on to the end.
+#
+# Note the difference between that and GitHub's "Re-run jobs" button: a re-run
+# replays the same commit. So if `master` has moved under a pull request, a
+# re-run of its checks re-validates nothing — only a push, or a rebase onto
+# `master`, tests the tree that would actually be merged.
 #
 # One accepted cost of dropping the `master` push: nothing refreshes the
 # `refs/heads/master`-scoped `Swatinem/rust-cache` entries any more, and a run
@@ -35,7 +47,7 @@ name: CI
 
 on:
   pull_request:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
   workflow_dispatch:
 
 permissions:
