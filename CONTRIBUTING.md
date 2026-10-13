@@ -101,6 +101,8 @@ CI (`.github/workflows/ci.yml` — `rustfmt`, `test`, `architecture`, `clippy`) 
 
 So push as often as you like while your pull request is a draft — check it yourself with `cargo fmt`, `cargo test` and `cargo clippy` — then mark it ready when you want CI's verdict, or start any workflow by hand from the **Actions** tab on any branch.
 
+Where the jobs run: `rustfmt` runs on [Ubicloud](https://www.ubicloud.com) (label `ubicloud-standard-2`), provisioned through the organisation's Ubicloud GitHub app. `test`, `architecture` and `clippy` stay on GitHub's `macos-14` — Allele is a macOS app and Ubicloud has no macOS runners. Moving a job back to a GitHub runner is the `runs-on:` label alone.
+
 ## Code conventions
 
 - **Rust 2021 edition.** Standard `rustfmt` and `clippy` — no custom rules yet. Run `cargo fmt` before pushing: CI runs `cargo fmt --all -- --check` on every ready pull request (see [Continuous integration](#continuous-integration) above). No branch-protection rule is configured, so no check blocks a merge automatically; by practice a pull request is merged only once its checks have passed on a ready pull request.

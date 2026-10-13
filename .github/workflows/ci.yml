@@ -44,6 +44,13 @@ name: CI
 # deny-level error. It is now blocking, which is the only state in which a
 # check means anything: a permanently-red one is a check everyone learns to
 # ignore.
+#
+# Runners: the Linux job (`rustfmt`) runs on Ubicloud, label
+# `ubicloud-standard-2`, provisioned through the organisation's Ubicloud GitHub
+# app. The macOS jobs stay on GitHub's `macos-14`, because Ubicloud has no
+# macOS runners. Ubicloud's x64 image is built from GitHub's
+# `actions/runner-images` templates, so a moved job needs no other change, and
+# moving one back is the label alone.
 
 on:
   pull_request:
@@ -61,7 +68,7 @@ jobs:
   rustfmt:
     name: rustfmt
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: ubuntu-latest
+    runs-on: ubicloud-standard-2
     steps:
       - name: Checkout
         uses: actions/checkout@v4
