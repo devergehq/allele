@@ -7,3 +7,5 @@ Nothing here is ever merged.
 Push 1 — opened as a draft.
 
 Push 2 — pushed while still a draft.
+
+Push 3 — pushed after the pull request was marked ready.
