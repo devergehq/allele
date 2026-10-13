@@ -1,3 +1,0 @@
-# Declares Ubicloud's runner label so actionlint does not reject it as unknown.
-self-hosted-runner:
-  labels: [ubicloud-standard-2]
