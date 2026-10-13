@@ -10,6 +10,14 @@ name: CI
 # any branch. Every job carries the gate, because `on:` alone cannot express
 # "not while it is a draft".
 #
+# One accepted cost of dropping the `master` push: nothing refreshes the
+# `refs/heads/master`-scoped `Swatinem/rust-cache` entries any more, and a run
+# may restore only caches saved on its own branch or on the default branch. So
+# once those entries age out, or `Cargo.lock` changes their key, each ready
+# pull request pays one cold GPUI/alacritty build instead of sharing a warm
+# one. Free on a public repository, but slower per pull request — and the
+# reason to re-read this trade before copying the rule to a private one.
+#
 # The gate is `github.event_name != 'pull_request' || ... .draft == false`
 # rather than the bare `.draft == false`: on a non-pull-request event the
 # property is missing, and a missing property and `false` both coerce to 0, so
