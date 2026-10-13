@@ -95,9 +95,15 @@ Those belong to other tools. A sandbox drives your real Claude Code against
 throwaway projects — redirecting them would give you a broken agent rather than
 an isolated one. See `src/paths.rs`.
 
+## Continuous integration
+
+CI (`.github/workflows/ci.yml` — `rustfmt`, `test`, `architecture`, `clippy`) runs only on a pull request that is **ready for review**: pushing to a draft starts a run whose jobs all skip, marking the pull request ready runs all four, and a merge to `master` runs none, because the run on the ready pull request already covered that tree.
+
+So push as often as you like while your pull request is a draft — check it yourself with `cargo fmt`, `cargo test` and `cargo clippy` — then mark it ready when you want CI's verdict, or start any workflow by hand from the **Actions** tab on any branch.
+
 ## Code conventions
 
-- **Rust 2021 edition.** Standard `rustfmt` and `clippy` — no custom rules yet. Run `cargo fmt` before pushing: CI runs `cargo fmt --all -- --check` on every PR (`.github/workflows/ci.yml`), and `master` requires that check to pass.
+- **Rust 2021 edition.** Standard `rustfmt` and `clippy` — no custom rules yet. Run `cargo fmt` before pushing: CI runs `cargo fmt --all -- --check` on every ready pull request (see [Continuous integration](#continuous-integration) above). No branch-protection rule is configured, so no check blocks a merge automatically; by practice a pull request is merged only once its checks have passed on a ready pull request.
 - **One logical change per PR.** If you find yourself touching unrelated files, split the PR.
 - **Clear commit messages.** Explain *why*, not just *what*. The commit message is the primary documentation for future-you and future-anyone-else.
 - **No aggressive refactors in feature PRs.** If you want to refactor, do it in a separate PR with its own discussion.
