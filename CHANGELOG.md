@@ -13,6 +13,15 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Changed
+- The control socket answers a session id it has no record of with its own
+  error code, **`session_not_found`**, on `sessions.status`, `sessions.discard`
+  and `sessions.interrupt`. It was `bad_request`, the same code as a request
+  that could not be parsed, so a caller could tell "that session is gone" only
+  by matching the message. The message is unchanged (`no session with id …`),
+  so a caller still matching it keeps working. Review Desk's session strip and
+  the Locus dispatcher both read this answer and already accept either form.
+
 ## [0.7.2] - 2026-10-13
 
 ### Fixed

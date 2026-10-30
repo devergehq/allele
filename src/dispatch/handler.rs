@@ -14,7 +14,8 @@ use gpui::{Context, Window};
 use crate::app_state::AppState;
 use crate::dispatch::address;
 use crate::dispatch::protocol::{
-    DiscardedSession, ErrorCode, ProjectSummary, Request, Response, SessionState, SessionSummary,
+    no_such_session, DiscardedSession, ErrorCode, ProjectSummary, Request, Response, SessionState,
+    SessionSummary,
 };
 use crate::session::Session;
 
@@ -73,10 +74,7 @@ fn sessions_status(state: &AppState, session_id: &str, cx: &gpui::App) -> Respon
             };
         }
     }
-    Response::Error {
-        code: ErrorCode::BadRequest,
-        message: format!("no session with id {session_id}"),
-    }
+    no_such_session(session_id)
 }
 
 /// Remove a dispatched session, archiving its work (DEV-429).
@@ -102,10 +100,7 @@ fn sessions_discard(
             .map(|s_idx| (p_idx, s_idx))
     });
     let Some((project_idx, session_idx)) = found else {
-        return Response::Error {
-            code: ErrorCode::BadRequest,
-            message: format!("no session with id {session_id}"),
-        };
+        return no_such_session(session_id);
     };
 
     let session = &state.projects[project_idx].sessions[session_idx];

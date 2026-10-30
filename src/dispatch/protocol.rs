@@ -362,9 +362,31 @@ pub enum ErrorCode {
     /// the agent's to delete. Distinct from `bad_request` so a caller can
     /// tell "you may not do that" from "that does not exist".
     NotDispatched,
+    /// No session with that id, on any op that takes a `session_id` (DEV-1145).
+    ///
+    /// **Its own code so a caller can tell "that session is gone" from "you
+    /// asked wrongly" without reading the message.** Review Desk's status strip
+    /// draws a gone session differently from an Allele that refused the
+    /// question, and the Locus dispatcher starts a fresh session only on this
+    /// answer — before it existed both matched the text `no session with id`,
+    /// which is still the message, so a caller doing that keeps working.
+    SessionNotFound,
     /// Malformed request, unknown project field, etc.
     BadRequest,
     Internal,
+}
+
+/// The answer to any op naming a session Allele has no record of.
+///
+/// One function for the three places that look a session up — `sessions.status`,
+/// `sessions.discard`, and the claim behind `sessions.interrupt` — so they cannot
+/// drift apart on the code or the words. The message keeps its old text, which
+/// callers matched before the code existed.
+pub fn no_such_session(session_id: &str) -> Response {
+    Response::Error {
+        code: ErrorCode::SessionNotFound,
+        message: format!("no session with id {session_id}"),
+    }
 }
 
 #[cfg(test)]
@@ -432,6 +454,23 @@ mod tests {
             "\"not_dispatched\""
         );
         assert_ne!(ErrorCode::NotDispatched, ErrorCode::BadRequest);
+    }
+
+    /// An unknown session id is its own code, distinct from a malformed
+    /// request, and keeps the message callers used to match (DEV-1145).
+    #[test]
+    fn an_unknown_session_is_its_own_code() {
+        let response = no_such_session("nope");
+        let line = serde_json::to_string(&response).expect("serialises");
+        assert_eq!(
+            line,
+            r#"{"result":"error","code":"session_not_found","message":"no session with id nope"}"#
+        );
+        assert_ne!(ErrorCode::SessionNotFound, ErrorCode::BadRequest);
+        assert_eq!(
+            serde_json::from_str::<Response>(&line).expect("parses"),
+            response
+        );
     }
 
     /// A dispatched session that isn't told otherwise starts bare: a
