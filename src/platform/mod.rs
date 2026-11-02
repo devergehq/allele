@@ -6,6 +6,8 @@
 //!   (macOS) vs a tracing-warning stub.
 //! - [`SystemShell`] — `open(1)`, `afplay`, `osascript` display dialog
 //!   (macOS) vs portable `xdg-open`/no-op fallbacks.
+//! - [`SecretStore`] — the macOS Keychain vs a store that refuses, so a
+//!   secret is never quietly written to a file instead (DEV-1159).
 //!
 //! Adapters DELEGATE to existing `crate::clone`, `crate::browser`,
 //! `crate::hooks` modules rather than duplicating logic. This is
@@ -80,6 +82,24 @@ pub(crate) trait SystemShell: Send + Sync {
     /// once the user dismisses it. Used for startup errors that must
     /// block before the caller exits the process.
     fn show_fatal_dialog(&self, title: &str, body: &str);
+
+    /// The user-facing name of this computer (macOS: *System Settings →
+    /// General → Sharing*, read with `scutil --get ComputerName`). `None`
+    /// when the OS will not say. Used as the default machine name (DEV-1159).
+    fn computer_name(&self) -> Option<String>;
+}
+
+/// Small secrets kept by the OS rather than on disk: the macOS Keychain.
+///
+/// Items are addressed by `(service, account)`, the Keychain's own generic-
+/// password key. Implementations must never fall back to a file: a platform
+/// without a secure store returns [`crate::errors::AlleleError::PlatformUnsupported`].
+pub(crate) trait SecretStore: Send + Sync {
+    /// The secret stored at `(service, account)`, or `None` if there is none.
+    fn load(&self, service: &str, account: &str) -> crate::errors::Result<Option<Vec<u8>>>;
+
+    /// Store `secret` at `(service, account)`, replacing any previous value.
+    fn store(&self, service: &str, account: &str, secret: &[u8]) -> crate::errors::Result<()>;
 }
 
 /// Bundle of trait objects representing the current platform's
@@ -91,6 +111,7 @@ pub(crate) struct Platform {
     #[allow(dead_code)] // held for phase-17 migration
     pub(crate) browser: Arc<dyn BrowserIntegration>,
     pub(crate) shell: Arc<dyn SystemShell>,
+    pub(crate) secrets: Arc<dyn SecretStore>,
 }
 
 impl Platform {
@@ -104,6 +125,7 @@ impl Platform {
                 clone: Arc::new(apple::AppleCloneBackend),
                 browser: Arc::new(apple::AppleBrowser),
                 shell: Arc::new(apple::AppleShell),
+                secrets: Arc::new(apple::AppleKeychain),
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -112,6 +134,7 @@ impl Platform {
                 clone: Arc::new(unsupported::FullCopyCloneBackend),
                 browser: Arc::new(unsupported::UnsupportedBrowser),
                 shell: Arc::new(unsupported::PortableSystemShell),
+                secrets: Arc::new(unsupported::NoSecretStore),
             }
         }
     }
@@ -138,6 +161,7 @@ impl Platform {
             clone: Arc::clone(&self.clone),
             browser: Arc::clone(&self.browser),
             shell: Arc::clone(&self.shell),
+            secrets: Arc::clone(&self.secrets),
         }
     }
 }

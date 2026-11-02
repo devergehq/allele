@@ -26,6 +26,7 @@ mod appearance;
 mod browser;
 mod editor;
 mod infrastructure;
+mod machines;
 mod naming;
 mod projects;
 mod sessions;
@@ -36,6 +37,7 @@ use appearance::AppearanceSection;
 use browser::BrowserSection;
 use editor::EditorSection;
 use infrastructure::InfraSection;
+use machines::MachinesSection;
 use naming::NamingSection;
 use projects::ProjectsSection;
 use sessions::SessionsSection;
@@ -52,6 +54,7 @@ enum Section {
     Browser,
     Appearance,
     Sync,
+    Machines,
 }
 
 impl Section {
@@ -66,6 +69,7 @@ impl Section {
             Section::Browser => "Browser",
             Section::Appearance => "Appearance",
             Section::Sync => "Sync",
+            Section::Machines => "Machines",
         }
     }
 
@@ -167,6 +171,18 @@ impl Section {
                 "share",
                 "device",
             ],
+            Section::Machines => &[
+                "machine",
+                "machines",
+                "computer name",
+                "relay",
+                "iroh",
+                "peer",
+                "pair",
+                "identity",
+                "multi-machine",
+                "network",
+            ],
         }
     }
 
@@ -204,6 +220,8 @@ pub struct SettingsWindowState {
     projects: ProjectsSection,
     /// Sync section (session-sync store config + connection test).
     sync: SyncSection,
+    /// Machines section (machine name, machine id, relay URL).
+    machines: MachinesSection,
 }
 
 impl SettingsWindowState {
@@ -247,8 +265,11 @@ impl SettingsWindowState {
             infrastructure: InfraSection::new(settings.base_infra_enabled),
             projects: ProjectsSection::new(cx),
             sync: SyncSection::new(cx, &settings.sync),
+            machines: MachinesSection::new(cx, &settings.remote),
         };
         s.agents.sync_inputs(cx);
+        let app = s.app.clone();
+        s.machines.load(&app, cx);
         s
     }
 }
@@ -287,6 +308,7 @@ fn render_sidebar(
         Section::Browser,
         Section::Appearance,
         Section::Sync,
+        Section::Machines,
     ];
 
     let mut list = div()
@@ -402,6 +424,7 @@ fn render_section_pane(
         Section::Browser => this.browser.render(cx).into_any_element(),
         Section::Appearance => this.appearance.render(cx).into_any_element(),
         Section::Sync => this.sync.render(cx).into_any_element(),
+        Section::Machines => this.machines.render(cx).into_any_element(),
     }
 }
 

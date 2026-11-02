@@ -1439,6 +1439,16 @@ impl AppState {
                 }
                 self.mark_settings_dirty();
             }
+            SettingsAction::UpdateMachineName(name) => {
+                *skip_refocus = true;
+                self.user_settings.remote.machine_name = non_blank(name);
+                self.mark_settings_dirty();
+            }
+            SettingsAction::UpdateRelayUrl(url) => {
+                *skip_refocus = true;
+                self.user_settings.remote.relay_url = non_blank(url);
+                self.mark_settings_dirty();
+            }
             SettingsAction::UpdateBaseInfra(enabled) => {
                 *skip_refocus = true;
                 self.user_settings.base_infra_enabled = enabled;
@@ -1552,6 +1562,13 @@ impl AppState {
             }
         }
     }
+}
+
+/// `None` for blank input, the trimmed text otherwise — how optional text
+/// settings are stored, so "cleared" and "never set" mean the same thing.
+fn non_blank(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -1729,6 +1746,47 @@ mod tests {
             Some("develop")
         );
         assert_eq!(fx.state.save_count(), 0);
+    }
+
+    /// Settings family (DEV-1159). The machine name persists to
+    /// settings.json, trimmed; clearing it stores `None`, which resolves back
+    /// to the computer name.
+    #[gpui::test]
+    fn update_machine_name_persists_trimmed_and_clears_to_none(cx: &mut TestAppContext) {
+        let fx = Fixture::new(cx);
+
+        let dirty = fx.dispatch(SettingsAction::UpdateMachineName("  Desk  ".into()), cx);
+        assert_eq!(dirty, (false, true));
+        fx.checkpoint(cx);
+        assert_eq!(
+            fx.settings.snapshot().remote.machine_name.as_deref(),
+            Some("Desk")
+        );
+
+        // Clearing marks settings dirty and stores `None`. (Read from the app,
+        // not the repository: the coordinator throttles back-to-back saves.)
+        let dirty = fx.dispatch(SettingsAction::UpdateMachineName("   ".into()), cx);
+        assert_eq!(dirty, (false, true));
+        let name = fx.update(cx, |state, _w, _cx| {
+            state.user_settings.remote.machine_name.clone()
+        });
+        assert_eq!(name, None);
+        assert_eq!(fx.state.save_count(), 0);
+    }
+
+    /// Settings family (DEV-1159). The relay URL persists to settings.json.
+    #[gpui::test]
+    fn update_relay_url_persists_to_settings_json(cx: &mut TestAppContext) {
+        let fx = Fixture::new(cx);
+        fx.dispatch(
+            SettingsAction::UpdateRelayUrl("https://relay.example.com".into()),
+            cx,
+        );
+        fx.checkpoint(cx);
+        assert_eq!(
+            fx.settings.snapshot().remote.relay_url.as_deref(),
+            Some("https://relay.example.com")
+        );
     }
 
     /// Archive family, via the dispatcher's stale-confirmation guard. A

@@ -62,6 +62,13 @@ similar = "2"
 # use tokio + native-tls, which on macOS is Security.framework (no OpenSSL).
 rust-s3 = "0.37.2"
 
+# Peer-to-peer QUIC transport for multi-machine (DEV-1159). Endpoints are
+# dialed by public key; iroh handles hole-punching and relay fallback. Pinned
+# exactly: n0 retires relays for old versions, so upgrades are deliberate.
+# Only `src/remote/iroh.rs` may name this crate (tests/architecture.rs).
+# Default features minus `metrics` and `portmapper` (~1.1 MB, DEV-1158 spike).
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+
 # Client-side payload encryption for session sync (X25519 data key + scrypt
 # passphrase wrapping).
 age = "0.12.1"
@@ -103,6 +110,10 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-cli
 [dev-dependencies]
 gpui = { git = "https://github.com/zed-industries/zed", rev = "83de8a25e0ef71a8d762a148459bc863adaeb7e3", package = "gpui", features = ["test-support"] }
 tempfile = "3"
+# Paused-clock tests for the reconnect supervisor (`remote::link`, DEV-1159).
+tokio = { version = "1", features = ["full", "test-util"] }
+# A local relay server so the iroh transport tests run offline (DEV-1159).
+iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring", "test-utils"] }
 
 # Architecture fitness tests (tests/architecture.rs) — walk the source tree and
 # parse it to enforce the invariants in ARCHITECTURE.md §7.
