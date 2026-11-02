@@ -163,8 +163,10 @@ impl MirroredGrid {
         self.display_offset = offset.clamp(0, self.history_size as i64) as usize;
     }
 
-    /// The next scrollback page to request, as `(start, count)`, when the view
-    /// reaches lines that are not loaded yet.
+    /// The next scrollback page to request, as `(start, count)`. It keeps a
+    /// screenful loaded above whatever is in view, so scrolling up rarely
+    /// shows a blank line waiting for its page; that also means one page is
+    /// wanted straight after attach.
     pub fn wanted_page(&self, page_len: usize) -> Option<(usize, usize)> {
         let loaded = self.history.len();
         let needed = (self.display_offset + self.lines).min(self.history_size);
