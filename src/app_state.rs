@@ -498,6 +498,9 @@ pub(crate) struct AppState {
     /// startup. Background tasks get cheap Arc clones. See
     /// ARCHITECTURE.md §3.2 + §4.1.
     pub(crate) platform: crate::platform::Platform,
+    /// Host side of the status feed paired clients subscribe to (DEV-1162).
+    /// A cheap clone handle: the transport holds its own copy.
+    pub(crate) status_feed: crate::status_feed::StatusFeed,
     /// Set by the Debug menu or agent request-file watcher.
     pub(crate) capture_ui_requested: bool,
 }
@@ -537,6 +540,19 @@ impl AppState {
     /// Do NOT call `save_state()` directly — see ARCHITECTURE.md §7.2.
     pub(crate) fn mark_state_dirty(&mut self) {
         self.state_dirty = true;
+        // Every add, remove, rename and status change ends here, so this is
+        // the one trigger the status feed needs (DEV-1162). The publisher
+        // diffs, so a call that changed nothing it reports costs a compare.
+        self.publish_status_feed();
+    }
+
+    /// Republish the status feed from the current sessions. Cheap and
+    /// idempotent; see [`crate::status_feed::StatusFeed::publish`].
+    pub(crate) fn publish_status_feed(&self) {
+        self.status_feed
+            .publish(crate::status_feed::host::entries_from_projects(
+                &self.projects,
+            ));
     }
 
     /// Flag that user settings (`settings.json`) have been mutated
@@ -1098,6 +1114,7 @@ pub(crate) mod fixture {
                     // depend on startup having installed the global.
                     platform: crate::platform::Platform::detect(),
                     capture_ui_requested: false,
+                    status_feed: Default::default(),
                 }
             });
 
