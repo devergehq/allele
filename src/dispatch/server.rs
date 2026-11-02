@@ -55,7 +55,8 @@ pub struct ControlRequest {
 
 /// A remote screen stream (DEV-1165) asking the foreground drain for a
 /// session's terminal. The answer is a weak handle, so a mirror never keeps a
-/// closed session's terminal alive. Only agent sessions are found.
+/// closed session's terminal alive. It is the session's own terminal, never
+/// a drawer shell. `None` when there is no such session or it has no terminal.
 pub struct ScreenLookup {
     pub session_id: String,
     pub reply: Sender<Option<std::sync::Arc<dyn crate::terminal::mirror::MirrorTerm>>>,

@@ -31,12 +31,12 @@
 //!                                                      the client to hang up
 //!     client → host  request  { id, op: <dispatch Request> }
 //!     host → client  response { id, result: <dispatch Response> }
-//!     client → host  attach   { session_id }   needs view (DEV-1165)
+//!     client → host  attach   { attach_id, session_id }   needs view (DEV-1165)
 //!                  | detach   { session_id }
-//!     host → client  attach_failed { session_id, code, message }
+//!     host → client  attach_failed { attach_id, session_id, code, message }
 //!
 //!   screen stream (one per attached session; HOST-opened, DEV-1165)
-//!     host → client  screen_open { session_id }   first frame
+//!     host → client  screen_open { attach_id, session_id }   first frame
 //!     host → client  screen { frame: snapshot | diff | scrollback }
 //!     client → host  scrollback_request { start, count } | resync
 //! ```
@@ -163,19 +163,24 @@ pub enum Frame {
     /// Client → host, on the control stream: mirror this session's screen.
     /// Needs `view`. The host answers by opening a screen stream, or with
     /// [`Frame::AttachFailed`].
-    Attach { session_id: String },
+    ///
+    /// `attach_id` is the client's own number for this attach; the host
+    /// echoes it in `screen_open` or `attach_failed`, so an answer can never
+    /// be taken for a different attach of the same session.
+    Attach { attach_id: u64, session_id: String },
     /// Client → host, on the control stream: stop mirroring this session.
     /// Closing the screen stream does the same.
     Detach { session_id: String },
     /// Host → client, on the control stream: the attach is not going ahead,
     /// or an attached stream stopped (session gone, `view` revoked).
     AttachFailed {
+        attach_id: u64,
         session_id: String,
         code: ErrorCode,
         message: String,
     },
     /// Host → client: the first frame on a host-opened screen stream.
-    ScreenOpen { session_id: String },
+    ScreenOpen { attach_id: u64, session_id: String },
     /// Host → client, on a screen stream: a snapshot, diff or scrollback page.
     Screen { frame: ScreenFrame },
     /// Client → host, on a screen stream: send scrollback rows

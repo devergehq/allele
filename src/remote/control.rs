@@ -39,7 +39,7 @@ use tokio::time::timeout;
 
 use super::peers::PeerPermissions;
 use super::registry::PeerRegistry;
-use super::screen::{Attachments, ScreenSource};
+use super::screen::{Attachments, Handled, ScreenSource};
 use super::transport::{PeerConnection, PeerId, PeerStream};
 use super::wire::{self, write_frame, Frame, StreamRefusal, MAX_PEER_FRAME, PROTOCOL_VERSION};
 use crate::dispatch::protocol::{ErrorCode, Request, Response};
@@ -349,7 +349,9 @@ async fn run(
             // Inline: the lookup behind an attach is bounded, and requests
             // already admitted keep running meanwhile.
             Ok(frame @ (Frame::Attach { .. } | Frame::Detach { .. })) => {
-                attachments.handle(frame).await;
+                if attachments.handle(frame).await == Handled::Gone {
+                    break Ended::Connection(NOT_PAIRED.into());
+                }
                 continue;
             }
             Ok(other) => {

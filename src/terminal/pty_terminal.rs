@@ -315,13 +315,13 @@ impl PtyTerminal {
         self.cleanup_hooks.push(Box::new(hook));
     }
 
-    /// Write input bytes to the PTY
     /// A handle a screen mirror captures from (DEV-1165). Weak, and carrying
     /// the scrollback limit this terminal was built with.
     pub fn mirror_handle(&self) -> crate::terminal::mirror::SharedTerm<JsonEventListener> {
         crate::terminal::mirror::SharedTerm::new(&self.term, Some(SCROLLBACK_LINES))
     }
 
+    /// Write input bytes to the PTY
     pub fn write(&self, input: &[u8]) {
         let _ = self.pty_tx.0.send(Msg::Input(input.to_vec().into()));
     }

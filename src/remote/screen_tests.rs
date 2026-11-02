@@ -13,6 +13,10 @@
 //! | requests still answered while attached | `requests_are_still_answered_while_a_session_is_attached` |
 //! | removing the peer ends its streams | `removing_the_peer_ends_its_screen_stream` |
 //! | an attach the host refuses fails the client call | `a_refused_attach_fails_the_client_call_with_the_hosts_message` |
+//! | a failure for another attach never fails this one | `a_failure_for_another_attach_does_not_fail_a_pending_one` |
+//! | a host that cannot look the session up says so | `a_lookup_the_host_cannot_answer_is_internal_not_not_found` |
+//! | a re-attach that fails leaves the working stream | `a_failed_reattach_keeps_the_working_stream` |
+//! | a full-size screen fits the link | `a_full_size_colour_screen_streams` |
 
 #![cfg(test)]
 
@@ -39,6 +43,7 @@ use super::testing::{MemNet, MemTransport};
 use super::transport::{PeerConnection, PeerStream, PeerTransport};
 use super::wire::{read_frame_within, write_frame, Frame, MAX_PEER_FRAME, PROTOCOL_VERSION};
 use crate::dispatch::protocol::{ErrorCode, Request, Response};
+use crate::errors::{AlleleError, Result};
 use crate::repositories::fakes::InMemoryPeersRepository;
 use crate::terminal::mirror::{capture, capture_history, MirrorTerm, ScreenFrame, SharedTerm};
 
@@ -49,14 +54,14 @@ const WAIT: Duration = Duration::from_secs(5);
 
 type HostTerm = Arc<FairMutex<Term<VoidListener>>>;
 
-fn term() -> HostTerm {
+fn term(columns: usize, lines: usize) -> HostTerm {
     let config = Config {
         scrolling_history: HISTORY,
         ..Default::default()
     };
     Arc::new(FairMutex::new(Term::new(
         config,
-        &TermSize::new(COLUMNS, LINES),
+        &TermSize::new(columns, lines),
         VoidListener,
     )))
 }
@@ -67,15 +72,22 @@ fn feed(term: &HostTerm, bytes: &[u8]) {
 }
 
 /// Terminals by session id, as the app's sessions would hold them.
+/// `s-busy` stands for a host that could not answer the lookup in time.
 #[derive(Default)]
 struct Screens(Mutex<HashMap<String, HostTerm>>);
 
 #[async_trait]
 impl ScreenSource for Screens {
-    async fn find(&self, session_id: &str) -> Option<Arc<dyn MirrorTerm>> {
+    async fn find(&self, session_id: &str) -> Result<Option<Arc<dyn MirrorTerm>>> {
+        if session_id == "s-busy" {
+            return Err(AlleleError::Remote(
+                "the other Mac is busy; try again".into(),
+            ));
+        }
         let terms = self.0.lock().unwrap();
-        let term = terms.get(session_id)?;
-        Some(Arc::new(SharedTerm::new(term, Some(HISTORY))))
+        Ok(terms
+            .get(session_id)
+            .map(|term| Arc::new(SharedTerm::new(term, Some(HISTORY))) as Arc<dyn MirrorTerm>))
     }
 }
 
@@ -94,19 +106,24 @@ struct Host {
     registry: PeerRegistry,
     /// The one session this host has, `s-1`.
     term: HostTerm,
+    screens: Arc<Screens>,
 }
 
 impl Host {
     fn start(net: &Arc<MemNet>) -> Self {
+        Self::start_sized(net, COLUMNS, LINES)
+    }
+
+    fn start_sized(net: &Arc<MemNet>, columns: usize, lines: usize) -> Self {
         let t = net.endpoint();
         let registry = PeerRegistry::load(Arc::new(InMemoryPeersRepository::default()));
-        let term = term();
-        let screens = Screens::default();
+        let term = term(columns, lines);
+        let screens = Arc::new(Screens::default());
         screens.0.lock().unwrap().insert("s-1".into(), term.clone());
         let control = ControlContext {
             dispatch: Arc::new(Lists),
             host_name: HostName::new(Some("Studio".into()), || None),
-            screens: Arc::new(screens),
+            screens: screens.clone(),
         };
         let gate = Gate::new(
             registry.clone(),
@@ -115,7 +132,12 @@ impl Host {
             control,
         );
         tokio::spawn(listener::run(t.clone() as Arc<dyn PeerTransport>, gate));
-        Self { t, registry, term }
+        Self {
+            t,
+            registry,
+            term,
+            screens,
+        }
     }
 
     /// A trusted peer with `permissions`, connected, its control stream open
@@ -155,8 +177,10 @@ async fn read(stream: &mut PeerStream) -> Frame {
         .expect("a readable frame")
 }
 
-async fn attach(control: &mut PeerStream, session_id: &str) {
+/// Raw attaches use ids from 100, clear of any `ScreenClient`'s.
+async fn attach(control: &mut PeerStream, attach_id: u64, session_id: &str) {
     let attach = Frame::Attach {
+        attach_id,
         session_id: session_id.into(),
     };
     write_frame(&mut control.send, &attach).await.unwrap();
@@ -178,14 +202,20 @@ async fn attach_opens_a_screen_stream_that_starts_with_a_snapshot() {
     feed(&host.term, b"hello from the host");
     let (_laptop, conn, mut control) = host.peer(&net, VIEW).await;
 
-    attach(&mut control, "s-1").await;
+    attach(&mut control, 100, "s-1").await;
     let mut screen = timeout(WAIT, conn.accept_stream())
         .await
         .expect("the host opens a stream")
         .unwrap();
 
     match read(&mut screen).await {
-        Frame::ScreenOpen { session_id } => assert_eq!(session_id, "s-1"),
+        Frame::ScreenOpen {
+            attach_id,
+            session_id,
+        } => {
+            assert_eq!(attach_id, 100, "the host echoes the client's attach id");
+            assert_eq!(session_id, "s-1");
+        }
         other => panic!("expected screen_open, got {other:?}"),
     }
     match read(&mut screen).await {
@@ -205,11 +235,15 @@ async fn a_peer_without_view_is_refused_attach() {
     let host = Host::start(&net);
     let (_laptop, conn, mut control) = host.peer(&net, NOTHING).await;
 
-    attach(&mut control, "s-1").await;
+    attach(&mut control, 100, "s-1").await;
     match read(&mut control).await {
         Frame::AttachFailed {
-            session_id, code, ..
+            attach_id,
+            session_id,
+            code,
+            ..
         } => {
+            assert_eq!(attach_id, 100);
             assert_eq!(session_id, "s-1");
             assert_eq!(code, ErrorCode::PermissionDenied);
         }
@@ -225,7 +259,7 @@ async fn an_unknown_session_is_refused_with_session_not_found() {
     let host = Host::start(&net);
     let (_laptop, _conn, mut control) = host.peer(&net, VIEW).await;
 
-    attach(&mut control, "s-nope").await;
+    attach(&mut control, 100, "s-nope").await;
     match read(&mut control).await {
         Frame::AttachFailed { code, .. } => assert_eq!(code, ErrorCode::SessionNotFound),
         other => panic!("expected attach_failed, got {other:?}"),
@@ -291,7 +325,7 @@ async fn detach_ends_the_hosts_screen_stream() {
     let host = Host::start(&net);
     let (_laptop, conn, mut control) = host.peer(&net, VIEW).await;
 
-    attach(&mut control, "s-1").await;
+    attach(&mut control, 100, "s-1").await;
     let mut screen = conn.accept_stream().await.unwrap();
     assert!(matches!(read(&mut screen).await, Frame::ScreenOpen { .. }));
 
@@ -373,4 +407,123 @@ async fn a_refused_attach_fails_the_client_call_with_the_hosts_message() {
         err.to_string().contains("no session with id s-nope"),
         "the host's message reaches the caller: {err}"
     );
+}
+
+#[tokio::test]
+async fn a_failure_for_another_attach_does_not_fail_a_pending_one() {
+    // A host that never answers, so the attach stays pending as long as the
+    // test needs: no race with a real answer.
+    let net = MemNet::new();
+    let (laptop, silent) = (net.endpoint(), net.endpoint());
+    let conn = laptop.dial_mem(silent.local_id()).await;
+    let client = Arc::new(ScreenClient::new(conn));
+    let pending = {
+        let client = Arc::clone(&client);
+        tokio::spawn(async move { client.attach(&mut tokio::io::sink(), "s-1").await })
+    };
+    sleep(Duration::from_millis(20)).await;
+
+    // A failure left over from an earlier attach of the same session...
+    let failed = |attach_id, message: &str| Frame::AttachFailed {
+        attach_id,
+        session_id: "s-1".into(),
+        code: ErrorCode::SessionNotFound,
+        message: message.into(),
+    };
+    assert!(client.on_control_frame(&failed(999, "the session has ended")));
+    sleep(Duration::from_millis(20)).await;
+    assert!(
+        !pending.is_finished(),
+        "a stale failure leaves the attach pending"
+    );
+
+    // ...while one for this attach (the client's first id) ends it.
+    assert!(client.on_control_frame(&failed(1, "this one")));
+    let err = match timeout(WAIT, pending).await.unwrap().unwrap() {
+        Ok(_) => panic!("the attach was refused"),
+        Err(e) => e,
+    };
+    assert!(err.to_string().contains("this one"), "{err}");
+}
+
+#[tokio::test]
+async fn a_lookup_the_host_cannot_answer_is_internal_not_not_found() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, _conn, mut control) = host.peer(&net, VIEW).await;
+
+    attach(&mut control, 100, "s-busy").await;
+    match read(&mut control).await {
+        Frame::AttachFailed { code, message, .. } => {
+            assert_eq!(
+                code,
+                ErrorCode::Internal,
+                "a busy host is not a missing session"
+            );
+            assert!(message.contains("try again"), "{message}");
+        }
+        other => panic!("expected attach_failed, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_failed_reattach_keeps_the_working_stream() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, VIEW).await;
+
+    attach(&mut control, 100, "s-1").await;
+    let mut screen = conn.accept_stream().await.unwrap();
+    assert!(matches!(read(&mut screen).await, Frame::ScreenOpen { .. }));
+    assert!(matches!(read(&mut screen).await, Frame::Screen { .. }));
+
+    // The session can no longer be found, so the re-attach fails...
+    host.screens.0.lock().unwrap().remove("s-1");
+    attach(&mut control, 101, "s-1").await;
+    match read(&mut control).await {
+        Frame::AttachFailed {
+            attach_id, code, ..
+        } => {
+            assert_eq!(attach_id, 101);
+            assert_eq!(code, ErrorCode::SessionNotFound);
+        }
+        other => panic!("expected attach_failed, got {other:?}"),
+    }
+
+    // ...and the stream already running carries on.
+    feed(&host.term, b"still here");
+    assert!(
+        matches!(read(&mut screen).await, Frame::Screen { .. }),
+        "the first stream still sends diffs"
+    );
+}
+
+#[tokio::test]
+async fn a_full_size_colour_screen_streams() {
+    let net = MemNet::new();
+    let host = Host::start_sized(&net, 200, 60);
+    // A style change on every cell: the worst case for the run encoding.
+    let mut output = String::new();
+    for line in 0..60 {
+        for col in 0..200 {
+            let c = (line * 200 + col) % 256;
+            output.push_str(&format!("\x1b[38;5;{c};48;5;{}m#", 255 - c));
+        }
+        output.push_str("\r\n");
+    }
+    feed(&host.term, output.as_bytes());
+
+    let (_laptop, conn, mut control) = host.peer(&net, VIEW).await;
+    let client = ScreenClient::new(conn);
+    let attached = client.attach(&mut control.send, "s-1").await.unwrap();
+    let grid = attached.grid();
+    eventually("a 200x60 snapshot arrives", || {
+        let host_screen = capture(&host.term.lock()).screen;
+        let grid = grid.lock();
+        host_screen
+            .iter()
+            .enumerate()
+            .all(|(i, row)| grid.row(i as i32) == Some(row))
+    })
+    .await;
 }
