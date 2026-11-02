@@ -77,25 +77,21 @@ impl HostFeeds {
     }
 
     /// One host's state, if it is followed.
-    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub fn get(&self, peer: PeerId) -> Option<RemoteHostState> {
         self.lock().get(&peer).cloned()
     }
 
     /// Every followed host's state.
-    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub fn all(&self) -> Vec<(PeerId, RemoteHostState)> {
         self.lock().iter().map(|(p, h)| (*p, h.clone())).collect()
     }
 
     /// Ticks whenever any host's state changes. For a UI that redraws.
-    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
     }
 
     /// Live status transitions, for notifications.
-    #[allow(dead_code)] // first caller: remote attention + notifications (DEV-1164)
     pub fn subscribe_transitions(&self) -> broadcast::Receiver<HostTransition> {
         self.transitions.subscribe()
     }
@@ -309,5 +305,101 @@ async fn read(conn: &Arc<dyn PeerConnection>, stream: &mut PeerStream) -> Option
     tokio::select! {
         frame = read_frame_within(&mut stream.recv, MAX_PEER_FRAME) => frame.ok(),
         _ = conn.closed() => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::remote::LocalIdentity;
+    use crate::status_feed::model::{FeedAttention, FeedStatus, SessionEntry};
+    use crate::status_feed::StatusChange;
+    use tokio::sync::broadcast::error::TryRecvError;
+
+    fn entry(status: FeedStatus) -> SessionEntry {
+        SessionEntry {
+            id: "a".into(),
+            label: "one".into(),
+            project_id: "p1".into(),
+            project_name: "allele".into(),
+            group: None,
+            status,
+            attention: (status == FeedStatus::AwaitingInput).then_some(FeedAttention::Permission),
+            last_activity_ms: 1,
+        }
+    }
+
+    fn snap(seq: u64, status: FeedStatus) -> StatusSnapshot {
+        StatusSnapshot {
+            seq,
+            sessions: vec![entry(status)],
+        }
+    }
+
+    /// DEV-1164: a session that started waiting while the host was
+    /// unreachable is in the state after the reconnect snapshot, but is not
+    /// announced — notifications come only from this channel.
+    #[test]
+    fn a_reconnect_snapshot_is_never_broadcast_as_a_transition() {
+        let feeds = HostFeeds::default();
+        let peer = LocalIdentity::ephemeral().id();
+        let mut rx = feeds.subscribe_transitions();
+
+        // Cold start with the session already waiting: shown, not announced.
+        feeds.snapshot(peer, snap(3, FeedStatus::AwaitingInput));
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
+
+        // It moves on, live: that is a transition (but not into waiting).
+        assert!(!feeds.delta(
+            peer,
+            StatusDelta {
+                seq: 4,
+                change: StatusChange::StatusChanged {
+                    id: "a".into(),
+                    status: FeedStatus::Running,
+                    attention: None,
+                    last_activity_ms: 2,
+                },
+            },
+        ));
+        let t = rx.try_recv().expect("a live transition");
+        assert!(!t.transition.enters_awaiting_input());
+
+        // The host drops; meanwhile the session starts waiting; we reconnect.
+        feeds.lost(peer);
+        feeds.snapshot(peer, snap(9, FeedStatus::AwaitingInput));
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty), "no re-notify");
+        let state = feeds.get(peer).expect("followed");
+        assert_eq!(state.awaiting_input().count(), 1, "but it is shown");
+
+        // A live change into waiting after that is announced, exactly once.
+        assert!(!feeds.delta(
+            peer,
+            StatusDelta {
+                seq: 10,
+                change: StatusChange::StatusChanged {
+                    id: "a".into(),
+                    status: FeedStatus::Running,
+                    attention: None,
+                    last_activity_ms: 3,
+                },
+            },
+        ));
+        assert!(!feeds.delta(
+            peer,
+            StatusDelta {
+                seq: 11,
+                change: StatusChange::StatusChanged {
+                    id: "a".into(),
+                    status: FeedStatus::AwaitingInput,
+                    attention: Some(FeedAttention::Question),
+                    last_activity_ms: 4,
+                },
+            },
+        ));
+        let _running = rx.try_recv().expect("into running");
+        let waiting = rx.try_recv().expect("into waiting");
+        assert!(waiting.transition.enters_awaiting_input());
+        assert_eq!(rx.try_recv(), Err(TryRecvError::Empty));
     }
 }
