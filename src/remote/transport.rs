@@ -133,7 +133,7 @@ pub trait PeerTransport: Send + Sync {
 
     /// Tell the transport the network changed (interface switch, wake from
     /// sleep) so it re-probes paths now instead of waiting to notice.
-    #[allow(dead_code)] // first caller: the client link (DEV-1162)
+    #[allow(dead_code)] // first caller: a wake / network-change observer (follow-up to DEV-1162)
     async fn network_changed(&self);
 
     /// Close every connection and release the endpoint.
