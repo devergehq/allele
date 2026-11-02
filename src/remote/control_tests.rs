@@ -96,12 +96,20 @@ struct Host {
 
 impl Host {
     fn start(net: &Arc<MemNet>) -> Self {
+        let script = Arc::new(Script::default());
+        Self::start_with(net, script.clone(), script)
+    }
+
+    fn start_with(
+        net: &Arc<MemNet>,
+        dispatch: Arc<dyn RemoteDispatch>,
+        script: Arc<Script>,
+    ) -> Self {
         let t = net.endpoint();
         let registry = PeerRegistry::load(Arc::new(InMemoryPeersRepository::default()));
         let pairing = Arc::new(HostPairing::default());
-        let script = Arc::new(Script::default());
         let control = ControlContext {
-            dispatch: script.clone(),
+            dispatch,
             host_name: HostName::new(Some("Studio".into()), || None),
         };
         let gate = Gate::new(
@@ -530,4 +538,113 @@ async fn concurrent_requests_are_answered_by_id() {
     }
     seen.sort_unstable();
     assert_eq!(seen, (0..20).collect::<Vec<_>>());
+}
+
+/// A dispatcher that holds every call until released, so requests pile up in
+/// flight; it records into the host's script once let through.
+struct Gated {
+    script: Arc<Script>,
+    gate: tokio::sync::Semaphore,
+}
+
+#[async_trait]
+impl RemoteDispatch for Gated {
+    async fn call(&self, op: Request) -> Response {
+        self.gate.acquire().await.unwrap().forget();
+        self.script.call(op).await
+    }
+}
+
+/// A request admitted but still queued for a slot is checked again when it
+/// gets one: revoking `control` stops it, not just the requests after it.
+#[tokio::test]
+async fn revoking_control_stops_a_create_still_waiting_for_a_slot() {
+    let net = MemNet::new();
+    let script = Arc::new(Script::default());
+    let gated = Arc::new(Gated {
+        script: script.clone(),
+        gate: tokio::sync::Semaphore::new(0),
+    });
+    let host = Host::start_with(&net, gated.clone(), script.clone());
+    let (laptop, conn) = host.peer(&net, CONTROL).await;
+    let (mut stream, _) = hello(&conn, 1).await;
+    let max = super::control::MAX_IN_FLIGHT as u64;
+    for id in 0..=max {
+        write_frame(
+            &mut stream.send,
+            &Frame::Request {
+                id,
+                op: create(None),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    // Give the host time to admit all of them: `max` in flight, one queued.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    host.registry.set_control(laptop.local_id(), false).unwrap();
+    gated.gate.add_permits(64);
+
+    let mut denied = Vec::new();
+    for _ in 0..=max {
+        if let Frame::Response { id, result } = read(&mut stream).await {
+            if is_denied(&result) {
+                denied.push(id);
+            }
+        }
+    }
+    assert_eq!(denied, vec![max], "only the queued request is stopped");
+    assert_eq!(script.calls().len(), max as usize);
+}
+
+/// A second stream with a protocol this host does not speak is refused as a
+/// second stream; it does not tear down the working one.
+#[tokio::test]
+async fn a_bad_second_hello_leaves_the_first_control_stream_alone() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn) = host.peer(&net, VIEW).await;
+    let (mut first, _) = hello(&conn, 1).await;
+    let (_second, reply) = hello(&conn, 2).await;
+    assert!(
+        matches!(
+            reply,
+            Frame::Refused {
+                code: StreamRefusal::AlreadyOpen,
+                ..
+            }
+        ),
+        "{reply:?}"
+    );
+    assert!(!conn.is_closed());
+    assert!(matches!(
+        call(&mut first, 1, Request::SessionsList).await,
+        Response::Sessions { .. }
+    ));
+}
+
+/// A stream that does not start with a hello is told so.
+#[tokio::test]
+async fn a_stream_without_a_hello_is_refused_readably() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn) = host.peer(&net, CONTROL).await;
+    let mut stream = conn.open_stream().await.unwrap();
+    write_frame(
+        &mut stream.send,
+        &Frame::Request {
+            id: 1,
+            op: Request::SessionsList,
+        },
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        read(&mut stream).await,
+        Frame::Refused {
+            code: StreamRefusal::BadHello,
+            ..
+        }
+    ));
+    assert!(host.script.calls().is_empty());
 }

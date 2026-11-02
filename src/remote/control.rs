@@ -42,12 +42,14 @@ use super::registry::PeerRegistry;
 use super::transport::{PeerConnection, PeerId, PeerStream};
 use super::wire::{self, write_frame, Frame, StreamRefusal, MAX_PEER_FRAME, PROTOCOL_VERSION};
 use crate::dispatch::protocol::{ErrorCode, Request, Response};
-use crate::dispatch::server::{ControlRequest, REPLY_TIMEOUT};
+use crate::dispatch::server::{forward, ControlRequest};
 
 /// Requests one connection may have in flight. Past this the host stops
 /// reading that stream until one finishes — backpressure on a peer that
 /// floods, rather than a queue of creates on the foreground thread.
 pub const MAX_IN_FLIGHT: usize = 8;
+
+const NOT_PAIRED: &str = "this machine is not paired";
 
 /// Responses and pushes waiting to be written on one stream.
 const OUTBOX: usize = 2 * MAX_IN_FLIGHT;
@@ -122,32 +124,25 @@ pub trait RemoteDispatch: Send + Sync {
 
 /// The production [`RemoteDispatch`]: the same channel `control.sock` feeds.
 pub struct ControlQueue {
-    tx: Mutex<mpsc::Sender<ControlRequest>>,
+    tx: mpsc::Sender<ControlRequest>,
 }
 
 impl ControlQueue {
     pub fn new(tx: mpsc::Sender<ControlRequest>) -> Self {
-        Self { tx: Mutex::new(tx) }
+        Self { tx }
     }
 }
 
 #[async_trait]
 impl RemoteDispatch for ControlQueue {
+    /// `control.sock`'s own hand-off, so the two cannot differ on timeouts or
+    /// errors. It blocks on a std channel, so it runs on the blocking pool —
+    /// at most [`MAX_IN_FLIGHT`] threads per connection.
     async fn call(&self, op: Request) -> Response {
-        let (reply, answer) = mpsc::channel();
-        let sent = self
-            .tx
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .send(ControlRequest { request: op, reply });
-        if sent.is_err() {
-            return internal("Allele is shutting down");
-        }
-        // The drain answers on a std channel; wait for it off the runtime.
-        match tokio::task::spawn_blocking(move || answer.recv_timeout(REPLY_TIMEOUT)).await {
-            Ok(Ok(response)) => response,
-            _ => internal("Allele did not answer in time"),
-        }
+        let tx = self.tx.clone();
+        tokio::task::spawn_blocking(move || forward(op, &tx))
+            .await
+            .unwrap_or_else(|_| internal("Allele did not answer"))
     }
 }
 
@@ -256,7 +251,28 @@ pub async fn serve(
     busy: &AtomicBool,
 ) -> Ended {
     let peer = conn.remote_id();
-    if protocol != PROTOCOL_VERSION {
+    if busy.swap(true, Ordering::SeqCst) {
+        let refused = Frame::Refused {
+            code: StreamRefusal::AlreadyOpen,
+            message: "this connection already has a control stream".into(),
+        };
+        let _ = write_frame(&mut stream.send, &refused).await;
+        let _ = stream.send.shutdown().await;
+        return Ended::Stream;
+    }
+    let ended = if protocol == PROTOCOL_VERSION {
+        run(conn, stream, registry, ctx).await
+    } else {
+        refuse_protocol(peer, stream, protocol).await
+    };
+    busy.store(false, Ordering::SeqCst);
+    ended
+}
+
+/// The client speaks another protocol: say so, readably, and end the
+/// connection — nothing else on it can be understood either.
+async fn refuse_protocol(peer: PeerId, mut stream: PeerStream, protocol: u32) -> Ended {
+    {
         let message = format!(
             "The other Mac speaks remote protocol {PROTOCOL_VERSION} and this one speaks \
              {protocol}. Update Allele on both Macs to the same version."
@@ -267,20 +283,8 @@ pub async fn serve(
             message: message.clone(),
         };
         let _ = write_frame(&mut stream.send, &refused).await;
-        return Ended::Connection(message);
+        Ended::Connection(message)
     }
-    if busy.swap(true, Ordering::SeqCst) {
-        let refused = Frame::Refused {
-            code: StreamRefusal::AlreadyOpen,
-            message: "this connection already has a control stream".into(),
-        };
-        let _ = write_frame(&mut stream.send, &refused).await;
-        let _ = stream.send.shutdown().await;
-        return Ended::Stream;
-    }
-    let ended = run(conn, stream, registry, ctx).await;
-    busy.store(false, Ordering::SeqCst);
-    ended
 }
 
 async fn run(
@@ -293,7 +297,12 @@ async fn run(
     let PeerStream { mut send, mut recv } = stream;
     // Read live: a peer removed since the gate admitted it gets nothing.
     let Some(permissions) = registry.permissions(peer) else {
-        return Ended::Connection("this machine is not paired".into());
+        let refused = Frame::Refused {
+            code: StreamRefusal::NotPaired,
+            message: NOT_PAIRED.into(),
+        };
+        let _ = write_frame(&mut send, &refused).await;
+        return Ended::Connection(NOT_PAIRED.into());
     };
     let welcome = Frame::Hello {
         protocol: PROTOCOL_VERSION,
@@ -352,7 +361,7 @@ async fn run(
         };
 
         match admit(registry, peer, &op) {
-            Admission::Gone => break Ended::Connection("this machine is not paired".into()),
+            Admission::Gone => break Ended::Connection(NOT_PAIRED.into()),
             Admission::Refused(result) => {
                 if out.send(Frame::Response { id, result }).await.is_err() {
                     break Ended::Stream;
@@ -362,9 +371,23 @@ async fn run(
                 let Ok(permit) = Arc::clone(&in_flight).acquire_owned().await else {
                     break Ended::Stream;
                 };
+                // The wait for a slot can be long (creates clone workspaces);
+                // a grant revoked meanwhile must stop this request too.
+                if !still_allowed(registry, peer, &op) {
+                    tracing::debug!(
+                        "remote: {} {} refused: grant changed while queued",
+                        peer.short(),
+                        op_name(&op)
+                    );
+                    let result = denied(&op, need(&op));
+                    if out.send(Frame::Response { id, result }).await.is_err() {
+                        break Ended::Stream;
+                    }
+                    continue;
+                }
                 let (out, dispatch) = (out.clone(), Arc::clone(&ctx.dispatch));
                 tokio::spawn(async move {
-                    let result = dispatch.call(localise(op)).await;
+                    let result = redact(dispatch.call(localise(op)).await);
                     let _ = out.send(Frame::Response { id, result }).await;
                     drop(permit);
                 });
@@ -415,20 +438,61 @@ fn admit(registry: &PeerRegistry, peer: PeerId, op: &Request) -> Admission {
         }
     );
     if granted {
-        return Admission::Allowed;
+        Admission::Allowed
+    } else {
+        Admission::Refused(denied(op, need))
     }
+}
+
+fn still_allowed(registry: &PeerRegistry, peer: PeerId, op: &Request) -> bool {
+    registry
+        .permissions(peer)
+        .is_some_and(|p| allows(p, need(op)))
+}
+
+fn denied(op: &Request, need: Need) -> Response {
     let what = match need {
         Need::View => "view",
         Need::Control => "control",
     };
-    Admission::Refused(Response::Error {
+    Response::Error {
         code: ErrorCode::PermissionDenied,
         message: format!(
             "{} needs {what} permission; grant it to this Mac in the other Mac's \
              Settings → Machines",
             op_name(op)
         ),
-    })
+    }
+}
+
+/// Strip from an answer what only means something on this machine: a
+/// project's source path (which names this Mac's user and folders) and a
+/// session's `reply_to` socket. A peer can use neither, and `view` is status,
+/// not this machine's layout.
+fn redact(response: Response) -> Response {
+    match response {
+        Response::Projects { mut projects } => {
+            for p in &mut projects {
+                p.source_path = String::new();
+            }
+            Response::Projects { projects }
+        }
+        Response::Sessions { mut sessions } => {
+            for s in &mut sessions {
+                s.reply_to = None;
+            }
+            Response::Sessions { sessions }
+        }
+        Response::Status { mut session } => {
+            session.reply_to = None;
+            Response::Status { session }
+        }
+        Response::Created { mut session } => {
+            session.reply_to = None;
+            Response::Created { session }
+        }
+        other => other,
+    }
 }
 
 /// Encode a frame for the writer. A response too large for the wire becomes
@@ -586,6 +650,47 @@ mod tests {
         assert_eq!(req.caller_session_id, None);
         assert_eq!(req.caller_reply_to, None);
         assert_eq!(req.group.as_deref(), Some("g"), "everything else kept");
+    }
+
+    #[test]
+    fn answers_lose_host_local_paths_and_sockets() {
+        let projects = redact(Response::Projects {
+            projects: vec![crate::dispatch::protocol::ProjectSummary {
+                id: "p".into(),
+                name: "allele".into(),
+                source_path: "/Users/someone/code/allele".into(),
+                session_count: 1,
+            }],
+        });
+        let Response::Projects { projects } = projects else {
+            panic!()
+        };
+        assert_eq!(projects[0].source_path, "");
+        assert_eq!(projects[0].name, "allele");
+
+        let summary = crate::dispatch::protocol::SessionSummary {
+            session_id: "s".into(),
+            name: "n".into(),
+            project: "allele".into(),
+            state: crate::dispatch::protocol::SessionState::Running,
+            state_age_secs: 0,
+            dispatched: true,
+            depth: 1,
+            reply_to: Some("uds:/tmp/cc-socks/1.sock".into()),
+            group: None,
+        };
+        let Response::Sessions { sessions } = redact(Response::Sessions {
+            sessions: vec![summary.clone()],
+        }) else {
+            panic!()
+        };
+        assert_eq!(sessions[0].reply_to, None);
+        let Response::Status { session } = redact(Response::Status {
+            session: Box::new(summary),
+        }) else {
+            panic!()
+        };
+        assert_eq!(session.reply_to, None);
     }
 
     #[test]

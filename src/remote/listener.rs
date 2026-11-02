@@ -22,6 +22,7 @@
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::{timeout, Instant};
@@ -32,7 +33,7 @@ use super::pairing::HostPairing;
 use super::peers::TrustedPeer;
 use super::registry::PeerRegistry;
 use super::transport::{PeerConnection, PeerTransport};
-use super::wire::{read_frame, Frame};
+use super::wire::{read_frame, write_frame, Frame, StreamRefusal};
 
 /// Unpaired connections served at once. Past this, more are closed on arrival,
 /// so strangers cannot pile up connections while a code is showing.
@@ -189,7 +190,13 @@ async fn serve_stream(
             serve_hello(conn, stream, frame, &gate.pairing, &gate.registry).await;
         }
         Ok(Ok(other)) => {
-            tracing::debug!("{} opened a stream with {other:?}; dropped", peer.short())
+            tracing::debug!("{} opened a stream with {other:?}; refused", peer.short());
+            let refused = Frame::Refused {
+                code: StreamRefusal::BadHello,
+                message: "a stream must start with a hello".into(),
+            };
+            let _ = write_frame(&mut stream.send, &refused).await;
+            let _ = stream.send.shutdown().await;
         }
         _ => tracing::debug!("{} opened a stream and sent no hello", peer.short()),
     }

@@ -188,7 +188,7 @@ fn serve(stream: UnixStream, tx: Sender<ControlRequest>) {
 }
 
 /// Hand a request to the foreground thread and block for its answer.
-fn forward(request: Request, tx: &Sender<ControlRequest>) -> Response {
+pub(crate) fn forward(request: Request, tx: &Sender<ControlRequest>) -> Response {
     let (reply_tx, reply_rx) = channel::<Response>();
     if tx
         .send(ControlRequest {

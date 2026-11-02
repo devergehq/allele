@@ -105,6 +105,8 @@ pub enum StreamRefusal {
     BadHello,
     /// This connection already has a control stream.
     AlreadyOpen,
+    /// The peer was removed from this host's trusted list.
+    NotPaired,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
