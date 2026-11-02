@@ -11,6 +11,18 @@
 //! | while unreachable, the client shows when it last was | `a_dropped_host_is_resubscribed_without_user_action` |
 //! | a subscriber that lags gets a fresh snapshot | `a_lagging_subscriber_is_resynced_with_a_fresh_snapshot` |
 //! | the feed needs `view` | `a_peer_without_view_is_refused_the_feed` |
+//!
+//! Remote ops on the same stream (DEV-1168):
+//!
+//! | criterion | test |
+//! | -- | -- |
+//! | the client learns its grant from the host's hello | `the_client_learns_its_grant_from_the_hosts_hello` |
+//! | an op reaches the host and its answer comes back | `an_op_reaches_the_host_and_its_answer_comes_back` |
+//! | the host's grant check reaches the client as an answer | `a_create_without_control_is_answered_permission_denied` |
+//! | no live stream: unreachable, at once | `an_op_for_a_host_with_no_stream_is_unreachable` |
+//! | a host that refused the stream: unreachable | `an_op_for_a_host_that_refused_the_feed_is_unreachable` |
+//! | no answer: times out | `an_op_the_host_never_answers_times_out` |
+//! | unpairing drops the grant | `following_stops_when_the_host_is_unpaired` |
 
 #![cfg(test)]
 
@@ -21,7 +33,8 @@ use std::time::{Duration, Instant, SystemTime};
 use async_trait::async_trait;
 use tokio::time::timeout;
 
-use super::control::{ControlContext, HostName, Unavailable};
+use super::control::{ControlContext, HostName, RemoteDispatch, Unavailable};
+use super::follow::CallError;
 use super::listener::{self, Gate};
 use super::pairing::HostPairing;
 use super::peers::{PeerPermissions, TrustedPeer};
@@ -30,8 +43,12 @@ use super::service::{Binder, RemoteService};
 use super::testing::{MemNet, MemTransport};
 use super::transport::{PeerConnection, PeerId, PeerStream, PeerTransport, TransportConfig};
 use super::wire::{read_frame_within, write_frame, Frame, MAX_PEER_FRAME, PROTOCOL_VERSION};
+use crate::dispatch::protocol::{
+    CreateRequest, CreatedSession, ErrorCode, ProjectSummary, Request, Response, SessionState,
+};
 use crate::errors::Result;
 use crate::repositories::fakes::InMemoryPeersRepository;
+use crate::session::Orchestration;
 use crate::settings::RemoteSettings;
 use crate::status_feed::client::Reachability;
 use crate::status_feed::model::{FeedStatus, SessionEntry};
@@ -62,6 +79,15 @@ struct Mac {
 
 impl Mac {
     async fn start(net: &Arc<MemNet>, name: &str, allow: bool) -> Self {
+        Self::start_with(net, name, allow, Arc::new(Unavailable)).await
+    }
+
+    async fn start_with(
+        net: &Arc<MemNet>,
+        name: &str,
+        allow: bool,
+        dispatch: Arc<dyn RemoteDispatch>,
+    ) -> Self {
         let binder = Arc::new(MemBinder {
             net: Arc::clone(net),
             made: Mutex::default(),
@@ -72,7 +98,7 @@ impl Mac {
             ..Default::default()
         };
         let control = ControlContext {
-            dispatch: Arc::new(Unavailable),
+            dispatch,
             host_name: HostName::new(Some(name.into()), || None),
             status_feed: feed.clone(),
             screens: Arc::new(crate::remote::screen::NoScreens),
@@ -276,6 +302,7 @@ async fn following_stops_when_the_host_is_unpaired() {
     desk.feed.publish(vec![entry("a", "one", FeedStatus::Idle)]);
     until(&laptop, &desk, |h| h.sessions().len() == 1).await;
 
+    assert!(laptop.svc.hosts().grant(desk.id).is_some());
     laptop.svc.remove_peer(desk.id).unwrap();
     let gone = timeout(Duration::from_secs(5), async {
         while host_state(&laptop, &desk).is_some() {
@@ -284,6 +311,11 @@ async fn following_stops_when_the_host_is_unpaired() {
     })
     .await;
     assert!(gone.is_ok(), "an unpaired host is dropped from the list");
+    assert_eq!(
+        laptop.svc.hosts().grant(desk.id),
+        None,
+        "and so is what it let this Mac do"
+    );
 }
 
 // ── the host's push, over a raw control stream ───────────────────────────
@@ -423,4 +455,222 @@ async fn a_peer_without_view_is_refused_the_feed() {
         Frame::StatusRefused { .. }
     ));
     assert!(!conn.is_closed(), "the control stream carries on");
+}
+
+// ── remote ops on the follower's stream (DEV-1168) ───────────────────────
+
+/// Answers like a host's dispatch drain would, and remembers what it was asked.
+#[derive(Default)]
+struct Script {
+    asked: Mutex<Vec<Request>>,
+    /// Never answer: for the timeout test.
+    silent: bool,
+}
+
+#[async_trait]
+impl RemoteDispatch for Script {
+    async fn call(&self, op: Request) -> Response {
+        self.asked.lock().unwrap().push(op.clone());
+        if self.silent {
+            std::future::pending::<()>().await;
+        }
+        match op {
+            Request::ProjectsList => Response::Projects {
+                projects: vec![ProjectSummary {
+                    id: "p1".into(),
+                    name: "allele".into(),
+                    source_path: "/Users/someone/allele".into(),
+                    session_count: 0,
+                }],
+            },
+            Request::SessionsCreate(req) => Response::Created {
+                session: CreatedSession {
+                    session_id: "s-new".into(),
+                    name: req.name,
+                    project: req.project,
+                    state: SessionState::Running,
+                    reply_to: None,
+                },
+            },
+            _ => Response::Error {
+                code: ErrorCode::BadRequest,
+                message: "not scripted".into(),
+            },
+        }
+    }
+}
+
+async fn scripted_desk_and_laptop(net: &Arc<MemNet>, script: Arc<Script>) -> (Mac, Mac) {
+    let desk = Mac::start_with(net, "Desk", true, script).await;
+    let laptop = Mac::start(net, "Laptop", false).await;
+    desk.trust(&laptop, "Laptop");
+    laptop.trust(&desk, "Desk");
+    until(&laptop, &desk, |h| {
+        h.reachability() == Reachability::Connected
+    })
+    .await;
+    (desk, laptop)
+}
+
+fn create(name: &str) -> Request {
+    Request::SessionsCreate(CreateRequest {
+        project: "p1".into(),
+        name: name.into(),
+        prompt: String::new(),
+        orchestration: Orchestration::Nothing,
+        caller_session_id: None,
+        caller_reply_to: None,
+        group: None,
+    })
+}
+
+#[tokio::test]
+async fn the_client_learns_its_grant_from_the_hosts_hello() {
+    let net = MemNet::new();
+    let (desk, laptop) = desk_and_laptop(&net).await;
+    let stranger = net.endpoint().local_id();
+    assert_eq!(laptop.svc.hosts().grant(stranger), None, "never greeted");
+
+    until(&laptop, &desk, |h| {
+        h.reachability() == Reachability::Connected
+    })
+    .await;
+    assert_eq!(
+        laptop.svc.hosts().grant(desk.id),
+        Some(PeerPermissions::NEW_PEER),
+        "a new pairing is view only, and the host says so"
+    );
+}
+
+#[tokio::test]
+async fn an_op_reaches_the_host_and_its_answer_comes_back() {
+    let net = MemNet::new();
+    let script = Arc::new(Script::default());
+    let (desk, laptop) = scripted_desk_and_laptop(&net, Arc::clone(&script)).await;
+
+    let Ok(Response::Projects { projects }) = laptop.svc.call(desk.id, Request::ProjectsList).await
+    else {
+        panic!("projects_list should be answered");
+    };
+    assert_eq!(projects[0].name, "allele");
+    assert_eq!(
+        projects[0].source_path, "",
+        "the host's paths stay on the host"
+    );
+
+    desk.svc.set_control(laptop.id, true).unwrap();
+    let answer = laptop.svc.call(desk.id, create("from the laptop")).await;
+    let Ok(Response::Created { session }) = answer else {
+        panic!("a create with control should start a session: {answer:?}");
+    };
+    assert_eq!(session.session_id, "s-new");
+    assert!(
+        matches!(
+            script.asked.lock().unwrap().last(),
+            Some(Request::SessionsCreate(r)) if r.name == "from the laptop"
+        ),
+        "the create ran on the host"
+    );
+}
+
+#[tokio::test]
+async fn a_create_without_control_is_answered_permission_denied() {
+    let net = MemNet::new();
+    let script = Arc::new(Script::default());
+    let (desk, laptop) = scripted_desk_and_laptop(&net, Arc::clone(&script)).await;
+
+    let answer = laptop.svc.call(desk.id, create("nope")).await;
+    assert!(
+        matches!(
+            answer,
+            Ok(Response::Error {
+                code: ErrorCode::PermissionDenied,
+                ..
+            })
+        ),
+        "got {answer:?}"
+    );
+    assert!(script.asked.lock().unwrap().is_empty(), "nothing ran");
+}
+
+#[tokio::test]
+async fn an_op_for_a_host_with_no_stream_is_unreachable() {
+    let net = MemNet::new();
+    let laptop = Mac::start(&net, "Laptop", false).await;
+    let unpaired = net.endpoint().local_id();
+    assert_eq!(
+        laptop.svc.call(unpaired, Request::ProjectsList).await,
+        Err(CallError::Unreachable),
+        "not followed at all"
+    );
+
+    // Paired, but its switch is off: the follower never gets a stream.
+    let desk = Mac::start(&net, "Desk", false).await;
+    desk.trust(&laptop, "Laptop");
+    laptop.trust(&desk, "Desk");
+    let started = Instant::now();
+    let answer = timeout(Duration::from_secs(5), async {
+        loop {
+            // The follower may not exist for a moment after pairing.
+            match laptop.svc.call(desk.id, Request::ProjectsList).await {
+                Err(CallError::Unreachable) => return,
+                other => {
+                    let _ = other;
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            }
+        }
+    })
+    .await;
+    assert!(answer.is_ok(), "answered unreachable, not left waiting");
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[tokio::test]
+async fn an_op_for_a_host_that_refused_the_feed_is_unreachable() {
+    let net = MemNet::new();
+    let desk = Mac::start(&net, "Desk", true).await;
+    let laptop = Mac::start(&net, "Laptop", false).await;
+    let mut no_view = TrustedPeer::newly_paired(laptop.id, "Laptop");
+    no_view.permissions = PeerPermissions {
+        view: false,
+        control: true,
+    };
+    desk.svc.registry().add_paired(no_view).unwrap();
+    laptop.trust(&desk, "Desk");
+
+    // The hello still states the grant before the feed is refused.
+    let greeted = timeout(Duration::from_secs(5), async {
+        while laptop.svc.hosts().grant(desk.id).is_none() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await;
+    assert!(greeted.is_ok());
+    // Refused, the follower holds no stream for 30 s; ops are not queued
+    // behind that.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let answer = timeout(
+        Duration::from_secs(2),
+        laptop.svc.call(desk.id, Request::ProjectsList),
+    )
+    .await
+    .expect("answered at once");
+    assert_eq!(answer, Err(CallError::Unreachable));
+}
+
+#[tokio::test]
+async fn an_op_the_host_never_answers_times_out() {
+    let net = MemNet::new();
+    let script = Arc::new(Script {
+        silent: true,
+        ..Default::default()
+    });
+    let (desk, laptop) = scripted_desk_and_laptop(&net, script).await;
+
+    let answer = laptop
+        .svc
+        .call_within(desk.id, Request::ProjectsList, Duration::from_millis(200))
+        .await;
+    assert_eq!(answer, Err(CallError::TimedOut));
 }

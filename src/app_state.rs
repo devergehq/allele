@@ -413,6 +413,9 @@ pub(crate) struct AppState {
     pub(crate) scratch_pad: Option<Entity<scratch_pad::ScratchPad>>,
     /// "New session with details" modal. `Some` while the overlay is visible.
     pub(crate) new_session_modal: Option<Entity<new_session_modal::NewSessionModal>>,
+    /// Remote sessions: the selected row, creates in flight, the open menu
+    /// (DEV-1168).
+    pub(crate) remote_ui: crate::remote_sessions::RemoteUi,
     /// Sidebar search/filter input entity.
     pub(crate) sidebar_filter_input: Entity<text_input::TextInput>,
     /// Reader in-file find input entity. Its text mirrors into
@@ -1082,6 +1085,7 @@ pub(crate) mod fixture {
                     browser_status: String::new(),
                     scratch_pad: None,
                     new_session_modal: None,
+                    remote_ui: Default::default(),
                     sidebar_filter_input: input(cx),
                     reader_find_input: input(cx),
                     file_palette: None,
