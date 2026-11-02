@@ -501,6 +501,9 @@ pub(crate) struct AppState {
     /// This machine's remote endpoint: pairing, trusted peers, the listener
     /// (DEV-1160). Cheap to clone into the Settings window.
     pub(crate) remote: crate::remote::RemoteService,
+    /// The pairing request waiting for approval, if any, for the main
+    /// window's banner (DEV-1188).
+    pub(crate) pairing_alert: crate::pairing_alert::PairingAlert,
     /// Set by the Debug menu or agent request-file watcher.
     pub(crate) capture_ui_requested: bool,
 }
@@ -1062,6 +1065,7 @@ pub(crate) mod fixture {
                     pending_session_groups: Default::default(),
                     pull_warning: None,
                     sync_notice: None,
+                    pairing_alert: Default::default(),
                     main_tab: MainTab::Claude,
                     browser_status: String::new(),
                     scratch_pad: None,

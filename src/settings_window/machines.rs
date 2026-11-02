@@ -26,6 +26,11 @@ enum IdStatus {
     Failed(String),
 }
 
+/// Position of the pairing block among the pane's direct children in
+/// `render`: title, note, name card, ID card, note, relay card, note, pairing.
+/// Keep in step with `render` if a child is added above it.
+const PAIRING_CHILD_INDEX: usize = 7;
+
 pub(super) struct MachinesSection {
     name_input: Entity<TextInput>,
     relay_input: Entity<TextInput>,
@@ -44,6 +49,9 @@ pub(super) struct MachinesSection {
     code_input: Entity<TextInput>,
     /// The peer whose *Remove* was clicked once and awaits a second click.
     pub(super) confirm_remove: Option<PeerId>,
+    /// The pane's scroll position, so a pairing banner can open it at the
+    /// approval card (DEV-1188).
+    scroll: ScrollHandle,
 }
 
 impl MachinesSection {
@@ -110,7 +118,14 @@ impl MachinesSection {
             status: None,
             code_input,
             confirm_remove: None,
+            scroll: ScrollHandle::new(),
         }
+    }
+
+    /// Scroll so the pairing controls (whose host card holds the Approve
+    /// prompt) start at the top of the pane.
+    pub(super) fn scroll_to_pairing(&self) {
+        self.scroll.scroll_to_top_of_item(PAIRING_CHILD_INDEX);
     }
 
     /// This machine's name as peers will see it: the field, else the computer
@@ -222,6 +237,7 @@ impl MachinesSection {
             .min_w(px(0.0))
             .overflow_x_hidden()
             .overflow_y_scroll()
+            .track_scroll(&self.scroll)
             .p(px(20.0))
             .gap(px(12.0))
             .child(section_title("Machines"))
