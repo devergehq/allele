@@ -46,6 +46,7 @@ impl PairingSecret {
         Ok(Self(bytes))
     }
 
+    #[cfg(test)]
     pub fn from_bytes(bytes: [u8; SECRET_LEN]) -> Self {
         Self(bytes)
     }

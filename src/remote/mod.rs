@@ -23,18 +23,22 @@
 //!   pairing ─────────► code, window, host, client    one-time code + host approval
 //!   listener ────────► Gate                          who gets in, decided before
 //!                                                    anything is read
+//!   control ─────────► control stream                what an admitted peer may call:
+//!                                                    the dispatch API, per-request
+//!                                                    view / control check (DEV-1161)
+//!   wire ────────────► Frame                         the one framing, pairing and
+//!                                                    control alike
 //!   service ─────────► RemoteService                 binds the endpoint only while
 //!                                                    something needs it
 //! ```
 //!
 //! `accept` hands back *authenticated* connections — the peer proved it holds
 //! the key behind `remote_id()`. [`listener::Gate`] is what *authorises* them,
-//! against the trusted list. What an admitted peer may do is DEV-1161.
+//! against the trusted list; [`control`] decides, per request, what it may do.
 
-// The link and parts of the transport API have no caller in the app until the
-// dispatch listener lands (DEV-1161). Remove this allow when DEV-1161 wires it.
-#![allow(dead_code, unused_imports)]
-
+pub mod control;
+// Test-only: the file gates itself with `#![cfg(test)]`.
+mod control_tests;
 pub mod identity;
 pub mod iroh_transport;
 pub mod link;
@@ -46,14 +50,10 @@ pub mod service;
 // Test-only: the file gates itself with `#![cfg(test)]`.
 pub(crate) mod testing;
 pub mod transport;
+pub mod wire;
 
+pub use control::ControlQueue;
 pub use identity::{resolve_machine_name, LocalIdentity};
-pub use iroh_transport::IrohTransport;
-pub use link::{LinkState, PeerLink, ReconnectPolicy};
-pub use peers::{PeerList, PeerPermissions, TrustedPeer};
-pub use registry::PeerRegistry;
+pub use peers::PeerList;
 pub use service::{ClientView, PeerRow, RemoteService, RemoteStatus};
-pub use transport::{
-    Heartbeat, PeerConnection, PeerId, PeerStream, PeerTransport, RelayChoice, TransportConfig,
-    ALPN,
-};
+pub use transport::{PeerId, RelayChoice};

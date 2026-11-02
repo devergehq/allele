@@ -351,7 +351,7 @@ mod tests {
     }
 
     fn sample_peers() -> PeerList {
-        PeerList::new(vec![crate::remote::TrustedPeer::newly_paired(
+        PeerList::new(vec![crate::remote::peers::TrustedPeer::newly_paired(
             crate::remote::LocalIdentity::ephemeral().id(),
             "Laptop",
         )])

@@ -15,11 +15,11 @@ use tokio::time::{sleep_until, timeout, Instant};
 use super::code::{confirmation_number, PairingCode};
 use super::host::HELLO_TIMEOUT;
 use super::window::APPROVAL_TIMEOUT;
-use super::wire::{read_frame, write_frame, Frame, PAIRING_VERSION};
 use crate::errors::{AlleleError, Result};
 use crate::remote::peers::TrustedPeer;
 use crate::remote::registry::PeerRegistry;
 use crate::remote::transport::{PeerConnection, PeerId, PeerTransport};
+use crate::remote::wire::{read_frame, write_frame, Frame, PAIRING_VERSION};
 
 /// How long to try to reach the host.
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(30);

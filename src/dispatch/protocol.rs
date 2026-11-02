@@ -371,6 +371,11 @@ pub enum ErrorCode {
     /// answer — before it existed both matched the text `no session with id`,
     /// which is still the message, so a caller doing that keeps working.
     SessionNotFound,
+    /// The caller is a paired machine whose grant does not cover this op
+    /// (DEV-1161): `view` for the read ops, `control` for create, interrupt
+    /// and discard. Never sent on `control.sock`, whose caller is this
+    /// machine's own user.
+    PermissionDenied,
     /// Malformed request, unknown project field, etc.
     BadRequest,
     Internal,

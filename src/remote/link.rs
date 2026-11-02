@@ -15,6 +15,11 @@
 //!
 //! [`Heartbeat`]: super::transport::Heartbeat
 
+// The client side: keeping a link to a host. Nothing in the app dials a host
+// yet — the host listener (DEV-1161) is the first half. The first caller is
+// the client that subscribes to a host's status (DEV-1162).
+#![allow(dead_code)]
+
 use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

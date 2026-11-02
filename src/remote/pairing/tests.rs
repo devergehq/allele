@@ -24,7 +24,7 @@ use crate::remote::peers::TrustedPeer;
 use crate::remote::registry::PeerRegistry;
 use crate::remote::service::{Binder, ClientView, RemoteService};
 use crate::remote::testing::{MemNet, MemTransport};
-use crate::remote::transport::{PeerConnection, PeerTransport, TransportConfig};
+use crate::remote::transport::{PeerTransport, TransportConfig};
 use crate::repositories::fakes::InMemoryPeersRepository;
 use crate::settings::RemoteSettings;
 
@@ -43,7 +43,12 @@ impl Host {
         let registry = PeerRegistry::load(Arc::new(repo.clone()));
         let pairing = Arc::new(HostPairing::default());
         let allow = Arc::new(AtomicBool::new(false));
-        let gate = Gate::new(registry.clone(), Arc::clone(&pairing), Arc::clone(&allow));
+        let gate = Gate::new(
+            registry.clone(),
+            Arc::clone(&pairing),
+            Arc::clone(&allow),
+            crate::remote::control::ControlContext::unavailable(),
+        );
         tokio::spawn(listener::run(t.clone() as Arc<dyn PeerTransport>, gate));
         Self {
             t,
@@ -415,10 +420,10 @@ async fn the_host_saves_the_client_only_after_its_acknowledgement() {
     let rogue = net.endpoint();
     let conn = rogue.dial_mem(code.host).await;
     let mut stream = conn.open_stream().await.unwrap();
-    super::wire::write_frame(
+    crate::remote::wire::write_frame(
         &mut stream.send,
-        &super::wire::Frame::PairHello {
-            v: super::wire::PAIRING_VERSION,
+        &crate::remote::wire::Frame::PairHello {
+            v: crate::remote::wire::PAIRING_VERSION,
             secret: code.secret.to_text(),
             machine_name: "Laptop".into(),
         },
@@ -427,8 +432,13 @@ async fn the_host_saves_the_client_only_after_its_acknowledgement() {
     .unwrap();
     let request = host.awaiting().await;
     host.pairing.answer(request.id, true);
-    let reply = super::wire::read_frame(&mut stream.recv).await.unwrap();
-    assert!(matches!(reply, super::wire::Frame::PairApproved { .. }));
+    let reply = crate::remote::wire::read_frame(&mut stream.recv)
+        .await
+        .unwrap();
+    assert!(matches!(
+        reply,
+        crate::remote::wire::Frame::PairApproved { .. }
+    ));
     conn.close("gone"); // no ack
     until(|| host.outcome().is_some()).await;
     assert!(matches!(host.outcome(), Some(Outcome::Failed(_))));
@@ -558,6 +568,7 @@ fn service(net: &Arc<MemNet>, allow: bool) -> (RemoteService, InMemoryPeersRepos
         Arc::new(repo.clone()),
         Arc::new(MemBinder(Arc::clone(net))),
         &settings,
+        crate::remote::control::ControlContext::unavailable(),
     );
     (svc, repo)
 }

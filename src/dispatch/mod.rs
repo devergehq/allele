@@ -31,7 +31,7 @@ pub(crate) mod protocol;
 pub(crate) mod pty;
 pub(crate) mod server;
 
-use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{Receiver, Sender};
 
 use gpui::{AsyncApp, Context, WeakEntity, Window};
 
@@ -60,16 +60,20 @@ pub(crate) fn update_in_main_window<R>(
         .map_err(|e| AlleleError::Dispatch(format!("main window is gone: {e}")))
 }
 
-/// Bind the control socket and start answering on it (DEV-415).
+/// Start the foreground drain and bind the control socket onto it (DEV-415).
 ///
-/// A no-op when the socket cannot be bound — another Allele already serves it,
-/// or the path is unusable. Dispatch is then unavailable and the app is
-/// otherwise unaffected, which is a better trade than refusing to launch over
-/// an optional automation surface.
-pub(crate) fn spawn_control_socket(cx: &mut Context<AppState>) {
-    if let Some(rx) = server::spawn_listener() {
-        spawn_control_loop(rx, cx);
-    }
+/// Returns the drain's sender. The remote listener (DEV-1161) sends on it too,
+/// so a paired machine's request is answered by exactly the handler — and
+/// counted against exactly the admission cap — a local caller's is.
+///
+/// The drain runs even when the socket cannot be bound (another Allele already
+/// serves it, or the path is unusable): local dispatch is then unavailable,
+/// but paired machines are not affected, and nor is the rest of the app.
+pub(crate) fn spawn_control_socket(cx: &mut Context<AppState>) -> Sender<server::ControlRequest> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    server::spawn_listener(tx.clone());
+    spawn_control_loop(rx, cx);
+    tx
 }
 
 /// Answer control-socket requests on the GPUI foreground thread.

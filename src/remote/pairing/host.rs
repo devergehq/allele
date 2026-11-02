@@ -12,17 +12,17 @@ use super::code::{PairingCode, PairingSecret};
 use super::window::{
     Outcome, PairingRequest, PairingWindow, Phase, Refusal, RequestId, APPROVAL_TIMEOUT,
 };
-use super::wire::{read_frame, write_frame, Frame, RefusalCode, PAIRING_VERSION};
 use crate::remote::peers::TrustedPeer;
 use crate::remote::registry::PeerRegistry;
 use crate::remote::transport::{PeerConnection, PeerId, PeerStream};
+use crate::remote::wire::{read_frame, write_frame, Frame, RefusalCode, PAIRING_VERSION};
 
 /// How long an unpaired peer has to open its stream and send its hello, and
 /// how long the host waits for the client's acknowledgement.
 pub const HELLO_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the host waits, after its last reply, for the client to close.
-const LINGER: Duration = Duration::from_secs(5);
+pub(crate) const LINGER: Duration = Duration::from_secs(5);
 
 /// What the host's Machines pane shows about pairing.
 #[derive(Clone, Debug, PartialEq, Eq)]

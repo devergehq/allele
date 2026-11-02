@@ -34,13 +34,12 @@ pub mod client;
 pub mod code;
 pub mod host;
 pub mod window;
-pub mod wire;
 
 pub(crate) use client::pair_with;
-pub use client::{ClientProgress, CONFIRM_TIMEOUT};
-pub use code::{confirmation_number, PairingCode, PairingSecret};
+pub use client::ClientProgress;
+pub use code::{PairingCode, PairingSecret};
 pub use host::{HostPairing, HostView};
-pub use window::{Outcome, PairingRequest, RequestId, APPROVAL_TIMEOUT, CODE_TTL};
+pub use window::{Outcome, PairingRequest, RequestId};
 
 // Test-only: the file gates itself with `#![cfg(test)]`.
 mod tests;
