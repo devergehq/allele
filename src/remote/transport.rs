@@ -109,7 +109,6 @@ pub trait PeerConnection: Send + Sync {
     async fn closed(&self) -> String;
 
     /// True once the connection is closed for any reason.
-    #[allow(dead_code)] // first caller: the client link (DEV-1162)
     fn is_closed(&self) -> bool;
 
     /// Close the connection now. Idempotent.

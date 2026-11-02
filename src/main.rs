@@ -2267,6 +2267,7 @@ fn main() {
                             crate::platform::global().secrets.clone(),
                             &settings_for_window.remote,
                             std::sync::Arc::new(crate::remote::ControlQueue::new(dispatch_queue)),
+                            status_feed.clone(),
                             {
                                 let shell = crate::platform::global().shell.clone();
                                 move || shell.computer_name()

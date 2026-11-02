@@ -37,6 +37,7 @@
 //! against the trusted list; [`control`] decides, per request, what it may do.
 
 pub mod control;
+pub mod follow;
 // Test-only: the file gates itself with `#![cfg(test)]`.
 mod control_tests;
 pub mod identity;

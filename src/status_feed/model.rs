@@ -86,18 +86,6 @@ pub(crate) enum StatusChange {
     },
 }
 
-impl StatusChange {
-    /// The session this change is about.
-    pub fn session_id(&self) -> &str {
-        match self {
-            StatusChange::Added { session } => &session.id,
-            StatusChange::Removed { id }
-            | StatusChange::Renamed { id, .. }
-            | StatusChange::StatusChanged { id, .. } => id,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

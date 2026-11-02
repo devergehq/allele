@@ -39,6 +39,7 @@ pub(crate) struct Transition {
 impl Transition {
     /// True when this is the session starting to need the user, which is
     /// what a notification fires on.
+    #[allow(dead_code)] // first caller: remote attention + notifications (DEV-1164)
     pub(crate) fn enters_awaiting_input(&self) -> bool {
         self.to == FeedStatus::AwaitingInput && self.from != Some(FeedStatus::AwaitingInput)
     }
@@ -98,6 +99,7 @@ impl RemoteHostState {
     }
 
     /// Host sessions in host sidebar order. Last known while unreachable.
+    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub(crate) fn sessions(&self) -> &[SessionEntry] {
         &self.sessions
     }
@@ -107,23 +109,27 @@ impl RemoteHostState {
     }
 
     /// Sessions blocked on the user, for the attention bar.
+    #[allow(dead_code)] // first caller: remote attention + notifications (DEV-1164)
     pub(crate) fn awaiting_input(&self) -> impl Iterator<Item = &SessionEntry> {
         self.sessions
             .iter()
             .filter(|s| s.status == FeedStatus::AwaitingInput)
     }
 
+    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub(crate) fn reachability(&self) -> Reachability {
         self.reachability
     }
 
     /// When a snapshot or delta last arrived.
+    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub(crate) fn last_heard(&self) -> Option<SystemTime> {
         self.last_heard
     }
 
     /// Connected but out of sync after a gap: the transport should
     /// resubscribe to get a fresh snapshot.
+    #[allow(dead_code)] // the follower resyncs on the delta outcome; for a UI that wants to show it
     pub(crate) fn needs_resync(&self) -> bool {
         self.reachability == Reachability::Connected && self.seq.is_none()
     }

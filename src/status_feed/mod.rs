@@ -16,18 +16,11 @@
 //! Deliberately independent of `crate::remote`: the transport maps these
 //! types onto its wire frames; nothing here knows there is a network.
 
-// The client store and `subscribe` have no production caller until the
-// transport is wired (DEV-1162 stage B) and the sidebar / attention tickets
-// (DEV-1163, DEV-1164) consume them. Remove this once they do.
-#![allow(dead_code, unused_imports)]
-
 pub(crate) mod client;
 pub(crate) mod diff;
 pub(crate) mod host;
 pub(crate) mod model;
 
-pub(crate) use client::{DeltaOutcome, Reachability, RemoteHostState, SnapshotOutcome, Transition};
+pub(crate) use client::{DeltaOutcome, RemoteHostState, Transition};
 pub(crate) use host::StatusFeed;
-pub(crate) use model::{
-    FeedAttention, FeedStatus, SessionEntry, StatusChange, StatusDelta, StatusSnapshot,
-};
+pub(crate) use model::{SessionEntry, StatusChange, StatusDelta, StatusSnapshot};
