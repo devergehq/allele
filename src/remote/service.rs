@@ -7,7 +7,13 @@
 //!   needed = Allow remote connections
 //!          ∨ a pairing code is showing (or its request is in flight)
 //!          ∨ this Mac is pairing with another (Add machine)
+//!          ∨ there are paired machines to follow (DEV-1162)
 //! ```
+//!
+//! Following is outbound: while the endpoint is up, a [`Follower`] per trusted
+//! peer keeps a link to it and its status feed in [`HostFeeds`]. That is
+//! independent of the switch, which only decides whether *others* may connect
+//! *here* — so a laptop with the switch off still sees its desktop.
 //!
 //! So the first pairing works with the switch still off, and turning the
 //! switch off closes every remote connection and — once no pairing is in
@@ -16,6 +22,7 @@
 //! The UI talks to it through `SettingsAction`s and reads [`RemoteStatus`];
 //! everything that touches the network runs on the shared tokio runtime.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -28,8 +35,10 @@ use tokio::time::Instant;
 
 use super::control::{ControlContext, HostName, RemoteDispatch};
 use super::endpoint::Endpoint;
+use super::follow::{Follower, HostFeeds};
 use super::identity::LocalIdentity;
 use super::iroh_transport::IrohTransport;
+use super::link::ReconnectPolicy;
 use super::listener::{self, Gate, SWITCHED_OFF_REASON};
 use super::pairing::{
     pair_with, ClientProgress, HostPairing, HostView, PairingCode, PairingSecret, RequestId,
@@ -41,6 +50,7 @@ use crate::errors::{AlleleError, Result};
 use crate::platform::SecretStore;
 use crate::repositories::{JsonFilePeersRepo, PeersRepository};
 use crate::settings::RemoteSettings;
+use crate::status_feed::StatusFeed;
 
 /// How long the relay setting must stay unchanged before the endpoint rebinds.
 /// The Machines pane saves on every keystroke, and `https://r` is already a
@@ -140,6 +150,10 @@ struct Life {
     accept: Option<JoinHandle<()>>,
     /// The config `transport` was bound with. Set exactly when it is.
     bound_with: Option<TransportConfig>,
+    /// One per trusted peer while the endpoint is up. They dial through
+    /// `followers_on`, so a relay rebind does not strand them (DEV-1186).
+    followers: HashMap<PeerId, Follower>,
+    followers_on: Option<Arc<Endpoint>>,
 }
 
 /// The peers that were connected when the relay changed, and how long to
@@ -157,6 +171,8 @@ struct Inner {
     binder: Arc<dyn Binder>,
     /// What admitted peers' requests are answered by (DEV-1161).
     control: ControlContext,
+    feeds: HostFeeds,
+    follow_policy: ReconnectPolicy,
     config: Mutex<Option<TransportConfig>>,
     /// When the relay setting last changed, for [`RELAY_SETTLE`].
     relay_changed_at: Mutex<Option<Instant>>,
@@ -203,6 +219,8 @@ impl RemoteService {
             allow: Arc::new(AtomicBool::new(settings.allow_connections)),
             binder,
             control,
+            feeds: HostFeeds::default(),
+            follow_policy: ReconnectPolicy::default(),
             config: Mutex::new(config),
             relay_changed_at: Mutex::new(None),
             relay_invalid: AtomicBool::new(false),
@@ -231,11 +249,13 @@ impl RemoteService {
         secrets: Arc<dyn SecretStore>,
         settings: &RemoteSettings,
         dispatch: Arc<dyn RemoteDispatch>,
+        status_feed: StatusFeed,
         computer_name: impl Fn() -> Option<String> + Send + Sync + 'static,
     ) -> Self {
         let control = ControlContext {
             dispatch,
             host_name: HostName::new(settings.machine_name.clone(), computer_name),
+            status_feed,
         };
         Self::new(
             crate::rt::handle(),
@@ -282,6 +302,14 @@ impl RemoteService {
             _ = peers.changed() => {}
             _ = pairing.changed() => {}
         }
+    }
+
+    /// What every paired host last told us about its sessions (DEV-1162).
+    /// Read by the Machines sidebar (DEV-1163) and remote attention
+    /// (DEV-1164).
+    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
+    pub fn hosts(&self) -> &HostFeeds {
+        &self.inner.feeds
     }
 
     pub fn status(&self) -> RemoteStatus {
@@ -357,7 +385,9 @@ impl RemoteService {
     /// This machine's endpoint as a handle that survives relay rebinds —
     /// what a [`PeerLink`](super::link::PeerLink) should dial through. Binds
     /// if nothing is bound.
-    #[allow(dead_code)] // first caller: the client links (DEV-1162)
+    /// The app's own links are the followers, which take the handle inside
+    /// the service; this is for tests and any later caller outside it.
+    #[cfg(test)]
     pub(crate) async fn endpoint(&self) -> Result<Arc<dyn PeerTransport>> {
         self.inner.bound(self.inner.life.lock().await).await?;
         lock(&self.inner.endpoint)
@@ -554,6 +584,59 @@ impl Inner {
         self.allow.load(Ordering::SeqCst)
             || self.client_busy.load(Ordering::SeqCst)
             || self.pairing.in_progress(Instant::now())
+            || !self.registry.is_empty()
+    }
+
+    /// One follower per trusted peer: start the new, stop the removed.
+    ///
+    /// Followers dial through the stable [`Endpoint`] handle, not the bound
+    /// transport, so after a relay rebind their links reconnect through the
+    /// new endpoint. If the handle itself was replaced (the identity changed),
+    /// they are restarted on the new one.
+    async fn sync_followers(&self, life: &mut Life) {
+        if life.transport.is_none() {
+            return;
+        }
+        let Some(handle) = lock(&self.endpoint).clone() else {
+            return;
+        };
+        if !life
+            .followers_on
+            .as_ref()
+            .is_some_and(|h| Arc::ptr_eq(h, &handle))
+        {
+            for (id, f) in life.followers.drain() {
+                f.stop().await;
+                self.feeds.lost(id);
+            }
+            life.followers_on = Some(Arc::clone(&handle));
+        }
+        let transport: Arc<dyn PeerTransport> = handle;
+        let trusted: Vec<PeerId> = self.registry.list().into_iter().map(|p| p.id).collect();
+        let gone: Vec<PeerId> = life
+            .followers
+            .keys()
+            .filter(|id| !trusted.contains(id))
+            .copied()
+            .collect();
+        for id in gone {
+            if let Some(f) = life.followers.remove(&id) {
+                f.stop().await;
+            }
+            self.feeds.forget(id);
+        }
+        for id in trusted {
+            life.followers.entry(id).or_insert_with(|| {
+                Follower::spawn(
+                    &self.rt,
+                    Arc::clone(&transport),
+                    id,
+                    self.follow_policy,
+                    self.feeds.clone(),
+                    Arc::clone(&self.control.host_name),
+                )
+            });
+        }
     }
 
     /// The bound transport, binding (and starting the gate) if there is none.
@@ -601,9 +684,26 @@ impl Inner {
             if let Err(e) = self.bound(life).await {
                 self.set_endpoint_down();
                 self.set_error(Some(format!("could not start the remote endpoint: {e}")));
+                return;
             }
-        } else if !needed {
+            life = self.life.lock().await;
+        }
+        if needed {
+            self.sync_followers(&mut life).await;
+        } else {
             self.set_endpoint_down();
+            // Unpairing the last peer is one way to get here: a peer that is
+            // no longer trusted is forgotten, not left listed as unreachable.
+            let trusted = self.registry.list();
+            life.followers_on = None;
+            for (id, f) in life.followers.drain() {
+                f.stop().await;
+                if trusted.iter().any(|p| p.id == id) {
+                    self.feeds.lost(id);
+                } else {
+                    self.feeds.forget(id);
+                }
+            }
             if let Some(transport) = life.transport.take() {
                 life.bound_with = None;
                 if let Some(task) = life.accept.take() {
@@ -731,6 +831,9 @@ async fn supervise(weak: std::sync::Weak<Inner>) {
     let Some(inner) = weak.upgrade() else { return };
     let mut wake = inner.wake.subscribe();
     let mut pairing = inner.pairing.subscribe();
+    // A peer paired or removed changes who to follow, and whether anything
+    // needs the endpoint at all.
+    let mut peers = inner.registry.subscribe();
     drop(inner);
     loop {
         let Some(inner) = weak.upgrade() else { return };
@@ -749,6 +852,7 @@ async fn supervise(weak: std::sync::Weak<Inner>) {
         tokio::select! {
             r = wake.changed() => if r.is_err() { return },
             r = pairing.changed() => if r.is_err() { return },
+            r = peers.changed() => if r.is_err() { return },
             _ = sleep => {
                 if let Some(inner) = weak.upgrade() {
                     inner.pairing.in_progress(Instant::now()); // expires the code

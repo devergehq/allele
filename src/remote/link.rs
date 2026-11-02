@@ -18,7 +18,6 @@
 // The client side: keeping a link to a host. Nothing in the app dials a host
 // yet — the host listener (DEV-1161) is the first half. The first caller is
 // the client that subscribes to a host's status (DEV-1162).
-#![allow(dead_code)]
 
 use std::fmt;
 use std::sync::Arc;
@@ -75,6 +74,7 @@ pub enum LinkState {
 }
 
 impl LinkState {
+    #[allow(dead_code)] // first caller: a wake / network-change observer (follow-up to DEV-1162)
     pub fn is_connected(&self) -> bool {
         matches!(self, Self::Connected(_))
     }
@@ -100,6 +100,8 @@ impl fmt::Debug for LinkState {
 
 enum Command {
     /// Drop the current connection (or the current wait) and dial again now.
+    #[allow(dead_code)]
+    // first caller: a wake / network-change observer (follow-up to DEV-1162)
     Reconnect,
     Shutdown,
 }
@@ -107,6 +109,7 @@ enum Command {
 /// A supervised connection to one peer. Dropping the link stops it and closes
 /// the connection.
 pub struct PeerLink {
+    #[allow(dead_code)] // first caller: a wake / network-change observer (follow-up to DEV-1162)
     peer: PeerId,
     state: watch::Receiver<LinkState>,
     commands: mpsc::UnboundedSender<Command>,
@@ -132,11 +135,13 @@ impl PeerLink {
         }
     }
 
+    #[allow(dead_code)] // first caller: a wake / network-change observer (follow-up to DEV-1162)
     pub fn peer(&self) -> PeerId {
         self.peer
     }
 
     /// The latest state.
+    #[allow(dead_code)] // first caller: a wake / network-change observer (follow-up to DEV-1162)
     pub fn state(&self) -> LinkState {
         self.state.borrow().clone()
     }
@@ -147,6 +152,7 @@ impl PeerLink {
     }
 
     /// The live connection, if there is one right now.
+    #[allow(dead_code)] // first caller: a wake / network-change observer (follow-up to DEV-1162)
     pub fn connection(&self) -> Option<Arc<dyn PeerConnection>> {
         match &*self.state.borrow() {
             LinkState::Connected(c) => Some(Arc::clone(c)),
@@ -155,6 +161,7 @@ impl PeerLink {
     }
 
     /// Wait until connected. `None` if the link stopped first.
+    #[allow(dead_code)] // first caller: a wake / network-change observer (follow-up to DEV-1162)
     pub async fn wait_connected(&self) -> Option<Arc<dyn PeerConnection>> {
         let mut rx = self.state.clone();
         loop {
@@ -170,6 +177,7 @@ impl PeerLink {
     /// Close the current connection and redial now — for a caller that has
     /// evidence the connection is bad before the heartbeat does (a request
     /// timed out, the Mac woke from sleep). Also cuts short a backoff wait.
+    #[allow(dead_code)] // first caller: a wake / network-change observer (follow-up to DEV-1162)
     pub fn reconnect_now(&self) {
         let _ = self.commands.send(Command::Reconnect);
     }
