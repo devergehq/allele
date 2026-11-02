@@ -113,6 +113,7 @@ impl Host {
             host_name: HostName::new(Some("Studio".into()), || None),
             status_feed: crate::status_feed::StatusFeed::new(),
             screens: Arc::new(super::screen::NoScreens),
+            viewers: Default::default(),
         };
         let gate = Gate::new(
             registry.clone(),

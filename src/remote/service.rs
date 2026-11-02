@@ -227,6 +227,7 @@ impl RemoteService {
             host_name: HostName::new(settings.machine_name.clone(), computer_name),
             screens,
             status_feed,
+            viewers: Default::default(),
         };
         Self::new(
             crate::rt::handle(),
@@ -339,6 +340,12 @@ impl RemoteService {
     /// (or no longer) trusted. Display only; peer-chosen text.
     pub fn peer_name(&self, id: PeerId) -> Option<String> {
         self.inner.registry.get(id).map(|p| p.machine_name)
+    }
+
+    /// Which paired machines are attached to which local sessions, for the
+    /// session tab's "<Machine> is viewing" chip (DEV-1166).
+    pub fn viewers(&self) -> super::viewers::Viewers {
+        self.inner.control.viewers.clone()
     }
 
     pub fn status(&self) -> RemoteStatus {

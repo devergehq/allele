@@ -17,6 +17,7 @@ use crate::{debug_capture, git, hooks, interrupted};
 
 /// Start every background poller. Called once, from `main`.
 pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
+    spawn_viewers_redraw(cx);
     // Paired Macs' sessions waiting for the user: notify and redraw (DEV-1164).
     crate::remote_attention::spawn(cx);
 
@@ -290,6 +291,25 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                 .is_err()
             {
                 break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// Redraw when a paired Mac attaches to or detaches from a session, so the
+/// tab's "<Machine> is viewing" chip (DEV-1166) appears and clears at once.
+/// Waits on the viewers' change channel: no wakeups while nothing changes,
+/// and unlike the render tick it runs while the display sleeps.
+fn spawn_viewers_redraw(cx: &mut Context<AppState>) {
+    cx.spawn(async move |this, cx| {
+        let Ok(mut changes) = this.read_with(cx, |state, _| state.remote.viewers().subscribe())
+        else {
+            return;
+        };
+        while changes.changed().await.is_ok() {
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                break; // AppState dropped — app is exiting
             }
         }
     })

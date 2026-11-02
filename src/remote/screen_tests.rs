@@ -17,6 +17,21 @@
 //! | a host that cannot look the session up says so | `a_lookup_the_host_cannot_answer_is_internal_not_not_found` |
 //! | a re-attach that fails leaves the working stream | `a_failed_reattach_keeps_the_working_stream` |
 //! | a full-size screen fits the link | `a_full_size_colour_screen_streams` |
+//!
+//! Remote input (DEV-1166):
+//!
+//! | criterion | test |
+//! | -- | -- |
+//! | typing on a `control` client appears in the host session | `typing_on_a_control_client_appears_in_the_host_session` |
+//! | Ctrl-C from the client reaches the PTY as `0x03` | `ctrl_c_from_the_client_reaches_the_host_pty_as_etx` |
+//! | keys reach the host as the keymap encoded them | `keys_reach_the_host_exactly_as_the_keymap_encodes_them` |
+//! | a multi-line paste arrives as one bracketed paste | `a_multiline_paste_arrives_as_one_bracketed_write` |
+//! | a paste into a program without bracketed paste is the bare text | `a_paste_without_bracketed_mode_is_one_plain_write` |
+//! | input from a `view` peer is dropped and refused | `input_from_a_view_peer_is_dropped_and_refused` |
+//! | `control` is read live, per frame | `control_granted_or_withdrawn_mid_attach_applies_to_the_next_key` |
+//! | an oversized input frame is refused, not written | `an_oversized_input_frame_is_refused_and_not_written` |
+//! | the client refuses an oversized paste itself | `the_client_refuses_an_oversized_paste_before_sending` |
+//! | the host lists the attached machine until it detaches | `the_host_lists_an_attached_machine_until_it_detaches` |
 
 #![cfg(test)]
 
@@ -41,10 +56,12 @@ use super::registry::PeerRegistry;
 use super::screen::{ScreenClient, ScreenSource};
 use super::testing::{MemNet, MemTransport};
 use super::transport::{PeerConnection, PeerStream, PeerTransport};
+use super::viewers::Viewers;
 use super::wire::{read_frame_within, write_frame, Frame, MAX_PEER_FRAME, PROTOCOL_VERSION};
 use crate::dispatch::protocol::{ErrorCode, Request, Response};
 use crate::errors::{AlleleError, Result};
 use crate::repositories::fakes::InMemoryPeersRepository;
+use crate::terminal::keymap::KeymapConfig;
 use crate::terminal::mirror::{capture, capture_history, MirrorTerm, ScreenFrame, SharedTerm};
 
 const COLUMNS: usize = 40;
@@ -71,10 +88,19 @@ fn feed(term: &HostTerm, bytes: &[u8]) {
     parser.advance(&mut *term.lock(), bytes);
 }
 
+/// Every write remote input made to a PTY, one entry per write.
+type Typed = Arc<Mutex<Vec<Vec<u8>>>>;
+
 /// Terminals by session id, as the app's sessions would hold them.
 /// `s-busy` stands for a host that could not answer the lookup in time.
+///
+/// Input written to a terminal is recorded in `typed` and echoed into the
+/// `Term`, as a shell with echo on would, so the client sees what it typed.
 #[derive(Default)]
-struct Screens(Mutex<HashMap<String, HostTerm>>);
+struct Screens {
+    terms: Mutex<HashMap<String, HostTerm>>,
+    typed: Typed,
+}
 
 #[async_trait]
 impl ScreenSource for Screens {
@@ -84,10 +110,20 @@ impl ScreenSource for Screens {
                 "the other Mac is busy; try again".into(),
             ));
         }
-        let terms = self.0.lock().unwrap();
-        Ok(terms
-            .get(session_id)
-            .map(|term| Arc::new(SharedTerm::new(term, Some(HISTORY))) as Arc<dyn MirrorTerm>))
+        let terms = self.terms.lock().unwrap();
+        Ok(terms.get(session_id).map(|term| {
+            let typed = Arc::clone(&self.typed);
+            let echo = Arc::downgrade(term);
+            let sink = move |bytes: &[u8]| {
+                typed.lock().unwrap().push(bytes.to_vec());
+                if let Some(term) = echo.upgrade() {
+                    feed(&term, bytes);
+                }
+                true
+            };
+            Arc::new(SharedTerm::new(term, Some(HISTORY)).with_input(Box::new(sink)))
+                as Arc<dyn MirrorTerm>
+        }))
     }
 }
 
@@ -107,6 +143,7 @@ struct Host {
     /// The one session this host has, `s-1`.
     term: HostTerm,
     screens: Arc<Screens>,
+    viewers: Viewers,
 }
 
 impl Host {
@@ -119,12 +156,18 @@ impl Host {
         let registry = PeerRegistry::load(Arc::new(InMemoryPeersRepository::default()));
         let term = term(columns, lines);
         let screens = Arc::new(Screens::default());
-        screens.0.lock().unwrap().insert("s-1".into(), term.clone());
+        screens
+            .terms
+            .lock()
+            .unwrap()
+            .insert("s-1".into(), term.clone());
+        let viewers = Viewers::default();
         let control = ControlContext {
             dispatch: Arc::new(Lists),
             host_name: HostName::new(Some("Studio".into()), || None),
             screens: screens.clone(),
             status_feed: crate::status_feed::StatusFeed::new(),
+            viewers: viewers.clone(),
         };
         let gate = Gate::new(
             registry.clone(),
@@ -138,6 +181,7 @@ impl Host {
             registry,
             term,
             screens,
+            viewers,
         }
     }
 
@@ -166,6 +210,10 @@ impl Host {
 }
 
 const VIEW: PeerPermissions = PeerPermissions::NEW_PEER;
+const CONTROL: PeerPermissions = PeerPermissions {
+    view: true,
+    control: true,
+};
 const NOTHING: PeerPermissions = PeerPermissions {
     view: false,
     control: false,
@@ -479,7 +527,7 @@ async fn a_failed_reattach_keeps_the_working_stream() {
     assert!(matches!(read(&mut screen).await, Frame::Screen { .. }));
 
     // The session can no longer be found, so the re-attach fails...
-    host.screens.0.lock().unwrap().remove("s-1");
+    host.screens.terms.lock().unwrap().remove("s-1");
     attach(&mut control, 101, "s-1").await;
     match read(&mut control).await {
         Frame::AttachFailed {
@@ -527,4 +575,307 @@ async fn a_full_size_colour_screen_streams() {
             .all(|(i, row)| grid.row(i as i32) == Some(row))
     })
     .await;
+}
+
+// ── remote input (DEV-1166) ──────────────────────────────────────────────
+
+impl Host {
+    /// Every PTY write remote input has made, in order.
+    fn typed(&self) -> Vec<Vec<u8>> {
+        self.screens.typed.lock().unwrap().clone()
+    }
+
+    /// The host screen's text, rows joined by newlines.
+    fn screen_text(&self) -> String {
+        let cap = capture(&self.term.lock());
+        cap.screen
+            .iter()
+            .map(|row| row.iter().map(|cell| cell.c).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn ctrl() -> gpui::Modifiers {
+    gpui::Modifiers {
+        control: true,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn typing_on_a_control_client_appears_in_the_host_session() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, CONTROL).await;
+    let client = ScreenClient::new(conn);
+    let attached = client.attach(&mut control.send, "s-1").await.unwrap();
+
+    for key in ["l", "s"] {
+        let bytes = KeymapConfig::default()
+            .resolve(key, &gpui::Modifiers::default(), Some(key))
+            .unwrap();
+        attached.send_input(&bytes).unwrap();
+    }
+    eventually("the keys reach the host PTY", || {
+        host.typed() == vec![b"l".to_vec(), b"s".to_vec()]
+    })
+    .await;
+    assert!(host.screen_text().contains("ls"), "{}", host.screen_text());
+
+    // And the echo comes back to the client's mirror.
+    let grid = attached.grid();
+    eventually("the client sees its own typing", || {
+        grid.lock()
+            .row(0)
+            .is_some_and(|row| row.iter().map(|c| c.c).collect::<String>().contains("ls"))
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn ctrl_c_from_the_client_reaches_the_host_pty_as_etx() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, CONTROL).await;
+    let client = ScreenClient::new(conn);
+    let attached = client.attach(&mut control.send, "s-1").await.unwrap();
+
+    let bytes = KeymapConfig::default()
+        .resolve("c", &ctrl(), Some("c"))
+        .unwrap();
+    assert_eq!(bytes, vec![0x03], "the keymap's Ctrl-C");
+    attached.send_input(&bytes).unwrap();
+    // 0x03 written to the PTY is what makes its line discipline send SIGINT
+    // to the foreground job: the same write local Ctrl-C makes.
+    eventually("ETX reaches the PTY", || host.typed() == vec![vec![0x03]]).await;
+}
+
+#[tokio::test]
+async fn keys_reach_the_host_exactly_as_the_keymap_encodes_them() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, CONTROL).await;
+    let client = ScreenClient::new(conn);
+    let attached = client.attach(&mut control.send, "s-1").await.unwrap();
+
+    let keymap = KeymapConfig::default();
+    let none = gpui::Modifiers::default();
+    let shift = gpui::Modifiers {
+        shift: true,
+        ..Default::default()
+    };
+    let alt = gpui::Modifiers {
+        alt: true,
+        ..Default::default()
+    };
+    let keys = [
+        keymap.resolve("enter", &none, None),
+        keymap.resolve("enter", &shift, None),
+        keymap.resolve("up", &none, None),
+        keymap.resolve("tab", &shift, None),
+        keymap.resolve("escape", &none, None),
+        keymap.resolve("backspace", &none, None),
+        keymap.resolve("b", &alt, Some("∫")),
+        keymap.resolve("é", &none, Some("é")),
+    ];
+    let sent: Vec<Vec<u8>> = keys.into_iter().map(|k| k.expect("a key")).collect();
+    for bytes in &sent {
+        attached.send_input(bytes).unwrap();
+    }
+    eventually("every key arrives, in order", || host.typed() == sent).await;
+}
+
+#[tokio::test]
+async fn a_multiline_paste_arrives_as_one_bracketed_write() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    // The program asked for bracketed paste, as Claude Code does.
+    feed(&host.term, b"\x1b[?2004h");
+    let (_laptop, conn, mut control) = host.peer(&net, CONTROL).await;
+    let client = ScreenClient::new(conn);
+    let attached = client.attach(&mut control.send, "s-1").await.unwrap();
+
+    attached.send_paste("one\ntwo\nthree").unwrap();
+    eventually("the paste is written", || !host.typed().is_empty()).await;
+    sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        host.typed(),
+        vec![b"\x1b[200~one\ntwo\nthree\x1b[201~".to_vec()],
+        "one write, wrapped once"
+    );
+}
+
+#[tokio::test]
+async fn a_paste_without_bracketed_mode_is_one_plain_write() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, CONTROL).await;
+    let client = ScreenClient::new(conn);
+    let attached = client.attach(&mut control.send, "s-1").await.unwrap();
+
+    attached.send_paste("one\ntwo").unwrap();
+    eventually("the paste is written", || {
+        host.typed() == vec![b"one\ntwo".to_vec()]
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn input_from_a_view_peer_is_dropped_and_refused() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, VIEW).await;
+    let client = ScreenClient::new(conn);
+    let attached = client.attach(&mut control.send, "s-1").await.unwrap();
+    let mut changed = attached.changed();
+
+    attached.send_input(b"y").unwrap();
+    attached.send_input(b"\r").unwrap();
+    let refusal = timeout(WAIT, async {
+        loop {
+            if let Some(message) = attached.take_refusal() {
+                return message;
+            }
+            changed.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("a refusal in time");
+    assert!(refusal.contains("control"), "{refusal}");
+
+    // Taken once.
+    sleep(Duration::from_millis(100)).await;
+    let _ = attached.take_refusal();
+    assert_eq!(attached.take_refusal(), None);
+    assert!(host.typed().is_empty(), "nothing reached the PTY");
+    // The mirror itself carries on.
+    feed(&host.term, b"still streaming");
+    let grid = attached.grid();
+    eventually("the mirror still follows the host", || {
+        grid.lock().row(0).is_some_and(|row| {
+            row.iter()
+                .map(|c| c.c)
+                .collect::<String>()
+                .contains("still")
+        })
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn control_granted_or_withdrawn_mid_attach_applies_to_the_next_key() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (laptop, conn, mut control) = host.peer(&net, VIEW).await;
+    let client = ScreenClient::new(conn);
+    let attached = client.attach(&mut control.send, "s-1").await.unwrap();
+
+    attached.send_input(b"a").unwrap();
+    eventually("refused while view only", || {
+        attached.take_refusal().is_some()
+    })
+    .await;
+
+    host.registry.set_control(laptop.local_id(), true).unwrap();
+    attached.send_input(b"b").unwrap();
+    eventually("written once control is granted", || {
+        host.typed() == vec![b"b".to_vec()]
+    })
+    .await;
+
+    host.registry.set_control(laptop.local_id(), false).unwrap();
+    attached.send_input(b"c").unwrap();
+    eventually("refused once control is withdrawn", || {
+        attached.take_refusal().is_some()
+    })
+    .await;
+    assert_eq!(host.typed(), vec![b"b".to_vec()]);
+}
+
+#[tokio::test]
+async fn an_oversized_input_frame_is_refused_and_not_written() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, CONTROL).await;
+
+    attach(&mut control, 100, "s-1").await;
+    let mut screen = conn.accept_stream().await.unwrap();
+    assert!(matches!(read(&mut screen).await, Frame::ScreenOpen { .. }));
+
+    // A client that skips its own check.
+    let big = Frame::Input {
+        text: "x".repeat(super::screen::MAX_INPUT_BYTES + 1),
+        paste: true,
+    };
+    write_frame(&mut screen.send, &big).await.unwrap();
+    let code = timeout(WAIT, async {
+        loop {
+            if let Frame::InputRefused { code, .. } = read(&mut screen).await {
+                return code;
+            }
+        }
+    })
+    .await
+    .expect("a refusal in time");
+    assert_eq!(code, ErrorCode::BadRequest);
+    assert!(host.typed().is_empty());
+
+    // The stream still takes input that fits.
+    let key = Frame::Input {
+        text: "k".into(),
+        paste: false,
+    };
+    write_frame(&mut screen.send, &key).await.unwrap();
+    eventually("a normal key still lands", || {
+        host.typed() == vec![b"k".to_vec()]
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_client_refuses_an_oversized_paste_before_sending() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, CONTROL).await;
+    let client = ScreenClient::new(conn);
+    let attached = client.attach(&mut control.send, "s-1").await.unwrap();
+
+    let big = "x".repeat(super::screen::MAX_INPUT_BYTES + 1);
+    let err = attached.send_paste(&big).unwrap_err().to_string();
+    assert!(err.contains("too much"), "{err}");
+    let fits = "x".repeat(super::screen::MAX_INPUT_BYTES);
+    attached.send_paste(&fits).unwrap();
+    eventually("a paste at the limit lands whole", || {
+        host.typed() == vec![fits.as_bytes().to_vec()]
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn the_host_lists_an_attached_machine_until_it_detaches() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, VIEW).await;
+    let client = ScreenClient::new(conn);
+    assert!(host.viewers.machines("s-1").is_empty());
+
+    let attached = client.attach(&mut control.send, "s-1").await.unwrap();
+    eventually("the host lists the machine", || {
+        host.viewers.machines("s-1") == vec!["Laptop".to_string()]
+    })
+    .await;
+
+    let version = host.viewers.version();
+    attached.detach(&mut control.send).await.unwrap();
+    // The chip's poller redraws on a version change every 500 ms; the
+    // entry itself must go well inside the 2 s the chip is allowed.
+    timeout(Duration::from_millis(1500), async {
+        while !host.viewers.machines("s-1").is_empty() {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the entry goes promptly after detach");
+    assert_ne!(host.viewers.version(), version);
 }
