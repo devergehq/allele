@@ -42,7 +42,9 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
             // on the foreground because it walks AppState, but
             // it touches no disk — the pruning it feeds does,
             // and that happens below, off-thread.
-            let Ok(live) = this.read_with(cx, |this, _cx| this.live_event_ids()) else {
+            let Ok((live, away_pending)) =
+                this.read_with(cx, |this, _cx| (this.live_event_ids(), this.away_pending()))
+            else {
                 break; // AppState dropped — app is exiting
             };
 
@@ -67,7 +69,7 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                 .await;
             watcher = returned;
 
-            if events.is_empty() {
+            if events.is_empty() && !away_pending {
                 continue;
             }
 
@@ -76,6 +78,10 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                     for event in events {
                         this.apply_hook_event(event, cx);
                     }
+                    // After the events, so a queued Away sees this tick's
+                    // status. Covers interrupted turns too: `poll_once` above
+                    // has already moved those out of `Running` (DEV-1157).
+                    this.drain_away_queue(cx);
                 })
                 .is_err()
             {

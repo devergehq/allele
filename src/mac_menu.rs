@@ -65,6 +65,13 @@ pub(crate) fn install_app_menu(cx: &mut App) {
             ],
         },
         Menu {
+            name: "Sessions".into(),
+            items: vec![MenuItem::action(
+                "Away — Remote Control for All Sessions",
+                crate::away::AwayAction,
+            )],
+        },
+        Menu {
             name: "Debug".into(),
             items: vec![MenuItem::action("Capture UI for Agent", CaptureUi)],
         },

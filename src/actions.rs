@@ -84,6 +84,9 @@ pub enum SessionAction {
     },
     /// Cancel an in-flight discard confirmation.
     CancelDiscard,
+    /// Away: request Claude Code's remote control from every live Claude
+    /// session, queueing those it is not yet safe to type into (DEV-1157).
+    RequestRemoteControlAll,
     /// Permanently delete the clone and remove the session from state.
     DiscardSession {
         project_idx: usize,

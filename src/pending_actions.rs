@@ -117,6 +117,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         match action {
+            SessionAction::RequestRemoteControlAll => self.away_and_report(cx),
             SessionAction::NewSessionInActiveProject => {
                 if let Some(active) = self.active {
                     self.add_session_to_project(active.project_idx, window, cx);
