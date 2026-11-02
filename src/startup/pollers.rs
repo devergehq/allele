@@ -76,6 +76,10 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                     for event in events {
                         this.apply_hook_event(event, cx);
                     }
+                    // Status changes already publish through
+                    // `mark_state_dirty`; this catches the rest (an attention
+                    // kind changing while the status holds) on the same tick.
+                    this.publish_status_feed();
                 })
                 .is_err()
             {

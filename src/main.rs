@@ -49,6 +49,7 @@ mod shell_env;
 mod sidebar;
 mod startup;
 mod state;
+mod status_feed;
 mod stream;
 mod sync;
 mod syntax;
@@ -2163,6 +2164,8 @@ fn main() {
                             .detach();
                     }
 
+                    let status_feed = status_feed::StatusFeed::seeded(&projects);
+
                     AppState {
                         projects,
                         active: initial_active,
@@ -2270,6 +2273,7 @@ fn main() {
                             },
                         ),
                         capture_ui_requested: false,
+                        status_feed,
                         // Captured on the first render (see `Render`).
                         main_window: None,
                         pending_dispatch_origins: Default::default(), // DEV-415
