@@ -31,6 +31,13 @@
 //!                                                      the client to hang up
 //!     client → host  request  { id, op: <dispatch Request> }
 //!     host → client  response { id, result: <dispatch Response> }
+//!
+//!   status feed (DEV-1162; same control stream, needs `view`)
+//!     client → host  subscribe_status                  again to resync
+//!     host → client  status_snapshot { seq, sessions } replaces everything
+//!                  | status_refused  { message }       no `view`, or it was revoked
+//!     host → client  status_delta    { seq, change }   seq = previous + 1
+//!
 //!     client → host  attach   { attach_id, session_id }   needs view (DEV-1165)
 //!                  | detach   { session_id }
 //!     host → client  attach_failed { attach_id, session_id, code, message }
@@ -55,6 +62,7 @@ use crate::errors::{AlleleError, Result};
 use crate::terminal::mirror::ScreenFrame;
 
 use super::peers::PeerPermissions;
+use crate::status_feed::{SessionEntry, StatusChange, StatusDelta, StatusSnapshot};
 
 /// Largest frame read from a peer that has not yet said who it is. A pairing
 /// hello is a ~16-byte secret and a ≤64-character name; 4 KiB is generous and
@@ -209,6 +217,39 @@ pub enum Frame {
     /// The mirror carries on. `code` is `permission_denied` (no `control`),
     /// `bad_request` (too large) or `session_not_found` (the terminal went).
     InputRefused { code: ErrorCode, message: String },
+
+    // ── status feed (DEV-1162) ────────────────────────────────────────────
+    /// Client → host: send me every session, then every change. Sent again
+    /// after a gap, it replaces the subscription with a fresh snapshot.
+    SubscribeStatus,
+    /// Host → client: every session, as of change `seq`.
+    StatusSnapshot {
+        seq: u64,
+        sessions: Vec<SessionEntry>,
+    },
+    /// Host → client: change number `seq`, always the previous one plus one.
+    StatusDelta { seq: u64, change: StatusChange },
+    /// Host → client: no feed — the peer lacks `view`, or lost it. The
+    /// control stream itself carries on.
+    StatusRefused { message: String },
+}
+
+impl From<StatusSnapshot> for Frame {
+    fn from(s: StatusSnapshot) -> Self {
+        Frame::StatusSnapshot {
+            seq: s.seq,
+            sessions: s.sessions,
+        }
+    }
+}
+
+impl From<StatusDelta> for Frame {
+    fn from(d: StatusDelta) -> Self {
+        Frame::StatusDelta {
+            seq: d.seq,
+            change: d.change,
+        }
+    }
 }
 
 /// Write one frame. Refuses a frame larger than [`MAX_PEER_FRAME`]; the
@@ -437,6 +478,30 @@ mod tests {
             serde_json::to_string(&response).unwrap(),
             r#"{"type":"response","id":7,"result":{"result":"error","code":"permission_denied","message":"no"}}"#
         );
+    }
+
+    #[test]
+    fn status_frames_have_the_documented_shape() {
+        assert_eq!(
+            serde_json::to_string(&Frame::SubscribeStatus).unwrap(),
+            r#"{"type":"subscribe_status"}"#
+        );
+        let delta: Frame = StatusDelta {
+            seq: 4,
+            change: StatusChange::Removed { id: "s1".into() },
+        }
+        .into();
+        assert_eq!(
+            serde_json::to_string(&delta).unwrap(),
+            r#"{"type":"status_delta","seq":4,"change":{"kind":"removed","id":"s1"}}"#
+        );
+        let snapshot: Frame = StatusSnapshot {
+            seq: 3,
+            sessions: vec![],
+        }
+        .into();
+        let json = serde_json::to_vec(&snapshot).unwrap();
+        assert_eq!(serde_json::from_slice::<Frame>(&json).unwrap(), snapshot);
     }
 
     #[test]

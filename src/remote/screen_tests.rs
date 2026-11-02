@@ -166,6 +166,7 @@ impl Host {
             dispatch: Arc::new(Lists),
             host_name: HostName::new(Some("Studio".into()), || None),
             screens: screens.clone(),
+            status_feed: crate::status_feed::StatusFeed::new(),
             viewers: viewers.clone(),
         };
         let gate = Gate::new(

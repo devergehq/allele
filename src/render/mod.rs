@@ -2408,6 +2408,7 @@ impl Render for AppState {
         }
 
         outer = outer.child(self.render_session_context_menu(cx));
+        outer = outer.child(self.render_remote_session_menu(cx));
         outer = outer.child(self.render_project_context_menu(cx));
         outer = outer.child(self.render_group_context_menu(cx));
 
