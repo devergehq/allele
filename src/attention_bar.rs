@@ -17,11 +17,37 @@ use crate::session;
 use crate::session::AttentionKind;
 use crate::theme::theme;
 
+/// Where an attention row points. A local row selects its session and can
+/// offer Allow; a remote one (DEV-1164) lives on another Mac, so it does
+/// neither — it carries no local index that a click could misuse.
+#[derive(Clone)]
+enum Target {
+    Local {
+        project_idx: usize,
+        session_idx: usize,
+    },
+    Remote {
+        key: String,
+    },
+}
+
+/// One row of the bar, local or remote.
+struct Item {
+    target: Target,
+    label: String,
+    kind: AttentionKind,
+    tool: String,
+    summary: String,
+}
+
 impl AppState {
     /// Render the attention bar — a summary header plus a row per session in
     /// AwaitingInput state, showing what each session wants so the user can
     /// act without switching. Returns `None` when no sessions need attention
     /// (renders nothing).
+    ///
+    /// Sessions on paired Macs that are waiting join the same list (DEV-1164),
+    /// labelled `Host · label` and sorted with the local ones by kind.
     ///
     /// The header collapses the rows away (DEV-525): at twenty-odd waiting
     /// sessions the unbounded list ate most of the viewport and the terminal
@@ -30,8 +56,7 @@ impl AppState {
     /// capped at `ATTENTION_BAR_MAX_ROWS` rows tall and scrolls past that, so
     /// the bar can never take the window no matter how many agents are blocked.
     pub(crate) fn render_attention_bar(&self, cx: &mut Context<Self>) -> Option<Div> {
-        // Each item: (project_idx, session_idx, label, kind, tool, summary)
-        let mut items: Vec<(usize, usize, String, AttentionKind, String, String)> = Vec::new();
+        let mut items: Vec<Item> = Vec::new();
 
         for (p_idx, project) in self.projects.iter().enumerate() {
             for (s_idx, session) in project.sessions.iter().enumerate() {
@@ -61,8 +86,29 @@ impl AppState {
                         "Waiting for input".into(),
                     )
                 };
-                items.push((p_idx, s_idx, label, kind, tool, summary));
+                items.push(Item {
+                    target: Target::Local {
+                        project_idx: p_idx,
+                        session_idx: s_idx,
+                    },
+                    label,
+                    kind,
+                    tool,
+                    summary,
+                });
             }
+        }
+
+        // Remote rows go after the local ones; the stable sort below keeps
+        // that order within a kind.
+        for row in self.remote_attention_rows() {
+            items.push(Item {
+                target: Target::Remote { key: row.key },
+                label: row.label,
+                kind: row.kind,
+                tool: String::new(),
+                summary: row.detail,
+            });
         }
 
         if items.is_empty() {
@@ -72,14 +118,14 @@ impl AppState {
         // Blocked first, then merely idle — the bar is a triage queue, and the
         // rows that need a human have to be the ones above the scroll fold
         // (DEV-788; the cap is ATTENTION_BAR_MAX_ROWS).
-        items.sort_by_key(|(_, _, _, kind, _, _)| match kind {
+        items.sort_by_key(|item| match item.kind {
             AttentionKind::Permission => 0u8,
             AttentionKind::Question => 1,
             AttentionKind::Idle => 2,
         });
 
         let collapsed = self.user_settings.attention_bar_collapsed;
-        let blocked = items.iter().filter(|i| i.3.is_blocking()).count();
+        let blocked = items.iter().filter(|i| i.kind.is_blocking()).count();
         let idle = items.len() - blocked;
 
         let mut bar = div()
@@ -106,8 +152,21 @@ impl AppState {
             .max_h(px(ATTENTION_BAR_ROW_HEIGHT * ATTENTION_BAR_MAX_ROWS))
             .overflow_y_scroll();
 
-        for (idx, (p_idx, s_idx, label, kind, tool, summary)) in items.into_iter().enumerate() {
-            let row_id = SharedString::from(format!("attention-row-{p_idx}-{s_idx}"));
+        for (idx, item) in items.into_iter().enumerate() {
+            let Item {
+                target,
+                label,
+                kind,
+                tool,
+                summary,
+            } = item;
+            let row_id = SharedString::from(match &target {
+                Target::Local {
+                    project_idx,
+                    session_idx,
+                } => format!("attention-row-{project_idx}-{session_idx}"),
+                Target::Remote { key } => format!("attention-remote-{key}"),
+            });
 
             let tool_display = if tool.is_empty() {
                 String::new()
@@ -115,10 +174,17 @@ impl AppState {
                 format!("{tool}: ")
             };
 
-            let is_active = self
-                .active
-                .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
-                .unwrap_or(false);
+            let local = match target {
+                Target::Local {
+                    project_idx,
+                    session_idx,
+                } => Some((project_idx, session_idx)),
+                Target::Remote { .. } => None,
+            };
+            let is_active = match (self.active, local) {
+                (Some(c), Some((p_idx, s_idx))) => c.project_idx == p_idx && c.session_idx == s_idx,
+                _ => false,
+            };
 
             let bg = if is_active {
                 theme().bg_attention
@@ -138,54 +204,58 @@ impl AppState {
                 .flex_row()
                 .items_center()
                 .gap(px(8.0))
-                .child(icon(kind.icon_name(), 13.0, kind.color()))
+                .child(icon(kind.icon_name(), 13.0, kind.color()));
+
+            let mut body = div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_x_hidden()
+                .flex()
+                .flex_row()
+                .items_center()
+                .gap(px(6.0));
+            // Only a local row is a link. A remote session can't be selected
+            // here, so its row doesn't pretend to be clickable.
+            if let Some((p_idx, s_idx)) = local {
+                body = body.cursor_pointer().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        this.pending_action = Some(
+                            SessionAction::SelectSession {
+                                project_idx: p_idx,
+                                session_idx: s_idx,
+                            }
+                            .into(),
+                        );
+                        cx.notify();
+                    }),
+                );
+            }
+            row = row.child(
+                body.child(
+                    div()
+                        .text_size(px(11.0))
+                        .text_color(theme().text_primary)
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(label),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_size(px(10.0))
+                        .text_color(kind.color())
+                        .child(kind.label()),
+                )
                 .child(
                     div()
                         .flex_1()
                         .min_w(px(0.0))
                         .overflow_x_hidden()
-                        .flex()
-                        .flex_row()
-                        .items_center()
-                        .gap(px(6.0))
-                        .cursor_pointer()
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this: &mut Self, _event, _window, cx| {
-                                this.pending_action = Some(
-                                    SessionAction::SelectSession {
-                                        project_idx: p_idx,
-                                        session_idx: s_idx,
-                                    }
-                                    .into(),
-                                );
-                                cx.notify();
-                            }),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.0))
-                                .text_color(theme().text_primary)
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(label),
-                        )
-                        .child(
-                            div()
-                                .flex_shrink_0()
-                                .text_size(px(10.0))
-                                .text_color(kind.color())
-                                .child(kind.label()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .overflow_x_hidden()
-                                .text_size(px(11.0))
-                                .text_color(theme().text_secondary)
-                                .child(format!("{tool_display}{summary}")),
-                        ),
-                );
+                        .text_size(px(11.0))
+                        .text_color(theme().text_secondary)
+                        .child(format!("{tool_display}{summary}")),
+                ),
+            );
 
             // Allow is offered for permission prompts and nothing else.
             //
@@ -197,7 +267,10 @@ impl AppState {
             // 49 of 364 permission notifications in a 156-session sample were
             // exactly that case (DEV-788). Question and Idle rows get the
             // click-to-switch row only.
-            if kind == AttentionKind::Permission {
+            //
+            // A remote row never gets it: Enter there would have to cross the
+            // network into another Mac's agent, which is DEV-1166's to design.
+            if let (AttentionKind::Permission, Some((p_idx, s_idx))) = (kind, local) {
                 let allow_id = SharedString::from(format!("attention-allow-{p_idx}-{s_idx}"));
                 row = row.child(
                     div()
