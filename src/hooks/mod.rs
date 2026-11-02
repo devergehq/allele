@@ -641,18 +641,30 @@ pub fn play_sound(path: &str) {
     }
 }
 
+/// Make `s` safe to place between double quotes in an AppleScript string
+/// literal. Backslashes are escaped first, then quotes, so a trailing `\` in
+/// the input cannot swallow the closing quote. Callers pass text they do not
+/// control (session labels, other machines' names), and an unescaped
+/// backslash would let that text end the string and run its own AppleScript.
+/// Real newlines become `\n` so they render as line breaks.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+}
+
 /// Fire a macOS notification via `osascript -e 'display notification ...'`.
 /// Spawns detached — never blocks. Silently no-ops on non-macOS.
 pub fn show_notification(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     {
         use std::process::{Command, Stdio};
-        // Escape double quotes in title/body to survive AppleScript quoting
-        let escape = |s: &str| s.replace('"', "\\\"");
         let script = format!(
             "display notification \"{}\" with title \"{}\"",
-            escape(body),
-            escape(title)
+            applescript_escape(body),
+            applescript_escape(title)
         );
         let mut command = Command::new("osascript");
         command
@@ -680,15 +692,11 @@ pub fn show_fatal_dialog(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     {
         use std::process::Command;
-        // Escape double quotes for AppleScript, then convert real newlines
-        // into AppleScript's `\n` escape sequence so they render as line
-        // breaks inside `display dialog`.
-        let escape = |s: &str| s.replace('"', "\\\"").replace('\n', "\\n");
         let script = format!(
             "display dialog \"{}\" with title \"{}\" with icon stop \
              buttons {{\"OK\"}} default button 1",
-            escape(body),
-            escape(title)
+            applescript_escape(body),
+            applescript_escape(title)
         );
         let _ = Command::new("osascript").arg("-e").arg(script).status();
     }
@@ -701,6 +709,32 @@ pub fn show_fatal_dialog(title: &str, body: &str) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn applescript_escape_handles_quotes_and_newlines() {
+        assert_eq!(applescript_escape(r#"say "hi""#), r#"say \"hi\""#);
+        assert_eq!(applescript_escape("a\nb"), r"a\nb");
+    }
+
+    /// A backslash before a quote must not turn the escaped quote back into a
+    /// string terminator, or the text could run its own AppleScript.
+    #[test]
+    fn applescript_escape_cannot_be_broken_out_of() {
+        let hostile = r#"\" & do shell script "touch /tmp/x" & ""#;
+        let escaped = applescript_escape(hostile);
+        assert_eq!(escaped, r#"\\\" & do shell script \"touch /tmp/x\" & \""#);
+        // Every quote in the output is preceded by an odd run of backslashes,
+        // so none of them closes the literal.
+        let bytes = escaped.as_bytes();
+        for (i, b) in bytes.iter().enumerate() {
+            if *b == b'"' {
+                let run = bytes[..i].iter().rev().take_while(|c| **c == b'\\').count();
+                assert_eq!(run % 2, 1, "unescaped quote at {i} in {escaped}");
+            }
+        }
+        // A trailing backslash stays inside the literal.
+        assert_eq!(applescript_escape(r"name\"), r"name\\");
+    }
+
     use super::*;
 
     /// The hole DEV-605 closes: a brief written 0644 is readable by every
