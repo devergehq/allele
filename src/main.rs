@@ -1986,7 +1986,7 @@ fn main() {
                         project.sessions.push(session);
                     }
 
-                    let dispatch_queue = dispatch::spawn_control_socket(cx);
+                    let drains = dispatch::spawn_control_socket(cx);
 
                     startup::pollers::spawn_all(cx);
                     startup::actions::register_all(cx);
@@ -2266,7 +2266,8 @@ fn main() {
                         remote: crate::remote::RemoteService::production(
                             crate::platform::global().secrets.clone(),
                             &settings_for_window.remote,
-                            std::sync::Arc::new(crate::remote::ControlQueue::new(dispatch_queue)),
+                            std::sync::Arc::new(crate::remote::ControlQueue::new(drains.requests)),
+                            std::sync::Arc::new(crate::remote::ScreenQueue::new(drains.screens)),
                             status_feed.clone(),
                             {
                                 let shell = crate::platform::global().shell.clone();

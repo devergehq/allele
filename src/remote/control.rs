@@ -43,6 +43,7 @@ use tokio::time::timeout;
 
 use super::peers::PeerPermissions;
 use super::registry::PeerRegistry;
+use super::screen::{Attachments, Handled, ScreenSource};
 use super::transport::{PeerConnection, PeerId, PeerStream};
 use super::wire::{self, write_frame, Frame, StreamRefusal, MAX_PEER_FRAME, PROTOCOL_VERSION};
 use crate::dispatch::protocol::{ErrorCode, Request, Response};
@@ -222,6 +223,8 @@ pub struct ControlContext {
     pub host_name: Arc<HostName>,
     /// What `subscribe_status` streams (DEV-1162).
     pub status_feed: StatusFeed,
+    /// Finds a session's terminal for `attach` (DEV-1165).
+    pub screens: Arc<dyn ScreenSource>,
 }
 
 impl ControlContext {
@@ -232,6 +235,7 @@ impl ControlContext {
             dispatch: Arc::new(Unavailable),
             host_name: HostName::new(None, || None),
             status_feed: StatusFeed::new(),
+            screens: Arc::new(super::screen::NoScreens),
         }
     }
 }
@@ -334,6 +338,13 @@ async fn run(
 
     let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
     let mut status_push: Option<JoinHandle<()>> = None;
+    // The screen streams this control stream started; dropped with it.
+    let mut attachments = Attachments::new(
+        Arc::clone(conn),
+        registry.clone(),
+        Arc::clone(&ctx.screens),
+        out.clone(),
+    );
     let ended = loop {
         let body = tokio::select! {
             body = wire::read_body_within(&mut recv, MAX_PEER_FRAME) => body,
@@ -350,6 +361,14 @@ async fn run(
                     Subscribed::Gone => break Ended::Connection(NOT_PAIRED.into()),
                     Subscribed::Closed => break Ended::Stream,
                 }
+            }
+            // Inline: the lookup behind an attach is bounded, and requests
+            // already admitted keep running meanwhile.
+            Ok(frame @ (Frame::Attach { .. } | Frame::Detach { .. })) => {
+                if attachments.handle(frame).await == Handled::Gone {
+                    break Ended::Connection(NOT_PAIRED.into());
+                }
+                continue;
             }
             Ok(other) => {
                 tracing::debug!(
@@ -411,6 +430,8 @@ async fn run(
         }
     };
 
+    // Stop the screen streams first: their tasks hold the outbox open.
+    drop(attachments);
     // The push holds an outbox sender and never finishes on its own; stop it
     // or the writer below would wait for it forever.
     if let Some(push) = status_push.take() {
