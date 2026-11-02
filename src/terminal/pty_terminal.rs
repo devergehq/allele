@@ -196,6 +196,10 @@ fn pty_env(extra_env: Vec<(String, String)>, allele_home: Option<&str>) -> HashM
     env
 }
 
+/// Lines of scrollback every PTY terminal keeps. A screen mirror needs it too
+/// (`DiffProducer::with_history_limit`).
+pub const SCROLLBACK_LINES: usize = 10_000;
+
 impl PtyTerminal {
     /// Create a terminal running a specific command in a specific directory
     /// `extra_env` is applied on top of the inherited environment before the
@@ -214,7 +218,7 @@ impl PtyTerminal {
 
         // Configure the terminal
         let term_config = TermConfig {
-            scrolling_history: 10_000,
+            scrolling_history: SCROLLBACK_LINES,
             ..Default::default()
         };
 

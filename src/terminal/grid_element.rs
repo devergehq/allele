@@ -1,13 +1,10 @@
-use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::term::Term;
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor};
 use gpui::*;
 use std::sync::Arc;
 
-use super::pty_terminal::JsonEventListener;
+use super::grid_source::{GridSource, GridView};
+pub use super::mirror::model::CursorShape;
 
 /// A GPUI Element that renders a terminal cell grid.
 ///
@@ -24,7 +21,9 @@ pub struct GridSelection {
 }
 
 pub struct TerminalGridElement {
-    term: Arc<FairMutex<Term<JsonEventListener>>>,
+    /// A local `Term` or a mirrored host screen; the element draws both the
+    /// same way because it reads nothing but the `GridView`.
+    source: Arc<dyn GridSource>,
     font: Font,
     font_size: Pixels,
     cell_width: Pixels,
@@ -47,14 +46,14 @@ pub struct TerminalGridElement {
 
 impl TerminalGridElement {
     pub fn new(
-        term: Arc<FairMutex<Term<JsonEventListener>>>,
+        source: Arc<dyn GridSource>,
         font: Font,
         font_size: Pixels,
         cell_width: Pixels,
         cell_height: Pixels,
     ) -> Self {
         Self {
-            term,
+            source,
             font,
             font_size,
             cell_width,
@@ -163,14 +162,15 @@ struct TextSpan {
     shaped: ShapedLine,
 }
 
-/// Cursor shape read from alacritty's grid state.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum CursorShape {
-    Block,
-    Underline,
-    Beam,
-    HollowBlock,
-    Hidden,
+/// What `prepare_rows` reads out of a grid view.
+#[derive(Default)]
+struct PreparedGrid {
+    rows: Vec<PreparedRow>,
+    cursor_point: Option<(usize, usize)>,
+    cursor_shape: CursorShape,
+    display_offset: usize,
+    total_lines: usize,
+    screen_lines: usize,
 }
 
 /// State computed during prepaint, passed to paint.
@@ -215,11 +215,11 @@ impl Element for TerminalGridElement {
         let cell_width = self.cell_width;
         let cell_height = self.cell_height;
 
-        let term = self.term.lock();
-        let grid = term.grid();
-        let cols = grid.columns();
-        let rows = grid.screen_lines();
-        drop(term);
+        let (mut cols, mut rows) = (0, 0);
+        self.source.with_view(&mut |view| {
+            cols = view.columns();
+            rows = view.screen_lines();
+        });
 
         let total_width = cell_width * cols as f32;
         let total_height = cell_height * rows as f32;
@@ -252,193 +252,20 @@ impl Element for TerminalGridElement {
     ) -> Self::PrepaintState {
         let hitbox = window.insert_hitbox(_bounds, HitboxBehavior::Normal);
 
-        let term = self.term.lock();
-        let cursor_shape_raw = term.cursor_style().shape;
-        let grid = term.grid();
-        let cursor_point = grid.cursor.point;
-        let num_lines = grid.screen_lines();
-        let num_cols = grid.columns();
-        let display_offset = grid.display_offset() as i32;
-
-        let cursor_shape = match cursor_shape_raw {
-            alacritty_terminal::vte::ansi::CursorShape::Block => CursorShape::Block,
-            alacritty_terminal::vte::ansi::CursorShape::Underline => CursorShape::Underline,
-            alacritty_terminal::vte::ansi::CursorShape::Beam => CursorShape::Beam,
-            alacritty_terminal::vte::ansi::CursorShape::HollowBlock => CursorShape::HollowBlock,
-            alacritty_terminal::vte::ansi::CursorShape::Hidden => CursorShape::Hidden,
-        };
-
-        let default_bg = ansi_to_hsla(&AnsiColor::Named(NamedColor::Background));
-        let default_fg = ansi_to_hsla(&AnsiColor::Named(NamedColor::Foreground));
-
-        let mut prepared_rows = Vec::with_capacity(num_lines);
-        let mut cursor_pos: Option<(usize, usize)> = None;
-
-        for line_idx in 0..num_lines {
-            // Account for scroll: negative Line values access history.
-            // When display_offset=5, screen line 0 maps to Line(-5).
-            let grid_line = Line(line_idx as i32 - display_offset);
-            let mut bg_spans: Vec<BgSpan> = Vec::new();
-            let mut text_spans: Vec<TextSpan> = Vec::new();
-
-            // First pass: collect background spans
-            let mut bg_start = 0usize;
-            let mut bg_color = default_bg;
-
-            for col_idx in 0..num_cols {
-                let cell = &grid[grid_line][Column(col_idx)];
-                // Track cursor position regardless of shape/visibility for paint pass.
-                let at_cursor = display_offset == 0
-                    && line_idx == cursor_point.line.0 as usize
-                    && col_idx == cursor_point.column.0;
-                if at_cursor {
-                    cursor_pos = Some((line_idx, col_idx));
-                }
-                // Only invert cell bg for block cursor shape (when visible)
-                let is_block_cursor =
-                    at_cursor && self.cursor_visible && cursor_shape == CursorShape::Block;
-
-                let cell_bg = if is_block_cursor {
-                    ansi_to_hsla(&AnsiColor::Named(NamedColor::Foreground))
-                } else {
-                    ansi_to_hsla(&cell.bg)
-                };
-
-                if col_idx == 0 {
-                    bg_color = cell_bg;
-                    bg_start = 0;
-                } else if cell_bg != bg_color {
-                    // Flush previous bg span (only if non-default)
-                    if bg_color != default_bg {
-                        bg_spans.push(BgSpan {
-                            col_start: bg_start,
-                            col_end: col_idx,
-                            color: bg_color,
-                        });
-                    }
-                    bg_color = cell_bg;
-                    bg_start = col_idx;
-                }
-            }
-            // Flush final bg span
-            if bg_color != default_bg {
-                bg_spans.push(BgSpan {
-                    col_start: bg_start,
-                    col_end: num_cols,
-                    color: bg_color,
-                });
-            }
-
-            // Second pass: collect text spans (batched by fg colour + style)
-            let mut text_buf = String::new();
-            let mut span_start = 0usize;
-            let mut span_fg = default_fg;
-            let mut span_bold = false;
-            let mut span_italic = false;
-
-            for col_idx in 0..num_cols {
-                let cell = &grid[grid_line][Column(col_idx)];
-
-                if cell.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
-                    continue;
-                }
-
-                let is_block_cursor = self.cursor_visible
-                    && cursor_shape == CursorShape::Block
-                    && display_offset == 0
-                    && line_idx == cursor_point.line.0 as usize
-                    && col_idx == cursor_point.column.0;
-
-                let cell_fg = if is_block_cursor {
-                    ansi_to_hsla(&AnsiColor::Named(NamedColor::Background))
-                } else {
-                    ansi_to_hsla(&cell.fg)
-                };
-                let bold = cell.flags.contains(CellFlags::BOLD);
-                let italic = cell.flags.contains(CellFlags::ITALIC);
-
-                // Style changed — flush current span
-                if col_idx > 0 && (cell_fg != span_fg || bold != span_bold || italic != span_italic)
-                {
-                    if !text_buf.is_empty() {
-                        let text: SharedString = std::mem::take(&mut text_buf).into();
-                        let font = self.make_font(span_bold, span_italic);
-                        let shaped = window.text_system().shape_line(
-                            text.clone(),
-                            self.font_size,
-                            &[TextRun {
-                                len: text.len(),
-                                font,
-                                color: span_fg,
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            }],
-                            Some(layout_state.cell_width),
-                        );
-                        text_spans.push(TextSpan {
-                            col_start: span_start,
-                            shaped,
-                        });
-                    }
-                    span_start = col_idx;
-                    span_fg = cell_fg;
-                    span_bold = bold;
-                    span_italic = italic;
-                }
-
-                if col_idx == 0 {
-                    span_fg = cell_fg;
-                    span_bold = bold;
-                    span_italic = italic;
-                }
-
-                let ch = if cell.c == '\0' { ' ' } else { cell.c };
-                text_buf.push(ch);
-            }
-
-            // Flush final text span
-            if !text_buf.is_empty() {
-                let text: SharedString = text_buf.into();
-                let font = self.make_font(span_bold, span_italic);
-                let shaped = window.text_system().shape_line(
-                    text.clone(),
-                    self.font_size,
-                    &[TextRun {
-                        len: text.len(),
-                        font,
-                        color: span_fg,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    }],
-                    Some(layout_state.cell_width),
-                );
-                text_spans.push(TextSpan {
-                    col_start: span_start,
-                    shaped,
-                });
-            }
-
-            prepared_rows.push(PreparedRow {
-                bg_spans,
-                text_spans,
-            });
-        }
-
-        let total = grid.total_lines();
-        let screen = grid.screen_lines();
-        let offset = grid.display_offset();
-        drop(term);
+        let mut prepared = None;
+        self.source.with_view(&mut |view| {
+            prepared = Some(self.prepare_rows(view, layout_state.cell_width, window));
+        });
+        let prepared = prepared.unwrap_or_default();
 
         GridPrepaintState {
-            rows: prepared_rows,
-            cursor_point: cursor_pos,
-            cursor_shape,
+            rows: prepared.rows,
+            cursor_point: prepared.cursor_point,
+            cursor_shape: prepared.cursor_shape,
             hitbox,
-            display_offset: offset,
-            total_lines: total,
-            screen_lines: screen,
+            display_offset: prepared.display_offset,
+            total_lines: prepared.total_lines,
+            screen_lines: prepared.screen_lines,
         }
     }
 
@@ -709,6 +536,188 @@ impl Element for TerminalGridElement {
 }
 
 impl TerminalGridElement {
+    /// Turn one frame of a grid into backgrounds and shaped text. Everything
+    /// the element knows about the terminal comes through `view`.
+    fn prepare_rows(
+        &self,
+        view: &dyn GridView,
+        cell_width: Pixels,
+        window: &mut Window,
+    ) -> PreparedGrid {
+        let cursor = view.cursor();
+        let cursor_shape = cursor.shape;
+        let (cursor_line, cursor_col) = (cursor.line as usize, cursor.column as usize);
+        let num_lines = view.screen_lines();
+        let num_cols = view.columns();
+        let display_offset = view.display_offset() as i32;
+
+        let default_bg = ansi_to_hsla(&AnsiColor::Named(NamedColor::Background));
+        let default_fg = ansi_to_hsla(&AnsiColor::Named(NamedColor::Foreground));
+
+        let mut prepared_rows = Vec::with_capacity(num_lines);
+        let mut cursor_pos: Option<(usize, usize)> = None;
+
+        for line_idx in 0..num_lines {
+            // Account for scroll: negative Line values access history.
+            // When display_offset=5, screen line 0 maps to Line(-5).
+            let grid_line = line_idx as i32 - display_offset;
+            let mut bg_spans: Vec<BgSpan> = Vec::new();
+            let mut text_spans: Vec<TextSpan> = Vec::new();
+
+            // First pass: collect background spans
+            let mut bg_start = 0usize;
+            let mut bg_color = default_bg;
+
+            for col_idx in 0..num_cols {
+                let cell = view.cell(grid_line, col_idx);
+                // Track cursor position regardless of shape/visibility for paint pass.
+                let at_cursor =
+                    display_offset == 0 && line_idx == cursor_line && col_idx == cursor_col;
+                if at_cursor {
+                    cursor_pos = Some((line_idx, col_idx));
+                }
+                // Only invert cell bg for block cursor shape (when visible)
+                let is_block_cursor =
+                    at_cursor && self.cursor_visible && cursor_shape == CursorShape::Block;
+
+                let cell_bg = if is_block_cursor {
+                    ansi_to_hsla(&AnsiColor::Named(NamedColor::Foreground))
+                } else {
+                    ansi_to_hsla(&cell.style.bg)
+                };
+
+                if col_idx == 0 {
+                    bg_color = cell_bg;
+                    bg_start = 0;
+                } else if cell_bg != bg_color {
+                    // Flush previous bg span (only if non-default)
+                    if bg_color != default_bg {
+                        bg_spans.push(BgSpan {
+                            col_start: bg_start,
+                            col_end: col_idx,
+                            color: bg_color,
+                        });
+                    }
+                    bg_color = cell_bg;
+                    bg_start = col_idx;
+                }
+            }
+            // Flush final bg span
+            if bg_color != default_bg {
+                bg_spans.push(BgSpan {
+                    col_start: bg_start,
+                    col_end: num_cols,
+                    color: bg_color,
+                });
+            }
+
+            // Second pass: collect text spans (batched by fg colour + style)
+            let mut text_buf = String::new();
+            let mut span_start = 0usize;
+            let mut span_fg = default_fg;
+            let mut span_bold = false;
+            let mut span_italic = false;
+
+            for col_idx in 0..num_cols {
+                let cell = view.cell(grid_line, col_idx);
+
+                if cell.style.flags.contains(CellFlags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+
+                let is_block_cursor = self.cursor_visible
+                    && cursor_shape == CursorShape::Block
+                    && display_offset == 0
+                    && line_idx == cursor_line
+                    && col_idx == cursor_col;
+
+                let cell_fg = if is_block_cursor {
+                    ansi_to_hsla(&AnsiColor::Named(NamedColor::Background))
+                } else {
+                    ansi_to_hsla(&cell.style.fg)
+                };
+                let bold = cell.style.flags.contains(CellFlags::BOLD);
+                let italic = cell.style.flags.contains(CellFlags::ITALIC);
+
+                // Style changed — flush current span
+                if col_idx > 0 && (cell_fg != span_fg || bold != span_bold || italic != span_italic)
+                {
+                    if !text_buf.is_empty() {
+                        let text: SharedString = std::mem::take(&mut text_buf).into();
+                        let font = self.make_font(span_bold, span_italic);
+                        let shaped = window.text_system().shape_line(
+                            text.clone(),
+                            self.font_size,
+                            &[TextRun {
+                                len: text.len(),
+                                font,
+                                color: span_fg,
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            }],
+                            Some(cell_width),
+                        );
+                        text_spans.push(TextSpan {
+                            col_start: span_start,
+                            shaped,
+                        });
+                    }
+                    span_start = col_idx;
+                    span_fg = cell_fg;
+                    span_bold = bold;
+                    span_italic = italic;
+                }
+
+                if col_idx == 0 {
+                    span_fg = cell_fg;
+                    span_bold = bold;
+                    span_italic = italic;
+                }
+
+                let ch = if cell.c == '\0' { ' ' } else { cell.c };
+                text_buf.push(ch);
+            }
+
+            // Flush final text span
+            if !text_buf.is_empty() {
+                let text: SharedString = text_buf.into();
+                let font = self.make_font(span_bold, span_italic);
+                let shaped = window.text_system().shape_line(
+                    text.clone(),
+                    self.font_size,
+                    &[TextRun {
+                        len: text.len(),
+                        font,
+                        color: span_fg,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    Some(cell_width),
+                );
+                text_spans.push(TextSpan {
+                    col_start: span_start,
+                    shaped,
+                });
+            }
+
+            prepared_rows.push(PreparedRow {
+                bg_spans,
+                text_spans,
+            });
+        }
+
+        PreparedGrid {
+            rows: prepared_rows,
+            cursor_point: cursor_pos,
+            cursor_shape,
+            display_offset: view.display_offset(),
+            total_lines: view.total_lines(),
+            screen_lines: view.screen_lines(),
+        }
+    }
+
     /// Build a Font with the appropriate weight/style for a span.
     fn make_font(&self, bold: bool, italic: bool) -> Font {
         Font {

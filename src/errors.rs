@@ -42,6 +42,9 @@ pub enum AlleleError {
     #[error("dispatch error: {0}")]
     Dispatch(String),
 
+    #[error("screen mirror error: {0}")]
+    Mirror(String),
+
     #[error("{0}")]
     Other(String),
 }
