@@ -178,19 +178,23 @@ dependencies = [
  "async-trait",
  "cocoa 0.26.0",
  "core-text",
+ "data-encoding",
  "dirs 6.0.0",
  "flume",
+ "getrandom 0.3.4",
  "gpui",
  "iroh",
  "libc",
  "notify",
  "objc",
  "pulldown-cmark",
+ "qrcode",
  "rust-s3",
  "rustix-openpty",
  "security-framework",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "similar",
  "syn 2.0.117",
  "tempfile",
@@ -6257,6 +6261,12 @@ checksum = "7f6d64c71eb498fe9eae14ce4ec935c555749aef511cca85b5568910d6e48001"
 dependencies = [
  "bytemuck",
 ]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quick-error"
