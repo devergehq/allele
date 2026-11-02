@@ -370,6 +370,8 @@ pub enum SettingsAction {
     },
     /// *Add machine*: pair with the host whose code was entered.
     AddMachine { code: String, machine_name: String },
+    /// This Mac's Confirm / Cancel on *Add machine*'s confirmation number.
+    ConfirmAddMachine { confirmed: bool },
     /// Clear the result of *Add machine*.
     DismissAddMachine,
     /// Grant or withdraw a paired machine's `control` permission.

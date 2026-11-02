@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::sync::{oneshot, watch};
 use tokio::time::{timeout, Instant};
 
+use super::client::CONFIRM_TIMEOUT;
 use super::code::{PairingCode, PairingSecret};
 use super::window::{
     Outcome, PairingRequest, PairingWindow, Phase, Refusal, RequestId, APPROVAL_TIMEOUT,
@@ -36,8 +37,11 @@ pub enum HostView {
         request: PairingRequest,
         expires_in: Duration,
     },
+    /// Approved here; waiting for the other Mac's user to confirm the
+    /// number, which is still shown so they can compare.
     Finishing {
         machine_name: String,
+        confirmation: String,
     },
     Ended(Outcome),
 }
@@ -259,6 +263,7 @@ impl HostPairing {
             },
             Phase::Approved(r) => HostView::Finishing {
                 machine_name: r.machine_name.clone(),
+                confirmation: r.confirmation.clone(),
             },
             Phase::Closed(o) => HostView::Ended(o.clone()),
         }
@@ -365,9 +370,11 @@ pub(crate) async fn serve_hello(
         pairing.finish(request.id, Outcome::Failed(e.to_string()));
         return;
     }
-    // Save the client only once it says it saved us.
+    // Save the client only once it says it saved us — which it does only after
+    // its own user confirmed the number. That can take a human's time; a
+    // cancel or a timeout there closes the connection without an ack.
     let ack = tokio::select! {
-        ack = timeout(HELLO_TIMEOUT, read_frame(&mut stream.recv)) => matches!(ack, Ok(Ok(Frame::PairAck))),
+        ack = timeout(CONFIRM_TIMEOUT + HELLO_TIMEOUT, read_frame(&mut stream.recv)) => matches!(ack, Ok(Ok(Frame::PairAck))),
         _ = conn.closed() => false,
     };
     match ack {

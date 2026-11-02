@@ -8,9 +8,10 @@
 //!                                    ◄───  dial host id (transport proves the
 //!                                          host holds that key), send hello
 //!   window.present: secret ok? →           {secret, name}
-//!   prompt "Approve <name>?"               shows confirmation number
-//!   with confirmation number               ─── user checks the numbers match ───
+//!   prompt "Approve <name>?"               "Does <number> match?"
+//!   with confirmation number               ─── both users check the numbers ───
 //!   [Approve]                         ───► PairApproved{host name}
+//!                                          [Confirm] (before or after approval)
 //!                                          save host (view)
 //!                                    ◄───  PairAck
 //!   save client (view)
@@ -21,6 +22,7 @@
 //! | property | where |
 //! | -- | -- |
 //! | nothing is trusted without a click on the host | `window::PairingWindow::decide` is the only way to `Approved` |
+//! | nothing is trusted without a click on the client | `client::pair_with` saves and acks only after `confirm` says yes |
 //! | a code works once | `window` — the first correct presentation consumes it |
 //! | a code expires after five minutes | `window::CODE_TTL` |
 //! | a leaked code raced by its owner aborts | `window` — a second correct presentation → `Contested` |
@@ -35,7 +37,7 @@ pub mod window;
 pub mod wire;
 
 pub(crate) use client::pair_with;
-pub use client::ClientProgress;
+pub use client::{ClientProgress, CONFIRM_TIMEOUT};
 pub use code::{confirmation_number, PairingCode, PairingSecret};
 pub use host::{HostPairing, HostView};
 pub use window::{Outcome, PairingRequest, RequestId, APPROVAL_TIMEOUT, CODE_TTL};

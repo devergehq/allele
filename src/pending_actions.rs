@@ -1480,6 +1480,10 @@ impl AppState {
                 *skip_refocus = true;
                 self.remote.add_machine(&code, machine_name);
             }
+            SettingsAction::ConfirmAddMachine { confirmed } => {
+                *skip_refocus = true;
+                self.remote.confirm_client(confirmed);
+            }
             SettingsAction::DismissAddMachine => {
                 *skip_refocus = true;
                 self.remote.dismiss_client();

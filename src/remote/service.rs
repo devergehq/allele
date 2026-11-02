@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::runtime::Handle;
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
@@ -78,8 +78,17 @@ pub struct Answer {
 pub enum ClientView {
     Idle,
     Connecting,
-    AwaitingApproval { confirmation: String },
-    Paired { machine_name: String },
+    /// "Does this number match the other Mac?" — Confirm / Cancel.
+    AwaitingConfirmation {
+        confirmation: String,
+    },
+    /// Confirmed here; the other Mac's user is still deciding.
+    Confirmed {
+        confirmation: String,
+    },
+    Paired {
+        machine_name: String,
+    },
     Failed(String),
 }
 
@@ -122,6 +131,8 @@ struct Inner {
     listening: AtomicBool,
     client: Mutex<ClientView>,
     client_busy: AtomicBool,
+    /// The running *Add machine*'s Confirm / Cancel channel.
+    client_confirm: Mutex<Option<oneshot::Sender<bool>>>,
     error: Mutex<Option<String>>,
     /// Bumped whenever the endpoint might need binding or releasing.
     wake: watch::Sender<u64>,
@@ -157,6 +168,7 @@ impl RemoteService {
             listening: AtomicBool::new(false),
             client: Mutex::new(ClientView::Idle),
             client_busy: AtomicBool::new(false),
+            client_confirm: Mutex::new(None),
             error: Mutex::new(error),
             wake: watch::channel(0).0,
             ui: watch::channel(0).0,
@@ -320,6 +332,8 @@ impl RemoteService {
             return; // one at a time
         }
         self.inner.set_client(ClientView::Connecting);
+        let (confirm_tx, confirm) = oneshot::channel();
+        *lock(&self.inner.client_confirm) = Some(confirm_tx);
         let inner = Arc::clone(&self.inner);
         self.inner.rt.spawn(async move {
             let result = async {
@@ -327,12 +341,23 @@ impl RemoteService {
                 let progress = |p| {
                     inner.set_client(match p {
                         ClientProgress::Connecting => ClientView::Connecting,
-                        ClientProgress::AwaitingApproval { confirmation } => {
-                            ClientView::AwaitingApproval { confirmation }
+                        ClientProgress::AwaitingConfirmation { confirmation } => {
+                            ClientView::AwaitingConfirmation { confirmation }
+                        }
+                        ClientProgress::Confirmed { confirmation } => {
+                            ClientView::Confirmed { confirmation }
                         }
                     })
                 };
-                pair_with(&*transport, &code, &machine_name, &inner.registry, progress).await
+                pair_with(
+                    &*transport,
+                    &code,
+                    &machine_name,
+                    &inner.registry,
+                    confirm,
+                    progress,
+                )
+                .await
             }
             .await;
             inner.set_client(match result {
@@ -348,9 +373,18 @@ impl RemoteService {
                 }
                 Err(e) => ClientView::Failed(e.to_string()),
             });
+            lock(&inner.client_confirm).take();
             inner.client_busy.store(false, Ordering::SeqCst);
             inner.wake_up();
         });
+    }
+
+    /// This Mac's user's answer to "does the number match?" during *Add
+    /// machine*. Cancel ends the pairing with nothing saved on either Mac.
+    pub fn confirm_client(&self, confirmed: bool) {
+        if let Some(tx) = lock(&self.inner.client_confirm).take() {
+            let _ = tx.send(confirmed);
+        }
     }
 
     pub fn dismiss_client(&self) {

@@ -155,8 +155,11 @@ fn host_card(host: &HostView, cx: &mut Context<SettingsWindowState>) -> Div {
             request,
             expires_in,
         } => approval_card(request, *expires_in, cx),
-        HostView::Finishing { machine_name } => card().child(faint(format!(
-            "Finishing pairing with \u{201c}{machine_name}\u{201d}…"
+        HostView::Finishing {
+            machine_name,
+            confirmation,
+        } => card().child(faint(format!(
+            "Waiting for \u{201c}{machine_name}\u{201d} to confirm the number {confirmation}…"
         ))),
         HostView::Ended(outcome) => {
             let (text, ok) = outcome_text(outcome);
@@ -200,13 +203,7 @@ fn approval_card(
             "Its ID begins {}",
             fingerprint(request.client)
         )))
-        .child(
-            div()
-                .font_family("Menlo")
-                .text_size(px(28.0))
-                .text_color(theme().accent)
-                .child(request.confirmation.clone()),
-        )
+        .child(big_number(&request.confirmation))
         .child(
             div()
                 .text_size(px(12.0))
@@ -284,20 +281,46 @@ fn client_card(
     match client {
         ClientView::Idle => card().child(entry()),
         ClientView::Connecting => card().child(faint("Connecting to the other Mac…".into())),
-        ClientView::AwaitingApproval { confirmation } => card()
+        ClientView::AwaitingConfirmation { confirmation } => card()
             .child(
                 div()
                     .text_size(px(12.0))
                     .text_color(theme().text_primary)
-                    .child("Approve this Mac on the other Mac. It should show this number:"),
+                    .child("Does the other Mac show this number? Confirm only if it matches."),
             )
+            .child(big_number(confirmation))
             .child(
-                div()
-                    .font_family("Menlo")
-                    .text_size(px(28.0))
-                    .text_color(theme().accent)
-                    .child(confirmation.clone()),
+                row()
+                    .child(
+                        button("add-confirm", "Confirm", theme().accent, theme().bg_base).on_click(
+                            cx.listener(|this, _e, _w, cx| {
+                                this.push_settings(
+                                    SettingsAction::ConfirmAddMachine { confirmed: true },
+                                    cx,
+                                );
+                            }),
+                        ),
+                    )
+                    .child(
+                        button(
+                            "add-cancel",
+                            "Cancel",
+                            theme().bg_hover,
+                            theme().text_primary,
+                        )
+                        .on_click(cx.listener(|this, _e, _w, cx| {
+                            this.push_settings(
+                                SettingsAction::ConfirmAddMachine { confirmed: false },
+                                cx,
+                            );
+                        })),
+                    ),
             ),
+        ClientView::Confirmed { confirmation } => card()
+            .child(faint(
+                "Confirmed. Now approve this Mac on the other Mac.".into(),
+            ))
+            .child(big_number(confirmation)),
         ClientView::Paired { machine_name } => card()
             .child(
                 div()
@@ -509,6 +532,15 @@ pub(super) fn date(secs: u64) -> String {
 
 fn row() -> Div {
     div().flex().flex_row().items_center().gap(px(8.0))
+}
+
+/// A confirmation number, as both Macs show it.
+fn big_number(number: &str) -> Div {
+    div()
+        .font_family("Menlo")
+        .text_size(px(28.0))
+        .text_color(theme().accent)
+        .child(number.to_string())
 }
 
 fn faint(text: String) -> Div {

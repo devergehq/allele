@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::oneshot;
 use tokio::time::{timeout, Instant};
 
 use super::code::{confirmation_number, PairingCode, PairingSecret};
@@ -21,7 +22,7 @@ use crate::errors::Result;
 use crate::remote::listener::{self, Gate, MAX_UNPAIRED};
 use crate::remote::peers::TrustedPeer;
 use crate::remote::registry::PeerRegistry;
-use crate::remote::service::{Binder, RemoteService};
+use crate::remote::service::{Binder, ClientView, RemoteService};
 use crate::remote::testing::{MemNet, MemTransport};
 use crate::remote::transport::{PeerConnection, PeerTransport, TransportConfig};
 use crate::repositories::fakes::InMemoryPeersRepository;
@@ -102,15 +103,34 @@ impl Client {
         }
     }
 
-    /// Run *Add machine* in the background.
+    /// Run *Add machine* in the background, with this Mac's user confirming
+    /// the number at once.
     fn pair(&self, code: &PairingCode, name: &str) -> tokio::task::JoinHandle<Result<TrustedPeer>> {
+        let (confirm, task) = self.pair_unconfirmed(code, name);
+        confirm.send(true).unwrap();
+        task
+    }
+
+    /// Run *Add machine* in the background; the test answers Confirm / Cancel
+    /// on the returned sender (dropping it cancels).
+    fn pair_unconfirmed(
+        &self,
+        code: &PairingCode,
+        name: &str,
+    ) -> (
+        oneshot::Sender<bool>,
+        tokio::task::JoinHandle<Result<TrustedPeer>>,
+    ) {
         let (t, code, name, registry) = (
             self.t.clone(),
             code.clone(),
             name.to_string(),
             self.registry.clone(),
         );
-        tokio::spawn(async move { pair_with(&*t, &code, &name, &registry, |_| {}).await })
+        let (tx, rx) = oneshot::channel();
+        let task =
+            tokio::spawn(async move { pair_with(&*t, &code, &name, &registry, rx, |_| {}).await });
+        (tx, task)
     }
 }
 
@@ -183,6 +203,102 @@ async fn declining_leaves_both_trusted_lists_unchanged() {
     assert!(host.repo.snapshot().peers.is_empty());
     assert!(client.repo.snapshot().peers.is_empty());
     assert_eq!(host.outcome(), Some(Outcome::Declined));
+}
+
+/// Approve on the host, then wait for the host to be waiting on the client's
+/// Confirm.
+async fn approve_and_wait_for_client(host: &Host) -> PairingRequest {
+    let request = host.awaiting().await;
+    assert!(host.pairing.answer(request.id, true));
+    until(|| {
+        matches!(
+            host.pairing.view(Instant::now()),
+            HostView::Finishing { .. }
+        )
+    })
+    .await;
+    request
+}
+
+/// DEV-1160 decision: the client confirms the number too. Confirming after
+/// the host approved pairs both, and nothing is saved on either Mac before
+/// the client's click.
+#[tokio::test]
+async fn confirming_on_the_client_after_approval_saves_both() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let client = Client::new(&net);
+    let code = host.show_code();
+
+    let (confirm, pairing) = client.pair_unconfirmed(&code, "Laptop");
+    let request = approve_and_wait_for_client(&host).await;
+    // The host keeps showing the number while it waits.
+    assert_eq!(
+        host.pairing.view(Instant::now()),
+        HostView::Finishing {
+            machine_name: "Laptop".into(),
+            confirmation: request.confirmation.clone(),
+        }
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(host.repo.snapshot().peers.is_empty());
+    assert!(client.repo.snapshot().peers.is_empty());
+
+    confirm.send(true).unwrap();
+    pairing.await.unwrap().unwrap();
+    until(|| host.outcome().is_some()).await;
+    assert!(matches!(host.outcome(), Some(Outcome::Paired { .. })));
+    assert_eq!(host.repo.snapshot().peers[0].id, client.t.local_id());
+    assert_eq!(client.repo.snapshot().peers[0].id, host.t.local_id());
+}
+
+/// Cancel on the client — even after the host approved — leaves both trusted
+/// lists empty.
+#[tokio::test]
+async fn cancelling_on_the_client_saves_nothing_on_either_mac() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let client = Client::new(&net);
+    let code = host.show_code();
+
+    let (confirm, pairing) = client.pair_unconfirmed(&code, "Laptop");
+    approve_and_wait_for_client(&host).await;
+    confirm.send(false).unwrap();
+    let err = pairing.await.unwrap().unwrap_err().to_string();
+    assert!(err.contains("cancelled"), "{err}");
+    until(|| host.outcome().is_some()).await;
+    assert!(
+        matches!(host.outcome(), Some(Outcome::Failed(_))),
+        "{:?}",
+        host.outcome()
+    );
+    assert!(host.repo.snapshot().peers.is_empty());
+    assert!(client.repo.snapshot().peers.is_empty());
+}
+
+/// No answer on the client before the timeout is a cancel: both trusted
+/// lists stay empty, even though the host approved.
+#[tokio::test(start_paused = true)]
+async fn a_client_confirmation_timeout_saves_nothing_on_either_mac() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let client = Client::new(&net);
+    let code = host.show_code();
+
+    // Keep the sender alive: this is silence, not a cancel.
+    let (_confirm, pairing) = client.pair_unconfirmed(&code, "Laptop");
+    approve_and_wait_for_client(&host).await;
+    // Paused time skips the two-minute wait.
+    let err = pairing.await.unwrap().unwrap_err().to_string();
+    assert!(err.contains("not confirmed"), "{err}");
+    until(|| host.outcome().is_some()).await;
+    assert!(
+        matches!(host.outcome(), Some(Outcome::Failed(_))),
+        "{:?}",
+        host.outcome()
+    );
+    assert!(host.repo.snapshot().peers.is_empty());
+    assert!(client.repo.snapshot().peers.is_empty());
 }
 
 /// A leaked code, used by someone else, gets nowhere without the click: the
@@ -526,4 +642,28 @@ async fn a_code_brings_the_endpoint_up_and_cancelling_takes_it_down() {
     svc.reconcile_now().await;
     assert!(!svc.status().listening);
     assert!(svc.pairing().view(Instant::now()) == HostView::Ended(Outcome::Cancelled));
+}
+
+/// *Add machine* through the service: the client card asks Confirm / Cancel,
+/// and Cancel from the UI ends the pairing with nothing saved on either Mac.
+#[tokio::test]
+async fn the_services_cancel_reaches_the_client_exchange() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let code = host.show_code();
+    let (svc, repo) = service(&net, false);
+
+    svc.add_machine(&code.to_text(), "Laptop".into());
+    until(|| matches!(svc.status().client, ClientView::AwaitingConfirmation { .. })).await;
+    let request = host.awaiting().await;
+    let ClientView::AwaitingConfirmation { confirmation } = svc.status().client else {
+        unreachable!()
+    };
+    assert_eq!(confirmation, request.confirmation);
+
+    svc.confirm_client(false);
+    until(|| matches!(svc.status().client, ClientView::Failed(_))).await;
+    until(|| host.outcome().is_some()).await;
+    assert!(repo.snapshot().peers.is_empty());
+    assert!(host.repo.snapshot().peers.is_empty());
 }
