@@ -743,6 +743,66 @@ fn window_raising_stays_out_of_request_paths() {
 }
 
 // ---------------------------------------------------------------------------
+// DEV-1168 / DEV-1187 — agents cannot act on another Mac
+// ---------------------------------------------------------------------------
+
+/// Names that reach a paired Mac's dispatch API: the service whose `call`
+/// sends ops over the control stream, and the module that drives it.
+const REMOTE_CALL_NAMES: &[&str] = &["remote", "remote_sessions", "RemoteService"];
+
+/// Remote creates, interrupts and discards are human-initiated only
+/// (DEV-1168, DEV-1187): they start from a click in this Mac's window. Agents
+/// reach Allele through `src/dispatch/` (`control.sock` and the MCP server),
+/// so nothing there may name the remote modules — a dispatched session that
+/// could create on another Mac would restart its depth count at 0 there.
+#[test]
+fn dispatch_cannot_reach_another_mac() {
+    struct Names(Vec<String>);
+    impl<'ast> Visit<'ast> for Names {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            for seg in &path.segments {
+                let name = seg.ident.to_string();
+                if REMOTE_CALL_NAMES.contains(&name.as_str()) {
+                    self.0.push(name);
+                }
+            }
+            syn::visit::visit_path(self, path);
+        }
+        fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
+            let ident = match tree {
+                syn::UseTree::Path(p) => Some(&p.ident),
+                syn::UseTree::Name(n) => Some(&n.ident),
+                syn::UseTree::Rename(r) => Some(&r.ident),
+                _ => None,
+            };
+            if let Some(ident) = ident {
+                let name = ident.to_string();
+                if REMOTE_CALL_NAMES.contains(&name.as_str()) {
+                    self.0.push(name);
+                }
+            }
+            syn::visit::visit_use_tree(self, tree);
+        }
+    }
+    let offenders: Vec<String> = source_files()
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("src/dispatch/"))
+        .filter_map(|(rel, path)| {
+            let src = read(&path);
+            let mut names = Names(Vec::new());
+            names.visit_file(&parse(&path, &src));
+            (!names.0.is_empty()).then(|| format!("{rel}: {}", names.0.join(", ")))
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "src/dispatch/ must not name the remote modules — remote creates are \
+         human-initiated only (DEV-1168, DEV-1187):\n{}",
+        offenders.join("\n")
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Meta — the docs and the tests must agree
 // ---------------------------------------------------------------------------
 

@@ -1869,6 +1869,14 @@ fn build_machines_section(state: &AppState, cx: &mut Context<AppState>) -> Vec<A
             continue;
         }
         items.push(render_machine_row(machine, now));
+        // Creates sent from the picker and not yet answered (DEV-1168).
+        for starting in state.remote_ui.starting_on(machine.id) {
+            items.push(render_starting_remote_row(&starting.label));
+        }
+        let manageable = crate::remote_sessions::can_manage(
+            machine.link == machines::MachineLink::Connected,
+            remote.hosts().grant(machine.id),
+        );
         for (project_name, rows) in projects {
             items.push(
                 div()
@@ -1888,7 +1896,14 @@ fn build_machines_section(state: &AppState, cx: &mut Context<AppState>) -> Vec<A
                     .into_any_element(),
             );
             for session in rows {
-                items.push(render_remote_session_row(machine, session, cx));
+                let key = crate::remote_sessions::RemoteSessionKey {
+                    peer: machine.id,
+                    session_id: session.id.clone(),
+                };
+                let selected = state.remote_ui.selected.as_ref() == Some(&key);
+                items.push(render_remote_session_row(
+                    machine, session, key, selected, manageable, cx,
+                ));
             }
         }
     }
@@ -1988,9 +2003,41 @@ fn render_machine_row(machine: &machines::MachineView, now: std::time::SystemTim
 /// One remote session: the same status icon and colour as a local row, a
 /// monitor marker on the right so it never reads as a session on this Mac,
 /// and everything greyed while its host is unreachable.
+/// A create in flight on a host: shown at once under the host, so the click
+/// visibly did something while the host clones a workspace.
+fn render_starting_remote_row(label: &str) -> AnyElement {
+    div()
+        .pl(px(32.0))
+        .pr(px(12.0))
+        .py(px(5.0))
+        .bg(theme().bg_surface)
+        .flex()
+        .flex_row()
+        .gap(px(6.0))
+        .items_center()
+        .child(icon(icons::CIRCLE_FILL, 7.0, theme().text_faint))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(12.0))
+                .text_color(theme().text_faint)
+                .child(format!("Starting \u{201c}{label}\u{201d}…")),
+        )
+        .into_any_element()
+}
+
+/// `manageable`: this Mac holds `control` on a live host, so a right-click
+/// offers Interrupt and Discard (DEV-1168). Otherwise there is no menu.
 fn render_remote_session_row(
     machine: &machines::MachineView,
     session: &machines::RemoteSessionView,
+    key: crate::remote_sessions::RemoteSessionKey,
+    selected: bool,
+    manageable: bool,
     cx: &mut Context<AppState>,
 ) -> AnyElement {
     let stale = machine.is_stale();
@@ -2012,6 +2059,7 @@ fn render_remote_session_row(
     } else {
         theme().text_muted
     };
+    let row_key = key;
     let key = format!("{}-{}", machine.id.short(), session.id);
     let status_dot = icon(status_icon, 11.0, status_color);
     let status_dot = if session.status == SessionStatus::Running && !stale {
@@ -2031,12 +2079,19 @@ fn render_remote_session_row(
         "On {} — opening a session on another Mac isn't available yet",
         machine.name
     ));
-    div()
+    let menu_key = row_key.clone();
+    let menu_label = session.label.clone();
+    let menu_host = machine.name.clone();
+    let row = div()
         .id(SharedString::from(format!("remote-session-{key}")))
         .pl(px(32.0))
         .pr(px(12.0))
         .py(px(5.0))
-        .bg(theme().bg_surface)
+        .bg(if selected {
+            theme().bg_active
+        } else {
+            theme().bg_surface
+        })
         .hover(|s| s.bg(theme().bg_hover_soft))
         .flex()
         .flex_row()
@@ -2061,16 +2116,40 @@ fn render_remote_session_row(
             })
             .into()
         })
-        // Swallowed rather than left to bubble: a click here must not reach
-        // whatever the sidebar does with a click on empty space. Attaching is
-        // DEV-1167.
+        // Stopped here so it never reaches whatever the sidebar does with a
+        // click on empty space. Selecting stands in for attaching until
+        // DEV-1167 replaces it.
         .on_mouse_down(
             MouseButton::Left,
-            cx.listener(|_this: &mut AppState, _event, _window, cx| {
+            cx.listener(move |this: &mut AppState, _event, _window, cx| {
                 cx.stop_propagation();
+                let action = crate::remote_sessions::RemoteSessionAction::Select(row_key.clone());
+                this.pending_action = Some(SessionAction::Remote(action).into());
+                cx.notify();
             }),
-        )
-        .into_any_element()
+        );
+    if !manageable {
+        return row.into_any_element();
+    }
+    row.on_mouse_down(
+        MouseButton::Right,
+        cx.listener(
+            move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.session_context_menu = None;
+                this.project_context_menu = None;
+                this.remote_ui.menu = Some(crate::remote_sessions::RemoteMenu {
+                    key: menu_key.clone(),
+                    label: menu_label.clone(),
+                    host_name: menu_host.clone(),
+                    position: event.position,
+                    confirming_discard: false,
+                });
+                cx.notify();
+            },
+        ),
+    )
+    .into_any_element()
 }
 
 #[cfg(test)]
