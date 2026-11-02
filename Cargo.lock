@@ -178,19 +178,23 @@ dependencies = [
  "async-trait",
  "cocoa 0.26.0",
  "core-text",
+ "data-encoding",
  "dirs 6.0.0",
  "flume",
+ "getrandom 0.3.4",
  "gpui",
  "iroh",
  "libc",
  "notify",
  "objc",
  "pulldown-cmark",
+ "qrcode",
  "rust-s3",
  "rustix-openpty",
  "security-framework",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "similar",
  "syn 2.0.117",
  "tempfile",
@@ -2003,7 +2007,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c54e03a951783e8b327515db3f2a2fd0e3bed362a96b066f341ce66ed49b4ead"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 3.0.9",
 ]
 
 [[package]]
@@ -6283,6 +6287,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
+
+[[package]]
 name = "quick-error"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -10161,7 +10171,7 @@ dependencies = [
  "log",
  "serde",
  "thiserror 2.0.18",
- "windows 0.61.3",
+ "windows 0.62.2",
  "windows-core 0.62.2",
 ]
 

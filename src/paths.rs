@@ -236,6 +236,11 @@ pub fn crash_log_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("crash.log"))
 }
 
+/// `<root>/.allele/peers.json` — the machines this one trusts (DEV-1160).
+pub fn peers_file() -> Option<PathBuf> {
+    allele_dir().map(|d| d.join("peers.json"))
+}
+
 pub fn state_file() -> Option<PathBuf> {
     allele_dir().map(|d| d.join("state.json"))
 }

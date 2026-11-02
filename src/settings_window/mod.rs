@@ -28,6 +28,7 @@ mod editor;
 mod infrastructure;
 mod machines;
 mod naming;
+mod pairing;
 mod projects;
 mod sessions;
 mod sync;
@@ -182,6 +183,13 @@ impl Section {
                 "identity",
                 "multi-machine",
                 "network",
+                "remote",
+                "qr",
+                "code",
+                "approve",
+                "trusted",
+                "control",
+                "revoke",
             ],
         }
     }

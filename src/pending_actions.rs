@@ -1447,7 +1447,57 @@ impl AppState {
             SettingsAction::UpdateRelayUrl(url) => {
                 *skip_refocus = true;
                 self.user_settings.remote.relay_url = non_blank(url);
+                self.remote.set_settings(&self.user_settings.remote);
                 self.mark_settings_dirty();
+            }
+            SettingsAction::SetAllowRemoteConnections(on) => {
+                *skip_refocus = true;
+                self.user_settings.remote.allow_connections = on;
+                self.remote.set_allow(on);
+                self.mark_settings_dirty();
+            }
+            SettingsAction::StartPairing { machine_name } => {
+                *skip_refocus = true;
+                self.remote.start_pairing(machine_name);
+            }
+            SettingsAction::CancelPairing => {
+                *skip_refocus = true;
+                self.remote.cancel_pairing();
+            }
+            SettingsAction::DismissPairing => {
+                *skip_refocus = true;
+                self.remote.dismiss_pairing();
+            }
+            SettingsAction::AnswerPairing { request, approve } => {
+                *skip_refocus = true;
+                let answer = self.remote.answer(request, approve);
+                if answer.switch_turned_on {
+                    self.user_settings.remote.allow_connections = true;
+                    self.mark_settings_dirty();
+                }
+            }
+            SettingsAction::AddMachine { code, machine_name } => {
+                *skip_refocus = true;
+                self.remote.add_machine(&code, machine_name);
+            }
+            SettingsAction::DismissAddMachine => {
+                *skip_refocus = true;
+                self.remote.dismiss_client();
+            }
+            SettingsAction::SetPeerControl { peer, allowed } => {
+                *skip_refocus = true;
+                if let Err(e) = self.remote.set_control(peer, allowed) {
+                    warn!("could not change {}'s permissions: {e}", peer.short());
+                }
+            }
+            SettingsAction::RemovePeer(peer) => {
+                *skip_refocus = true;
+                if let Err(e) = self.remote.remove_peer(peer) {
+                    warn!(
+                        "{} was disconnected but its removal was not saved: {e}",
+                        peer.short()
+                    );
+                }
             }
             SettingsAction::UpdateBaseInfra(enabled) => {
                 *skip_refocus = true;
@@ -1787,6 +1837,55 @@ mod tests {
             fx.settings.snapshot().remote.relay_url.as_deref(),
             Some("https://relay.example.com")
         );
+    }
+
+    /// Settings family (DEV-1160). The switch persists to settings.json and
+    /// reaches the remote service.
+    #[gpui::test]
+    fn allow_remote_connections_persists_and_reaches_the_service(cx: &mut TestAppContext) {
+        let fx = Fixture::new(cx);
+        let dirty = fx.dispatch(SettingsAction::SetAllowRemoteConnections(true), cx);
+        assert_eq!(dirty, (false, true));
+        assert!(fx.update(cx, |state, _w, _cx| state.remote.allows_connections()));
+        fx.checkpoint(cx);
+        assert!(fx.settings.snapshot().remote.allow_connections);
+
+        fx.dispatch(SettingsAction::SetAllowRemoteConnections(false), cx);
+        assert!(!fx.update(cx, |state, _w, _cx| state.remote.allows_connections()));
+    }
+
+    /// Settings family (DEV-1160). Revoking and the control toggle go through
+    /// the service to peers.json, not settings.json.
+    #[gpui::test]
+    fn peer_control_and_removal_go_to_the_peer_list(cx: &mut TestAppContext) {
+        let fx = Fixture::new(cx);
+        let id = crate::remote::LocalIdentity::ephemeral().id();
+        fx.update(cx, |state, _w, _cx| {
+            state
+                .remote
+                .registry()
+                .add_paired(crate::remote::TrustedPeer::newly_paired(id, "Laptop"))
+                .unwrap()
+        });
+
+        let dirty = fx.dispatch(
+            SettingsAction::SetPeerControl {
+                peer: id,
+                allowed: true,
+            },
+            cx,
+        );
+        assert_eq!(dirty, (false, false), "permissions live in peers.json");
+        let control = fx.update(cx, |state, _w, _cx| {
+            state.remote.registry().permissions(id).map(|p| p.control)
+        });
+        assert_eq!(control, Some(true));
+
+        fx.dispatch(SettingsAction::RemovePeer(id), cx);
+        let gone = fx.update(cx, |state, _w, _cx| {
+            state.remote.registry().get(id).is_none()
+        });
+        assert!(gone);
     }
 
     /// Archive family, via the dispatcher's stale-confirmation guard. A
