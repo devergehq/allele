@@ -4,4 +4,6 @@
 
 /// Named session groups (DEV-853) — the pure decisions `render` draws.
 pub(crate) mod groups;
+/// The MACHINES section (DEV-1163) — paired hosts and their sessions, as data.
+pub(crate) mod machines;
 pub(crate) mod render;
