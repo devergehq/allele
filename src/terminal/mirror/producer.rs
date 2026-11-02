@@ -40,6 +40,7 @@ struct Sent {
     lines: usize,
     history_size: usize,
     cursor: Cursor,
+    alt_screen: bool,
     screen: Vec<Row>,
     /// Host lines -1, -2, ... when the frame was taken (at most `lines + 1`),
     /// to confirm a scroll count against.
@@ -216,6 +217,7 @@ impl DiffProducer {
             lines: cap.lines,
             history_size: cap.history_size,
             cursor: cap.cursor,
+            alt_screen: cap.alt_screen,
             screen: cap.screen,
             history_head,
         });
@@ -234,11 +236,16 @@ impl DiffProducer {
 ///
 /// While scrollback is below its limit (when the producer knows the limit),
 /// its growth *is* the count. Once it is full, blank or repetitive history can
-/// align at several `k`. Then the
-/// candidate whose scrolled-off rows the consumer already holds wins, and if
-/// that still leaves a tie the answer is `None`: the consumer drops loaded
-/// scrollback and pages it in again. A refetch beats showing wrong history.
+/// align at several `k`; then the answer is `None` and the consumer drops
+/// loaded scrollback and pages it in again. A refetch beats wrong history.
+///
+/// The limit must be the `Term`'s real `scrolling_history`: one that is too
+/// large makes a full scrollback look "below the limit", where growth 0 reads
+/// as "no scroll".
 fn detect_scroll(sent: &Sent, cap: &Capture, history_limit: Option<usize>) -> Option<usize> {
+    if cap.alt_screen != sent.alt_screen {
+        return None; // a different grid, with different scrollback
+    }
     if cap.history_size < sent.history_size {
         return None; // cleared
     }
@@ -274,16 +281,9 @@ fn detect_scroll(sent: &Sent, cap: &Capture, history_limit: Option<usize>) -> Op
     }
     match candidates.as_slice() {
         [k] => Some(*k),
-        [] => None,
-        many => {
-            let held =
-                |k: &&usize| (0..**k).all(|i| sent.screen[i] == cap.history_head[**k - 1 - i]);
-            let mut held = many.iter().filter(held);
-            match (held.next(), held.next()) {
-                (Some(k), None) => Some(*k),
-                _ => None,
-            }
-        }
+        // Several counts line up (blank or repeated history): guessing could
+        // show wrong scrollback, so make the consumer refetch instead.
+        _ => None,
     }
 }
 

@@ -145,15 +145,21 @@ impl MirroredGrid {
             // the request). Drop it; `wanted_page` will ask again.
             return Ok(());
         }
-        for (i, wire) in page.rows.iter().enumerate() {
-            let row = wire.decode(self.columns)?;
+        // Decode first, so a bad row changes nothing.
+        let rows = page
+            .rows
+            .iter()
+            .map(|r| r.decode(self.columns))
+            .collect::<Result<Vec<Row>>>()?;
+        // The diffs own `history_size`: the producer flushes any pending diff
+        // before a page, so the two agree, and a page never moves the view.
+        let room = self.history_size.saturating_sub(start);
+        for (i, row) in rows.into_iter().take(room).enumerate() {
             match self.history.get_mut(start + i) {
                 Some(slot) => *slot = row,
                 None => self.history.push_back(row),
             }
         }
-        self.history_size = page.history_size as usize;
-        self.history.truncate(self.history_size);
         Ok(())
     }
 

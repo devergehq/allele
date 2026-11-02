@@ -272,17 +272,21 @@ fn diffs_reproduce_the_host_after_random_output() {
 
         for step in 0..150 {
             let before = client.grid.history_size();
+            let alt_before = capture(&host.term).alt_screen;
             host.feed(&random_output(&mut rng, columns, lines));
+            let switched = capture(&host.term).alt_screen != alt_before;
             now += MIN_FRAME_INTERVAL;
             if let Some(frame) = frame_from(producer.poll(now, || capture(&host.term))) {
-                // A reset is expected when scrollback shrank (2J clears it in
-                // Allele's alacritty fork; the alt screen has none), grew by
+                // A reset is expected on an alt-screen switch (a different
+                // grid), when scrollback shrank (2J clears it in Allele's
+                // alacritty fork), grew by
                 // more than a screenful, or is full, where blank history can
                 // align at several counts. Below the limit the count is exact,
                 // so any other reset is a detector bug.
                 if let ScreenFrame::Diff(d) = &frame {
                     let after = d.history_size as usize;
-                    let explained = after < before || after - before > lines || after == 200;
+                    let explained =
+                        switched || after < before || after - before > lines || after == 200;
                     if d.history_reset && !explained {
                         unexplained += 1;
                     }
@@ -603,4 +607,85 @@ fn scrolling_output_bandwidth_estimate() {
         client.scrolls,
         diff_bytes as f64 / seconds / 1024.0
     );
+}
+
+// ── Review regressions ─────────────────────────────────────────────
+
+/// Leaving the alt screen brings back the main grid's scrollback. That is not
+/// a scroll: treating it as one pushed the editor's rows into the client's
+/// scrollback (review finding on stage A).
+#[test]
+fn leaving_the_alt_screen_does_not_push_its_rows_into_scrollback() {
+    for limit in [None, Some(1000)] {
+        let mut host = Host::new(40, 10, 1000);
+        for i in 0..13 {
+            host.feed(format!("shell line {i}\r\n").as_bytes());
+        }
+        assert_eq!(
+            host.term.grid().history_size(),
+            4,
+            "fewer lines than a screen"
+        );
+        let mut producer = DiffProducer::default();
+        if let Some(limit) = limit {
+            producer = producer.with_history_limit(limit);
+        }
+        let mut client = Client::new();
+        let mut now = Instant::now();
+        client.receive(&producer.snapshot(capture(&host.term), now));
+
+        for step in [
+            &b"\x1b[?1049hEDITOR top\x1b[10;1HEDITOR bottom"[..],
+            b"\x1b[?1049l",
+        ] {
+            host.feed(step);
+            now += MIN_FRAME_INTERVAL;
+            if let Some(frame) = frame_from(producer.poll(now, || capture(&host.term))) {
+                client.receive(&frame);
+            }
+            assert_views_match(&host.term, &client.grid, "alt screen");
+            assert_loaded_history_exact(&host, &client.grid, "alt screen");
+        }
+        while let Some((start, count)) = client.grid.wanted_page(50) {
+            let page = capture_history(&host.term, start, count);
+            for frame in producer.scrollback(capture(&host.term), page, start, now) {
+                client.receive(&frame);
+            }
+        }
+        assert_eq!(client.grid.loaded_history(), 4);
+        assert_loaded_history_exact(&host, &client.grid, "after paging");
+    }
+}
+
+#[test]
+fn a_page_with_a_bad_row_changes_nothing() {
+    let mut host = Host::new(10, 3, 100);
+    for i in 0..6 {
+        host.feed(format!("row {i}\r\n").as_bytes());
+    }
+    let mut producer = DiffProducer::default();
+    let mut client = Client::new();
+    let now = Instant::now();
+    client.receive(&producer.snapshot(capture(&host.term), now));
+
+    let good = WireRow::encode(&host.host_row(-1));
+    let too_wide = WireRow::encode(&vec![Cell::default(); 1])
+        .0
+        .into_iter()
+        .chain(std::iter::once(super::model::Run {
+            text: "x".repeat(11),
+            fg: 0,
+            bg: 0,
+            flags: 0,
+            extras: Vec::new(),
+        }))
+        .collect::<Vec<_>>();
+    let page = ScreenFrame::Scrollback(super::model::ScrollbackPage {
+        start: 0,
+        history_size: 999,
+        rows: vec![good, WireRow(too_wide)],
+    });
+    assert!(client.grid.apply(&page).is_err());
+    assert_eq!(client.grid.loaded_history(), 0, "nothing applied");
+    assert_eq!(client.grid.history_size(), host.term.grid().history_size());
 }

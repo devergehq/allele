@@ -6,9 +6,10 @@
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::Term;
+use alacritty_terminal::term::{Term, TermMode};
 
 use super::model::{Cell, Cursor, Row};
+use crate::terminal::grid_source::GridView;
 
 /// A copy of everything the producer needs from one `Term` at one instant.
 #[derive(Clone, Debug)]
@@ -17,6 +18,10 @@ pub struct Capture {
     pub lines: usize,
     pub history_size: usize,
     pub cursor: Cursor,
+    /// The alternate screen (vim, less, Claude's full-screen UI) is showing.
+    /// Switching screens swaps the whole grid and its scrollback, which no
+    /// scroll count can describe.
+    pub alt_screen: bool,
     /// The visible screen, top first. Independent of the host's own scroll
     /// position: the client scrolls its mirror on its own.
     pub screen: Vec<Row>,
@@ -42,16 +47,13 @@ pub fn capture<T>(term: &Term<T>) -> Capture {
         .map(|n| copy_row(term, Line(-(n as i32)), columns))
         .collect();
 
-    let point = grid.cursor.point;
     Capture {
         columns,
         lines,
         history_size,
-        cursor: Cursor {
-            line: point.line.0.max(0) as u16,
-            column: point.column.0 as u16,
-            shape: term.cursor_style().shape.into(),
-        },
+        // The renderer's own conversion, so the mirror cannot drift from it.
+        cursor: GridView::cursor(term),
+        alt_screen: term.mode().contains(TermMode::ALT_SCREEN),
         screen,
         history_head,
     }
