@@ -1,10 +1,11 @@
-//! A handle to a live `Term` that a screen mirror can capture from, from any
-//! thread, without keeping the terminal alive.
+//! A handle to a live `Term` that a screen mirror can capture from, and a
+//! remote client with `control` can type into (DEV-1166), from any thread,
+//! without keeping the terminal alive.
 
 use std::sync::{Arc, Weak};
 
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::Term;
+use alacritty_terminal::term::{Term, TermMode};
 
 use super::capture::{capture, capture_history, Capture};
 use super::model::Row;
@@ -22,13 +23,32 @@ pub trait MirrorTerm: Send + Sync {
     /// The `Term`'s `scrolling_history`, when known (see
     /// [`DiffProducer::with_history_limit`](super::DiffProducer::with_history_limit)).
     fn history_limit(&self) -> Option<usize>;
+
+    /// Whether the program in the terminal asked for bracketed paste
+    /// (`CSI ? 2004 h`). `None` once the terminal has gone.
+    fn bracketed_paste(&self) -> Option<bool> {
+        None
+    }
+
+    /// Write `bytes` to the PTY as one write, exactly as local typing does.
+    /// False when nothing was written: the terminal has gone, or this handle
+    /// was made without an input path (a read-only mirror). Callers check
+    /// permission first; this does not.
+    fn write_input(&self, _bytes: &[u8]) -> bool {
+        false
+    }
 }
+
+/// Where a [`SharedTerm`] sends input: the PTY's own writer. Returns false
+/// when the PTY is no longer listening.
+pub type InputSink = Box<dyn Fn(&[u8]) -> bool + Send + Sync>;
 
 /// A [`MirrorTerm`] over a shared alacritty `Term`. Holds it weakly: a mirror
 /// must not keep a closed session's terminal alive.
 pub struct SharedTerm<T> {
     term: Weak<FairMutex<Term<T>>>,
     history_limit: Option<usize>,
+    input: Option<InputSink>,
 }
 
 impl<T> SharedTerm<T> {
@@ -38,7 +58,15 @@ impl<T> SharedTerm<T> {
         Self {
             term: Arc::downgrade(term),
             history_limit,
+            input: None,
         }
+    }
+
+    /// Let remote input reach the PTY through `sink`. Without this the
+    /// handle is read-only and [`MirrorTerm::write_input`] writes nothing.
+    pub fn with_input(mut self, sink: InputSink) -> Self {
+        self.input = Some(sink);
+        self
     }
 }
 
@@ -57,5 +85,19 @@ impl<T: Send> MirrorTerm for SharedTerm<T> {
 
     fn history_limit(&self) -> Option<usize> {
         self.history_limit
+    }
+
+    fn bracketed_paste(&self) -> Option<bool> {
+        let term = self.term.upgrade()?;
+        let bracketed = term.lock().mode().contains(TermMode::BRACKETED_PASTE);
+        Some(bracketed)
+    }
+
+    fn write_input(&self, bytes: &[u8]) -> bool {
+        // A closed session's terminal is gone even if its PTY writer lingers.
+        if self.term.strong_count() == 0 {
+            return false;
+        }
+        self.input.as_ref().is_some_and(|sink| sink(bytes))
     }
 }

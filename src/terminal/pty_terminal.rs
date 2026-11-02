@@ -317,8 +317,15 @@ impl PtyTerminal {
 
     /// A handle a screen mirror captures from (DEV-1165). Weak, and carrying
     /// the scrollback limit this terminal was built with.
+    ///
+    /// It also writes input (DEV-1166): the same `Msg::Input` [`Self::write`]
+    /// sends, so a remote keystroke reaches the PTY exactly as a local one.
+    /// The remote side checks `control` before every write.
     pub fn mirror_handle(&self) -> crate::terminal::mirror::SharedTerm<JsonEventListener> {
-        crate::terminal::mirror::SharedTerm::new(&self.term, Some(SCROLLBACK_LINES))
+        let pty = self.pty_tx.0.clone();
+        crate::terminal::mirror::SharedTerm::new(&self.term, Some(SCROLLBACK_LINES)).with_input(
+            Box::new(move |bytes: &[u8]| pty.send(Msg::Input(bytes.to_vec().into())).is_ok()),
+        )
     }
 
     /// Write input bytes to the PTY

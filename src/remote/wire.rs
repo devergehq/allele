@@ -39,6 +39,8 @@
 //!     host → client  screen_open { attach_id, session_id }   first frame
 //!     host → client  screen { frame: snapshot | diff | scrollback }
 //!     client → host  scrollback_request { start, count } | resync
+//!     client → host  input { text, paste? }            needs control (DEV-1166)
+//!     host → client  input_refused { code, message }   input dropped, not written
 //! ```
 //!
 //! `op` and `result` are `crate::dispatch::protocol`'s own types, nested
@@ -189,6 +191,24 @@ pub enum Frame {
     /// Client → host, on a screen stream: the mirror lost track (a frame it
     /// could not apply); send a full snapshot.
     Resync,
+
+    // ── remote input (DEV-1166) ───────────────────────────────────────────
+    /// Client → host, on a screen stream: type into the attached session.
+    /// Needs `control`, read live for every frame. `text` is what the
+    /// client's keymap produced for a keystroke (exactly the bytes local
+    /// typing would write), or the pasted text when `paste` is set; the host
+    /// adds the bracketed-paste markers itself, because only the host knows
+    /// whether its terminal asked for them. At most
+    /// [`MAX_INPUT_BYTES`](super::screen::MAX_INPUT_BYTES) of text.
+    Input {
+        text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        paste: bool,
+    },
+    /// Host → client, on a screen stream: input was dropped and not written.
+    /// The mirror carries on. `code` is `permission_denied` (no `control`),
+    /// `bad_request` (too large) or `session_not_found` (the terminal went).
+    InputRefused { code: ErrorCode, message: String },
 }
 
 /// Write one frame. Refuses a frame larger than [`MAX_PEER_FRAME`]; the
@@ -288,6 +308,34 @@ mod tests {
         write_frame(&mut a, &Frame::PairAck).await.unwrap();
         assert_eq!(read_frame(&mut b).await.unwrap(), hello);
         assert_eq!(read_frame(&mut b).await.unwrap(), Frame::PairAck);
+    }
+
+    /// Keystrokes are JSON strings, not arrays of numbers: a control byte
+    /// costs six bytes, a printable one costs one. `paste` is left out when
+    /// false, so a keystroke frame stays small.
+    #[test]
+    fn input_frames_encode_as_text() {
+        let key = Frame::Input {
+            text: "\u{3}".into(),
+            paste: false,
+        };
+        let body = String::from_utf8(encode(&key).unwrap()).unwrap();
+        assert_eq!(body, r#"{"type":"input","text":"\u0003"}"#);
+        assert_eq!(decode(body.as_bytes()).unwrap(), key);
+
+        let paste = Frame::Input {
+            text: "a\nb".into(),
+            paste: true,
+        };
+        assert_eq!(decode(&encode(&paste).unwrap()).unwrap(), paste);
+
+        let refused = Frame::InputRefused {
+            code: ErrorCode::PermissionDenied,
+            message: "read only".into(),
+        };
+        let body = String::from_utf8(encode(&refused).unwrap()).unwrap();
+        assert!(body.contains(r#""type":"input_refused""#), "{body}");
+        assert!(body.contains(r#""code":"permission_denied""#), "{body}");
     }
 
     #[tokio::test]

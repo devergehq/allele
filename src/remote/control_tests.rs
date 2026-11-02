@@ -112,6 +112,7 @@ impl Host {
             dispatch,
             host_name: HostName::new(Some("Studio".into()), || None),
             screens: Arc::new(super::screen::NoScreens),
+            viewers: Default::default(),
         };
         let gate = Gate::new(
             registry.clone(),

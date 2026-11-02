@@ -17,6 +17,8 @@ use crate::{debug_capture, git, hooks, interrupted};
 
 /// Start every background poller. Called once, from `main`.
 pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
+    spawn_viewers_redraw(cx);
+
     // Spawn the hook-event polling task. Runs for the life
     // of the app, reads ~/.allele/events/*.jsonl every
     // 250ms, and routes each new event into apply_hook_event.
@@ -243,6 +245,33 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                 .is_err()
             {
                 break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// Redraw when a paired Mac attaches to or detaches from a session, so the
+/// tab's "<Machine> is viewing" chip (DEV-1166) appears and clears within a
+/// second. A timer, not the render tick, which stops while the display
+/// sleeps; reading the version is one atomic load.
+fn spawn_viewers_redraw(cx: &mut Context<AppState>) {
+    cx.spawn(async move |this, cx| {
+        let Ok(viewers) = this.read_with(cx, |state, _| state.remote.viewers()) else {
+            return;
+        };
+        let mut seen = viewers.version();
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+            let now = viewers.version();
+            if now == seen {
+                continue;
+            }
+            seen = now;
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                break; // AppState dropped — app is exiting
             }
         }
     })

@@ -227,6 +227,42 @@ impl KeymapConfig {
 ///
 /// Control characters are `byte & 0x1f` — i.e. 'a' (0x61) → 0x01,
 /// 'z' (0x7a) → 0x1a. This is algorithmic, not a lookup table.
+/// Start of a bracketed paste (`CSI 200 ~`).
+pub const PASTE_START: &[u8] = b"\x1b[200~";
+/// End of a bracketed paste (`CSI 201 ~`).
+pub const PASTE_END: &[u8] = b"\x1b[201~";
+
+/// The bytes a paste of `text` writes to the PTY, as one buffer: wrapped in
+/// the bracketed-paste markers when the program asked for them
+/// (`bracketed`), as is otherwise.
+///
+/// Any marker already inside `text` is removed first. Otherwise a pasted
+/// `ESC [ 201 ~` would end the paste early and the rest would be read as
+/// typed keys — including an Enter that submits, or approves a permission
+/// prompt. Used for remote pastes (DEV-1166), whose text came from another
+/// machine's clipboard.
+pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() + PASTE_START.len() + PASTE_END.len());
+    if bracketed {
+        out.extend_from_slice(PASTE_START);
+    }
+    let body_start = out.len();
+    // One pass, checking the tail after each byte: removing a marker can
+    // join the bytes around it into another (`ESC[20` + `ESC[201~` + `1~`),
+    // and the tail check catches that too.
+    for &b in text.as_bytes() {
+        out.push(b);
+        let tail = &out[body_start..];
+        if tail.ends_with(PASTE_START) || tail.ends_with(PASTE_END) {
+            out.truncate(out.len() - PASTE_START.len());
+        }
+    }
+    if bracketed {
+        out.extend_from_slice(PASTE_END);
+    }
+    out
+}
+
 fn control_byte(key: &str) -> Option<u8> {
     let bytes = key.as_bytes();
     if bytes.len() == 1 {
@@ -241,6 +277,36 @@ fn control_byte(key: &str) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bracketed_paste_is_wrapped_once() {
+        assert_eq!(
+            paste_bytes("one\ntwo", true),
+            b"\x1b[200~one\ntwo\x1b[201~".to_vec()
+        );
+    }
+
+    #[test]
+    fn an_unbracketed_paste_is_the_text() {
+        assert_eq!(paste_bytes("one\ntwo", false), b"one\ntwo".to_vec());
+    }
+
+    #[test]
+    fn a_pasted_end_marker_cannot_end_the_paste_early() {
+        let hostile = "safe\x1b[201~rm -rf ~\r";
+        assert_eq!(
+            paste_bytes(hostile, true),
+            b"\x1b[200~saferm -rf ~\r\x1b[201~".to_vec()
+        );
+        assert_eq!(paste_bytes(hostile, false), b"saferm -rf ~\r".to_vec());
+    }
+
+    #[test]
+    fn a_marker_rebuilt_by_removing_another_is_removed_too() {
+        // Removing the inner marker leaves `ESC[20` + `1~` = `ESC[201~`.
+        let nested = "a\x1b[20\x1b[200~1~b";
+        assert_eq!(paste_bytes(nested, false), b"ab".to_vec());
+    }
 
     fn mods(control: bool, alt: bool, platform: bool, shift: bool) -> Modifiers {
         Modifiers {

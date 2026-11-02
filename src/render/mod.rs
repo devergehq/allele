@@ -383,7 +383,32 @@ impl AppState {
         if self.browser_tab_available() {
             strip = strip.child(tab("main-tab-browser", "Browser", MainTab::Browser));
         }
+        if let Some(chip) = self.render_viewers_chip() {
+            strip = strip.child(div().flex_1()).child(chip);
+        }
         strip
+    }
+
+    /// "<Machine> is viewing" while a paired Mac has this session attached
+    /// (DEV-1166), so remote viewing or typing is never silent. Redrawn by
+    /// the viewers poller within a second of an attach or detach.
+    fn render_viewers_chip(&self) -> Option<AnyElement> {
+        let session = self.active_session()?;
+        let machines = self.remote.viewers().machines(&session.id);
+        let text = crate::remote::viewers::chip_text(&machines)?;
+        Some(
+            div()
+                .id("session-viewers-chip")
+                .flex_shrink_0()
+                .px(px(8.0))
+                .py(px(2.0))
+                .rounded(px(10.0))
+                .bg(theme().tint_warning)
+                .text_size(px(11.0))
+                .text_color(theme().warning)
+                .child(text)
+                .into_any_element(),
+        )
     }
 
     /// Render the Transcript tab. Shows a "no active session" placeholder
