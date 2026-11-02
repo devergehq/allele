@@ -413,6 +413,9 @@ pub(crate) struct AppState {
     pub(crate) scratch_pad: Option<Entity<scratch_pad::ScratchPad>>,
     /// "New session with details" modal. `Some` while the overlay is visible.
     pub(crate) new_session_modal: Option<Entity<new_session_modal::NewSessionModal>>,
+    /// Remote sessions: the selected row, creates in flight, the open menu
+    /// (DEV-1168).
+    pub(crate) remote_ui: crate::remote_sessions::RemoteUi,
     /// Sidebar search/filter input entity.
     pub(crate) sidebar_filter_input: Entity<text_input::TextInput>,
     /// Reader in-file find input entity. Its text mirrors into
@@ -501,6 +504,9 @@ pub(crate) struct AppState {
     /// This machine's remote endpoint: pairing, trusted peers, the listener
     /// (DEV-1160). Cheap to clone into the Settings window.
     pub(crate) remote: crate::remote::RemoteService,
+    /// Host side of the status feed paired clients subscribe to (DEV-1162).
+    /// A cheap clone handle: the transport holds its own copy.
+    pub(crate) status_feed: crate::status_feed::StatusFeed,
     /// Set by the Debug menu or agent request-file watcher.
     pub(crate) capture_ui_requested: bool,
 }
@@ -540,6 +546,19 @@ impl AppState {
     /// Do NOT call `save_state()` directly — see ARCHITECTURE.md §7.2.
     pub(crate) fn mark_state_dirty(&mut self) {
         self.state_dirty = true;
+        // Every add, remove, rename and status change ends here, so this is
+        // the one trigger the status feed needs (DEV-1162). The publisher
+        // diffs, so a call that changed nothing it reports costs a compare.
+        self.publish_status_feed();
+    }
+
+    /// Republish the status feed from the current sessions. Cheap and
+    /// idempotent; see [`crate::status_feed::StatusFeed::publish`].
+    pub(crate) fn publish_status_feed(&self) {
+        self.status_feed
+            .publish(crate::status_feed::host::entries_from_projects(
+                &self.projects,
+            ));
     }
 
     /// Flag that user settings (`settings.json`) have been mutated
@@ -1066,6 +1085,7 @@ pub(crate) mod fixture {
                     browser_status: String::new(),
                     scratch_pad: None,
                     new_session_modal: None,
+                    remote_ui: Default::default(),
                     sidebar_filter_input: input(cx),
                     reader_find_input: input(cx),
                     file_palette: None,
@@ -1102,6 +1122,7 @@ pub(crate) mod fixture {
                     platform: crate::platform::Platform::detect(),
                     remote: crate::remote::RemoteService::offline(&Default::default()),
                     capture_ui_requested: false,
+                    status_feed: Default::default(),
                 }
             });
 

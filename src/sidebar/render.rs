@@ -18,6 +18,7 @@ use crate::app_state::{AppState, GroupRename};
 use crate::project::Project;
 use crate::session::{AttentionKind, SessionStatus};
 use crate::sidebar::groups::{self, GroupCounts, GroupHeader};
+use crate::sidebar::machines;
 use crate::SimpleTooltip;
 
 /// Left indents matching the rows each confirmation strip sits beneath, so the
@@ -364,6 +365,7 @@ fn render_group_header(
                     cx.stop_propagation();
                     this.session_context_menu = None;
                     this.project_context_menu = None;
+                    this.remote_ui.menu = None;
                     this.group_headers.context_menu = Some((p_idx, name.clone(), event.position));
                     cx.notify();
                 }
@@ -638,6 +640,7 @@ pub(crate) fn build_sidebar_items(
                     move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
+                        this.remote_ui.menu = None;
                         this.project_context_menu = Some((p_idx, event.position));
                         cx.notify();
                     },
@@ -1287,6 +1290,7 @@ pub(crate) fn build_sidebar_items(
                         move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
                             cx.stop_propagation();
                             this.project_context_menu = None;
+                            this.remote_ui.menu = None;
                             this.session_context_menu = Some((
                                 SessionCursor {
                                     project_idx: p_idx,
@@ -1822,7 +1826,342 @@ pub(crate) fn build_sidebar_items(
         }
     }
 
+    sidebar_items.extend(build_machines_section(state, cx));
     sidebar_items
+}
+
+/// The MACHINES section (DEV-1163): every paired host, and under it that
+/// host's sessions grouped by project. Empty — so the section is absent — when
+/// nothing is paired.
+///
+/// Remote rows are read-only for now. Clicking one does nothing until attach
+/// lands (DEV-1167); the tooltip says so, and the row keeps the default cursor
+/// so it never promises more than it does.
+fn build_machines_section(state: &AppState, cx: &mut Context<AppState>) -> Vec<AnyElement> {
+    let remote = &state.remote;
+    let machines = machines::machine_views(&remote.paired(), |id| remote.hosts().get(id));
+    if machines.is_empty() {
+        return Vec::new();
+    }
+
+    let filter = state.sidebar_filter.as_str();
+    let active_only = state.user_settings.sidebar_active_only;
+    let now = std::time::SystemTime::now();
+    let mut items: Vec<AnyElement> = Vec::new();
+
+    for machine in &machines {
+        let host_matches = filter.is_empty() || machine.name.to_lowercase().contains(filter);
+        let keep = |s: &machines::RemoteSessionView, project: &str| {
+            (!active_only || session_survives_active_only(s.status, false))
+                && (host_matches
+                    || session_matches_filter(&s.label, None, s.group.as_deref(), project, filter))
+        };
+        let projects: Vec<(&str, Vec<&machines::RemoteSessionView>)> = machine
+            .projects
+            .iter()
+            .map(|p| {
+                let rows = p.sessions.iter().filter(|s| keep(s, &p.name)).collect();
+                (p.name.as_str(), rows)
+            })
+            .filter(|(_, rows): &(&str, Vec<_>)| !rows.is_empty())
+            .collect();
+        // A text filter that matches neither the host nor any of its sessions
+        // hides the host, as it hides a local project. Active-only does not:
+        // the host row carries reachability, which is news in itself.
+        if !host_matches && projects.is_empty() {
+            continue;
+        }
+        items.push(render_machine_row(machine, now));
+        // Creates sent from the picker and not yet answered (DEV-1168).
+        for starting in state.remote_ui.starting_on(machine.id) {
+            items.push(render_starting_remote_row(&starting.label));
+        }
+        let manageable = crate::remote_sessions::can_manage(
+            machine.link == machines::MachineLink::Connected,
+            remote.hosts().grant(machine.id),
+        );
+        for (project_name, rows) in projects {
+            items.push(
+                div()
+                    .pl(px(24.0))
+                    .pr(px(12.0))
+                    .pt(px(4.0))
+                    .pb(px(2.0))
+                    .bg(theme().bg_surface)
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme().text_dim)
+                    .child(project_name.to_string())
+                    .into_any_element(),
+            );
+            for session in rows {
+                let key = crate::remote_sessions::RemoteSessionKey {
+                    peer: machine.id,
+                    session_id: session.id.clone(),
+                };
+                let selected = state.remote_ui.selected.as_ref() == Some(&key);
+                items.push(render_remote_session_row(
+                    machine, session, key, selected, manageable, cx,
+                ));
+            }
+        }
+    }
+
+    if items.is_empty() {
+        return items;
+    }
+    let header = div()
+        .px(px(12.0))
+        .py(px(6.0))
+        .bg(theme().bg_sunken)
+        .border_t_1()
+        .border_b_1()
+        .border_color(theme().border_subtle)
+        .text_size(px(10.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme().text_faint)
+        .child("MACHINES")
+        .into_any_element();
+    items.insert(0, header);
+    items
+}
+
+/// A host row: name and how many of its sessions need the user, then a dot
+/// and the link state ("connected", "unreachable · last seen 4m ago") on a
+/// second line so a narrow sidebar never truncates the part that matters.
+fn render_machine_row(machine: &machines::MachineView, now: std::time::SystemTime) -> AnyElement {
+    let (dot_color, text_color) = match machine.link {
+        machines::MachineLink::Connected => (theme().success, theme().text_dim),
+        machines::MachineLink::Connecting => (theme().warning, theme().text_dim),
+        machines::MachineLink::Unreachable { .. } => (theme().text_faint, theme().text_faint),
+    };
+    let mut name_row = div()
+        .flex()
+        .flex_row()
+        .gap(px(6.0))
+        .items_center()
+        .child(icon(icons::MONITOR, 12.0, theme().text_muted))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(if machine.is_stale() {
+                    theme().text_muted
+                } else {
+                    theme().text_primary
+                })
+                .child(machine.name.clone()),
+        );
+    if machine.awaiting_input > 0 {
+        name_row = name_row.child(
+            div()
+                .flex_shrink_0()
+                .px(px(6.0))
+                .rounded(px(6.0))
+                .bg(with_alpha(theme().attention, 0.18))
+                .text_size(px(11.0))
+                .text_color(theme().attention)
+                .child(format!("{} waiting", machine.awaiting_input)),
+        );
+    }
+    div()
+        .px(px(12.0))
+        .py(px(5.0))
+        .bg(theme().bg_surface)
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .child(name_row)
+        .child(
+            div()
+                .pl(px(18.0))
+                .flex()
+                .flex_row()
+                .gap(px(5.0))
+                .items_center()
+                .child(icon(icons::CIRCLE_FILL, 7.0, dot_color))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_size(px(11.0))
+                        .text_color(text_color)
+                        .child(machine.link.describe(now)),
+                ),
+        )
+        .into_any_element()
+}
+
+/// One remote session: the same status icon and colour as a local row, a
+/// monitor marker on the right so it never reads as a session on this Mac,
+/// and everything greyed while its host is unreachable.
+/// A create in flight on a host: shown at once under the host, so the click
+/// visibly did something while the host clones a workspace.
+fn render_starting_remote_row(label: &str) -> AnyElement {
+    div()
+        .pl(px(32.0))
+        .pr(px(12.0))
+        .py(px(5.0))
+        .bg(theme().bg_surface)
+        .flex()
+        .flex_row()
+        .gap(px(6.0))
+        .items_center()
+        .child(icon(icons::CIRCLE_FILL, 7.0, theme().text_faint))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(12.0))
+                .text_color(theme().text_faint)
+                .child(format!("Starting \u{201c}{label}\u{201d}…")),
+        )
+        .into_any_element()
+}
+
+/// `manageable`: this Mac holds `control` on a live host, so a right-click
+/// offers Interrupt and Discard (DEV-1168). Otherwise there is no menu.
+fn render_remote_session_row(
+    machine: &machines::MachineView,
+    session: &machines::RemoteSessionView,
+    key: crate::remote_sessions::RemoteSessionKey,
+    selected: bool,
+    manageable: bool,
+    cx: &mut Context<AppState>,
+) -> AnyElement {
+    let stale = machine.is_stale();
+    let attention = (session.status == SessionStatus::AwaitingInput)
+        .then_some(session.attention)
+        .flatten();
+    let status_icon = attention
+        .map(|k| k.icon_name())
+        .unwrap_or_else(|| session.status.icon_name());
+    let status_color = if stale {
+        theme().text_faint
+    } else {
+        attention
+            .map(|k| k.color())
+            .unwrap_or_else(|| session.status.color())
+    };
+    let label_color = if stale || session.status == SessionStatus::Suspended {
+        theme().text_faint
+    } else {
+        theme().text_muted
+    };
+    let row_key = key;
+    let key = format!("{}-{}", machine.id.short(), session.id);
+    let status_dot = icon(status_icon, 11.0, status_color);
+    let status_dot = if session.status == SessionStatus::Running && !stale {
+        status_dot
+            .with_animation(
+                SharedString::from(format!("remote-pulse-{key}")),
+                Animation::new(std::time::Duration::from_millis(2200))
+                    .repeat()
+                    .with_easing(pulsating_between(0.35, 1.0)),
+                |dot, delta| dot.opacity(delta),
+            )
+            .into_any_element()
+    } else {
+        status_dot.into_any_element()
+    };
+    let tooltip = SharedString::from(format!(
+        "On {} — opening a session on another Mac isn't available yet",
+        machine.name
+    ));
+    let menu_key = row_key.clone();
+    let menu_label = session.label.clone();
+    let menu_host = machine.name.clone();
+    let row = div()
+        .id(SharedString::from(format!("remote-session-{key}")))
+        .pl(px(32.0))
+        .pr(px(12.0))
+        .py(px(5.0))
+        .bg(if selected {
+            theme().bg_active
+        } else {
+            theme().bg_surface
+        })
+        .hover(|s| s.bg(theme().bg_hover_soft))
+        .flex()
+        .flex_row()
+        .gap(px(6.0))
+        .items_center()
+        .child(status_dot)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(12.0))
+                .text_color(label_color)
+                .child(session.label.clone()),
+        )
+        .child(icon(icons::MONITOR, 10.0, theme().text_faint))
+        .tooltip(move |_window, cx| {
+            cx.new(|_| SimpleTooltip {
+                text: tooltip.clone(),
+            })
+            .into()
+        })
+        // Stopped here so it never reaches whatever the sidebar does with a
+        // click on empty space. Selecting stands in for attaching until
+        // DEV-1167 replaces it.
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                cx.stop_propagation();
+                let action = crate::remote_sessions::RemoteSessionAction::Select(row_key.clone());
+                this.pending_action = Some(SessionAction::Remote(action).into());
+                cx.notify();
+            }),
+        );
+    if !manageable {
+        // No menu, and nothing else either: a right-click on a remote row
+        // must not fall through to the sidebar's own menus.
+        return row
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_this: &mut AppState, _event, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element();
+    }
+    row.on_mouse_down(
+        MouseButton::Right,
+        cx.listener(
+            move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.session_context_menu = None;
+                this.project_context_menu = None;
+                this.remote_ui.menu = Some(crate::remote_sessions::RemoteMenu {
+                    key: menu_key.clone(),
+                    label: menu_label.clone(),
+                    host_name: menu_host.clone(),
+                    position: event.position,
+                    confirming_discard: false,
+                });
+                cx.notify();
+            },
+        ),
+    )
+    .into_any_element()
 }
 
 #[cfg(test)]

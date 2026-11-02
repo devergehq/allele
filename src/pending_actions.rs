@@ -144,6 +144,7 @@ impl AppState {
                 *skip_refocus = true;
                 self.open_new_session_modal(project_idx, window, cx);
             }
+            SessionAction::Remote(action) => self.handle_remote_session_action(action, cx),
             SessionAction::AddSessionWithDetails {
                 project_idx,
                 label,

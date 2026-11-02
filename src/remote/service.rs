@@ -7,7 +7,13 @@
 //!   needed = Allow remote connections
 //!          ∨ a pairing code is showing (or its request is in flight)
 //!          ∨ this Mac is pairing with another (Add machine)
+//!          ∨ there are paired machines to follow (DEV-1162)
 //! ```
+//!
+//! Following is outbound: while the endpoint is up, a [`Follower`] per trusted
+//! peer keeps a link to it and its status feed in [`HostFeeds`]. That is
+//! independent of the switch, which only decides whether *others* may connect
+//! *here* — so a laptop with the switch off still sees its desktop.
 //!
 //! So the first pairing works with the switch still off, and turning the
 //! switch off closes every remote connection and — once no pairing is in
@@ -16,8 +22,11 @@
 //! The UI talks to it through `SettingsAction`s and reads [`RemoteStatus`];
 //! everything that touches the network runs on the shared tokio runtime.
 
+use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::runtime::Handle;
@@ -26,8 +35,10 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::control::{ControlContext, HostName, RemoteDispatch};
+use super::follow::{CallError, Follower, HostFeeds, OpCall};
 use super::identity::LocalIdentity;
 use super::iroh_transport::IrohTransport;
+use super::link::ReconnectPolicy;
 use super::listener::{self, Gate, SWITCHED_OFF_REASON};
 use super::pairing::{
     pair_with, ClientProgress, HostPairing, HostView, PairingCode, PairingSecret, RequestId,
@@ -36,10 +47,12 @@ use super::peers::TrustedPeer;
 use super::registry::PeerRegistry;
 use super::screen::ScreenSource;
 use super::transport::{PeerId, PeerTransport, TransportConfig};
+use crate::dispatch::protocol::{Request, Response};
 use crate::errors::{AlleleError, Result};
 use crate::platform::SecretStore;
 use crate::repositories::{JsonFilePeersRepo, PeersRepository};
 use crate::settings::RemoteSettings;
+use crate::status_feed::StatusFeed;
 
 /// Binds the endpoint. Production loads the Keychain identity and binds iroh;
 /// tests bind an in-memory transport.
@@ -120,6 +133,8 @@ pub struct RemoteStatus {
 struct Life {
     transport: Option<Arc<dyn PeerTransport>>,
     accept: Option<JoinHandle<()>>,
+    /// One per trusted peer while the endpoint is up.
+    followers: HashMap<PeerId, Follower>,
 }
 
 struct Inner {
@@ -130,6 +145,12 @@ struct Inner {
     binder: Arc<dyn Binder>,
     /// What admitted peers' requests are answered by (DEV-1161).
     control: ControlContext,
+    feeds: HostFeeds,
+    /// Each running follower's op queue (DEV-1168). Mirrors
+    /// `Life.followers`, but under a plain lock, so a click's call never waits
+    /// behind a reconcile holding `life`.
+    ops: Mutex<HashMap<PeerId, tokio::sync::mpsc::Sender<OpCall>>>,
+    follow_policy: ReconnectPolicy,
     config: Mutex<Option<TransportConfig>>,
     life: tokio::sync::Mutex<Life>,
     listening: AtomicBool,
@@ -169,6 +190,9 @@ impl RemoteService {
             allow: Arc::new(AtomicBool::new(settings.allow_connections)),
             binder,
             control,
+            feeds: HostFeeds::default(),
+            ops: Mutex::default(),
+            follow_policy: ReconnectPolicy::default(),
             config: Mutex::new(config),
             life: tokio::sync::Mutex::new(Life::default()),
             listening: AtomicBool::new(false),
@@ -195,12 +219,14 @@ impl RemoteService {
         settings: &RemoteSettings,
         dispatch: Arc<dyn RemoteDispatch>,
         screens: Arc<dyn ScreenSource>,
+        status_feed: StatusFeed,
         computer_name: impl Fn() -> Option<String> + Send + Sync + 'static,
     ) -> Self {
         let control = ControlContext {
             dispatch,
             host_name: HostName::new(settings.machine_name.clone(), computer_name),
             screens,
+            status_feed,
         };
         Self::new(
             crate::rt::handle(),
@@ -231,6 +257,12 @@ impl RemoteService {
         )
     }
 
+    /// The paired machines, in pairing order. Cheaper than [`Self::status`]
+    /// for a caller that draws every frame (the MACHINES sidebar, DEV-1163).
+    pub fn paired(&self) -> Vec<TrustedPeer> {
+        self.inner.registry.list()
+    }
+
     #[cfg(test)]
     pub fn registry(&self) -> &PeerRegistry {
         &self.inner.registry
@@ -247,6 +279,66 @@ impl RemoteService {
             _ = peers.changed() => {}
             _ = pairing.changed() => {}
         }
+    }
+
+    /// What every paired host last told us about its sessions (DEV-1162).
+    /// Read by the Machines sidebar (DEV-1163) and remote attention
+    /// (DEV-1164).
+    pub fn hosts(&self) -> &HostFeeds {
+        &self.inner.feeds
+    }
+
+    /// Call a paired host's dispatch API over the control stream its
+    /// follower already holds (DEV-1168).
+    ///
+    /// **For the human's UI only** — the New Session picker and the remote
+    /// session menu. Nothing on `control.sock` or the MCP server reaches this
+    /// (`tests/architecture.rs` checks), so an agent cannot start or remove
+    /// sessions on another Mac (DEV-1187).
+    ///
+    /// Runs on the service's runtime; the returned future can be awaited from
+    /// any executor. A host refusal (cap, unknown project, permission) is an
+    /// `Ok(Response::Error)`; `Err` means the host never answered.
+    pub fn call(
+        &self,
+        peer: PeerId,
+        op: Request,
+    ) -> impl Future<Output = std::result::Result<Response, CallError>> + Send + 'static {
+        let deadline = call_deadline(&op);
+        self.call_within(peer, op, deadline)
+    }
+
+    /// [`Self::call`] with an explicit deadline.
+    pub(crate) fn call_within(
+        &self,
+        peer: PeerId,
+        op: Request,
+        deadline: Duration,
+    ) -> impl Future<Output = std::result::Result<Response, CallError>> + Send + 'static {
+        let inner = Arc::clone(&self.inner);
+        let task = self.inner.rt.spawn(async move {
+            let queue = lock(&inner.ops).get(&peer).cloned();
+            let Some(queue) = queue else {
+                return Err(CallError::Unreachable);
+            };
+            let (reply, answer) = oneshot::channel();
+            queue.try_send(OpCall { op, reply }).map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => CallError::Busy,
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => CallError::Unreachable,
+            })?;
+            match tokio::time::timeout(deadline, answer).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(CallError::Dropped),
+                Err(_) => Err(CallError::TimedOut),
+            }
+        });
+        async move { task.await.unwrap_or(Err(CallError::Dropped)) }
+    }
+
+    /// The name a trusted peer gave when it paired, or `None` if it is not
+    /// (or no longer) trusted. Display only; peer-chosen text.
+    pub fn peer_name(&self, id: PeerId) -> Option<String> {
+        self.inner.registry.get(id).map(|p| p.machine_name)
     }
 
     pub fn status(&self) -> RemoteStatus {
@@ -488,6 +580,41 @@ impl Inner {
         self.allow.load(Ordering::SeqCst)
             || self.client_busy.load(Ordering::SeqCst)
             || self.pairing.in_progress(Instant::now())
+            || !self.registry.is_empty()
+    }
+
+    /// One follower per trusted peer: start the new, stop the removed.
+    async fn sync_followers(&self, life: &mut Life) {
+        let Some(transport) = life.transport.clone() else {
+            return;
+        };
+        let trusted: Vec<PeerId> = self.registry.list().into_iter().map(|p| p.id).collect();
+        let gone: Vec<PeerId> = life
+            .followers
+            .keys()
+            .filter(|id| !trusted.contains(id))
+            .copied()
+            .collect();
+        for id in gone {
+            lock(&self.ops).remove(&id);
+            if let Some(f) = life.followers.remove(&id) {
+                f.stop().await;
+            }
+            self.feeds.forget(id);
+        }
+        for id in trusted {
+            let follower = life.followers.entry(id).or_insert_with(|| {
+                Follower::spawn(
+                    &self.rt,
+                    Arc::clone(&transport),
+                    id,
+                    self.follow_policy,
+                    self.feeds.clone(),
+                    Arc::clone(&self.control.host_name),
+                )
+            });
+            lock(&self.ops).insert(id, follower.ops());
+        }
     }
 
     /// The bound transport, binding (and starting the gate) if there is none.
@@ -527,8 +654,25 @@ impl Inner {
         if needed && life.transport.is_none() {
             if let Err(e) = self.bound(life).await {
                 self.set_error(Some(format!("could not start the remote endpoint: {e}")));
+                return;
             }
-        } else if !needed {
+            life = self.life.lock().await;
+        }
+        if needed {
+            self.sync_followers(&mut life).await;
+        } else {
+            // Unpairing the last peer is one way to get here: a peer that is
+            // no longer trusted is forgotten, not left listed as unreachable.
+            let trusted = self.registry.list();
+            lock(&self.ops).clear();
+            for (id, f) in life.followers.drain() {
+                f.stop().await;
+                if trusted.iter().any(|p| p.id == id) {
+                    self.feeds.lost(id);
+                } else {
+                    self.feeds.forget(id);
+                }
+            }
             if let Some(transport) = life.transport.take() {
                 if let Some(task) = life.accept.take() {
                     task.abort();
@@ -543,12 +687,30 @@ impl Inner {
     }
 }
 
+/// How long to wait for a host's answer. A create clones a workspace and the
+/// host's drain allows it five minutes (`dispatch::server::REPLY_TIMEOUT`);
+/// the rest answer in seconds, and a human should not wait minutes to learn
+/// that they won't.
+pub(crate) fn call_deadline(op: &Request) -> Duration {
+    match op {
+        Request::SessionsCreate(_) => Duration::from_secs(330),
+        Request::SessionsDiscard { .. } => Duration::from_secs(120),
+        Request::ProjectsList
+        | Request::SessionsList
+        | Request::SessionsStatus { .. }
+        | Request::SessionsInterrupt { .. } => Duration::from_secs(30),
+    }
+}
+
 /// Reconcile whenever something changes, and when a pairing deadline passes.
 /// Ends when the service is dropped.
 async fn supervise(weak: std::sync::Weak<Inner>) {
     let Some(inner) = weak.upgrade() else { return };
     let mut wake = inner.wake.subscribe();
     let mut pairing = inner.pairing.subscribe();
+    // A peer paired or removed changes who to follow, and whether anything
+    // needs the endpoint at all.
+    let mut peers = inner.registry.subscribe();
     drop(inner);
     loop {
         let Some(inner) = weak.upgrade() else { return };
@@ -564,6 +726,7 @@ async fn supervise(weak: std::sync::Weak<Inner>) {
         tokio::select! {
             r = wake.changed() => if r.is_err() { return },
             r = pairing.changed() => if r.is_err() { return },
+            r = peers.changed() => if r.is_err() { return },
             _ = sleep => {
                 if let Some(inner) = weak.upgrade() {
                     inner.pairing.in_progress(Instant::now()); // expires the code

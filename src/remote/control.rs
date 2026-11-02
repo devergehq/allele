@@ -25,8 +25,10 @@
 //! grant as it stands *at that moment*: a host user revoking `control` stops
 //! the next create on a connection that is already open.
 //!
-//! Later frames (status subscription, DEV-1162) belong on this stream: the
-//! writer is a queue, so a pushed frame and a response can interleave.
+//! The status feed (DEV-1162) rides the same stream: after
+//! `subscribe_status`, a push task queues a snapshot and then every change on
+//! the same outbox the responses use, so the two interleave. It needs `view`,
+//! read at subscribe time and again before every change it sends.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -34,7 +36,9 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use super::peers::PeerPermissions;
@@ -44,6 +48,7 @@ use super::transport::{PeerConnection, PeerId, PeerStream};
 use super::wire::{self, write_frame, Frame, StreamRefusal, MAX_PEER_FRAME, PROTOCOL_VERSION};
 use crate::dispatch::protocol::{ErrorCode, Request, Response};
 use crate::dispatch::server::{forward, ControlRequest};
+use crate::status_feed::StatusFeed;
 
 /// Requests one connection may have in flight. Past this the host stops
 /// reading that stream until one finishes — backpressure on a peer that
@@ -216,6 +221,8 @@ impl HostName {
 pub struct ControlContext {
     pub dispatch: Arc<dyn RemoteDispatch>,
     pub host_name: Arc<HostName>,
+    /// What `subscribe_status` streams (DEV-1162).
+    pub status_feed: StatusFeed,
     /// Finds a session's terminal for `attach` (DEV-1165).
     pub screens: Arc<dyn ScreenSource>,
 }
@@ -227,6 +234,7 @@ impl ControlContext {
         Self {
             dispatch: Arc::new(Unavailable),
             host_name: HostName::new(None, || None),
+            status_feed: StatusFeed::new(),
             screens: Arc::new(super::screen::NoScreens),
         }
     }
@@ -329,6 +337,7 @@ async fn run(
     });
 
     let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
+    let mut status_push: Option<JoinHandle<()>> = None;
     // The screen streams this control stream started; dropped with it.
     let mut attachments = Attachments::new(
         Arc::clone(conn),
@@ -346,6 +355,13 @@ async fn run(
         };
         let (id, op) = match wire::decode(&body) {
             Ok(Frame::Request { id, op }) => (id, op),
+            Ok(Frame::SubscribeStatus) => {
+                match subscribe_status(registry, peer, ctx, &out, &mut status_push).await {
+                    Subscribed::Started | Subscribed::Refused => continue,
+                    Subscribed::Gone => break Ended::Connection(NOT_PAIRED.into()),
+                    Subscribed::Closed => break Ended::Stream,
+                }
+            }
             // Inline: the lookup behind an attach is bounded, and requests
             // already admitted keep running meanwhile.
             Ok(frame @ (Frame::Attach { .. } | Frame::Detach { .. })) => {
@@ -416,6 +432,11 @@ async fn run(
 
     // Stop the screen streams first: their tasks hold the outbox open.
     drop(attachments);
+    // The push holds an outbox sender and never finishes on its own; stop it
+    // or the writer below would wait for it forever.
+    if let Some(push) = status_push.take() {
+        push.abort();
+    }
     // Let in-flight answers finish and be written, unless the peer is gone.
     drop(out);
     tokio::select! {
@@ -423,6 +444,117 @@ async fn run(
         _ = conn.closed() => {}
     }
     ended
+}
+
+// ── status feed ───────────────────────────────────────────────────────────
+
+enum Subscribed {
+    Started,
+    /// No `view`; the peer was told and the stream carries on.
+    Refused,
+    /// The peer is no longer trusted.
+    Gone,
+    /// The outbox is closed: the stream is ending.
+    Closed,
+}
+
+const STATUS_NEEDS_VIEW: &str = "the status feed needs view permission; grant it to this Mac in \
+                                 the other Mac's Settings → Machines";
+
+/// Start (or restart) this stream's status push. A second `subscribe_status`
+/// is a client asking to resync, so the old push stops first.
+async fn subscribe_status(
+    registry: &PeerRegistry,
+    peer: PeerId,
+    ctx: &ControlContext,
+    out: &tokio::sync::mpsc::Sender<Frame>,
+    push: &mut Option<JoinHandle<()>>,
+) -> Subscribed {
+    if let Some(old) = push.take() {
+        old.abort();
+        let _ = old.await;
+    }
+    let Some(trusted) = registry.get(peer) else {
+        tracing::info!(
+            "remote: {} subscribe_status refused: no longer paired",
+            peer.short()
+        );
+        return Subscribed::Gone;
+    };
+    let granted = trusted.permissions.view;
+    tracing::info!(
+        "remote: \u{201c}{}\u{201d} ({}) subscribe_status {}",
+        trusted.machine_name,
+        peer.short(),
+        if granted {
+            "allowed"
+        } else {
+            "refused: needs view"
+        }
+    );
+    if !granted {
+        let refused = Frame::StatusRefused {
+            message: STATUS_NEEDS_VIEW.into(),
+        };
+        return match out.send(refused).await {
+            Ok(()) => Subscribed::Refused,
+            Err(_) => Subscribed::Closed,
+        };
+    }
+    *push = Some(tokio::spawn(push_status(
+        ctx.status_feed.clone(),
+        out.clone(),
+        registry.clone(),
+        peer,
+    )));
+    Subscribed::Started
+}
+
+/// Queue a snapshot, then every change, until the stream ends or `view` is
+/// revoked. A subscriber that falls behind the feed's buffer gets a fresh
+/// snapshot rather than a gap.
+async fn push_status(
+    feed: StatusFeed,
+    out: tokio::sync::mpsc::Sender<Frame>,
+    registry: PeerRegistry,
+    peer: PeerId,
+) {
+    loop {
+        let sub = feed.subscribe();
+        let mut deltas = sub.deltas;
+        if out.send(sub.snapshot.into()).await.is_err() {
+            return;
+        }
+        loop {
+            match deltas.recv().await {
+                Ok(delta) => {
+                    // Live, per change: revoking `view` stops the very next one.
+                    if !registry.permissions(peer).is_some_and(|p| p.view) {
+                        tracing::info!(
+                            "remote: {} status feed stopped: view revoked",
+                            peer.short()
+                        );
+                        let refused = Frame::StatusRefused {
+                            message: STATUS_NEEDS_VIEW.into(),
+                        };
+                        let _ = out.send(refused).await;
+                        return;
+                    }
+                    if out.send(delta.into()).await.is_err() {
+                        return;
+                    }
+                }
+                Err(RecvError::Lagged(missed)) => {
+                    tracing::debug!(
+                        "remote: {} fell {missed} changes behind; resending a snapshot",
+                        peer.short()
+                    );
+                    break;
+                }
+                Err(RecvError::Closed) => return,
+            }
+        }
+    }
 }
 
 enum Admission {

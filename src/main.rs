@@ -34,7 +34,9 @@ mod proc;
 mod project;
 mod reader;
 mod remote;
+mod remote_attention;
 mod remote_browser;
+mod remote_sessions;
 mod render;
 mod repositories;
 mod rich;
@@ -49,6 +51,7 @@ mod shell_env;
 mod sidebar;
 mod startup;
 mod state;
+mod status_feed;
 mod stream;
 mod sync;
 mod syntax;
@@ -978,6 +981,7 @@ impl AppState {
             .map(|p| p.group_names().to_vec())
             .unwrap_or_default();
 
+        let machines = self.machine_choices(project_idx);
         let entity = cx.new(|cx| {
             new_session_modal::NewSessionModal::new(
                 cx,
@@ -987,6 +991,7 @@ impl AppState {
                 default_label,
                 existing_branches,
                 existing_groups,
+                machines,
             )
         });
 
@@ -1016,6 +1021,12 @@ impl AppState {
                             }
                             .into(),
                         );
+                        cx.notify();
+                    }
+                    new_session_modal::NewSessionModalEvent::CreateRemote(create) => {
+                        this.new_session_modal = None;
+                        let action = remote_sessions::RemoteSessionAction::Create(create.clone());
+                        this.pending_action = Some(SessionAction::Remote(action).into());
                         cx.notify();
                     }
                     new_session_modal::NewSessionModalEvent::Close => {
@@ -2163,6 +2174,8 @@ fn main() {
                             .detach();
                     }
 
+                    let status_feed = status_feed::StatusFeed::seeded(&projects);
+
                     AppState {
                         projects,
                         active: initial_active,
@@ -2230,6 +2243,7 @@ fn main() {
                         scratch_pad: None,
                         scratch_pad_history: loaded_state.scratch_pad_history.clone(),
                         new_session_modal: None,
+                        remote_ui: Default::default(),
                         session_context_menu: None,
                         project_context_menu: None,
                         group_headers: Default::default(),
@@ -2265,12 +2279,14 @@ fn main() {
                             &settings_for_window.remote,
                             std::sync::Arc::new(crate::remote::ControlQueue::new(drains.requests)),
                             std::sync::Arc::new(crate::remote::ScreenQueue::new(drains.screens)),
+                            status_feed.clone(),
                             {
                                 let shell = crate::platform::global().shell.clone();
                                 move || shell.computer_name()
                             },
                         ),
                         capture_ui_requested: false,
+                        status_feed,
                         // Captured on the first render (see `Render`).
                         main_window: None,
                         pending_dispatch_origins: Default::default(), // DEV-415
