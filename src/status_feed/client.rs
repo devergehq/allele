@@ -39,7 +39,6 @@ pub(crate) struct Transition {
 impl Transition {
     /// True when this is the session starting to need the user, which is
     /// what a notification fires on.
-    #[allow(dead_code)] // first caller: remote attention + notifications (DEV-1164)
     pub(crate) fn enters_awaiting_input(&self) -> bool {
         self.to == FeedStatus::AwaitingInput && self.from != Some(FeedStatus::AwaitingInput)
     }

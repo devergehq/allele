@@ -284,7 +284,6 @@ impl RemoteService {
     /// What every paired host last told us about its sessions (DEV-1162).
     /// Read by the Machines sidebar (DEV-1163) and remote attention
     /// (DEV-1164).
-    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub fn hosts(&self) -> &HostFeeds {
         &self.inner.feeds
     }
@@ -334,6 +333,12 @@ impl RemoteService {
             }
         });
         async move { task.await.unwrap_or(Err(CallError::Dropped)) }
+    }
+
+    /// The name a trusted peer gave when it paired, or `None` if it is not
+    /// (or no longer) trusted. Display only; peer-chosen text.
+    pub fn peer_name(&self, id: PeerId) -> Option<String> {
+        self.inner.registry.get(id).map(|p| p.machine_name)
     }
 
     pub fn status(&self) -> RemoteStatus {

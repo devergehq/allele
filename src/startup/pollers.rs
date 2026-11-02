@@ -17,6 +17,9 @@ use crate::{debug_capture, git, hooks, interrupted};
 
 /// Start every background poller. Called once, from `main`.
 pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
+    // Paired Macs' sessions waiting for the user: notify and redraw (DEV-1164).
+    crate::remote_attention::spawn(cx);
+
     // Spawn the hook-event polling task. Runs for the life
     // of the app, reads ~/.allele/events/*.jsonl every
     // 250ms, and routes each new event into apply_hook_event.
