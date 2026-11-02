@@ -61,6 +61,13 @@ impl LocalIdentity {
     /// generate a new key: silently replacing the identity would orphan every
     /// pairing made with the old one.
     pub(crate) fn load_or_create(store: &dyn SecretStore, data_root: &Path) -> Result<Self> {
+        // Check-then-generate must be atomic, or two first-use callers (the
+        // Settings pane and the listener at startup) each store a key and the
+        // loser hands out an id whose secret was just overwritten.
+        static FIRST_USE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = FIRST_USE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let account = keychain_account(data_root);
         if let Some(bytes) = store.load(KEYCHAIN_SERVICE, &account)? {
             let secret: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {

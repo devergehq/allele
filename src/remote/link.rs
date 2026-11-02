@@ -269,7 +269,12 @@ async fn supervise(
         });
         match wait(backoff, &mut commands).await {
             Wake::Stop => break 'link,
-            Wake::Reconnect => {}
+            // Fresh evidence the network is back (a wake, an interface
+            // switch): start over as if from a healthy connection.
+            Wake::Reconnect => {
+                attempt = 0;
+                backoff = policy.initial_backoff;
+            }
             Wake::Elapsed => backoff = (backoff * 2).min(policy.max_backoff),
         }
     }
@@ -389,7 +394,7 @@ mod tests {
             conns.push(Arc::clone(&conn));
             Ok(conn)
         }
-        async fn accept(&self) -> Option<Result<Arc<dyn PeerConnection>>> {
+        async fn accept(&self) -> Option<Arc<dyn PeerConnection>> {
             None
         }
         async fn network_changed(&self) {}
@@ -487,6 +492,35 @@ mod tests {
         assert_eq!(ms, vec![250, 500, 1000, 1000, 1000, 1000]);
         // And it gets there once the peer answers.
         l.wait_connected().await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn reconnect_now_during_backoff_restarts_from_the_initial_backoff() {
+        let t = FakeTransport::new(&[false; 5]);
+        let policy = ReconnectPolicy {
+            max_backoff: Duration::from_secs(60),
+            ..ReconnectPolicy::default()
+        };
+        let l = link(&t, policy);
+        // Let the backoff grow past its starting value.
+        wait_for(&l, |s| {
+            matches!(s, LinkState::Waiting { retry_in, .. } if *retry_in >= Duration::from_secs(2))
+        })
+        .await;
+        l.reconnect_now();
+        let s = wait_for(&l, |s| {
+            matches!(s, LinkState::Waiting { retry_in, .. } if *retry_in < Duration::from_secs(2))
+        })
+        .await;
+        match s {
+            LinkState::Waiting {
+                attempt, retry_in, ..
+            } => {
+                assert_eq!(retry_in, policy.initial_backoff);
+                assert_eq!(attempt, 1);
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     #[tokio::test(start_paused = true)]

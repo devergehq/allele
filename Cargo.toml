@@ -65,7 +65,7 @@ rust-s3 = "0.37.2"
 # Peer-to-peer QUIC transport for multi-machine (DEV-1159). Endpoints are
 # dialed by public key; iroh handles hole-punching and relay fallback. Pinned
 # exactly: n0 retires relays for old versions, so upgrades are deliberate.
-# Only `src/remote/iroh.rs` may name this crate (tests/architecture.rs).
+# Only `src/remote/iroh_transport.rs` may name this crate (tests/architecture.rs).
 # Default features minus `metrics` and `portmapper` (~1.1 MB, DEV-1158 spike).
 iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
 

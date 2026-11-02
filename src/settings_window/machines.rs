@@ -30,6 +30,8 @@ pub(super) struct MachinesSection {
     /// Why the relay text was not saved, if it was not.
     relay_error: Option<String>,
     id: IdStatus,
+    /// Whether `load` has run. It runs once, when the section is first shown.
+    load_started: bool,
     /// What the name resolves to when the field is blank.
     computer_name: Option<String>,
 }
@@ -79,22 +81,35 @@ impl MachinesSection {
         })
         .detach();
 
+        // A saved value that no longer validates (hand-edited settings.json)
+        // is flagged from the start, not only once the user edits it.
+        let relay_error = RelayChoice::from_setting(settings.relay_url.as_deref())
+            .err()
+            .map(|e| e.to_string());
+
         Self {
             name_input,
             relay_input,
-            relay_error: None,
+            relay_error,
             id: IdStatus::Loading,
+            load_started: false,
             computer_name: None,
         }
     }
 
-    /// Resolve the machine id and the computer name off the UI thread. Called
-    /// once, when the settings window opens.
+    /// Resolve the machine id and the computer name off the UI thread, once,
+    /// when the section is first selected. Not on window open: reading the
+    /// Keychain can raise a macOS permission prompt (ad-hoc signed builds
+    /// re-prompt after every update), and the first read also creates the
+    /// identity — neither should happen to someone changing the font size.
     pub(super) fn load(
         &mut self,
         app: &WeakEntity<AppState>,
         cx: &mut Context<SettingsWindowState>,
     ) {
+        if std::mem::replace(&mut self.load_started, true) {
+            return;
+        }
         let Some(platform) = app.upgrade().map(|a| a.read(cx).platform.clone_arcs()) else {
             return;
         };

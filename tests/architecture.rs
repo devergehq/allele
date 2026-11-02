@@ -392,12 +392,29 @@ impl<'ast> Visit<'ast> for CrateFinder {
     }
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
-        if let syn::UseTree::Path(p) = &item.tree {
-            if p.ident == self.krate {
-                self.found = true;
-            }
+        if use_tree_roots_at(&item.tree, self.krate) {
+            self.found = true;
         }
         syn::visit::visit_item_use(self, item);
+    }
+
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        if item.ident == self.krate {
+            self.found = true;
+        }
+        syn::visit::visit_item_extern_crate(self, item);
+    }
+}
+
+/// Whether a `use` tree starts at `krate` in any of its shapes: `use k::x`,
+/// `use k;`, `use k as y;`, or inside a group, `use {k::x, std::y};`.
+fn use_tree_roots_at(tree: &syn::UseTree, krate: &str) -> bool {
+    match tree {
+        syn::UseTree::Path(p) => p.ident == krate,
+        syn::UseTree::Name(n) => n.ident == krate,
+        syn::UseTree::Rename(r) => r.ident == krate,
+        syn::UseTree::Group(g) => g.items.iter().any(|t| use_tree_roots_at(t, krate)),
+        syn::UseTree::Glob(_) => false,
     }
 }
 

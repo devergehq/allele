@@ -124,10 +124,12 @@ pub trait PeerTransport: Send + Sync {
     /// Connect to `peer`, by id alone; the transport finds a path.
     async fn dial(&self, peer: PeerId) -> Result<Arc<dyn PeerConnection>>;
 
-    /// The next incoming connection, or `None` once the transport is shut
-    /// down. The peer is **authenticated, not authorised**: check
-    /// `remote_id()` against the trusted peers before serving it (DEV-1160).
-    async fn accept(&self) -> Option<Result<Arc<dyn PeerConnection>>>;
+    /// The next incoming connection whose handshake completed, or `None` once
+    /// the transport is shut down. Handshakes run concurrently, and one that
+    /// fails is dropped rather than returned. The peer is **authenticated, not
+    /// authorised**: check `remote_id()` against the trusted peers before
+    /// serving it (DEV-1160).
+    async fn accept(&self) -> Option<Arc<dyn PeerConnection>>;
 
     /// Tell the transport the network changed (interface switch, wake from
     /// sleep) so it re-probes paths now instead of waiting to notice.
@@ -239,6 +241,11 @@ mod tests {
             RelayChoice::from_setting(Some("  ")).unwrap(),
             RelayChoice::N0
         );
+    }
+
+    #[test]
+    fn host_port_without_a_scheme_is_rejected() {
+        assert!(RelayChoice::from_setting(Some("relay.example.com:443")).is_err());
     }
 
     #[test]

@@ -18,6 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use iroh::endpoint::{presets, Builder, Connection, IdleTimeout, QuicTransportConfig, VarInt};
 use iroh::{Endpoint, EndpointAddr, EndpointId, RelayMode, RelayUrl, SecretKey};
+use tokio::sync::mpsc;
 
 use crate::errors::{AlleleError, Result};
 
@@ -50,11 +51,25 @@ pub(super) fn parse_peer_id(s: &str) -> Result<PeerId> {
         .map_err(|e| remote_err("not a machine id", e))
 }
 
-/// Check a relay URL parses as iroh will use it.
+/// Check a relay URL is one iroh can use: `http(s)://host[:port]`.
+///
+/// Parsing alone is not enough — `relay.example.com:443` parses, with
+/// `relay.example.com` as the *scheme*, and would bind an endpoint that never
+/// comes online.
 pub(super) fn validate_relay_url(url: &str) -> Result<()> {
-    url.parse::<RelayUrl>()
-        .map(|_| ())
-        .map_err(|e| remote_err(&format!("invalid relay URL {url:?}"), e))
+    parse_relay_url(url).map(|_| ())
+}
+
+fn parse_relay_url(url: &str) -> Result<RelayUrl> {
+    let parsed = url
+        .parse::<RelayUrl>()
+        .map_err(|e| remote_err(&format!("invalid relay URL {url:?}"), e))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(AlleleError::Remote(format!(
+            "invalid relay URL {url:?}: expected http(s)://host[:port]"
+        )));
+    }
+    Ok(parsed)
 }
 
 fn peer_id(id: EndpointId) -> PeerId {
@@ -68,9 +83,7 @@ fn endpoint_id(peer: PeerId) -> Result<EndpointId> {
 fn relay_mode(choice: &RelayChoice) -> Result<RelayMode> {
     Ok(match choice {
         RelayChoice::N0 => RelayMode::Default,
-        RelayChoice::Custom(url) => RelayMode::custom([url
-            .parse::<RelayUrl>()
-            .map_err(|e| remote_err(&format!("invalid relay URL {url:?}"), e))?]),
+        RelayChoice::Custom(url) => RelayMode::custom([parse_relay_url(url)?]),
     })
 }
 
@@ -93,7 +106,15 @@ fn quic_config(heartbeat: &Heartbeat) -> Result<QuicTransportConfig> {
 /// as `Arc<dyn PeerTransport>`.
 pub struct IrohTransport {
     endpoint: Endpoint,
+    /// Finished handshakes, fed by a task started on the first `accept`. Each
+    /// handshake runs in its own task, so one peer that stalls mid-handshake
+    /// cannot hold up everyone else. Never started on a dial-only endpoint.
+    incoming: tokio::sync::OnceCell<tokio::sync::Mutex<mpsc::Receiver<Connection>>>,
 }
+
+/// Handshakes finished but not yet taken by `accept`. Past this, the accept
+/// loop waits — backpressure, rather than an unbounded queue of strangers.
+const ACCEPT_BACKLOG: usize = 16;
 
 impl IrohTransport {
     /// Bind an endpoint for `identity`, using n0's address lookup and the
@@ -124,7 +145,10 @@ impl IrohTransport {
             peer_id(endpoint.id()).short(),
             config.relay
         );
-        Ok(Self { endpoint })
+        Ok(Self {
+            endpoint,
+            incoming: tokio::sync::OnceCell::new(),
+        })
     }
 
     /// Wait until the endpoint is reachable (connected to its home relay),
@@ -161,14 +185,15 @@ impl PeerTransport for IrohTransport {
         Ok(Arc::new(IrohConnection::new(conn)))
     }
 
-    async fn accept(&self) -> Option<Result<Arc<dyn PeerConnection>>> {
-        let incoming = self.endpoint.accept().await?;
-        Some(
-            incoming
-                .await
-                .map(|conn| Arc::new(IrohConnection::new(conn)) as Arc<dyn PeerConnection>)
-                .map_err(|e| remote_err("incoming connection failed", e)),
-        )
+    async fn accept(&self) -> Option<Arc<dyn PeerConnection>> {
+        let rx = self
+            .incoming
+            .get_or_init(|| async {
+                tokio::sync::Mutex::new(spawn_accept_loop(self.endpoint.clone()))
+            })
+            .await;
+        let conn = rx.lock().await.recv().await?;
+        Some(Arc::new(IrohConnection::new(conn)))
     }
 
     async fn network_changed(&self) {
@@ -178,6 +203,27 @@ impl PeerTransport for IrohTransport {
     async fn shutdown(&self) {
         self.endpoint.close().await;
     }
+}
+
+/// Accept every incoming connection and finish each handshake in its own
+/// task, forwarding the ones that complete. A failed handshake is logged and
+/// dropped; it never ends the loop. Stops when the endpoint closes.
+fn spawn_accept_loop(endpoint: Endpoint) -> mpsc::Receiver<Connection> {
+    let (tx, rx) = mpsc::channel(ACCEPT_BACKLOG);
+    tokio::spawn(async move {
+        while let Some(incoming) = endpoint.accept().await {
+            let tx = tx.clone();
+            tokio::spawn(async move {
+                match incoming.await {
+                    Ok(conn) => {
+                        let _ = tx.send(conn).await;
+                    }
+                    Err(e) => tracing::debug!("remote: incoming handshake failed: {e}"),
+                }
+            });
+        }
+    });
+    rx
 }
 
 // ── connection ────────────────────────────────────────────────────────────
@@ -287,7 +333,7 @@ mod tests {
     /// Accept connections forever, echoing every stream.
     fn serve_echo(t: Arc<IrohTransport>) {
         tokio::spawn(async move {
-            while let Some(Ok(conn)) = t.accept().await {
+            while let Some(conn) = t.accept().await {
                 tokio::spawn(async move {
                     while let Ok(mut s) = conn.accept_stream().await {
                         tokio::spawn(async move {
@@ -325,6 +371,16 @@ mod tests {
     #[test]
     fn n0_relay_choice_maps_to_n0_relays() {
         assert_eq!(relay_mode(&RelayChoice::N0).unwrap(), RelayMode::Default);
+    }
+
+    #[test]
+    fn relay_urls_need_an_http_scheme_and_a_host() {
+        assert!(validate_relay_url("https://relay.example.com").is_ok());
+        assert!(validate_relay_url("http://localhost:3340").is_ok());
+        // These parse as URLs, with the host read as the scheme.
+        assert!(validate_relay_url("relay.example.com:443").is_err());
+        assert!(validate_relay_url("localhost:3340").is_err());
+        assert!(validate_relay_url("ftp://relay.example.com").is_err());
     }
 
     #[test]

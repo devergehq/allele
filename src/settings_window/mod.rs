@@ -268,8 +268,6 @@ impl SettingsWindowState {
             machines: MachinesSection::new(cx, &settings.remote),
         };
         s.agents.sync_inputs(cx);
-        let app = s.app.clone();
-        s.machines.load(&app, cx);
         s
     }
 }
@@ -371,6 +369,10 @@ fn render_sidebar(
                 MouseButton::Left,
                 cx.listener(move |this, _event, _window, cx| {
                     this.selected = section;
+                    if section == Section::Machines {
+                        let app = this.app.clone();
+                        this.machines.load(&app, cx);
+                    }
                     cx.notify();
                 }),
             );
