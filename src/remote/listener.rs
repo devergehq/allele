@@ -12,7 +12,7 @@
 //! something to close) and answers only a pairing hello — a paired machine
 //! re-pairing after losing its own list.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use tokio::sync::Semaphore;
@@ -65,8 +65,8 @@ impl Gate {
     /// it. Synchronous on purpose: the decision reads nothing from the peer.
     pub fn route(&self, conn: Arc<dyn PeerConnection>) -> Route {
         let id = conn.remote_id();
-        if self.allow.load(Ordering::SeqCst) {
-            if let Some(peer) = self.registry.admit(&conn) {
+        {
+            if let Some(peer) = self.registry.admit(&conn, &self.allow) {
                 tracing::info!(
                     "\u{201c}{}\u{201d} ({}) connected",
                     peer.machine_name,

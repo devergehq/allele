@@ -32,6 +32,15 @@ pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(120);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RequestId(pub u64);
 
+impl RequestId {
+    /// A process-wide fresh id, so a prompt left over from an earlier window
+    /// can never match a request in a later one.
+    fn next() -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+    }
+}
+
 /// A correct presentation waiting for the host user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PairingRequest {
@@ -88,7 +97,6 @@ pub struct PairingWindow {
     opened_at: Instant,
     phase: Phase,
     failed_attempts: u32,
-    next_request: u64,
 }
 
 impl PairingWindow {
@@ -98,7 +106,6 @@ impl PairingWindow {
             opened_at: now,
             phase: Phase::Open,
             failed_attempts: 0,
-            next_request: 1,
         }
     }
 
@@ -162,12 +169,11 @@ impl PairingWindow {
             }
             Phase::Open => {
                 let request = PairingRequest {
-                    id: RequestId(self.next_request),
+                    id: RequestId::next(),
                     client,
                     machine_name: sanitize_machine_name(claimed_name),
                     confirmation: confirmation_number(self.code.host, client, &self.code.secret),
                 };
-                self.next_request += 1;
                 self.phase = Phase::AwaitingApproval(request.clone());
                 Ok(request)
             }
@@ -337,6 +343,16 @@ mod tests {
             req.confirmation,
             confirmation_number(w.code().host, client, &s)
         );
+    }
+
+    #[test]
+    fn request_ids_never_repeat_across_windows() {
+        let (mut w1, s1, now) = window();
+        let (mut w2, s2, _) = window();
+        let a = w1.present(id(), &bytes(&s1), "A", now).unwrap();
+        let b = w2.present(id(), &bytes(&s2), "B", now).unwrap();
+        assert_ne!(a.id, b.id);
+        assert!(w2.decide(a.id, true).is_none());
     }
 
     #[test]

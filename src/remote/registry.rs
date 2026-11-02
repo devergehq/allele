@@ -103,11 +103,21 @@ impl PeerRegistry {
         self.lock().live.get(&id).map_or(0, Vec::len)
     }
 
-    /// If the connection's peer is trusted, register the connection as open
-    /// and return the peer. Atomic with [`PeerRegistry::remove`].
-    pub fn admit(&self, conn: &Arc<dyn PeerConnection>) -> Option<TrustedPeer> {
+    /// If the connection's peer is trusted and `allow` (the *Allow remote
+    /// connections* switch) is on, register the connection as open and return
+    /// the peer. Atomic with [`PeerRegistry::remove`] and
+    /// [`PeerRegistry::close_all`]: the switch is read under the same lock the
+    /// switch-off sweep takes, so a connection is either swept or refused.
+    pub fn admit(
+        &self,
+        conn: &Arc<dyn PeerConnection>,
+        allow: &std::sync::atomic::AtomicBool,
+    ) -> Option<TrustedPeer> {
         let id = conn.remote_id();
         let mut inner = self.lock();
+        if !allow.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
         let peer = inner.peers.iter().find(|p| p.id == id).cloned()?;
         inner.live.entry(id).or_default().push(Arc::clone(conn));
         drop(inner);
@@ -222,6 +232,8 @@ mod tests {
     use crate::remote::transport::PeerTransport;
     use crate::repositories::fakes::InMemoryPeersRepository;
 
+    static ON: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
     fn registry() -> (PeerRegistry, InMemoryPeersRepository) {
         let repo = InMemoryPeersRepository::default();
         (PeerRegistry::load(Arc::new(repo.clone())), repo)
@@ -244,7 +256,7 @@ mod tests {
         let (a, b) = (net.endpoint(), net.endpoint());
         let _accept = b.clone();
         let conn = a.dial_mem(b.local_id()).await;
-        assert!(reg.admit(&conn).is_none());
+        assert!(reg.admit(&conn, &ON).is_none());
         assert_eq!(reg.live_count(conn.remote_id()), 0);
     }
 
@@ -256,7 +268,7 @@ mod tests {
         let conn = a.dial_mem(b.local_id()).await;
         reg.add_paired(TrustedPeer::newly_paired(conn.remote_id(), "Desk"))
             .unwrap();
-        assert!(reg.admit(&conn).is_some());
+        assert!(reg.admit(&conn, &ON).is_some());
         assert_eq!(reg.live_count(conn.remote_id()), 1);
 
         assert!(reg.remove(conn.remote_id()).unwrap());
@@ -267,7 +279,7 @@ mod tests {
         assert_eq!(reg.live_count(conn.remote_id()), 0);
         assert!(repo.snapshot().peers.is_empty());
         // And it cannot come back on the same or a new connection.
-        assert!(reg.admit(&conn).is_none());
+        assert!(reg.admit(&conn, &ON).is_none());
     }
 
     #[tokio::test]
@@ -288,6 +300,19 @@ mod tests {
         reg.add_paired(TrustedPeer::newly_paired(id, "Again"))
             .unwrap();
         assert!(!reg.permissions(id).unwrap().control);
+    }
+
+    #[tokio::test]
+    async fn a_trusted_peer_is_not_admitted_while_the_switch_is_off() {
+        let (reg, _) = registry();
+        let net = MemNet::new();
+        let (a, b) = (net.endpoint(), net.endpoint());
+        let conn = a.dial_mem(b.local_id()).await;
+        reg.add_paired(TrustedPeer::newly_paired(conn.remote_id(), "Desk"))
+            .unwrap();
+        let off = std::sync::atomic::AtomicBool::new(false);
+        assert!(reg.admit(&conn, &off).is_none());
+        assert_eq!(reg.live_count(conn.remote_id()), 0);
     }
 
     #[test]

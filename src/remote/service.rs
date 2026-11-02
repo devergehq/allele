@@ -239,6 +239,8 @@ impl RemoteService {
     /// The *Allow remote connections* switch. Off closes every remote
     /// connection now; the endpoint follows once no pairing needs it.
     pub fn set_allow(&self, on: bool) {
+        // Store first, then sweep: `admit` reads the switch under the lock the
+        // sweep takes, so a racing connection is either refused or swept.
         self.inner.allow.store(on, Ordering::SeqCst);
         if !on {
             self.inner.registry.close_all(SWITCHED_OFF_REASON);
