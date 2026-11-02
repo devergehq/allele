@@ -31,7 +31,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::mpsc::{channel, Sender};
 use std::time::Duration;
 
 use tracing::{info, warn};
@@ -43,12 +43,33 @@ use super::protocol::{ErrorCode, Request, Response};
 /// Generous, because a legitimate `sessions.create` clones a workspace and
 /// resolves a branch. The timeout exists so a wedged or shutting-down app
 /// produces an error rather than a socket that never replies.
-const REPLY_TIMEOUT: Duration = Duration::from_secs(300);
+pub(crate) const REPLY_TIMEOUT: Duration = Duration::from_secs(300);
 
-/// A request from the socket, with the channel its answer goes back on.
+/// A request for the foreground drain, with the channel its answer goes back
+/// on. The socket and the remote listener (DEV-1161) both produce these, so
+/// both are answered by one handler and counted against one admission cap.
 pub struct ControlRequest {
     pub request: Request,
     pub reply: Sender<Response>,
+}
+
+/// A remote screen stream (DEV-1165) asking the foreground drain for a
+/// session's terminal. The answer is a weak handle, so a mirror never keeps a
+/// closed session's terminal alive. It is the session's own terminal, never
+/// a drawer shell. `None` when there is no such session or it has no terminal.
+pub struct ScreenLookup {
+    pub session_id: String,
+    pub reply: Sender<Option<std::sync::Arc<dyn crate::terminal::mirror::MirrorTerm>>>,
+}
+
+/// A paired machine asking to resize a session's terminal to its window
+/// (DEV-1167). `true` when the session had a terminal to resize. The host's
+/// next local interaction with the session restores its own size.
+pub struct ScreenResize {
+    pub session_id: String,
+    pub columns: u16,
+    pub lines: u16,
+    pub reply: Sender<bool>,
 }
 
 /// File name of the control socket under `<root>/.allele`.
@@ -67,21 +88,22 @@ pub(crate) fn control_socket_in(root: &Path) -> PathBuf {
     crate::paths::allele_dir_in(root).join(SOCKET_NAME)
 }
 
-/// Bind the control socket and start accepting.
+/// Bind the control socket and start accepting, forwarding each request on
+/// `tx` to the foreground drain.
 ///
-/// Returns the receiver the foreground drain reads from, or `None` if the
-/// socket could not be bound — in which case dispatch is unavailable and the
-/// app carries on normally. A session manager that refuses to launch because
-/// an optional automation surface is missing would be a worse trade.
-pub fn spawn_listener() -> Option<Receiver<ControlRequest>> {
-    spawn_listener_at(socket_path()?)
+/// `false` if the socket could not be bound — in which case local dispatch is
+/// unavailable and the app carries on normally. A session manager that refuses
+/// to launch because an optional automation surface is missing would be a
+/// worse trade.
+pub fn spawn_listener(tx: Sender<ControlRequest>) -> bool {
+    socket_path().is_some_and(|path| spawn_listener_at(path, tx))
 }
 
 /// [`spawn_listener`] against an explicit path.
 ///
 /// Split out so tests can bind a temporary socket. A test that bound the real
 /// `~/.allele/control.sock` would fight the user's running Allele for it.
-pub fn spawn_listener_at(path: PathBuf) -> Option<Receiver<ControlRequest>> {
+pub fn spawn_listener_at(path: PathBuf, tx: Sender<ControlRequest>) -> bool {
     // A socket file left by a previous run would make `bind` fail with
     // EADDRINUSE even though nothing is listening. Only remove it when
     // nothing answers, so two running Alleles cannot silently steal the
@@ -93,7 +115,7 @@ pub fn spawn_listener_at(path: PathBuf) -> Option<Receiver<ControlRequest>> {
                  dispatch disabled in this instance",
                 path.display()
             );
-            return None;
+            return false;
         }
         let _ = std::fs::remove_file(&path);
     }
@@ -102,7 +124,7 @@ pub fn spawn_listener_at(path: PathBuf) -> Option<Receiver<ControlRequest>> {
         Ok(l) => l,
         Err(e) => {
             warn!("could not bind control socket {}: {e}", path.display());
-            return None;
+            return false;
         }
     };
 
@@ -114,18 +136,20 @@ pub fn spawn_listener_at(path: PathBuf) -> Option<Receiver<ControlRequest>> {
         if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
             warn!("could not chmod control socket to 0600: {e} — refusing to serve it");
             let _ = std::fs::remove_file(&path);
-            return None;
+            return false;
         }
     }
 
-    let (tx, rx) = channel::<ControlRequest>();
-    std::thread::Builder::new()
+    if std::thread::Builder::new()
         .name("allele-control".into())
         .spawn(move || accept_loop(listener, tx))
-        .ok()?;
+        .is_err()
+    {
+        return false;
+    }
 
     info!("control socket listening on {}", path.display());
-    Some(rx)
+    true
 }
 
 fn accept_loop(listener: UnixListener, tx: Sender<ControlRequest>) {
@@ -183,7 +207,7 @@ fn serve(stream: UnixStream, tx: Sender<ControlRequest>) {
 }
 
 /// Hand a request to the foreground thread and block for its answer.
-fn forward(request: Request, tx: &Sender<ControlRequest>) -> Response {
+pub(crate) fn forward(request: Request, tx: &Sender<ControlRequest>) -> Response {
     let (reply_tx, reply_rx) = channel::<Response>();
     if tx
         .send(ControlRequest {
@@ -225,7 +249,8 @@ mod tests {
         responder: impl Fn(Request) -> Response + Send + 'static,
     ) -> PathBuf {
         let path = dir.path().join("control.sock");
-        let rx = spawn_listener_at(path.clone()).expect("binds");
+        let (tx, rx) = channel();
+        assert!(spawn_listener_at(path.clone(), tx), "binds");
         std::thread::spawn(move || {
             while let Ok(req) = rx.recv() {
                 let _ = req.reply.send(responder(req.request));
@@ -302,7 +327,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("control.sock");
         std::fs::write(&path, b"stale").expect("write stale file");
-        assert!(spawn_listener_at(path.clone()).is_some(), "should reclaim");
+        assert!(
+            spawn_listener_at(path.clone(), channel().0),
+            "should reclaim"
+        );
     }
 
     /// But a socket something is still answering on must not be stolen —
@@ -312,7 +340,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = serve_with(&dir, |_| Response::Sessions { sessions: vec![] });
         assert!(
-            spawn_listener_at(path).is_none(),
+            !spawn_listener_at(path, channel().0),
             "second listener must refuse a socket that is already answering"
         );
     }

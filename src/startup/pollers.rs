@@ -17,6 +17,10 @@ use crate::{debug_capture, git, hooks, interrupted};
 
 /// Start every background poller. Called once, from `main`.
 pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
+    spawn_viewers_redraw(cx);
+    // Paired Macs' sessions waiting for the user: notify and redraw (DEV-1164).
+    crate::remote_attention::spawn(cx);
+
     // Spawn the hook-event polling task. Runs for the life
     // of the app, reads ~/.allele/events/*.jsonl every
     // 250ms, and routes each new event into apply_hook_event.
@@ -76,6 +80,10 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                     for event in events {
                         this.apply_hook_event(event, cx);
                     }
+                    // Status changes already publish through
+                    // `mark_state_dirty`; this catches the rest (an attention
+                    // kind changing while the status holds) on the same tick.
+                    this.publish_status_feed();
                 })
                 .is_err()
             {
@@ -220,6 +228,46 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
     })
     .detach();
 
+    // Redraw the MACHINES section (DEV-1163) when a paired host's feed
+    // changes. Checked on a 1 s timer rather than awaited, so nothing here
+    // depends on which executor drives the watch channel. While a host is
+    // unreachable its "last seen 4m ago" ages, so it is redrawn every 30 s
+    // even with no news.
+    cx.spawn(async move |this, cx| {
+        let Ok(mut host_changes) = this.update(cx, |state: &mut AppState, _| {
+            state.remote.hosts().subscribe_changes()
+        }) else {
+            return;
+        };
+        const AGEING_REDRAW: std::time::Duration = std::time::Duration::from_secs(30);
+        let mut last_redraw = std::time::Instant::now();
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            let changed = host_changes.has_changed().unwrap_or(false);
+            if changed {
+                host_changes.borrow_and_update();
+            }
+            let redrew = this.update(cx, |state: &mut AppState, cx| {
+                let ageing = last_redraw.elapsed() >= AGEING_REDRAW
+                    && state.remote.hosts().any_unreachable();
+                if changed || ageing {
+                    cx.notify();
+                    true
+                } else {
+                    false
+                }
+            });
+            match redrew {
+                Ok(true) => last_redraw = std::time::Instant::now(),
+                Ok(false) => {}
+                Err(_) => break,
+            }
+        }
+    })
+    .detach();
+
     // Rich Sidecar transcript tailer poll. Runs on a much
     // gentler cadence than the old 120ms spinner timer so
     // it doesn't drive full AppState re-renders that trigger
@@ -243,6 +291,25 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                 .is_err()
             {
                 break;
+            }
+        }
+    })
+    .detach();
+}
+
+/// Redraw when a paired Mac attaches to or detaches from a session, so the
+/// tab's "<Machine> is viewing" chip (DEV-1166) appears and clears at once.
+/// Waits on the viewers' change channel: no wakeups while nothing changes,
+/// and unlike the render tick it runs while the display sleeps.
+fn spawn_viewers_redraw(cx: &mut Context<AppState>) {
+    cx.spawn(async move |this, cx| {
+        let Ok(mut changes) = this.read_with(cx, |state, _| state.remote.viewers().subscribe())
+        else {
+            return;
+        };
+        while changes.changed().await.is_ok() {
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                break; // AppState dropped — app is exiting
             }
         }
     })

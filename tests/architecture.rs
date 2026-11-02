@@ -342,6 +342,83 @@ impl<'ast> Visit<'ast> for AnyhowFinder {
 }
 
 // ---------------------------------------------------------------------------
+// §7.13 / DEV-1159 — iroh stays behind the PeerTransport seam
+// ---------------------------------------------------------------------------
+
+/// The one file allowed to name the `iroh` crate. Everything else speaks
+/// `remote::PeerTransport`, so the transport can be swapped or faked.
+const IROH_ALLOWLIST: &[&str] = &["src/remote/iroh_transport.rs"];
+
+#[test]
+fn iroh_is_named_only_by_its_adapter() {
+    let observed: BTreeSet<String> = source_files()
+        .into_iter()
+        .filter(|(_, path)| {
+            let src = read(path);
+            let file = parse(path, &src);
+            let mut finder = CrateFinder {
+                krate: "iroh",
+                found: false,
+            };
+            finder.visit_file(&file);
+            finder.found
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+
+    assert_matches_allowlist(
+        &observed,
+        IROH_ALLOWLIST,
+        "ARCHITECTURE.md §7.13 — only the iroh adapter may name `iroh`. Go through \
+         `crate::remote::PeerTransport` / `PeerConnection` instead, or translate the \
+         iroh type into a crate type inside `src/remote/iroh_transport.rs`.",
+    );
+}
+
+/// Detects a crate used as the *first* segment of a path (`iroh::Endpoint`,
+/// `::iroh::X`) or a `use` root. First-segment only, so a module that merely
+/// shares the prefix (`remote::iroh_transport`) is not a match.
+struct CrateFinder {
+    krate: &'static str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for CrateFinder {
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if path.segments.len() > 1 && path.segments[0].ident == self.krate {
+            self.found = true;
+        }
+        syn::visit::visit_path(self, path);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if use_tree_roots_at(&item.tree, self.krate) {
+            self.found = true;
+        }
+        syn::visit::visit_item_use(self, item);
+    }
+
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        if item.ident == self.krate {
+            self.found = true;
+        }
+        syn::visit::visit_item_extern_crate(self, item);
+    }
+}
+
+/// Whether a `use` tree starts at `krate` in any of its shapes: `use k::x`,
+/// `use k;`, `use k as y;`, or inside a group, `use {k::x, std::y};`.
+fn use_tree_roots_at(tree: &syn::UseTree, krate: &str) -> bool {
+    match tree {
+        syn::UseTree::Path(p) => p.ident == krate,
+        syn::UseTree::Name(n) => n.ident == krate,
+        syn::UseTree::Rename(r) => r.ident == krate,
+        syn::UseTree::Group(g) => g.items.iter().any(|t| use_tree_roots_at(t, krate)),
+        syn::UseTree::Glob(_) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // §7.3 — platform::global() is a leaf-only escape hatch
 // ---------------------------------------------------------------------------
 
@@ -584,6 +661,19 @@ struct PanicSiteFinder {
 }
 
 impl<'ast> Visit<'ast> for PanicSiteFinder {
+    /// A file that gates itself with an inner `#![cfg(test)]` is test code
+    /// throughout — test doubles that live in their own file, like
+    /// `src/remote/testing.rs`, are declared `#[cfg(test)] mod testing;` in
+    /// the parent, which this per-file walk cannot see.
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        let was = self.in_test;
+        if is_test_gated(&file.attrs) {
+            self.in_test = true;
+        }
+        syn::visit::visit_file(self, file);
+        self.in_test = was;
+    }
+
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
         let was = self.in_test;
         if is_test_gated(&item.attrs) {
@@ -611,6 +701,135 @@ impl<'ast> Visit<'ast> for PanicSiteFinder {
 }
 
 // ---------------------------------------------------------------------------
+// §7.9 — requests from outside the process never raise the window
+// ---------------------------------------------------------------------------
+
+/// The only files that may bring Allele's window forward. Both are a person
+/// acting on the app — the dock icon, a menu item — never a request.
+const WINDOW_RAISE_ALLOWLIST: &[&str] = &["src/main.rs", "src/startup/actions.rs"];
+
+/// §7.9: neither `control.sock` nor a paired machine (DEV-1161) may bring the
+/// window forward. Both reach the app through `dispatch`, so the rule is
+/// enforced where it can be: a call that raises the window (`activate`,
+/// `activate_window`) may appear only in the allowlisted files, so no request
+/// path can contain one.
+#[test]
+fn window_raising_stays_out_of_request_paths() {
+    struct Raise(bool);
+    impl<'ast> Visit<'ast> for Raise {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "activate" || call.method == "activate_window" {
+                self.0 = true;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let observed: BTreeSet<String> = source_files()
+        .into_iter()
+        .filter(|(_, path)| {
+            let src = read(path);
+            let mut finder = Raise(false);
+            finder.visit_file(&parse(path, &src));
+            finder.0
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+    assert_matches_allowlist(
+        &observed,
+        WINDOW_RAISE_ALLOWLIST,
+        "ARCHITECTURE.md §7.9 — only a person's own action may raise Allele's window. \
+         Dispatch requests, local or remote, must never bring it forward.",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DEV-1168 / DEV-1187 — agents cannot act on another Mac
+// ---------------------------------------------------------------------------
+
+/// Names that reach a paired Mac's dispatch API, in any position — a path
+/// (`crate::remote::…`, `RemoteService`), a field (`state.remote`), a method
+/// (`state.handle_remote_session_action(…)`) or a variant reached through
+/// its enum (`SessionAction::Remote`, checked separately below).
+const REMOTE_CALL_NAMES: &[&str] = &[
+    "remote",
+    "remote_sessions",
+    "remote_ui",
+    "RemoteService",
+    "RemoteSessionAction",
+    "RemoteCreate",
+    "handle_remote_session_action",
+    "machine_choices",
+];
+
+/// Remote creates, interrupts and discards are human-initiated only
+/// (DEV-1168, DEV-1187): they start from a click in this Mac's window. Agents
+/// reach Allele through `src/dispatch/` (`control.sock` and the MCP server),
+/// so nothing there may name the remote modules, the service's field on
+/// `AppState`, or the pending action that drives them — a dispatched session
+/// that could create on another Mac would restart its depth count at 0 there.
+#[test]
+fn dispatch_cannot_reach_another_mac() {
+    struct Names(Vec<String>);
+    impl Names {
+        fn check(&mut self, name: String) {
+            if REMOTE_CALL_NAMES.contains(&name.as_str()) {
+                self.0.push(name);
+            }
+        }
+    }
+    impl<'ast> Visit<'ast> for Names {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+            if segs
+                .windows(2)
+                .any(|w| w[0] == "SessionAction" && w[1] == "Remote")
+            {
+                self.0.push("SessionAction::Remote".into());
+            }
+            for seg in segs {
+                self.check(seg);
+            }
+            syn::visit::visit_path(self, path);
+        }
+        fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
+            match tree {
+                syn::UseTree::Path(p) => self.check(p.ident.to_string()),
+                syn::UseTree::Name(n) => self.check(n.ident.to_string()),
+                syn::UseTree::Rename(r) => self.check(r.ident.to_string()),
+                _ => {}
+            }
+            syn::visit::visit_use_tree(self, tree);
+        }
+        fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+            if let syn::Member::Named(name) = &field.member {
+                self.check(name.to_string());
+            }
+            syn::visit::visit_expr_field(self, field);
+        }
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.check(call.method.to_string());
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let offenders: Vec<String> = source_files()
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("src/dispatch/"))
+        .filter_map(|(rel, path)| {
+            let src = read(&path);
+            let mut names = Names(Vec::new());
+            names.visit_file(&parse(&path, &src));
+            (!names.0.is_empty()).then(|| format!("{rel}: {}", names.0.join(", ")))
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "src/dispatch/ must not reach the remote modules — remote creates, \
+         interrupts and discards are human-initiated only (DEV-1168, DEV-1187):\n{}",
+        offenders.join("\n")
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Meta — the docs and the tests must agree
 // ---------------------------------------------------------------------------
 
@@ -626,7 +845,9 @@ fn architecture_doc_still_documents_the_enforced_rules() {
         "### 7.4 Don't sprinkle `#[cfg(target_os = \"macos\")]` in business logic",
         "### 7.6 Don't use `anyhow::Result<T>` for new public functions",
         "### 7.7 Don't introduce a new god-object",
+        "### 7.9 Don't let the control socket raise UI",
         "### 7.11 Don't make two feature modules depend on each other",
+        "### 7.13 Don't name `iroh` outside its adapter",
     ] {
         assert!(
             doc.contains(anchor),

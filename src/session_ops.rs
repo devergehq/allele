@@ -2131,7 +2131,7 @@ fn list_remote_blocking(
     settings: &crate::settings::SyncSettings,
 ) -> anyhow::Result<Vec<crate::sync::pull::RemoteSession>> {
     let store = crate::sync::config::build_store_from_settings(settings)?;
-    crate::sync::rt::block_on(crate::sync::pull::list_remote_sessions(store.as_ref()))
+    crate::rt::block_on(crate::sync::pull::list_remote_sessions(store.as_ref()))
 }
 
 /// Background worker: fetch a bundle, resolve it against local projects, and —
@@ -2143,13 +2143,11 @@ fn pull_blocking(
     session_id: &str,
 ) -> anyhow::Result<PullOutcome> {
     let store = crate::sync::config::build_store_from_settings(settings)?;
-    let meta = match crate::sync::rt::block_on(crate::sync::pull::fetch_bundle(
-        store.as_ref(),
-        session_id,
-    ))? {
-        Some(meta) => meta,
-        None => return Ok(PullOutcome::Vanished),
-    };
+    let meta =
+        match crate::rt::block_on(crate::sync::pull::fetch_bundle(store.as_ref(), session_id))? {
+            Some(meta) => meta,
+            None => return Ok(PullOutcome::Vanished),
+        };
 
     let idents: Vec<(String, crate::sync::meta::ProjectIdentity)> = projects
         .into_iter()
@@ -2226,7 +2224,7 @@ fn materialize_blocking(
     //    conversation. Best-effort — a metadata-only bundle just yields a
     //    fresh Claude session in the materialized workspace.
     let store = crate::sync::config::build_store_from_settings(settings)?;
-    if let Some(bytes) = crate::sync::rt::block_on(crate::sync::pull::fetch_transcript(
+    if let Some(bytes) = crate::rt::block_on(crate::sync::pull::fetch_transcript(
         store.as_ref(),
         session_id,
     ))? {
@@ -2281,7 +2279,7 @@ fn sync_up_blocking(
     };
     let store = crate::sync::config::build_store_from_settings(settings)?;
     let mut ledger = crate::sync::ledger::SyncLedger::load();
-    let revision = crate::sync::rt::block_on(crate::sync::push::push_session_bundle(
+    let revision = crate::rt::block_on(crate::sync::push::push_session_bundle(
         store.as_ref(),
         &mut ledger,
         &synced,
@@ -2299,7 +2297,7 @@ fn sync_up_blocking(
             crate::transcript::expected_session_jsonl(clone, conversation_id)
         {
             if let Ok(bytes) = std::fs::read(&transcript_path) {
-                crate::sync::rt::block_on(crate::sync::push::push_transcript(
+                crate::rt::block_on(crate::sync::push::push_transcript(
                     store.as_ref(),
                     &synced.id,
                     bytes,

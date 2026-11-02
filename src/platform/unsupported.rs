@@ -145,4 +145,35 @@ impl super::SystemShell for PortableSystemShell {
         // Without a GUI toolkit we can't block on user confirmation.
         tracing::error!("FATAL ({title}): {body} — no dialog adapter for this OS, continuing");
     }
+
+    fn computer_name(&self) -> Option<String> {
+        let mut buf = [0u8; 256];
+        // SAFETY: `buf` is valid for `buf.len()` bytes; gethostname writes a
+        // NUL-terminated name into it, truncating if it is too long.
+        let rc = unsafe { libc::gethostname(buf.as_mut_ptr().cast(), buf.len()) };
+        if rc != 0 {
+            return None;
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        let name = String::from_utf8_lossy(&buf[..end]).trim().to_string();
+        (!name.is_empty()).then_some(name)
+    }
+}
+
+/// No secure store on this OS. Refuses rather than writing a file, so a
+/// secret that must stay out of `~/.allele` never lands there by default.
+pub(crate) struct NoSecretStore;
+
+impl super::SecretStore for NoSecretStore {
+    fn load(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>> {
+        Err(AlleleError::PlatformUnsupported(format!(
+            "no secret store for {service}/{account} on this OS"
+        )))
+    }
+
+    fn store(&self, service: &str, account: &str, _secret: &[u8]) -> Result<()> {
+        Err(AlleleError::PlatformUnsupported(format!(
+            "no secret store for {service}/{account} on this OS"
+        )))
+    }
 }
