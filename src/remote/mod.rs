@@ -38,6 +38,7 @@
 
 pub mod control;
 pub mod follow;
+mod follow_tests;
 // Test-only: the file gates itself with `#![cfg(test)]`.
 mod control_tests;
 pub mod identity;

@@ -589,9 +589,16 @@ impl Inner {
         if needed {
             self.sync_followers(&mut life).await;
         } else {
+            // Unpairing the last peer is one way to get here: a peer that is
+            // no longer trusted is forgotten, not left listed as unreachable.
+            let trusted = self.registry.list();
             for (id, f) in life.followers.drain() {
                 f.stop().await;
-                self.feeds.lost(id);
+                if trusted.iter().any(|p| p.id == id) {
+                    self.feeds.lost(id);
+                } else {
+                    self.feeds.forget(id);
+                }
             }
             if let Some(transport) = life.transport.take() {
                 if let Some(task) = life.accept.take() {
