@@ -1144,6 +1144,9 @@ impl Render for AppState {
         // Remember which project the overview should describe (DEV-310).
         self.track_overview_project();
 
+        // Hide a remote tab once a local session is selected (DEV-1167).
+        self.settle_remote_tabs(cx);
+
         if self.capture_ui_requested {
             self.capture_ui_requested = false;
             let active = self.active;
@@ -1440,11 +1443,15 @@ impl Render for AppState {
         let sidebar_visible = self.sidebar.visible;
         let is_resizing = self.sidebar.resizing;
         let drawer_is_resizing = self.drawer.resizing;
-        let drawer_visible = self
-            .active_session()
-            .map(|s| s.drawer_visible)
-            .unwrap_or(false);
-        let right_sidebar_visible = self.right_panel.visible;
+        // The remote tab on screen, if any (DEV-1167). It hides the local
+        // session's chrome: its summary, tab strip, drawer and changes panel.
+        let remote_view = self.remote_tabs.shown().map(|t| t.view.clone());
+        let drawer_visible = remote_view.is_none()
+            && self
+                .active_session()
+                .map(|s| s.drawer_visible)
+                .unwrap_or(false);
+        let right_sidebar_visible = remote_view.is_none() && self.right_panel.visible;
         let right_sidebar_w = self.right_panel.width;
         let right_sidebar_resizing = self.right_panel.resizing;
 
@@ -1763,14 +1770,20 @@ impl Render for AppState {
                 main_area_idx += 1;
             }
 
-            if let Some(summary) = self.render_session_summary_header(active_is_resumable, cx) {
+            if let Some(summary) = remote_view
+                .is_none()
+                .then(|| self.render_session_summary_header(active_is_resumable, cx))
+                .flatten()
+            {
                 content_col = content_col.child(summary);
                 main_area_idx += 1;
             }
 
             // --- Main-area tab strip: Claude / Reader ---
-            content_col = content_col.child(self.render_main_tab_strip(cx));
-            main_area_idx += 1;
+            if remote_view.is_none() {
+                content_col = content_col.child(self.render_main_tab_strip(cx));
+                main_area_idx += 1;
+            }
 
             // --- Main terminal area (flex_1, takes remaining space) ---
             {
@@ -1780,79 +1793,89 @@ impl Render for AppState {
                     .overflow_hidden()
                     .relative();
 
-                match self.main_tab {
-                    MainTab::Claude => {
-                        main_area = main_area.pt(px(6.0));
-                        if let Some(tv) =
-                            self.active_session().and_then(|s| s.terminal_view.clone())
-                        {
-                            // Tell the main terminal how much space the drawer
-                            // reserves below it so the PTY resize is correct.
-                            let inset = if drawer_visible {
-                                // 6px resize handle + ~30px header + drawer panel
-                                6.0 + 30.0 + self.drawer.height
-                            } else {
-                                0.0
-                            };
-                            // Same for the right changes panel: its width +
-                            // 6px resize handle are unavailable to the PTY.
-                            let right_inset = if right_sidebar_visible {
-                                6.0 + right_sidebar_w
-                            } else {
-                                0.0
-                            };
-                            tv.update(cx, |tv, _cx| {
-                                tv.bottom_inset = inset;
-                                tv.right_inset = right_inset;
-                            });
-                            main_area = main_area.child(tv);
-                        } else if self.projects.is_empty() {
-                            main_area = main_area.child(
-                                div()
-                                    .size_full()
-                                    .flex()
-                                    .flex_col()
-                                    .items_center()
-                                    .justify_center()
-                                    .gap(px(16.0))
-                                    .bg(theme().bg_base)
-                                    .child(icon(icons::HELIX, 28.0, with_alpha(theme().ready, 0.7)))
-                                    .child(
-                                        div()
-                                            .text_size(px(16.0))
-                                            .text_color(theme().text_faint)
-                                            .child("No active session"),
-                                    )
-                                    .child(div().w(px(56.0)).h(px(2.0)).rounded(px(1.0)).bg(
-                                        linear_gradient(
-                                            90.0,
-                                            linear_color_stop(theme().accent, 0.0),
-                                            linear_color_stop(theme().ready, 1.0),
+                // A remote tab (DEV-1167) replaces the local session's
+                // content entirely; the local session is untouched beneath.
+                if let Some(view) = remote_view.clone() {
+                    main_area = main_area.child(view);
+                } else {
+                    match self.main_tab {
+                        MainTab::Claude => {
+                            main_area = main_area.pt(px(6.0));
+                            if let Some(tv) =
+                                self.active_session().and_then(|s| s.terminal_view.clone())
+                            {
+                                // Tell the main terminal how much space the drawer
+                                // reserves below it so the PTY resize is correct.
+                                let inset = if drawer_visible {
+                                    // 6px resize handle + ~30px header + drawer panel
+                                    6.0 + 30.0 + self.drawer.height
+                                } else {
+                                    0.0
+                                };
+                                // Same for the right changes panel: its width +
+                                // 6px resize handle are unavailable to the PTY.
+                                let right_inset = if right_sidebar_visible {
+                                    6.0 + right_sidebar_w
+                                } else {
+                                    0.0
+                                };
+                                tv.update(cx, |tv, _cx| {
+                                    tv.bottom_inset = inset;
+                                    tv.right_inset = right_inset;
+                                });
+                                main_area = main_area.child(tv);
+                            } else if self.projects.is_empty() {
+                                main_area = main_area.child(
+                                    div()
+                                        .size_full()
+                                        .flex()
+                                        .flex_col()
+                                        .items_center()
+                                        .justify_center()
+                                        .gap(px(16.0))
+                                        .bg(theme().bg_base)
+                                        .child(icon(
+                                            icons::HELIX,
+                                            28.0,
+                                            with_alpha(theme().ready, 0.7),
+                                        ))
+                                        .child(
+                                            div()
+                                                .text_size(px(16.0))
+                                                .text_color(theme().text_faint)
+                                                .child("No active session"),
+                                        )
+                                        .child(div().w(px(56.0)).h(px(2.0)).rounded(px(1.0)).bg(
+                                            linear_gradient(
+                                                90.0,
+                                                linear_color_stop(theme().accent, 0.0),
+                                                linear_color_stop(theme().ready, 1.0),
+                                            ),
+                                        ))
+                                        .child(
+                                            div()
+                                                .text_size(px(12.0))
+                                                .text_color(theme().text_ghost)
+                                                .child("Click + in the sidebar to open a project"),
                                         ),
-                                    ))
-                                    .child(
-                                        div()
-                                            .text_size(px(12.0))
-                                            .text_color(theme().text_ghost)
-                                            .child("Click + in the sidebar to open a project"),
-                                    ),
-                            );
-                        } else {
-                            main_area = main_area.child(self.render_project_overview(cx));
+                                );
+                            } else {
+                                main_area = main_area.child(self.render_project_overview(cx));
+                            }
                         }
-                    }
-                    MainTab::Reader => {
-                        main_area = main_area.child(self.render_reader_view(cx));
-                    }
-                    MainTab::Browser => {
-                        main_area = main_area.child(self.render_browser_placeholder(cx));
-                    }
-                    MainTab::Transcript => {
-                        main_area = main_area.child(self.render_transcript_view(cx));
+                        MainTab::Reader => {
+                            main_area = main_area.child(self.render_reader_view(cx));
+                        }
+                        MainTab::Browser => {
+                            main_area = main_area.child(self.render_browser_placeholder(cx));
+                        }
+                        MainTab::Transcript => {
+                            main_area = main_area.child(self.render_transcript_view(cx));
+                        }
                     }
                 }
 
-                if active_is_done {
+                if active_is_done && remote_view.is_none() {
                     let mut buttons = div().flex().flex_row().gap(px(8.0));
 
                     if active_is_resumable {

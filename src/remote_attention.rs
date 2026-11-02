@@ -45,6 +45,9 @@ const MAX_DISPLAY_CHARS: usize = 80;
 pub(crate) struct RemoteRow {
     /// Unique across hosts: the peer and the host's session id.
     pub key: String,
+    /// The host and its session id: what a click opens (DEV-1167).
+    pub peer: PeerId,
+    pub session_id: String,
     /// `Host · label`.
     pub label: String,
     pub kind: AttentionKind,
@@ -146,6 +149,8 @@ pub(crate) fn rows(
             };
             out.push(RemoteRow {
                 key: format!("{peer}-{}", entry.id),
+                peer: *peer,
+                session_id: entry.id.clone(),
                 label: labelled(name, entry),
                 kind: kind_of(entry.attention),
                 detail,

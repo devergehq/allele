@@ -39,6 +39,7 @@ use super::listener::{self, Gate};
 use super::pairing::HostPairing;
 use super::peers::{PeerPermissions, TrustedPeer};
 use super::registry::PeerRegistry;
+use super::screen::ScreenSource;
 use super::service::{Binder, RemoteService};
 use super::testing::{MemNet, MemTransport};
 use super::transport::{PeerConnection, PeerId, PeerStream, PeerTransport, TransportConfig};
@@ -53,10 +54,11 @@ use crate::settings::RemoteSettings;
 use crate::status_feed::client::Reachability;
 use crate::status_feed::model::{FeedStatus, SessionEntry};
 use crate::status_feed::{RemoteHostState, StatusFeed};
+use crate::terminal::mirror::MirrorTerm;
 
 /// Binds on the in-memory network and keeps every endpoint it made, so a test
 /// can reach the host's side of a connection.
-struct MemBinder {
+pub(super) struct MemBinder {
     net: Arc<MemNet>,
     made: Mutex<Vec<Arc<MemTransport>>>,
 }
@@ -70,15 +72,30 @@ impl Binder for MemBinder {
     }
 }
 
-struct Mac {
-    svc: RemoteService,
+pub(super) struct Mac {
+    pub(super) svc: RemoteService,
     binder: Arc<MemBinder>,
-    feed: StatusFeed,
-    id: PeerId,
+    pub(super) feed: StatusFeed,
+    pub(super) id: PeerId,
+    /// The terminals this Mac serves to `attach`, by session id (DEV-1167).
+    pub(super) screens: Arc<TestScreens>,
+}
+
+/// Terminals by session id, for `attach`.
+#[derive(Default)]
+pub(super) struct TestScreens(
+    pub(super) Mutex<std::collections::HashMap<String, Arc<dyn MirrorTerm>>>,
+);
+
+#[async_trait]
+impl ScreenSource for TestScreens {
+    async fn find(&self, session_id: &str) -> Result<Option<Arc<dyn MirrorTerm>>> {
+        Ok(self.0.lock().unwrap().get(session_id).cloned())
+    }
 }
 
 impl Mac {
-    async fn start(net: &Arc<MemNet>, name: &str, allow: bool) -> Self {
+    pub(super) async fn start(net: &Arc<MemNet>, name: &str, allow: bool) -> Self {
         Self::start_with(net, name, allow, Arc::new(Unavailable)).await
     }
 
@@ -93,6 +110,7 @@ impl Mac {
             made: Mutex::default(),
         });
         let feed = StatusFeed::new();
+        let screens = Arc::new(TestScreens::default());
         let settings = RemoteSettings {
             allow_connections: allow,
             ..Default::default()
@@ -101,7 +119,7 @@ impl Mac {
             dispatch,
             host_name: HostName::new(Some(name.into()), || None),
             status_feed: feed.clone(),
-            screens: Arc::new(crate::remote::screen::NoScreens),
+            screens: screens.clone(),
             viewers: Default::default(),
         };
         let svc = RemoteService::new(
@@ -117,10 +135,11 @@ impl Mac {
             binder,
             feed,
             id,
+            screens,
         }
     }
 
-    fn trust(&self, other: &Mac, name: &str) {
+    pub(super) fn trust(&self, other: &Mac, name: &str) {
         self.svc
             .registry()
             .add_paired(TrustedPeer::newly_paired(other.id, name))
@@ -128,7 +147,7 @@ impl Mac {
     }
 
     /// The host's end of every connection a client opened to it.
-    fn accepted(&self) -> Vec<Arc<super::testing::MemConn>> {
+    pub(super) fn accepted(&self) -> Vec<Arc<super::testing::MemConn>> {
         self.binder.made.lock().unwrap()[0].accepted()
     }
 }
@@ -148,7 +167,7 @@ fn entry(id: &str, label: &str, status: FeedStatus) -> SessionEntry {
 
 /// A desk Mac hosting, a laptop following it — paired both ways, the laptop
 /// with its own switch off (following is outbound).
-async fn desk_and_laptop(net: &Arc<MemNet>) -> (Mac, Mac) {
+pub(super) async fn desk_and_laptop(net: &Arc<MemNet>) -> (Mac, Mac) {
     let desk = Mac::start(net, "Desk", true).await;
     let laptop = Mac::start(net, "Laptop", false).await;
     desk.trust(&laptop, "Laptop");

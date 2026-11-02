@@ -62,6 +62,16 @@ pub struct ScreenLookup {
     pub reply: Sender<Option<std::sync::Arc<dyn crate::terminal::mirror::MirrorTerm>>>,
 }
 
+/// A paired machine asking to resize a session's terminal to its window
+/// (DEV-1167). `true` when the session had a terminal to resize. The host's
+/// next local interaction with the session restores its own size.
+pub struct ScreenResize {
+    pub session_id: String,
+    pub columns: u16,
+    pub lines: u16,
+    pub reply: Sender<bool>,
+}
+
 /// File name of the control socket under `<root>/.allele`.
 const SOCKET_NAME: &str = "control.sock";
 

@@ -26,6 +26,7 @@ pub enum PendingAction {
     Settings(SettingsAction),
     Browser(BrowserAction),
     Overlay(OverlayAction),
+    RemoteTab(crate::remote_tab::RemoteTabAction),
 }
 
 impl PendingAction {
