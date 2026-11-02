@@ -227,6 +227,46 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
     })
     .detach();
 
+    // Redraw the MACHINES section (DEV-1163) when a paired host's feed
+    // changes. Checked on a 1 s timer rather than awaited, so nothing here
+    // depends on which executor drives the watch channel. While a host is
+    // unreachable its "last seen 4m ago" ages, so it is redrawn every 30 s
+    // even with no news.
+    cx.spawn(async move |this, cx| {
+        let Ok(mut host_changes) = this.update(cx, |state: &mut AppState, _| {
+            state.remote.hosts().subscribe_changes()
+        }) else {
+            return;
+        };
+        const AGEING_REDRAW: std::time::Duration = std::time::Duration::from_secs(30);
+        let mut last_redraw = std::time::Instant::now();
+        loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(1))
+                .await;
+            let changed = host_changes.has_changed().unwrap_or(false);
+            if changed {
+                host_changes.borrow_and_update();
+            }
+            let redrew = this.update(cx, |state: &mut AppState, cx| {
+                let ageing = last_redraw.elapsed() >= AGEING_REDRAW
+                    && state.remote.hosts().any_unreachable();
+                if changed || ageing {
+                    cx.notify();
+                    true
+                } else {
+                    false
+                }
+            });
+            match redrew {
+                Ok(true) => last_redraw = std::time::Instant::now(),
+                Ok(false) => {}
+                Err(_) => break,
+            }
+        }
+    })
+    .detach();
+
     // Rich Sidecar transcript tailer poll. Runs on a much
     // gentler cadence than the old 120ms spinner timer so
     // it doesn't drive full AppState re-renders that trigger

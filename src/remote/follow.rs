@@ -31,6 +31,7 @@ use super::link::{LinkState, PeerLink, ReconnectPolicy};
 use super::pairing::host::HELLO_TIMEOUT;
 use super::transport::{PeerConnection, PeerId, PeerStream, PeerTransport};
 use super::wire::{read_frame_within, write_frame, Frame, MAX_PEER_FRAME, PROTOCOL_VERSION};
+use crate::status_feed::client::Reachability;
 use crate::status_feed::{DeltaOutcome, RemoteHostState, StatusDelta, StatusSnapshot, Transition};
 
 /// How long to leave a host alone after it refused the feed (no `view`)
@@ -89,6 +90,14 @@ impl HostFeeds {
     /// Ticks whenever any host's state changes. For a UI that redraws.
     pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
+    }
+
+    /// True when any followed host has dropped. Its "last seen" text is
+    /// ageing, so the sidebar redraws it periodically.
+    pub fn any_unreachable(&self) -> bool {
+        self.lock()
+            .values()
+            .any(|h| matches!(h.reachability(), Reachability::Unreachable { .. }))
     }
 
     /// Live status transitions, for notifications.
