@@ -34,6 +34,7 @@ use super::pairing::{
 };
 use super::peers::TrustedPeer;
 use super::registry::PeerRegistry;
+use super::screen::ScreenSource;
 use super::transport::{PeerId, PeerTransport, TransportConfig};
 use crate::errors::{AlleleError, Result};
 use crate::platform::SecretStore;
@@ -186,17 +187,20 @@ impl RemoteService {
     /// identity, and iroh. Starts listening at once if the switch is on.
     ///
     /// `dispatch` answers paired machines' requests — in the app, the same
-    /// queue `control.sock` feeds. `computer_name` is this Mac's name, looked
+    /// queue `control.sock` feeds. `screens` finds a session's terminal for
+    /// a screen stream (DEV-1165). `computer_name` is this Mac's name, looked
     /// up only when a peer first needs it.
     pub(crate) fn production(
         secrets: Arc<dyn SecretStore>,
         settings: &RemoteSettings,
         dispatch: Arc<dyn RemoteDispatch>,
+        screens: Arc<dyn ScreenSource>,
         computer_name: impl Fn() -> Option<String> + Send + Sync + 'static,
     ) -> Self {
         let control = ControlContext {
             dispatch,
             host_name: HostName::new(settings.machine_name.clone(), computer_name),
+            screens,
         };
         Self::new(
             crate::rt::handle(),

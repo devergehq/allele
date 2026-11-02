@@ -201,6 +201,21 @@ fn write_bytes(tv: &gpui::WeakEntity<TerminalView>, bytes: &[u8], cx: &mut gpui:
     })
 }
 
+/// A handle a remote screen stream mirrors `session_id` from (DEV-1165).
+/// `None` when the session is unknown or has no terminal, as for
+/// [`with_terminal`].
+pub(crate) fn mirror_of(
+    state: &AppState,
+    session_id: &str,
+    cx: &Context<AppState>,
+) -> Option<std::sync::Arc<dyn crate::terminal::mirror::MirrorTerm>> {
+    let mut found: Option<std::sync::Arc<dyn crate::terminal::mirror::MirrorTerm>> = None;
+    with_terminal(state, session_id, cx, |terminal| {
+        found = Some(std::sync::Arc::new(terminal.mirror_handle()));
+    });
+    found
+}
+
 /// Run `f` against a session's PTY. Returns false when the session is unknown
 /// or has no terminal yet — still being cloned, or suspended — which callers
 /// treat as "not delivered" rather than as an error.

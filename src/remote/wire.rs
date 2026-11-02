@@ -31,6 +31,14 @@
 //!                                                      the client to hang up
 //!     client → host  request  { id, op: <dispatch Request> }
 //!     host → client  response { id, result: <dispatch Response> }
+//!     client → host  attach   { session_id }   needs view (DEV-1165)
+//!                  | detach   { session_id }
+//!     host → client  attach_failed { session_id, code, message }
+//!
+//!   screen stream (one per attached session; HOST-opened, DEV-1165)
+//!     host → client  screen_open { session_id }   first frame
+//!     host → client  screen { frame: snapshot | diff | scrollback }
+//!     client → host  scrollback_request { start, count } | resync
 //! ```
 //!
 //! `op` and `result` are `crate::dispatch::protocol`'s own types, nested
@@ -40,8 +48,9 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::dispatch::protocol::{Request, Response};
+use crate::dispatch::protocol::{ErrorCode, Request, Response};
 use crate::errors::{AlleleError, Result};
+use crate::terminal::mirror::ScreenFrame;
 
 use super::peers::PeerPermissions;
 
@@ -149,6 +158,32 @@ pub enum Frame {
     Request { id: u64, op: Request },
     /// Host → client: the answer to request `id`. Exactly one per request.
     Response { id: u64, result: Response },
+
+    // ── screens (DEV-1165) ────────────────────────────────────────────────
+    /// Client → host, on the control stream: mirror this session's screen.
+    /// Needs `view`. The host answers by opening a screen stream, or with
+    /// [`Frame::AttachFailed`].
+    Attach { session_id: String },
+    /// Client → host, on the control stream: stop mirroring this session.
+    /// Closing the screen stream does the same.
+    Detach { session_id: String },
+    /// Host → client, on the control stream: the attach is not going ahead,
+    /// or an attached stream stopped (session gone, `view` revoked).
+    AttachFailed {
+        session_id: String,
+        code: ErrorCode,
+        message: String,
+    },
+    /// Host → client: the first frame on a host-opened screen stream.
+    ScreenOpen { session_id: String },
+    /// Host → client, on a screen stream: a snapshot, diff or scrollback page.
+    Screen { frame: ScreenFrame },
+    /// Client → host, on a screen stream: send scrollback rows
+    /// `start..start + count` (0 = the line just above the screen).
+    ScrollbackRequest { start: u32, count: u32 },
+    /// Client → host, on a screen stream: the mirror lost track (a frame it
+    /// could not apply); send a full snapshot.
+    Resync,
 }
 
 /// Write one frame. Refuses a frame larger than [`MAX_PEER_FRAME`]; the

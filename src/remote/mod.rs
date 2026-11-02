@@ -46,6 +46,9 @@ pub mod listener;
 pub mod pairing;
 pub mod peers;
 pub mod registry;
+pub mod screen;
+// Test-only: the file gates itself with `#![cfg(test)]`.
+mod screen_tests;
 pub mod service;
 // Test-only: the file gates itself with `#![cfg(test)]`.
 pub(crate) mod testing;
@@ -55,5 +58,6 @@ pub mod wire;
 pub use control::ControlQueue;
 pub use identity::{resolve_machine_name, LocalIdentity};
 pub use peers::PeerList;
+pub use screen::ScreenQueue;
 pub use service::{ClientView, PeerRow, RemoteService, RemoteStatus};
 pub use transport::{PeerId, RelayChoice};

@@ -20,6 +20,7 @@ pub mod capture;
 pub mod grid;
 pub mod model;
 pub mod producer;
+pub mod source;
 
 #[cfg(test)]
 mod tests;
@@ -28,3 +29,4 @@ pub use capture::{capture, capture_history, Capture};
 pub use grid::MirroredGrid;
 pub use model::{RowDiff, ScreenFrame, ScreenSnapshot, ScrollbackPage, WireRow};
 pub use producer::{DiffProducer, Poll, MIN_FRAME_INTERVAL};
+pub use source::{MirrorTerm, SharedTerm};

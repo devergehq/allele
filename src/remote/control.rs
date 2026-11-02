@@ -39,6 +39,7 @@ use tokio::time::timeout;
 
 use super::peers::PeerPermissions;
 use super::registry::PeerRegistry;
+use super::screen::{Attachments, ScreenSource};
 use super::transport::{PeerConnection, PeerId, PeerStream};
 use super::wire::{self, write_frame, Frame, StreamRefusal, MAX_PEER_FRAME, PROTOCOL_VERSION};
 use crate::dispatch::protocol::{ErrorCode, Request, Response};
@@ -215,6 +216,8 @@ impl HostName {
 pub struct ControlContext {
     pub dispatch: Arc<dyn RemoteDispatch>,
     pub host_name: Arc<HostName>,
+    /// Finds a session's terminal for `attach` (DEV-1165).
+    pub screens: Arc<dyn ScreenSource>,
 }
 
 impl ControlContext {
@@ -224,6 +227,7 @@ impl ControlContext {
         Self {
             dispatch: Arc::new(Unavailable),
             host_name: HostName::new(None, || None),
+            screens: Arc::new(super::screen::NoScreens),
         }
     }
 }
@@ -325,6 +329,13 @@ async fn run(
     });
 
     let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT));
+    // The screen streams this control stream started; dropped with it.
+    let mut attachments = Attachments::new(
+        Arc::clone(conn),
+        registry.clone(),
+        Arc::clone(&ctx.screens),
+        out.clone(),
+    );
     let ended = loop {
         let body = tokio::select! {
             body = wire::read_body_within(&mut recv, MAX_PEER_FRAME) => body,
@@ -335,6 +346,12 @@ async fn run(
         };
         let (id, op) = match wire::decode(&body) {
             Ok(Frame::Request { id, op }) => (id, op),
+            // Inline: the lookup behind an attach is bounded, and requests
+            // already admitted keep running meanwhile.
+            Ok(frame @ (Frame::Attach { .. } | Frame::Detach { .. })) => {
+                attachments.handle(frame).await;
+                continue;
+            }
             Ok(other) => {
                 tracing::debug!(
                     "remote: {} sent an unexpected frame on its control stream: {other:?}",
@@ -395,6 +412,8 @@ async fn run(
         }
     };
 
+    // Stop the screen streams first: their tasks hold the outbox open.
+    drop(attachments);
     // Let in-flight answers finish and be written, unless the peer is gone.
     drop(out);
     tokio::select! {
