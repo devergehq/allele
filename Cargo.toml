@@ -10,7 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 # GPUI — pinned to specific Zed commit (same rev Termy uses, known working)
-gpui = { git = "https://github.com/zed-industries/zed", rev = "83de8a25e0ef71a8d762a148459bc863adaeb7e3", package = "gpui" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "2c59293b69889610eba8f54920cca64c387308ba", package = "gpui" }
 
 # Terminal emulation — Deverge fork with CSI 2J scrollback fix
 alacritty_terminal = { git = "https://github.com/devergehq/alacritty.git", branch = "allele/clear-scrollback-on-csi2j" }
@@ -108,7 +108,7 @@ security-framework = "3"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
 
 [dev-dependencies]
-gpui = { git = "https://github.com/zed-industries/zed", rev = "83de8a25e0ef71a8d762a148459bc863adaeb7e3", package = "gpui", features = ["test-support"] }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "2c59293b69889610eba8f54920cca64c387308ba", package = "gpui", features = ["test-support"] }
 tempfile = "3"
 # Paused-clock tests for the reconnect supervisor (`remote::link`, DEV-1159).
 tokio = { version = "1", features = ["full", "test-util"] }
