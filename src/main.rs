@@ -1597,6 +1597,8 @@ fn install_panic_hook() {
 }
 
 fn main() {
+    // DEV-1158 spike, throwaway: `--iroh-spike` runs the probe and exits.
+    sync::iroh_spike::exit_if_requested();
     // Refuse unrecognised arguments before anything with a side effect runs.
     // Allele has no CLI, and everything below this point — tracing, the
     // descriptor ceiling, the orphan sweep, `state.json` — assumes it is the
