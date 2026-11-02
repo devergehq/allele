@@ -452,6 +452,9 @@ async fn session(
                 }
             }
             Some(call) = ops.recv() => {
+                // Callers that gave up (timed out) have dropped their end;
+                // forget them rather than hold them for the stream's life.
+                pending.retain(|_, reply| !reply.is_closed());
                 let id = next_id;
                 next_id += 1;
                 let request = Frame::Request { id, op: call.op };

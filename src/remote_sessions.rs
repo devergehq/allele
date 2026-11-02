@@ -189,7 +189,53 @@ pub(crate) fn failure_text(
     }
 }
 
+/// [`failure_text`] for a create. A create the host never answered may still
+/// be running there — the host keeps cloning after this Mac stops waiting —
+/// so the text says to look before trying again, not that it failed.
+pub(crate) fn create_failure_text(
+    host: &str,
+    label: &str,
+    result: &Result<Response, CallError>,
+) -> Option<String> {
+    match result {
+        Err(CallError::TimedOut | CallError::Dropped) => Some(format!(
+            "{host} didn't confirm \u{201c}{label}\u{201d}. It may still start there; check under \
+             {host} in the sidebar before creating it again."
+        )),
+        other => failure_text(host, None, other),
+    }
+}
+
+/// The grant to keep after a host's answer. A `permission_denied` means the
+/// host took `control` away since its hello said otherwise; dropping it here
+/// stops the UI offering what the host will refuse. (A grant *added*
+/// mid-connection shows on the next hello.)
+pub(crate) fn grant_after(
+    known: Option<PeerPermissions>,
+    result: &Result<Response, CallError>,
+) -> Option<PeerPermissions> {
+    match result {
+        Ok(Response::Error {
+            code: ErrorCode::PermissionDenied,
+            ..
+        }) => known.map(|g| PeerPermissions {
+            control: false,
+            ..g
+        }),
+        _ => known,
+    }
+}
+
 impl AppState {
+    /// Record what a host's answer says about this Mac's grant.
+    fn note_grant(&self, peer: PeerId, result: &Result<Response, CallError>) {
+        let feeds = self.remote.hosts();
+        let known = feeds.grant(peer);
+        if let Some(grant) = grant_after(known, result).filter(|g| Some(*g) != known) {
+            feeds.set_grant(peer, grant);
+        }
+    }
+
     /// What the New Session picker offers for the project at `project_idx`.
     pub(crate) fn machine_choices(
         &self,
@@ -251,7 +297,8 @@ impl AppState {
             host_name,
             request,
         } = create;
-        let token = self.remote_ui.start(peer, request.name.clone());
+        let label = request.name.clone();
+        let token = self.remote_ui.start(peer, label.clone());
         let answer = self.remote.call(peer, Request::SessionsCreate(request));
         cx.notify();
         cx.spawn(async move |this, cx| {
@@ -267,7 +314,8 @@ impl AppState {
                         session_id: session.session_id.clone(),
                     });
                 }
-                if let Some(text) = failure_text(&host_name, None, &result) {
+                this.note_grant(peer, &result);
+                if let Some(text) = create_failure_text(&host_name, &label, &result) {
                     this.pull_warning = Some(text);
                 }
                 cx.notify();
@@ -295,6 +343,7 @@ impl AppState {
                 {
                     this.remote_ui.selected = None;
                 }
+                this.note_grant(key.peer, &result);
                 // Success needs no message: the row's status (or its
                 // disappearing) arrives on the feed.
                 if let Some(text) = failure_text(&host_name, Some(&label), &result) {
@@ -422,6 +471,34 @@ mod tests {
         assert_eq!(
             failure_text("Desk", None, &Err(CallError::Unreachable)).as_deref(),
             Some("Desk isn't connected right now.")
+        );
+    }
+
+    #[test]
+    fn an_unanswered_create_may_still_be_starting() {
+        let text = create_failure_text("Desk", "fix tests", &Err(CallError::TimedOut)).unwrap();
+        assert!(text.contains("may still start there"), "{text}");
+        assert!(
+            create_failure_text("Desk", "x", &Err(CallError::Unreachable))
+                .unwrap()
+                .contains("isn't connected")
+        );
+    }
+
+    #[test]
+    fn a_permission_refusal_withdraws_control_from_the_ui() {
+        let denied = Ok(Response::Error {
+            code: ErrorCode::PermissionDenied,
+            message: "needs control".into(),
+        });
+        assert_eq!(
+            grant_after(Some(CONTROL), &denied),
+            Some(PeerPermissions::NEW_PEER)
+        );
+        assert_eq!(grant_after(None, &denied), None);
+        assert_eq!(
+            grant_after(Some(CONTROL), &Err(CallError::Dropped)),
+            Some(CONTROL)
         );
     }
 

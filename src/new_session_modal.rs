@@ -329,7 +329,8 @@ impl NewSessionModal {
         let host = self.remote_host()?;
         if !host.can_create {
             return Some(format!(
-                "{0} lets this Mac see its sessions but not start them. Turn on control                  for this Mac in {0}'s Settings → Machines.",
+                "{0} lets this Mac see its sessions but not start them. Turn on control \
+                 for this Mac in {0}'s Settings → Machines.",
                 host.name
             ));
         }
@@ -670,74 +671,38 @@ impl NewSessionModal {
     }
 
     fn agent_row(&self, agent_display: String, cx: &mut Context<Self>) -> Div {
-        Self::render_form_row("Agent", {
-            let mut selector = div().w_full().flex().flex_col().gap(px(3.0)).child(
-                div()
-                    .id("new-session-agent-selector")
-                    .cursor_pointer()
-                    .w_full()
-                    .px(px(8.0))
-                    .py(px(5.0))
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(theme().border_default)
-                    .bg(theme().bg_sunken)
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .text_size(px(12.0))
-                    .text_color(theme().accent)
-                    .hover(|s| s.bg(theme().bg_surface))
-                    .child(agent_display)
-                    .child(icon(icons::CHEVRON_DOWN, 11.0, theme().text_faint))
+        let mut selector = div().w_full().flex().flex_col().gap(px(3.0)).child(
+            Self::selector_face("new-session-agent-selector", agent_display).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this: &mut Self, _ev, _w, cx| {
+                    cx.stop_propagation();
+                    this.toggle_agent_selector(cx);
+                }),
+            ),
+        );
+        if self.agent_selector_open {
+            let mut options = Self::selector_list();
+            for (idx, (_, name)) in self.agents.iter().enumerate() {
+                options = options.child(
+                    Self::selector_option(
+                        SharedString::from(format!("new-session-agent-{idx}")),
+                        name.clone(),
+                        idx == self.selected_agent_idx,
+                    )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(|this: &mut Self, _ev, _w, cx| {
+                        cx.listener(move |this: &mut Self, _ev, _w, cx| {
                             cx.stop_propagation();
-                            this.toggle_agent_selector(cx);
+                            this.selected_agent_idx = idx;
+                            this.agent_selector_open = false;
+                            cx.notify();
                         }),
                     ),
-            );
-            if self.agent_selector_open {
-                let mut options = div()
-                    .w_full()
-                    .rounded(px(6.0))
-                    .border_1()
-                    .border_color(theme().border_default)
-                    .bg(theme().bg_surface)
-                    .flex()
-                    .flex_col();
-                for (idx, (_, name)) in self.agents.iter().enumerate() {
-                    let selected = idx == self.selected_agent_idx;
-                    options = options.child(
-                        div()
-                            .id(SharedString::from(format!("new-session-agent-{idx}")))
-                            .cursor_pointer()
-                            .px(px(8.0))
-                            .py(px(5.0))
-                            .text_size(px(12.0))
-                            .text_color(if selected {
-                                theme().accent
-                            } else {
-                                theme().text_primary
-                            })
-                            .hover(|s| s.bg(theme().bg_hover))
-                            .child(name.clone())
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this: &mut Self, _ev, _w, cx| {
-                                    cx.stop_propagation();
-                                    this.selected_agent_idx = idx;
-                                    this.agent_selector_open = false;
-                                    cx.notify();
-                                }),
-                            ),
-                    );
-                }
-                selector = selector.child(options);
+                );
             }
-            selector
-        })
+            selector = selector.child(options);
+        }
+        Self::render_form_row("Agent", selector)
     }
 
     fn render_form_row(label_text: &str, content: impl IntoElement) -> Div {

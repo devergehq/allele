@@ -746,42 +746,69 @@ fn window_raising_stays_out_of_request_paths() {
 // DEV-1168 / DEV-1187 — agents cannot act on another Mac
 // ---------------------------------------------------------------------------
 
-/// Names that reach a paired Mac's dispatch API: the service whose `call`
-/// sends ops over the control stream, and the module that drives it.
-const REMOTE_CALL_NAMES: &[&str] = &["remote", "remote_sessions", "RemoteService"];
+/// Names that reach a paired Mac's dispatch API, in any position — a path
+/// (`crate::remote::…`, `RemoteService`), a field (`state.remote`), a method
+/// (`state.handle_remote_session_action(…)`) or a variant reached through
+/// its enum (`SessionAction::Remote`, checked separately below).
+const REMOTE_CALL_NAMES: &[&str] = &[
+    "remote",
+    "remote_sessions",
+    "remote_ui",
+    "RemoteService",
+    "RemoteSessionAction",
+    "RemoteCreate",
+    "handle_remote_session_action",
+    "machine_choices",
+];
 
 /// Remote creates, interrupts and discards are human-initiated only
 /// (DEV-1168, DEV-1187): they start from a click in this Mac's window. Agents
 /// reach Allele through `src/dispatch/` (`control.sock` and the MCP server),
-/// so nothing there may name the remote modules — a dispatched session that
-/// could create on another Mac would restart its depth count at 0 there.
+/// so nothing there may name the remote modules, the service's field on
+/// `AppState`, or the pending action that drives them — a dispatched session
+/// that could create on another Mac would restart its depth count at 0 there.
 #[test]
 fn dispatch_cannot_reach_another_mac() {
     struct Names(Vec<String>);
+    impl Names {
+        fn check(&mut self, name: String) {
+            if REMOTE_CALL_NAMES.contains(&name.as_str()) {
+                self.0.push(name);
+            }
+        }
+    }
     impl<'ast> Visit<'ast> for Names {
         fn visit_path(&mut self, path: &'ast syn::Path) {
-            for seg in &path.segments {
-                let name = seg.ident.to_string();
-                if REMOTE_CALL_NAMES.contains(&name.as_str()) {
-                    self.0.push(name);
-                }
+            let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+            if segs
+                .windows(2)
+                .any(|w| w[0] == "SessionAction" && w[1] == "Remote")
+            {
+                self.0.push("SessionAction::Remote".into());
+            }
+            for seg in segs {
+                self.check(seg);
             }
             syn::visit::visit_path(self, path);
         }
         fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
-            let ident = match tree {
-                syn::UseTree::Path(p) => Some(&p.ident),
-                syn::UseTree::Name(n) => Some(&n.ident),
-                syn::UseTree::Rename(r) => Some(&r.ident),
-                _ => None,
-            };
-            if let Some(ident) = ident {
-                let name = ident.to_string();
-                if REMOTE_CALL_NAMES.contains(&name.as_str()) {
-                    self.0.push(name);
-                }
+            match tree {
+                syn::UseTree::Path(p) => self.check(p.ident.to_string()),
+                syn::UseTree::Name(n) => self.check(n.ident.to_string()),
+                syn::UseTree::Rename(r) => self.check(r.ident.to_string()),
+                _ => {}
             }
             syn::visit::visit_use_tree(self, tree);
+        }
+        fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+            if let syn::Member::Named(name) = &field.member {
+                self.check(name.to_string());
+            }
+            syn::visit::visit_expr_field(self, field);
+        }
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.check(call.method.to_string());
+            syn::visit::visit_expr_method_call(self, call);
         }
     }
     let offenders: Vec<String> = source_files()
@@ -796,8 +823,8 @@ fn dispatch_cannot_reach_another_mac() {
         .collect();
     assert!(
         offenders.is_empty(),
-        "src/dispatch/ must not name the remote modules — remote creates are \
-         human-initiated only (DEV-1168, DEV-1187):\n{}",
+        "src/dispatch/ must not reach the remote modules — remote creates, \
+         interrupts and discards are human-initiated only (DEV-1168, DEV-1187):\n{}",
         offenders.join("\n")
     );
 }

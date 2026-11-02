@@ -145,6 +145,10 @@ struct Inner {
     /// What admitted peers' requests are answered by (DEV-1161).
     control: ControlContext,
     feeds: HostFeeds,
+    /// Each running follower's op queue (DEV-1168). Mirrors
+    /// `Life.followers`, but under a plain lock, so a click's call never waits
+    /// behind a reconcile holding `life`.
+    ops: Mutex<HashMap<PeerId, tokio::sync::mpsc::Sender<OpCall>>>,
     follow_policy: ReconnectPolicy,
     config: Mutex<Option<TransportConfig>>,
     life: tokio::sync::Mutex<Life>,
@@ -186,6 +190,7 @@ impl RemoteService {
             binder,
             control,
             feeds: HostFeeds::default(),
+            ops: Mutex::default(),
             follow_policy: ReconnectPolicy::default(),
             config: Mutex::new(config),
             life: tokio::sync::Mutex::new(Life::default()),
@@ -309,10 +314,7 @@ impl RemoteService {
     ) -> impl Future<Output = std::result::Result<Response, CallError>> + Send + 'static {
         let inner = Arc::clone(&self.inner);
         let task = self.inner.rt.spawn(async move {
-            let queue = {
-                let life = inner.life.lock().await;
-                life.followers.get(&peer).map(Follower::ops)
-            };
+            let queue = lock(&inner.ops).get(&peer).cloned();
             let Some(queue) = queue else {
                 return Err(CallError::Unreachable);
             };
@@ -585,13 +587,14 @@ impl Inner {
             .copied()
             .collect();
         for id in gone {
+            lock(&self.ops).remove(&id);
             if let Some(f) = life.followers.remove(&id) {
                 f.stop().await;
             }
             self.feeds.forget(id);
         }
         for id in trusted {
-            life.followers.entry(id).or_insert_with(|| {
+            let follower = life.followers.entry(id).or_insert_with(|| {
                 Follower::spawn(
                     &self.rt,
                     Arc::clone(&transport),
@@ -601,6 +604,7 @@ impl Inner {
                     Arc::clone(&self.control.host_name),
                 )
             });
+            lock(&self.ops).insert(id, follower.ops());
         }
     }
 
@@ -651,6 +655,7 @@ impl Inner {
             // Unpairing the last peer is one way to get here: a peer that is
             // no longer trusted is forgotten, not left listed as unreachable.
             let trusted = self.registry.list();
+            lock(&self.ops).clear();
             for (id, f) in life.followers.drain() {
                 f.stop().await;
                 if trusted.iter().any(|p| p.id == id) {

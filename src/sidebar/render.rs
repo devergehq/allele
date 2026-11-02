@@ -365,6 +365,7 @@ fn render_group_header(
                     cx.stop_propagation();
                     this.session_context_menu = None;
                     this.project_context_menu = None;
+                    this.remote_ui.menu = None;
                     this.group_headers.context_menu = Some((p_idx, name.clone(), event.position));
                     cx.notify();
                 }
@@ -639,6 +640,7 @@ pub(crate) fn build_sidebar_items(
                     move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
+                        this.remote_ui.menu = None;
                         this.project_context_menu = Some((p_idx, event.position));
                         cx.notify();
                     },
@@ -1288,6 +1290,7 @@ pub(crate) fn build_sidebar_items(
                         move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
                             cx.stop_propagation();
                             this.project_context_menu = None;
+                            this.remote_ui.menu = None;
                             this.session_context_menu = Some((
                                 SessionCursor {
                                     project_idx: p_idx,
@@ -2129,7 +2132,16 @@ fn render_remote_session_row(
             }),
         );
     if !manageable {
-        return row.into_any_element();
+        // No menu, and nothing else either: a right-click on a remote row
+        // must not fall through to the sidebar's own menus.
+        return row
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_this: &mut AppState, _event, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element();
     }
     row.on_mouse_down(
         MouseButton::Right,
