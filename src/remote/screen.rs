@@ -95,6 +95,10 @@ const MIN_INPUT_INTERVAL: Duration = Duration::from_millis(1);
 /// not keeping up.
 const INPUT_QUEUE: usize = 64;
 
+/// Input frames the host reads ahead of the PTY writes. Once full, the
+/// reader stops and the link pushes back on the peer.
+const INPUT_BACKLOG: usize = 16;
+
 /// What the client shows when the host drops its input for want of `control`.
 const NEEDS_CONTROL: &str = "typing needs control permission; grant it to this Mac in the \
                              other Mac's Settings → Machines";
@@ -374,29 +378,41 @@ impl Streamer {
         // `input` frames are handled by the reader itself (see [`Input`]), so
         // typing is never queued behind a scrollback page or a slow write.
         // Its refusals come back through `notices` for this loop to write.
+        //
+        // Listed on the host's tab before any input can be read, and until
+        // this stream ends, however it ends.
+        let _viewing = self
+            .viewers
+            .register(&self.session_id, self.peer, &self.machine_name);
         let (requests_tx, mut requests) = mpsc::channel::<Frame>(4);
+        let (inputs_tx, mut inputs) = mpsc::channel::<(String, bool)>(INPUT_BACKLOG);
         let (notices_tx, mut notices) = mpsc::channel::<Frame>(1);
         let (reader_alive, mut hung_up) = oneshot::channel::<()>();
-        let input = Input {
+        let mut input = Input {
             registry: self.registry.clone(),
             peer: self.peer,
             term: Arc::clone(&self.term),
             notices: notices_tx,
             next: Instant::now(),
         };
+        // Input on a task of its own: pacing and a paste's `Term` lock wait
+        // hold up neither screen requests nor screen frames.
+        let _input = AbortOnDrop(tokio::spawn(async move {
+            while let Some((text, paste)) = inputs.recv().await {
+                input.deliver(text, paste).await;
+            }
+        }));
         let _reader = AbortOnDrop(tokio::spawn(async move {
             let _alive = reader_alive;
-            let mut input = input;
             let mut recv = recv;
             // An admitted peer's limit: a paste is up to MAX_INPUT_BYTES.
             while let Ok(frame) = read_frame_within(&mut recv, MAX_PEER_FRAME).await {
-                match frame {
-                    Frame::Input { text, paste } => input.deliver(text, paste).await,
-                    other => {
-                        if requests_tx.send(other).await.is_err() {
-                            break;
-                        }
-                    }
+                let sent = match frame {
+                    Frame::Input { text, paste } => inputs_tx.send((text, paste)).await.is_ok(),
+                    other => requests_tx.send(other).await.is_ok(),
+                };
+                if !sent {
+                    break;
                 }
             }
         }));
@@ -408,10 +424,6 @@ impl Streamer {
         if write_frame(&mut send, &open).await.is_err() {
             return None;
         }
-        // Shown on the host's tab until this stream ends, however it ends.
-        let _viewing = self
-            .viewers
-            .register(&self.session_id, self.peer, &self.machine_name);
 
         // The interval below is the rate cap, so the producer's own is off.
         let mut producer = DiffProducer::new(Duration::ZERO);
@@ -534,13 +546,16 @@ impl Input {
 
     /// Write one `input` frame to the PTY, or drop it and say why.
     async fn deliver(&mut self, text: String, paste: bool) {
+        // Every frame is paced, refused or not, by the bytes the peer sent;
+        // and before the check, so the permission read is the last thing
+        // before the write.
+        sleep_until(self.next).await;
+        let pace = Duration::from_micros(text.len() as u64 * 1_000_000 / INPUT_BYTES_PER_SEC);
+        self.next = Instant::now() + pace.max(MIN_INPUT_INTERVAL);
         if text.len() > MAX_INPUT_BYTES {
             let message = format!("input over {MAX_INPUT_BYTES} bytes was not sent");
             return self.refuse(ErrorCode::BadRequest, message);
         }
-        // Pace before the check, so the permission read is the last thing
-        // before the write.
-        sleep_until(self.next).await;
         if !self.controllable() {
             tracing::debug!("remote: {} input dropped: needs control", self.peer.short());
             return self.refuse(ErrorCode::PermissionDenied, NEEDS_CONTROL.into());
@@ -551,21 +566,18 @@ impl Input {
             // reader can hold mid-chunk: wait for it off the runtime's
             // worker threads. A keystroke needs no lock.
             tokio::task::spawn_blocking(move || {
-                let bytes = paste_bytes(&text, term.bracketed_paste()?);
-                term.write_input(&bytes).then_some(bytes.len())
+                term.bracketed_paste()
+                    .is_some_and(|bracketed| term.write_input(&paste_bytes(&text, bracketed)))
             })
             .await
-            .ok()
-            .flatten()
+            .unwrap_or(false)
         } else {
-            term.write_input(text.as_bytes()).then_some(text.len())
+            term.write_input(text.as_bytes())
         };
-        let Some(len) = written else {
+        if !written {
             let message = "the session no longer takes input".to_string();
-            return self.refuse(ErrorCode::SessionNotFound, message);
-        };
-        let pace = Duration::from_micros(len as u64 * 1_000_000 / INPUT_BYTES_PER_SEC);
-        self.next = Instant::now() + pace.max(MIN_INPUT_INTERVAL);
+            self.refuse(ErrorCode::SessionNotFound, message);
+        }
     }
 
     fn refuse(&self, code: ErrorCode, message: String) {
@@ -912,7 +924,12 @@ async fn mirror(stream: PeerStream, m: Mirror) {
                 // The stream ended, or the host broke the protocol.
                 _ => break,
             },
-            Some(typed) = input.recv() => Some(typed),
+            Some(typed) = input.recv() => {
+                if write_frame(&mut send, &typed).await.is_err() {
+                    break;
+                }
+                None
+            }
             _ = nudge.notified() => None,
         };
         let page = grid.lock().wanted_page(MAX_PAGE_ROWS as usize);

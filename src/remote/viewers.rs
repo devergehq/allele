@@ -6,11 +6,12 @@
 //! A screen stream registers when it starts and holds a [`Viewing`] guard;
 //! the entry goes when the guard drops, which is when the stream ends for any
 //! reason (detach, closed stream or connection, view revoked, unpaired). The
-//! UI polls [`Viewers::version`] to know when to redraw.
+//! UI waits on [`Viewers::subscribe`] to know when to redraw.
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
+
+use tokio::sync::watch;
 
 use super::transport::PeerId;
 
@@ -27,11 +28,19 @@ struct Entry {
     machine_name: String,
 }
 
-#[derive(Default)]
 struct Shared {
     state: Mutex<State>,
     /// Bumped on every change.
-    version: AtomicU64,
+    version: watch::Sender<u64>,
+}
+
+impl Default for Shared {
+    fn default() -> Self {
+        Self {
+            state: Mutex::default(),
+            version: watch::channel(0).0,
+        }
+    }
 }
 
 /// The attached machines, by session. Cheap to clone; safe from any thread.
@@ -73,21 +82,37 @@ impl Viewers {
         let Some(entries) = state.sessions.get(session_id) else {
             return Vec::new();
         };
-        let mut seen: Vec<PeerId> = Vec::new();
-        let mut names: Vec<String> = Vec::new();
-        for entry in entries {
-            if !seen.contains(&entry.peer) {
-                seen.push(entry.peer);
-                names.push(entry.machine_name.clone());
-            }
-        }
+        let by_peer: BTreeMap<PeerId, &str> = entries
+            .iter()
+            .map(|e| (e.peer, e.machine_name.as_str()))
+            .collect();
+        let mut names: Vec<String> = by_peer.into_values().map(str::to_string).collect();
         names.sort();
         names
     }
 
+    /// Every session with a machine attached, with [`Viewers::machines`]
+    /// for each, sorted by session id.
+    pub fn sessions(&self) -> Vec<(String, Vec<String>)> {
+        let mut ids: Vec<String> = self.lock().sessions.keys().cloned().collect();
+        ids.sort();
+        ids.into_iter()
+            .map(|id| {
+                let machines = self.machines(&id);
+                (id, machines)
+            })
+            .collect()
+    }
+
     /// Changes whenever a machine attaches or detaches anywhere.
+    #[cfg(test)]
     pub fn version(&self) -> u64 {
-        self.shared.version.load(Ordering::Acquire)
+        *self.shared.version.borrow()
+    }
+
+    /// Wakes on every attach and detach, for a redraw with no polling.
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.shared.version.subscribe()
     }
 
     fn remove(&self, session_id: &str, key: u64) {
@@ -104,7 +129,7 @@ impl Viewers {
     }
 
     fn bump(&self) {
-        self.shared.version.fetch_add(1, Ordering::AcqRel);
+        self.shared.version.send_modify(|v| *v += 1);
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {
@@ -174,6 +199,28 @@ mod tests {
         assert_eq!(viewers.machines("s-1"), vec!["Air"]);
         drop(other);
         assert!(viewers.machines("s-1").is_empty());
+    }
+
+    #[test]
+    fn sessions_lists_every_attached_session_and_subscribers_wake() {
+        let viewers = Viewers::default();
+        let mut changes = viewers.subscribe();
+        assert!(viewers.sessions().is_empty());
+        let a = viewers.register("s-2", peer(1), "Laptop");
+        let b = viewers.register("s-1", peer(2), "Air");
+        assert!(changes.has_changed().unwrap());
+        changes.mark_unchanged();
+        assert_eq!(
+            viewers.sessions(),
+            vec![
+                ("s-1".to_string(), vec!["Air".to_string()]),
+                ("s-2".to_string(), vec!["Laptop".to_string()]),
+            ]
+        );
+        drop(a);
+        assert!(changes.has_changed().unwrap(), "a detach wakes the UI");
+        drop(b);
+        assert!(viewers.sessions().is_empty());
     }
 
     #[test]

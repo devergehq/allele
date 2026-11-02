@@ -252,24 +252,16 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
 }
 
 /// Redraw when a paired Mac attaches to or detaches from a session, so the
-/// tab's "<Machine> is viewing" chip (DEV-1166) appears and clears within a
-/// second. A timer, not the render tick, which stops while the display
-/// sleeps; reading the version is one atomic load.
+/// tab's "<Machine> is viewing" chip (DEV-1166) appears and clears at once.
+/// Waits on the viewers' change channel: no wakeups while nothing changes,
+/// and unlike the render tick it runs while the display sleeps.
 fn spawn_viewers_redraw(cx: &mut Context<AppState>) {
     cx.spawn(async move |this, cx| {
-        let Ok(viewers) = this.read_with(cx, |state, _| state.remote.viewers()) else {
+        let Ok(mut changes) = this.read_with(cx, |state, _| state.remote.viewers().subscribe())
+        else {
             return;
         };
-        let mut seen = viewers.version();
-        loop {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(500))
-                .await;
-            let now = viewers.version();
-            if now == seen {
-                continue;
-            }
-            seen = now;
+        while changes.changed().await.is_ok() {
             if this.update(cx, |_, cx| cx.notify()).is_err() {
                 break; // AppState dropped — app is exiting
             }

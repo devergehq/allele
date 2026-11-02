@@ -223,10 +223,6 @@ impl KeymapConfig {
     }
 }
 
-/// Convert a single lowercase letter to its ASCII control byte.
-///
-/// Control characters are `byte & 0x1f` — i.e. 'a' (0x61) → 0x01,
-/// 'z' (0x7a) → 0x1a. This is algorithmic, not a lookup table.
 /// Start of a bracketed paste (`CSI 200 ~`).
 pub const PASTE_START: &[u8] = b"\x1b[200~";
 /// End of a bracketed paste (`CSI 201 ~`).
@@ -263,6 +259,10 @@ pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     out
 }
 
+/// Convert a single lowercase letter to its ASCII control byte.
+///
+/// Control characters are `byte & 0x1f` — i.e. 'a' (0x61) → 0x01,
+/// 'z' (0x7a) → 0x1a. This is algorithmic, not a lookup table.
 fn control_byte(key: &str) -> Option<u8> {
     let bytes = key.as_bytes();
     if bytes.len() == 1 {
