@@ -46,6 +46,9 @@ pub(super) struct MachinesSection {
     pub(super) confirm_remove: Option<PeerId>,
 }
 
+/// Shown under the relay field while a relay change is taking effect (DEV-1186).
+const RECONNECTING_NOTICE: &str = "Reconnecting through the new relay\u{2026}";
+
 impl MachinesSection {
     pub(super) fn new(cx: &mut Context<SettingsWindowState>, settings: &RemoteSettings) -> Self {
         let name_input = cx.new(|cx| {
@@ -208,6 +211,14 @@ impl MachinesSection {
                     .text_size(px(11.0))
                     .text_color(theme().danger)
                     .child(err.clone()),
+            );
+        }
+        if self.status.as_ref().is_some_and(|s| s.reconnecting) {
+            relay_card = relay_card.child(
+                div()
+                    .text_size(px(11.0))
+                    .text_color(theme().text_faint)
+                    .child(RECONNECTING_NOTICE),
             );
         }
 

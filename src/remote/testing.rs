@@ -33,11 +33,17 @@ impl MemNet {
 
     /// A new endpoint with a fresh identity, reachable at once.
     pub(crate) fn endpoint(self: &Arc<Self>) -> Arc<MemTransport> {
-        let id = LocalIdentity::ephemeral().id();
+        self.endpoint_as(LocalIdentity::ephemeral().id())
+    }
+
+    /// A new endpoint that binds `id` — the same machine binding again, as
+    /// after a rebind. Replaces any endpoint already registered as `id`.
+    pub(crate) fn endpoint_as(self: &Arc<Self>, id: PeerId) -> Arc<MemTransport> {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.endpoints.lock().unwrap().insert(id, tx);
+        self.endpoints.lock().unwrap().insert(id, tx.clone());
         Arc::new(MemTransport {
             id,
+            me: tx,
             net: Arc::clone(self),
             incoming: tokio::sync::Mutex::new(rx),
             accepted: Mutex::new(Vec::new()),
@@ -48,6 +54,8 @@ impl MemNet {
 
 pub(crate) struct MemTransport {
     id: PeerId,
+    /// This endpoint's own entry in the net, to tell it from a later rebind.
+    me: Incoming,
     net: Arc<MemNet>,
     incoming: tokio::sync::Mutex<mpsc::UnboundedReceiver<Arc<MemConn>>>,
     /// Every connection `accept` has handed out, for inspection.
@@ -74,6 +82,9 @@ impl PeerTransport for MemTransport {
     }
 
     async fn dial(&self, peer: PeerId) -> Result<Arc<dyn PeerConnection>> {
+        if *self.shut.borrow() {
+            return Err(AlleleError::Remote("endpoint shut down".into()));
+        }
         let tx = self
             .net
             .endpoints
@@ -104,7 +115,15 @@ impl PeerTransport for MemTransport {
     async fn network_changed(&self) {}
 
     async fn shutdown(&self) {
-        self.net.endpoints.lock().unwrap().remove(&self.id);
+        let mut endpoints = self.net.endpoints.lock().unwrap();
+        // A rebind may already have registered a newer endpoint as this id.
+        if endpoints
+            .get(&self.id)
+            .is_some_and(|tx| tx.same_channel(&self.me))
+        {
+            endpoints.remove(&self.id);
+        }
+        drop(endpoints);
         self.shut.send_replace(true);
     }
 }

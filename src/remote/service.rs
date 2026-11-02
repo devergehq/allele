@@ -18,6 +18,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::runtime::Handle;
@@ -26,6 +27,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::control::{ControlContext, HostName, RemoteDispatch};
+use super::endpoint::Endpoint;
 use super::identity::LocalIdentity;
 use super::iroh_transport::IrohTransport;
 use super::listener::{self, Gate, SWITCHED_OFF_REASON};
@@ -39,6 +41,20 @@ use crate::errors::{AlleleError, Result};
 use crate::platform::SecretStore;
 use crate::repositories::{JsonFilePeersRepo, PeersRepository};
 use crate::settings::RemoteSettings;
+
+/// How long the relay setting must stay unchanged before the endpoint rebinds.
+/// The Machines pane saves on every keystroke, and `https://r` is already a
+/// valid URL: without this, typing a relay would drop every connection once
+/// per character.
+pub const RELAY_SETTLE: Duration = Duration::from_secs(1);
+
+/// How long after a rebind the pane may say "Reconnecting through the new
+/// relay…" while waiting for peers that were connected before it. A peer that
+/// went away meanwhile must not keep the notice up forever.
+pub const RECONNECT_NOTICE: Duration = Duration::from_secs(30);
+
+/// Reason given to peers whose connection a relay change closed.
+pub const RELAY_CHANGED_REASON: &str = "the relay changed; reconnecting";
 
 /// Binds the endpoint. Production loads the Keychain identity and binds iroh;
 /// tests bind an in-memory transport.
@@ -113,12 +129,24 @@ pub struct RemoteStatus {
     pub error: Option<String>,
     /// `peers.json` could not be read; nobody is trusted until it is fixed.
     pub peers_error: Option<String>,
+    /// The relay changed and the endpoint is rebinding, or peers connected
+    /// before the change are not back yet (DEV-1186).
+    pub reconnecting: bool,
 }
 
 #[derive(Default)]
 struct Life {
     transport: Option<Arc<dyn PeerTransport>>,
     accept: Option<JoinHandle<()>>,
+    /// The config `transport` was bound with. Set exactly when it is.
+    bound_with: Option<TransportConfig>,
+}
+
+/// The peers that were connected when the relay changed, and how long to
+/// wait for them.
+struct Reconnect {
+    peers: Vec<PeerId>,
+    until: Instant,
 }
 
 struct Inner {
@@ -130,6 +158,13 @@ struct Inner {
     /// What admitted peers' requests are answered by (DEV-1161).
     control: ControlContext,
     config: Mutex<Option<TransportConfig>>,
+    /// When the relay setting last changed, for [`RELAY_SETTLE`].
+    relay_changed_at: Mutex<Option<Instant>>,
+    /// The shown error is the relay setting's own, so a valid setting clears it.
+    relay_invalid: AtomicBool,
+    reconnect: Mutex<Option<Reconnect>>,
+    /// The handle long-lived dialers hold; created at the first bind.
+    endpoint: Mutex<Option<Arc<Endpoint>>>,
     life: tokio::sync::Mutex<Life>,
     listening: AtomicBool,
     client: Mutex<ClientView>,
@@ -169,6 +204,10 @@ impl RemoteService {
             binder,
             control,
             config: Mutex::new(config),
+            relay_changed_at: Mutex::new(None),
+            relay_invalid: AtomicBool::new(false),
+            reconnect: Mutex::new(None),
+            endpoint: Mutex::new(None),
             life: tokio::sync::Mutex::new(Life::default()),
             listening: AtomicBool::new(false),
             client: Mutex::new(ClientView::Idle),
@@ -263,6 +302,7 @@ impl RemoteService {
             client: lock(&inner.client).clone(),
             error: lock(&inner.error).clone(),
             peers_error: inner.registry.load_error(),
+            reconnecting: inner.reconnecting(),
         }
     }
 
@@ -284,16 +324,46 @@ impl RemoteService {
     }
 
     /// New relay or machine-name settings. The name applies to the next
-    /// control stream; the relay the next time the endpoint binds.
+    /// control stream. A new relay rebinds a bound endpoint once the setting
+    /// has been still for [`RELAY_SETTLE`] (DEV-1186); an invalid one is
+    /// reported and changes nothing — the endpoint keeps its old relay.
     pub fn set_settings(&self, settings: &RemoteSettings) {
         self.inner
             .control
             .host_name
             .set(settings.machine_name.clone());
-        match TransportConfig::from_settings(settings) {
-            Ok(c) => *lock(&self.inner.config) = Some(c),
-            Err(e) => self.inner.set_error(Some(e.to_string())),
+        let config = match TransportConfig::from_settings(settings) {
+            Ok(c) => c,
+            Err(e) => {
+                self.inner.relay_invalid.store(true, Ordering::SeqCst);
+                return self.inner.set_error(Some(e.to_string()));
+            }
+        };
+        if self.inner.relay_invalid.swap(false, Ordering::SeqCst) {
+            self.inner.set_error(None);
         }
+        let mut current = lock(&self.inner.config);
+        if current.as_ref() == Some(&config) {
+            return;
+        }
+        // Stamp before publishing: a reconcile that sees the new config must
+        // also see the change time, or it would rebind without settling.
+        *lock(&self.inner.relay_changed_at) = Some(Instant::now());
+        *current = Some(config);
+        drop(current);
+        self.inner.wake_up();
+    }
+
+    /// This machine's endpoint as a handle that survives relay rebinds —
+    /// what a [`PeerLink`](super::link::PeerLink) should dial through. Binds
+    /// if nothing is bound.
+    #[allow(dead_code)] // first caller: the client links (DEV-1162)
+    pub(crate) async fn endpoint(&self) -> Result<Arc<dyn PeerTransport>> {
+        self.inner.bound(self.inner.life.lock().await).await?;
+        lock(&self.inner.endpoint)
+            .clone()
+            .map(|e| e as Arc<dyn PeerTransport>)
+            .ok_or_else(|| AlleleError::Remote("the remote endpoint is not running".into()))
     }
 
     /// *Pair a new machine*: bind if need be, then show a fresh code.
@@ -510,22 +580,32 @@ impl Inner {
         );
         life.accept = Some(self.rt.spawn(listener::run(Arc::clone(&transport), gate)));
         life.transport = Some(Arc::clone(&transport));
+        life.bound_with = Some(config);
         self.listening.store(true, Ordering::SeqCst);
+        // Last, so dials waiting on a rebind wake to an endpoint that accepts.
+        self.install(&transport);
         tracing::info!("remote endpoint up as {}", transport.local_id().short());
         self.bump_ui();
         Ok(transport)
     }
 
-    /// Bind if something needs the endpoint; release it if nothing does.
+    /// Bind if something needs the endpoint; release it if nothing does; and
+    /// rebind it if the relay changed.
     async fn reconcile(&self) {
         let mut life = self.life.lock().await;
+        if self.relay_stale(&life) {
+            self.release_for_rebind(&mut life).await;
+        }
         let needed = self.needed();
         if needed && life.transport.is_none() {
             if let Err(e) = self.bound(life).await {
+                self.set_endpoint_down();
                 self.set_error(Some(format!("could not start the remote endpoint: {e}")));
             }
         } else if !needed {
+            self.set_endpoint_down();
             if let Some(transport) = life.transport.take() {
+                life.bound_with = None;
                 if let Some(task) = life.accept.take() {
                     task.abort();
                 }
@@ -539,6 +619,112 @@ impl Inner {
     }
 }
 
+impl Inner {
+    /// Put a freshly bound transport behind the stable handle. A transport
+    /// with another identity (the Keychain key was replaced) gets a new
+    /// handle; dialers on the old one see it as down.
+    fn install(&self, transport: &Arc<dyn PeerTransport>) {
+        let mut endpoint = lock(&self.endpoint);
+        if let Some(e) = endpoint.as_ref() {
+            match e.install(Arc::clone(transport)) {
+                Ok(()) => return,
+                Err(err) => {
+                    tracing::warn!("remote: {err}; links made before this must be remade");
+                    e.set_down();
+                }
+            }
+        }
+        *endpoint = Some(Arc::new(Endpoint::new(Arc::clone(transport))));
+    }
+
+    /// Nothing is bound: dials fail, and there is no reconnect to announce.
+    fn set_endpoint_down(&self) {
+        if let Some(e) = lock(&self.endpoint).as_ref() {
+            e.set_down();
+        }
+        *lock(&self.reconnect) = None;
+    }
+
+    /// The bound endpoint uses a relay other than the setting's, and the
+    /// setting has been still for [`RELAY_SETTLE`].
+    fn relay_stale(&self, life: &Life) -> bool {
+        let Some(bound_with) = &life.bound_with else {
+            return false;
+        };
+        let differs = lock(&self.config)
+            .as_ref()
+            .is_some_and(|desired| desired != bound_with);
+        differs && self.settle_deadline().is_none()
+    }
+
+    /// When a pending relay change may be applied, if that is still ahead.
+    fn settle_deadline(&self) -> Option<Instant> {
+        let at = (*lock(&self.relay_changed_at))? + RELAY_SETTLE;
+        (at > Instant::now()).then_some(at)
+    }
+
+    /// Drop the endpoint so it can be bound again with the new relay. Every
+    /// connection closes — the ticket accepts that — and dials through the
+    /// handle wait for the new endpoint rather than failing.
+    async fn release_for_rebind(&self, life: &mut Life) {
+        let Some(transport) = life.transport.take() else {
+            return;
+        };
+        life.bound_with = None;
+        let endpoint = lock(&self.endpoint).clone();
+        let mut peers: Vec<PeerId> = self
+            .registry
+            .list()
+            .into_iter()
+            .map(|p| p.id)
+            .filter(|id| self.registry.live_count(*id) > 0)
+            .collect();
+        if let Some(e) = &endpoint {
+            peers.extend(e.live_peers());
+            e.begin_rebind();
+        }
+        peers.sort();
+        peers.dedup();
+        tracing::info!(
+            "remote: relay changed; rebinding and reconnecting {} peer(s)",
+            peers.len()
+        );
+        *lock(&self.reconnect) = Some(Reconnect {
+            peers,
+            until: Instant::now() + RECONNECT_NOTICE,
+        });
+        if let Some(task) = life.accept.take() {
+            task.abort();
+        }
+        self.registry.close_all(RELAY_CHANGED_REASON);
+        if let Some(e) = &endpoint {
+            e.close_dialed(RELAY_CHANGED_REASON);
+        }
+        transport.shutdown().await;
+        self.listening.store(false, Ordering::SeqCst);
+        self.bump_ui();
+    }
+
+    /// Whether the pane should say "Reconnecting through the new relay…".
+    fn reconnecting(&self) -> bool {
+        let endpoint = lock(&self.endpoint).clone();
+        let rebinding = endpoint.as_ref().is_some_and(|e| e.is_rebinding());
+        let mut reconnect = lock(&self.reconnect);
+        let Some(r) = reconnect.as_ref() else {
+            return rebinding;
+        };
+        let dialed = endpoint.map(|e| e.live_peers()).unwrap_or_default();
+        let waiting = Instant::now() < r.until
+            && r.peers
+                .iter()
+                .any(|p| self.registry.live_count(*p) == 0 && !dialed.contains(p));
+        if !waiting && !rebinding {
+            *reconnect = None;
+        }
+        waiting || rebinding
+    }
+}
+
 /// Reconcile whenever something changes, and when a pairing deadline passes.
 /// Ends when the service is dropped.
 async fn supervise(weak: std::sync::Weak<Inner>) {
@@ -549,7 +735,10 @@ async fn supervise(weak: std::sync::Weak<Inner>) {
     loop {
         let Some(inner) = weak.upgrade() else { return };
         inner.reconcile().await;
-        let deadline = inner.pairing.next_deadline();
+        let deadline = match (inner.pairing.next_deadline(), inner.settle_deadline()) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         drop(inner);
         let sleep = async {
             match deadline {
