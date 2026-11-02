@@ -27,6 +27,7 @@ mod mac_menu;
 mod memory_watchdog;
 mod naming;
 mod new_session_modal;
+mod pairing_alert;
 mod paths;
 mod pending_actions;
 mod platform;
@@ -2239,6 +2240,7 @@ fn main() {
                         settings_window: None,
                         pull_warning: None,
                         sync_notice: None,
+                        pairing_alert: Default::default(),
                         main_tab: MainTab::Claude,
                         browser_status: String::new(),
                         scratch_pad: None,
