@@ -31,6 +31,26 @@
 //!                                                      the client to hang up
 //!     client → host  request  { id, op: <dispatch Request> }
 //!     host → client  response { id, result: <dispatch Response> }
+//!
+//!   status feed (DEV-1162; same control stream, needs `view`)
+//!     client → host  subscribe_status                  again to resync
+//!     host → client  status_snapshot { seq, sessions } replaces everything
+//!                  | status_refused  { message }       no `view`, or it was revoked
+//!     host → client  status_delta    { seq, change }   seq = previous + 1
+//!
+//!     client → host  attach   { attach_id, session_id }   needs view (DEV-1165)
+//!                  | detach   { session_id }
+//!     host → client  attach_failed { attach_id, session_id, code, message }
+//!
+//!   screen stream (one per attached session; HOST-opened, DEV-1165)
+//!     host → client  screen_open { attach_id, session_id }   first frame
+//!     host → client  screen { frame: snapshot | diff | scrollback }
+//!     client → host  scrollback_request { start, count } | resync
+//!     client → host  input { text, paste? }            needs control (DEV-1166)
+//!     host → client  input_refused { code, message }   input dropped, not written
+//!
+//!   resizing (DEV-1167; control stream, needs `control`, attached sessions only)
+//!     client → host  resize { session_id, columns, lines }   no reply
 //! ```
 //!
 //! `op` and `result` are `crate::dispatch::protocol`'s own types, nested
@@ -40,10 +60,12 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::dispatch::protocol::{Request, Response};
+use crate::dispatch::protocol::{ErrorCode, Request, Response};
 use crate::errors::{AlleleError, Result};
+use crate::terminal::mirror::ScreenFrame;
 
 use super::peers::PeerPermissions;
+use crate::status_feed::{SessionEntry, StatusChange, StatusDelta, StatusSnapshot};
 
 /// Largest frame read from a peer that has not yet said who it is. A pairing
 /// hello is a ~16-byte secret and a ≤64-character name; 4 KiB is generous and
@@ -149,6 +171,97 @@ pub enum Frame {
     Request { id: u64, op: Request },
     /// Host → client: the answer to request `id`. Exactly one per request.
     Response { id: u64, result: Response },
+
+    // ── screens (DEV-1165) ────────────────────────────────────────────────
+    /// Client → host, on the control stream: mirror this session's screen.
+    /// Needs `view`. The host answers by opening a screen stream, or with
+    /// [`Frame::AttachFailed`].
+    ///
+    /// `attach_id` is the client's own number for this attach; the host
+    /// echoes it in `screen_open` or `attach_failed`, so an answer can never
+    /// be taken for a different attach of the same session.
+    Attach { attach_id: u64, session_id: String },
+    /// Client → host, on the control stream: stop mirroring this session.
+    /// Closing the screen stream does the same.
+    Detach { session_id: String },
+    /// Host → client, on the control stream: the attach is not going ahead,
+    /// or an attached stream stopped (session gone, `view` revoked).
+    AttachFailed {
+        attach_id: u64,
+        session_id: String,
+        code: ErrorCode,
+        message: String,
+    },
+    /// Host → client: the first frame on a host-opened screen stream.
+    ScreenOpen { attach_id: u64, session_id: String },
+    /// Host → client, on a screen stream: a snapshot, diff or scrollback page.
+    Screen { frame: ScreenFrame },
+    /// Client → host, on a screen stream: send scrollback rows
+    /// `start..start + count` (0 = the line just above the screen).
+    ScrollbackRequest { start: u32, count: u32 },
+    /// Client → host, on a screen stream: the mirror lost track (a frame it
+    /// could not apply); send a full snapshot.
+    Resync,
+
+    // ── remote input (DEV-1166) ───────────────────────────────────────────
+    /// Client → host, on a screen stream: type into the attached session.
+    /// Needs `control`, read live for every frame. `text` is what the
+    /// client's keymap produced for a keystroke (exactly the bytes local
+    /// typing would write), or the pasted text when `paste` is set; the host
+    /// adds the bracketed-paste markers itself, because only the host knows
+    /// whether its terminal asked for them. At most
+    /// [`MAX_INPUT_BYTES`](super::screen::MAX_INPUT_BYTES) of text.
+    Input {
+        text: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        paste: bool,
+    },
+    /// Host → client, on a screen stream: input was dropped and not written.
+    /// The mirror carries on. `code` is `permission_denied` (no `control`),
+    /// `bad_request` (too large) or `session_not_found` (the terminal went).
+    InputRefused { code: ErrorCode, message: String },
+
+    /// Client → host, on the control stream: resize this attached session's
+    /// terminal to the client's window ("Fit to this window"). Needs
+    /// `control`. Not answered: the new size arrives as the next snapshot,
+    /// and the host's next local keystroke or click puts its own size back.
+    Resize {
+        session_id: String,
+        columns: u16,
+        lines: u16,
+    },
+    // ── status feed (DEV-1162) ────────────────────────────────────────────
+    /// Client → host: send me every session, then every change. Sent again
+    /// after a gap, it replaces the subscription with a fresh snapshot.
+    SubscribeStatus,
+    /// Host → client: every session, as of change `seq`.
+    StatusSnapshot {
+        seq: u64,
+        sessions: Vec<SessionEntry>,
+    },
+    /// Host → client: change number `seq`, always the previous one plus one.
+    StatusDelta { seq: u64, change: StatusChange },
+    /// Host → client: no feed — the peer lacks `view`, or lost it. The
+    /// control stream itself carries on.
+    StatusRefused { message: String },
+}
+
+impl From<StatusSnapshot> for Frame {
+    fn from(s: StatusSnapshot) -> Self {
+        Frame::StatusSnapshot {
+            seq: s.seq,
+            sessions: s.sessions,
+        }
+    }
+}
+
+impl From<StatusDelta> for Frame {
+    fn from(d: StatusDelta) -> Self {
+        Frame::StatusDelta {
+            seq: d.seq,
+            change: d.change,
+        }
+    }
 }
 
 /// Write one frame. Refuses a frame larger than [`MAX_PEER_FRAME`]; the
@@ -250,6 +363,34 @@ mod tests {
         assert_eq!(read_frame(&mut b).await.unwrap(), Frame::PairAck);
     }
 
+    /// Keystrokes are JSON strings, not arrays of numbers: a control byte
+    /// costs six bytes, a printable one costs one. `paste` is left out when
+    /// false, so a keystroke frame stays small.
+    #[test]
+    fn input_frames_encode_as_text() {
+        let key = Frame::Input {
+            text: "\u{3}".into(),
+            paste: false,
+        };
+        let body = String::from_utf8(encode(&key).unwrap()).unwrap();
+        assert_eq!(body, r#"{"type":"input","text":"\u0003"}"#);
+        assert_eq!(decode(body.as_bytes()).unwrap(), key);
+
+        let paste = Frame::Input {
+            text: "a\nb".into(),
+            paste: true,
+        };
+        assert_eq!(decode(&encode(&paste).unwrap()).unwrap(), paste);
+
+        let refused = Frame::InputRefused {
+            code: ErrorCode::PermissionDenied,
+            message: "read only".into(),
+        };
+        let body = String::from_utf8(encode(&refused).unwrap()).unwrap();
+        assert!(body.contains(r#""type":"input_refused""#), "{body}");
+        assert!(body.contains(r#""code":"permission_denied""#), "{body}");
+    }
+
     #[tokio::test]
     async fn an_oversized_length_is_refused_before_the_body_is_read() {
         let (mut a, mut b) = tokio::io::duplex(64);
@@ -349,6 +490,30 @@ mod tests {
             serde_json::to_string(&response).unwrap(),
             r#"{"type":"response","id":7,"result":{"result":"error","code":"permission_denied","message":"no"}}"#
         );
+    }
+
+    #[test]
+    fn status_frames_have_the_documented_shape() {
+        assert_eq!(
+            serde_json::to_string(&Frame::SubscribeStatus).unwrap(),
+            r#"{"type":"subscribe_status"}"#
+        );
+        let delta: Frame = StatusDelta {
+            seq: 4,
+            change: StatusChange::Removed { id: "s1".into() },
+        }
+        .into();
+        assert_eq!(
+            serde_json::to_string(&delta).unwrap(),
+            r#"{"type":"status_delta","seq":4,"change":{"kind":"removed","id":"s1"}}"#
+        );
+        let snapshot: Frame = StatusSnapshot {
+            seq: 3,
+            sessions: vec![],
+        }
+        .into();
+        let json = serde_json::to_vec(&snapshot).unwrap();
+        assert_eq!(serde_json::from_slice::<Frame>(&json).unwrap(), snapshot);
     }
 
     #[test]

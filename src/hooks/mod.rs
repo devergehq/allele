@@ -655,17 +655,25 @@ pub(crate) fn applescript_escape(s: &str) -> String {
         .replace('\r', "\\r")
 }
 
+/// The AppleScript `show_notification` hands to `osascript -e`. Both strings
+/// go through [`applescript_escape`]; split out so tests can check exactly
+/// what osascript would be given.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn notification_script(title: &str, body: &str) -> String {
+    format!(
+        "display notification \"{}\" with title \"{}\"",
+        applescript_escape(body),
+        applescript_escape(title)
+    )
+}
+
 /// Fire a macOS notification via `osascript -e 'display notification ...'`.
 /// Spawns detached — never blocks. Silently no-ops on non-macOS.
 pub fn show_notification(title: &str, body: &str) {
     #[cfg(target_os = "macos")]
     {
         use std::process::{Command, Stdio};
-        let script = format!(
-            "display notification \"{}\" with title \"{}\"",
-            applescript_escape(body),
-            applescript_escape(title)
-        );
+        let script = notification_script(title, body);
         let mut command = Command::new("osascript");
         command
             .arg("-e")

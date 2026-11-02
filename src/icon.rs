@@ -25,6 +25,7 @@ pub mod name {
     pub const IMAGE: &str = "image";
     pub const LOADER: &str = "loader";
     pub const LOCK: &str = "lock";
+    pub const MONITOR: &str = "monitor";
     pub const PAPERCLIP: &str = "paperclip";
     pub const PAUSE: &str = "pause";
     pub const PIN: &str = "pin";

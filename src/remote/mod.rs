@@ -37,6 +37,8 @@
 //! against the trusted list; [`control`] decides, per request, what it may do.
 
 pub mod control;
+pub mod follow;
+mod follow_tests;
 // Test-only: the file gates itself with `#![cfg(test)]`.
 mod control_tests;
 pub mod identity;
@@ -46,14 +48,23 @@ pub mod listener;
 pub mod pairing;
 pub mod peers;
 pub mod registry;
+pub mod screen;
+// Test-only: the file gates itself with `#![cfg(test)]`.
+mod screen_tests;
 pub mod service;
 // Test-only: the file gates itself with `#![cfg(test)]`.
 pub(crate) mod testing;
 pub mod transport;
+pub mod viewer;
+// Test-only: the file gates itself with `#![cfg(test)]`.
+mod viewer_tests;
+pub mod viewers;
 pub mod wire;
 
 pub use control::ControlQueue;
 pub use identity::{resolve_machine_name, LocalIdentity};
 pub use peers::PeerList;
+pub use screen::ScreenQueue;
 pub use service::{ClientView, PeerRow, RemoteService, RemoteStatus};
 pub use transport::{PeerId, RelayChoice};
+pub use viewer::{RemoteScreen, ScreenPhase};

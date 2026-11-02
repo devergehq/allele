@@ -26,6 +26,7 @@ pub enum PendingAction {
     Settings(SettingsAction),
     Browser(BrowserAction),
     Overlay(OverlayAction),
+    RemoteTab(crate::remote_tab::RemoteTabAction),
 }
 
 impl PendingAction {
@@ -57,6 +58,9 @@ pub enum SessionAction {
     AddSessionToProject(usize), // project index
     /// Open the "New session with details" modal for a project.
     OpenNewSessionModal(usize),
+    /// Create, interrupt, discard or select a session on a paired Mac
+    /// (DEV-1168). Human clicks only — see `crate::remote_sessions`.
+    Remote(crate::remote_sessions::RemoteSessionAction),
     /// Create a session with custom details from the modal.
     AddSessionWithDetails {
         project_idx: usize,

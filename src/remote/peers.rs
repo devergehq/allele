@@ -130,7 +130,7 @@ pub fn sanitize_machine_name(raw: &str) -> String {
 /// bidi embeddings, overrides and isolates, zero-width joiners and spaces, the
 /// word joiner and invisible operators, the BOM, and the interlinear and tag
 /// blocks. std has no category lookup, so the ranges are listed.
-fn is_format_char(c: char) -> bool {
+pub(crate) fn is_format_char(c: char) -> bool {
     matches!(
         c,
         '\u{00AD}'
