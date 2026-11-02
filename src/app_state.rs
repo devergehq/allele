@@ -413,6 +413,9 @@ pub(crate) struct AppState {
     pub(crate) scratch_pad: Option<Entity<scratch_pad::ScratchPad>>,
     /// "New session with details" modal. `Some` while the overlay is visible.
     pub(crate) new_session_modal: Option<Entity<new_session_modal::NewSessionModal>>,
+    /// Remote sessions: the selected row, creates in flight, the open menu
+    /// (DEV-1168).
+    pub(crate) remote_ui: crate::remote_sessions::RemoteUi,
     /// Sidebar search/filter input entity.
     pub(crate) sidebar_filter_input: Entity<text_input::TextInput>,
     /// Reader in-file find input entity. Its text mirrors into
@@ -501,9 +504,14 @@ pub(crate) struct AppState {
     /// This machine's remote endpoint: pairing, trusted peers, the listener
     /// (DEV-1160). Cheap to clone into the Settings window.
     pub(crate) remote: crate::remote::RemoteService,
+    /// Sessions on paired Macs open in tabs (DEV-1167).
+    pub(crate) remote_tabs: crate::remote_tab::RemoteTabs,
     /// Host side of the status feed paired clients subscribe to (DEV-1162).
     /// A cheap clone handle: the transport holds its own copy.
     pub(crate) status_feed: crate::status_feed::StatusFeed,
+    /// The pairing request waiting for approval, if any, for the main
+    /// window's banner (DEV-1188).
+    pub(crate) pairing_alert: crate::pairing_alert::PairingAlert,
     /// Set by the Debug menu or agent request-file watcher.
     pub(crate) capture_ui_requested: bool,
 }
@@ -1078,10 +1086,12 @@ pub(crate) mod fixture {
                     pending_session_groups: Default::default(),
                     pull_warning: None,
                     sync_notice: None,
+                    pairing_alert: Default::default(),
                     main_tab: MainTab::Claude,
                     browser_status: String::new(),
                     scratch_pad: None,
                     new_session_modal: None,
+                    remote_ui: Default::default(),
                     sidebar_filter_input: input(cx),
                     reader_find_input: input(cx),
                     file_palette: None,
@@ -1117,6 +1127,7 @@ pub(crate) mod fixture {
                     // depend on startup having installed the global.
                     platform: crate::platform::Platform::detect(),
                     remote: crate::remote::RemoteService::offline(&Default::default()),
+                    remote_tabs: Default::default(),
                     capture_ui_requested: false,
                     status_feed: Default::default(),
                 }

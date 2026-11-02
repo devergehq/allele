@@ -201,6 +201,43 @@ fn write_bytes(tv: &gpui::WeakEntity<TerminalView>, bytes: &[u8], cx: &mut gpui:
     })
 }
 
+/// A handle a remote screen stream mirrors `session_id` from (DEV-1165).
+/// `None` when the session is unknown or has no terminal, as for
+/// [`with_terminal`].
+pub(crate) fn mirror_of(
+    state: &AppState,
+    session_id: &str,
+    cx: &Context<AppState>,
+) -> Option<std::sync::Arc<dyn crate::terminal::mirror::MirrorTerm>> {
+    let mut found: Option<std::sync::Arc<dyn crate::terminal::mirror::MirrorTerm>> = None;
+    with_terminal(state, session_id, cx, |terminal| {
+        found = Some(std::sync::Arc::new(terminal.mirror_handle()));
+    });
+    found
+}
+
+/// Resize a session's terminal to a paired machine's window (DEV-1167). The
+/// session's own view keeps its local size and restores it on the next local
+/// keystroke or click. `false` when there is no such session or terminal.
+pub(crate) fn fit_to_remote(
+    state: &AppState,
+    session_id: &str,
+    columns: u16,
+    lines: u16,
+    cx: &mut Context<AppState>,
+) -> bool {
+    let Some(view) = state
+        .projects
+        .iter()
+        .flat_map(|p| p.sessions.iter())
+        .find(|s| s.id == session_id)
+        .and_then(|s| s.terminal_view.clone())
+    else {
+        return false;
+    };
+    view.update(cx, |view, cx| view.fit_to_remote(columns, lines, cx))
+}
+
 /// Run `f` against a session's PTY. Returns false when the session is unknown
 /// or has no terminal yet — still being cloned, or suspended — which callers
 /// treat as "not delivered" rather than as an error.

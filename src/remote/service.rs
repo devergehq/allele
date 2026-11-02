@@ -23,6 +23,7 @@
 //! everything that touches the network runs on the shared tokio runtime.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -35,7 +36,7 @@ use tokio::time::Instant;
 
 use super::control::{ControlContext, HostName, RemoteDispatch};
 use super::endpoint::Endpoint;
-use super::follow::{Follower, HostFeeds};
+use super::follow::{CallError, Follower, HostFeeds, OpCall};
 use super::identity::LocalIdentity;
 use super::iroh_transport::IrohTransport;
 use super::link::ReconnectPolicy;
@@ -45,7 +46,9 @@ use super::pairing::{
 };
 use super::peers::TrustedPeer;
 use super::registry::PeerRegistry;
+use super::screen::ScreenSource;
 use super::transport::{PeerId, PeerTransport, TransportConfig};
+use crate::dispatch::protocol::{Request, Response};
 use crate::errors::{AlleleError, Result};
 use crate::platform::SecretStore;
 use crate::repositories::{JsonFilePeersRepo, PeersRepository};
@@ -172,6 +175,10 @@ struct Inner {
     /// What admitted peers' requests are answered by (DEV-1161).
     control: ControlContext,
     feeds: HostFeeds,
+    /// Each running follower's op queue (DEV-1168). Mirrors
+    /// `Life.followers`, but under a plain lock, so a click's call never waits
+    /// behind a reconcile holding `life`.
+    ops: Mutex<HashMap<PeerId, tokio::sync::mpsc::Sender<OpCall>>>,
     follow_policy: ReconnectPolicy,
     config: Mutex<Option<TransportConfig>>,
     /// When the relay setting last changed, for [`RELAY_SETTLE`].
@@ -220,6 +227,7 @@ impl RemoteService {
             binder,
             control,
             feeds: HostFeeds::default(),
+            ops: Mutex::default(),
             follow_policy: ReconnectPolicy::default(),
             config: Mutex::new(config),
             relay_changed_at: Mutex::new(None),
@@ -243,19 +251,23 @@ impl RemoteService {
     /// identity, and iroh. Starts listening at once if the switch is on.
     ///
     /// `dispatch` answers paired machines' requests — in the app, the same
-    /// queue `control.sock` feeds. `computer_name` is this Mac's name, looked
+    /// queue `control.sock` feeds. `screens` finds a session's terminal for
+    /// a screen stream (DEV-1165). `computer_name` is this Mac's name, looked
     /// up only when a peer first needs it.
     pub(crate) fn production(
         secrets: Arc<dyn SecretStore>,
         settings: &RemoteSettings,
         dispatch: Arc<dyn RemoteDispatch>,
+        screens: Arc<dyn ScreenSource>,
         status_feed: StatusFeed,
         computer_name: impl Fn() -> Option<String> + Send + Sync + 'static,
     ) -> Self {
         let control = ControlContext {
             dispatch,
             host_name: HostName::new(settings.machine_name.clone(), computer_name),
+            screens,
             status_feed,
+            viewers: Default::default(),
         };
         Self::new(
             crate::rt::handle(),
@@ -286,6 +298,12 @@ impl RemoteService {
         )
     }
 
+    /// The paired machines, in pairing order. Cheaper than [`Self::status`]
+    /// for a caller that draws every frame (the MACHINES sidebar, DEV-1163).
+    pub fn paired(&self) -> Vec<TrustedPeer> {
+        self.inner.registry.list()
+    }
+
     #[cfg(test)]
     pub fn registry(&self) -> &PeerRegistry {
         &self.inner.registry
@@ -307,9 +325,93 @@ impl RemoteService {
     /// What every paired host last told us about its sessions (DEV-1162).
     /// Read by the Machines sidebar (DEV-1163) and remote attention
     /// (DEV-1164).
-    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub fn hosts(&self) -> &HostFeeds {
         &self.inner.feeds
+    }
+
+    /// Call a paired host's dispatch API over the control stream its
+    /// follower already holds (DEV-1168).
+    ///
+    /// **For the human's UI only** — the New Session picker and the remote
+    /// session menu. Nothing on `control.sock` or the MCP server reaches this
+    /// (`tests/architecture.rs` checks), so an agent cannot start or remove
+    /// sessions on another Mac (DEV-1187).
+    ///
+    /// Runs on the service's runtime; the returned future can be awaited from
+    /// any executor. A host refusal (cap, unknown project, permission) is an
+    /// `Ok(Response::Error)`; `Err` means the host never answered.
+    pub fn call(
+        &self,
+        peer: PeerId,
+        op: Request,
+    ) -> impl Future<Output = std::result::Result<Response, CallError>> + Send + 'static {
+        let deadline = call_deadline(&op);
+        self.call_within(peer, op, deadline)
+    }
+
+    /// [`Self::call`] with an explicit deadline.
+    pub(crate) fn call_within(
+        &self,
+        peer: PeerId,
+        op: Request,
+        deadline: Duration,
+    ) -> impl Future<Output = std::result::Result<Response, CallError>> + Send + 'static {
+        let inner = Arc::clone(&self.inner);
+        let task = self.inner.rt.spawn(async move {
+            let queue = lock(&inner.ops).get(&peer).cloned();
+            let Some(queue) = queue else {
+                return Err(CallError::Unreachable);
+            };
+            let (reply, answer) = oneshot::channel();
+            queue.try_send(OpCall { op, reply }).map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => CallError::Busy,
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => CallError::Unreachable,
+            })?;
+            match tokio::time::timeout(deadline, answer).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(CallError::Dropped),
+                Err(_) => Err(CallError::TimedOut),
+            }
+        });
+        async move { task.await.unwrap_or(Err(CallError::Dropped)) }
+    }
+
+    /// The name a trusted peer gave when it paired, or `None` if it is not
+    /// (or no longer) trusted. Display only; peer-chosen text.
+    pub fn peer_name(&self, id: PeerId) -> Option<String> {
+        self.inner.registry.get(id).map(|p| p.machine_name)
+    }
+
+    /// Which paired machines are attached to which local sessions, for the
+    /// session tab's "<Machine> is viewing" chip (DEV-1166).
+    pub fn viewers(&self) -> super::viewers::Viewers {
+        self.inner.control.viewers.clone()
+    }
+
+    /// Mirror one of `peer`'s sessions for a tab (DEV-1167). It attaches over
+    /// the peer's control stream whenever one is up, reattaching after each
+    /// reconnect, until the returned screen is dropped.
+    /// Resize one of `peer`'s sessions to this Mac's window ("Fit to this
+    /// window", DEV-1167). Best effort: the host checks `control` and that
+    /// the session is attached on this stream; the new size arrives as the
+    /// next snapshot. `false` when there is no control stream to send it on.
+    pub fn fit_screen(&self, peer: PeerId, session_id: &str, columns: u16, lines: u16) -> bool {
+        let link = self.inner.feeds.screen_link(peer).borrow().clone();
+        link.is_some_and(|link| {
+            link.try_send(super::wire::Frame::Resize {
+                session_id: session_id.to_string(),
+                columns,
+                lines,
+            })
+        })
+    }
+
+    pub fn open_screen(&self, peer: PeerId, session_id: &str) -> super::viewer::RemoteScreen {
+        super::viewer::RemoteScreen::open(
+            &self.inner.rt,
+            self.inner.feeds.screen_link(peer),
+            session_id,
+        )
     }
 
     pub fn status(&self) -> RemoteStatus {
@@ -620,13 +722,14 @@ impl Inner {
             .copied()
             .collect();
         for id in gone {
+            lock(&self.ops).remove(&id);
             if let Some(f) = life.followers.remove(&id) {
                 f.stop().await;
             }
             self.feeds.forget(id);
         }
         for id in trusted {
-            life.followers.entry(id).or_insert_with(|| {
+            let follower = life.followers.entry(id).or_insert_with(|| {
                 Follower::spawn(
                     &self.rt,
                     Arc::clone(&transport),
@@ -636,6 +739,7 @@ impl Inner {
                     Arc::clone(&self.control.host_name),
                 )
             });
+            lock(&self.ops).insert(id, follower.ops());
         }
     }
 
@@ -695,6 +799,7 @@ impl Inner {
             // Unpairing the last peer is one way to get here: a peer that is
             // no longer trusted is forgotten, not left listed as unreachable.
             let trusted = self.registry.list();
+            lock(&self.ops).clear();
             life.followers_on = None;
             for (id, f) in life.followers.drain() {
                 f.stop().await;
@@ -716,6 +821,21 @@ impl Inner {
                 self.bump_ui();
             }
         }
+    }
+}
+
+/// How long to wait for a host's answer. A create clones a workspace and the
+/// host's drain allows it five minutes (`dispatch::server::REPLY_TIMEOUT`);
+/// the rest answer in seconds, and a human should not wait minutes to learn
+/// that they won't.
+pub(crate) fn call_deadline(op: &Request) -> Duration {
+    match op {
+        Request::SessionsCreate(_) => Duration::from_secs(330),
+        Request::SessionsDiscard { .. } => Duration::from_secs(120),
+        Request::ProjectsList
+        | Request::SessionsList
+        | Request::SessionsStatus { .. }
+        | Request::SessionsInterrupt { .. } => Duration::from_secs(30),
     }
 }
 
