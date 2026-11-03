@@ -6,6 +6,8 @@
 //!   (macOS) vs a tracing-warning stub.
 //! - [`SystemShell`] — `open(1)`, `afplay`, `osascript` display dialog
 //!   (macOS) vs portable `xdg-open`/no-op fallbacks.
+//! - [`PowerManagement`] — an IOKit power assertion that keeps the machine
+//!   out of idle sleep (macOS) vs a logged no-op (DEV-1156).
 //!
 //! Adapters DELEGATE to existing `crate::clone`, `crate::browser`,
 //! `crate::hooks` modules rather than duplicating logic. This is
@@ -19,6 +21,8 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 pub(crate) mod apple;
+#[cfg(target_os = "macos")]
+pub(crate) mod apple_power;
 pub(crate) mod unsupported;
 
 /// APFS-style directory clone. macOS uses `clonefile(2)` for
@@ -82,6 +86,22 @@ pub(crate) trait SystemShell: Send + Sync {
     fn show_fatal_dialog(&self, title: &str, body: &str);
 }
 
+/// Keeping the machine awake while work is running (DEV-1156).
+///
+/// The adapter owns the assertion it holds, so callers only ever say what
+/// they want — awake or not — and never juggle an OS handle. Both methods
+/// are idempotent: asking for the state already in force does nothing, which
+/// is what lets a poller call [`Self::set_prevent_idle_sleep`] every tick.
+pub(crate) trait PowerManagement: Send + Sync {
+    /// Hold (`true`) or release (`false`) an assertion that prevents *idle
+    /// system* sleep. The display is still free to sleep on its own schedule.
+    fn set_prevent_idle_sleep(&self, prevent: bool) -> crate::errors::Result<()>;
+
+    /// True while this adapter holds an assertion.
+    #[allow(dead_code)] // read by tests and diagnostics
+    fn is_preventing_idle_sleep(&self) -> bool;
+}
+
 /// Bundle of trait objects representing the current platform's
 /// adapters. Stored once globally via [`Platform::install_global`];
 /// subsystems get cheap `Arc` clones to pass into background tasks.
@@ -91,6 +111,7 @@ pub(crate) struct Platform {
     #[allow(dead_code)] // held for phase-17 migration
     pub(crate) browser: Arc<dyn BrowserIntegration>,
     pub(crate) shell: Arc<dyn SystemShell>,
+    pub(crate) power: Arc<dyn PowerManagement>,
 }
 
 impl Platform {
@@ -104,6 +125,7 @@ impl Platform {
                 clone: Arc::new(apple::AppleCloneBackend),
                 browser: Arc::new(apple::AppleBrowser),
                 shell: Arc::new(apple::AppleShell),
+                power: Arc::new(apple_power::ApplePower::default()),
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -112,6 +134,7 @@ impl Platform {
                 clone: Arc::new(unsupported::FullCopyCloneBackend),
                 browser: Arc::new(unsupported::UnsupportedBrowser),
                 shell: Arc::new(unsupported::PortableSystemShell),
+                power: Arc::new(unsupported::UnsupportedPower::default()),
             }
         }
     }
@@ -138,6 +161,7 @@ impl Platform {
             clone: Arc::clone(&self.clone),
             browser: Arc::clone(&self.browser),
             shell: Arc::clone(&self.shell),
+            power: Arc::clone(&self.power),
         }
     }
 }
