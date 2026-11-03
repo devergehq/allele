@@ -288,6 +288,28 @@ impl AttentionContext {
     }
 }
 
+/// Away's per-session record (DEV-1157). Lives on the session, not in a map
+/// on `AppState`, so it goes away with the session and cannot go stale.
+///
+/// Both pids are the agent's child pid. Keying on the process rather than on a
+/// flag is what makes a resume start clean: a respawned agent has a new pid,
+/// so it counts as not-yet-heard-from and not-yet-sent-to without anyone
+/// remembering to reset anything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RemoteControlState {
+    /// Away asked for remote control while it was not safe to type; deliver
+    /// on the first poll tick at which it is.
+    pub queued: bool,
+    /// The process `/remote-control` was delivered to. A second delivery
+    /// opens Claude Code's Remote Control menu and leaves the session in it.
+    pub sent_to_pid: Option<u32>,
+    /// The process Allele has received a hook event from. Until then a new
+    /// session's `Idle` is only the initial value, and the agent may be
+    /// sitting on a startup dialog (MCP approval, onboarding) where Enter
+    /// picks an option.
+    pub heard_from_pid: Option<u32>,
+}
+
 /// Status of a session
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionStatus {
@@ -700,6 +722,8 @@ pub struct Session {
     /// the hook payload when a Notification fires (AwaitingInput), cleared
     /// when the session transitions to Running or any non-attention state.
     pub attention_context: Option<AttentionContext>,
+    /// What Away has done for this session's agent process (DEV-1157).
+    pub remote_control: RemoteControlState,
     /// Transient status line from the allele.json `startup` command.
     /// Updated line-by-line as the script runs, cleared when it finishes.
     pub startup_status: Option<String>,
@@ -779,6 +803,7 @@ impl Session {
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
+            remote_control: RemoteControlState::default(),
             startup_status: None,
             operation_error: None,
             operation_result: None,
@@ -840,6 +865,7 @@ impl Session {
             naming_suggestions: None,
             last_pre_tool_use: None,
             attention_context: None,
+            remote_control: RemoteControlState::default(),
             startup_status: None,
             operation_error: None,
             operation_result: None,
