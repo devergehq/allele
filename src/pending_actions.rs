@@ -1349,6 +1349,12 @@ impl AppState {
                 };
                 snapshot.save();
             }
+            SettingsAction::UpdateKeepAwake(enabled) => {
+                *skip_refocus = true;
+                self.user_settings.keep_awake_while_working = enabled;
+                self.mark_settings_dirty();
+                self.reconcile_keep_awake();
+            }
             SettingsAction::UpdateFontSize(size) => {
                 *skip_refocus = true;
                 let new_size = clamp_font_size(size);

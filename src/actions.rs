@@ -331,6 +331,10 @@ pub enum SettingsAction {
     /// Toggle "promote attention-needed sessions to top of list".
     /// Emitted by the Settings window; persisted immediately.
     UpdatePromoteAttentionSessions(bool),
+    /// Toggle "keep this Mac awake while sessions are working" (DEV-1156).
+    /// Reconciles the power assertion immediately, so turning it off
+    /// releases a held assertion without waiting for the poller.
+    UpdateKeepAwake(bool),
     /// Replace the global terminal font size and persist. Emitted by the
     /// Settings window, by Cmd+=/Cmd+- (as a clamped new value), and by
     /// Cmd+0 (reset to DEFAULT_FONT_SIZE). The handler clamps again,

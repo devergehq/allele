@@ -112,6 +112,9 @@ impl Section {
                 "pull",
                 "attention",
                 "promote",
+                "sleep",
+                "awake",
+                "power",
                 "workspace",
                 "clone",
             ],
@@ -231,6 +234,7 @@ impl SettingsWindowState {
                 settings.session_cleanup_paths.clone(),
                 settings.git_pull_before_new_session,
                 settings.promote_attention_sessions,
+                settings.keep_awake_while_working,
             ),
             editor: EditorSection::new(
                 cx,

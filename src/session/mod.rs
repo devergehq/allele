@@ -7,6 +7,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use crate::terminal::TerminalView;
 
+pub(crate) mod keep_awake;
+
 /// How much of the project's orchestration a session runs (DEV-415).
 ///
 /// DEV-400 shipped this as a single `skip_orchestration` bool, which bundled
