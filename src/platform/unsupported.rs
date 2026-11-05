@@ -177,3 +177,29 @@ impl super::SecretStore for NoSecretStore {
         )))
     }
 }
+
+/// No power-assertion adapter off macOS. The machine may idle into sleep
+/// mid-session; we say so once each time keeping it awake is first asked for,
+/// rather than on every poll tick (DEV-1156).
+#[derive(Default)]
+pub(crate) struct UnsupportedPower {
+    wanted: std::sync::atomic::AtomicBool,
+}
+
+impl super::PowerManagement for UnsupportedPower {
+    fn set_prevent_idle_sleep(&self, prevent: bool) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let was = self.wanted.swap(prevent, Ordering::Relaxed);
+        if prevent && !was {
+            tracing::warn!(
+                "UnsupportedPower: no idle-sleep adapter for this OS — \
+                 the machine may sleep while sessions are working"
+            );
+        }
+        Ok(())
+    }
+
+    fn is_preventing_idle_sleep(&self) -> bool {
+        false
+    }
+}
