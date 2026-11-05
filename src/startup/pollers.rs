@@ -20,6 +20,8 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
     spawn_viewers_redraw(cx);
     // Paired Macs' sessions waiting for the user: notify and redraw (DEV-1164).
     crate::remote_attention::spawn(cx);
+    // Hold off idle sleep while any session is working (DEV-1156).
+    crate::session::keep_awake::spawn(cx);
 
     // Spawn the hook-event polling task. Runs for the life
     // of the app, reads ~/.allele/events/*.jsonl every
@@ -46,7 +48,9 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
             // on the foreground because it walks AppState, but
             // it touches no disk — the pruning it feeds does,
             // and that happens below, off-thread.
-            let Ok(live) = this.read_with(cx, |this, _cx| this.live_event_ids()) else {
+            let Ok((live, away_pending)) =
+                this.read_with(cx, |this, _cx| (this.live_event_ids(), this.away_pending()))
+            else {
                 break; // AppState dropped — app is exiting
             };
 
@@ -71,7 +75,7 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                 .await;
             watcher = returned;
 
-            if events.is_empty() {
+            if events.is_empty() && !away_pending {
                 continue;
             }
 
@@ -84,6 +88,10 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                     // `mark_state_dirty`; this catches the rest (an attention
                     // kind changing while the status holds) on the same tick.
                     this.publish_status_feed();
+                    // After the events, so a queued Away sees this tick's
+                    // status. Covers interrupted turns too: `poll_once` above
+                    // has already moved those out of `Running` (DEV-1157).
+                    this.drain_away_queue(cx);
                 })
                 .is_err()
             {
