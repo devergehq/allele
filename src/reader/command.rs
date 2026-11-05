@@ -25,6 +25,7 @@ enum Cmd {
     NewSession,
     SwitchSession(SessionCursor),
     DiscardChanges,
+    Away,
 }
 
 /// A palette row: what it says, whether it can run, and what it does.
@@ -162,6 +163,7 @@ impl AppState {
                 }
             }
             Cmd::SwitchSession(cursor) => self.active = Some(cursor),
+            Cmd::Away => self.away_and_report(cx),
             Cmd::DiscardChanges => {
                 // Open the standard discard confirmation prompt — safe; the
                 // actual discard still requires the user to confirm.
@@ -314,6 +316,16 @@ impl AppState {
             true,
             discard_disabled,
             Cmd::DiscardChanges,
+        );
+
+        push(
+            "Away — Remote Control for All Sessions",
+            Some("Sends /remote-control to every live Claude session"),
+            "away remote control phone mobile lunch rc leave",
+            None,
+            false,
+            None,
+            Cmd::Away,
         );
 
         // ── Switch project / session ──────────────────────────────

@@ -215,6 +215,17 @@ pub(crate) fn register_all(cx: &mut Context<AppState>) {
                 .ok();
         }
     });
+    App::on_action::<crate::away::AwayAction>(cx, {
+        let handle = toggle_handle.clone();
+        move |_, cx| {
+            handle
+                .update(cx, |this: &mut AppState, cx| {
+                    this.pending_action = Some(SessionAction::RequestRemoteControlAll.into());
+                    cx.notify();
+                })
+                .ok();
+        }
+    });
     App::on_action::<CaptureUi>(cx, {
         let handle = toggle_handle.clone();
         move |_, cx| {
