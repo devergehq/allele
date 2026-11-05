@@ -1,4 +1,5 @@
-//! Sessions settings section — clone cleanup paths + session-creation toggles.
+//! Sessions settings section — clone cleanup paths, session-creation toggles,
+//! and keep-awake (DEV-1156).
 
 use gpui::*;
 
@@ -9,12 +10,13 @@ use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::theme;
 use crate::AppState;
 
-/// Owns the cleanup-path list, its draft input, and the two session toggles.
+/// Owns the cleanup-path list, its draft input, and the session toggles.
 pub(super) struct SessionsSection {
     cleanup_paths: Vec<String>,
     draft_input: Entity<TextInput>,
     git_pull_before_new_session: bool,
     promote_attention_sessions: bool,
+    keep_awake_while_working: bool,
 }
 
 impl SessionsSection {
@@ -23,6 +25,7 @@ impl SessionsSection {
         initial_paths: Vec<String>,
         git_pull_before_new_session: bool,
         promote_attention_sessions: bool,
+        keep_awake_while_working: bool,
     ) -> Self {
         let draft_input =
             cx.new(|cx| TextInput::new(cx, "", "Add a path (e.g. tmp/pids/server.pid)"));
@@ -40,6 +43,7 @@ impl SessionsSection {
             draft_input,
             git_pull_before_new_session,
             promote_attention_sessions,
+            keep_awake_while_working,
         }
     }
 
@@ -101,6 +105,15 @@ impl SessionsSection {
         app.update(cx, |state: &mut AppState, cx| {
             state.pending_action =
                 Some(crate::SettingsAction::UpdatePromoteAttentionSessions(value).into());
+            cx.notify();
+        })
+        .ok();
+    }
+
+    fn push_keep_awake(&self, app: &WeakEntity<AppState>, cx: &mut Context<SettingsWindowState>) {
+        let value = self.keep_awake_while_working;
+        app.update(cx, |state: &mut AppState, cx| {
+            state.pending_action = Some(crate::SettingsAction::UpdateKeepAwake(value).into());
             cx.notify();
         })
         .ok();
@@ -200,6 +213,31 @@ impl SessionsSection {
                     .child("Move attention-needed sessions to top of list"),
             );
 
+        let keep_awake_enabled = self.keep_awake_while_working;
+        let keep_awake_toggle = div()
+            .id("keep-awake-toggle")
+            .cursor_pointer()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.sessions.keep_awake_while_working =
+                        !this.sessions.keep_awake_while_working;
+                    this.sessions.push_keep_awake(&this.app, cx);
+                    cx.notify();
+                }),
+            )
+            .child(toggle_switch("keep-awake-knob", keep_awake_enabled))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme().text_primary)
+                    .child("Keep this Mac awake while sessions are working"),
+            );
+
         let add_button = div()
             .id("cleanup-add")
             .cursor_pointer()
@@ -243,7 +281,16 @@ impl SessionsSection {
             .p(px(20.0))
             .gap(px(12.0))
             .child(section_title("Sessions"))
-            .child(card().child(pull_toggle).child(promote_toggle))
+            .child(
+                card()
+                    .child(pull_toggle)
+                    .child(promote_toggle)
+                    .child(keep_awake_toggle),
+            )
+            .child(section_note(
+                "Keep awake stops the Mac idling into sleep while any session \
+                     is running or waiting for input. The display still sleeps.",
+            ))
             .child(section_note(
                 "Cleanup paths — deleted from each new session clone. \
                      Useful for stale runtime files that the parent working \

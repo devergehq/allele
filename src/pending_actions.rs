@@ -117,6 +117,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         match action {
+            SessionAction::RequestRemoteControlAll => self.away_and_report(cx),
             SessionAction::NewSessionInActiveProject => {
                 if let Some(active) = self.active {
                     self.add_session_to_project(active.project_idx, window, cx);
@@ -1348,6 +1349,12 @@ impl AppState {
                     ..self.user_settings.clone()
                 };
                 snapshot.save();
+            }
+            SettingsAction::UpdateKeepAwake(enabled) => {
+                *skip_refocus = true;
+                self.user_settings.keep_awake_while_working = enabled;
+                self.mark_settings_dirty();
+                self.reconcile_keep_awake();
             }
             SettingsAction::UpdateFontSize(size) => {
                 *skip_refocus = true;
