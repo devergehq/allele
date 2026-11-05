@@ -252,6 +252,12 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub promote_attention_sessions: bool,
 
+    /// When true, Allele holds a power assertion that prevents idle system
+    /// sleep while any session is Running or AwaitingInput. The display still
+    /// sleeps. Default: ON — a sleeping host stops every agent (DEV-1156).
+    #[serde(default = "default_true")]
+    pub keep_awake_while_working: bool,
+
     /// When true, the sidebar shows only sessions with a live agent attached
     /// (see `SessionStatus::is_active`) and hides any project left with
     /// nothing to show. Suspended/Done sessions are hidden, not deleted —
@@ -487,6 +493,7 @@ impl Default for Settings {
             tool_visibility: std::collections::HashMap::new(),
             git_pull_before_new_session: false,
             promote_attention_sessions: true,
+            keep_awake_while_working: true,
             sidebar_active_only: false,
             attention_bar_collapsed: false,
             naming: NamingConfig::default(),
