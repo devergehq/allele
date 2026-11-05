@@ -4,6 +4,7 @@ mod agents;
 mod app_state;
 mod assets;
 mod attention_bar;
+mod away;
 mod base_infra;
 mod browser;
 mod changes;

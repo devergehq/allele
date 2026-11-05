@@ -8,6 +8,8 @@
 //!   (macOS) vs portable `xdg-open`/no-op fallbacks.
 //! - [`SecretStore`] — the macOS Keychain vs a store that refuses, so a
 //!   secret is never quietly written to a file instead (DEV-1159).
+//! - [`PowerManagement`] — an IOKit power assertion that keeps the machine
+//!   out of idle sleep (macOS) vs a logged no-op (DEV-1156).
 //!
 //! Adapters DELEGATE to existing `crate::clone`, `crate::browser`,
 //! `crate::hooks` modules rather than duplicating logic. This is
@@ -21,6 +23,8 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 pub(crate) mod apple;
+#[cfg(target_os = "macos")]
+pub(crate) mod apple_power;
 pub(crate) mod unsupported;
 
 /// APFS-style directory clone. macOS uses `clonefile(2)` for
@@ -102,6 +106,22 @@ pub(crate) trait SecretStore: Send + Sync {
     fn store(&self, service: &str, account: &str, secret: &[u8]) -> crate::errors::Result<()>;
 }
 
+/// Keeping the machine awake while work is running (DEV-1156).
+///
+/// The adapter owns the assertion it holds, so callers only ever say what
+/// they want — awake or not — and never juggle an OS handle. Both methods
+/// are idempotent: asking for the state already in force does nothing, which
+/// is what lets a poller call [`Self::set_prevent_idle_sleep`] every tick.
+pub(crate) trait PowerManagement: Send + Sync {
+    /// Hold (`true`) or release (`false`) an assertion that prevents *idle
+    /// system* sleep. The display is still free to sleep on its own schedule.
+    fn set_prevent_idle_sleep(&self, prevent: bool) -> crate::errors::Result<()>;
+
+    /// True while this adapter holds an assertion.
+    #[allow(dead_code)] // read by tests and diagnostics
+    fn is_preventing_idle_sleep(&self) -> bool;
+}
+
 /// Bundle of trait objects representing the current platform's
 /// adapters. Stored once globally via [`Platform::install_global`];
 /// subsystems get cheap `Arc` clones to pass into background tasks.
@@ -112,6 +132,7 @@ pub(crate) struct Platform {
     pub(crate) browser: Arc<dyn BrowserIntegration>,
     pub(crate) shell: Arc<dyn SystemShell>,
     pub(crate) secrets: Arc<dyn SecretStore>,
+    pub(crate) power: Arc<dyn PowerManagement>,
 }
 
 impl Platform {
@@ -126,6 +147,7 @@ impl Platform {
                 browser: Arc::new(apple::AppleBrowser),
                 shell: Arc::new(apple::AppleShell),
                 secrets: Arc::new(apple::AppleKeychain),
+                power: Arc::new(apple_power::ApplePower::default()),
             }
         }
         #[cfg(not(target_os = "macos"))]
@@ -135,6 +157,7 @@ impl Platform {
                 browser: Arc::new(unsupported::UnsupportedBrowser),
                 shell: Arc::new(unsupported::PortableSystemShell),
                 secrets: Arc::new(unsupported::NoSecretStore),
+                power: Arc::new(unsupported::UnsupportedPower::default()),
             }
         }
     }
@@ -162,6 +185,7 @@ impl Platform {
             browser: Arc::clone(&self.browser),
             shell: Arc::clone(&self.shell),
             secrets: Arc::clone(&self.secrets),
+            power: Arc::clone(&self.power),
         }
     }
 }
