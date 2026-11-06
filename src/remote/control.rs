@@ -225,6 +225,8 @@ pub struct ControlContext {
     pub status_feed: StatusFeed,
     /// Finds a session's terminal for `attach` (DEV-1165).
     pub screens: Arc<dyn ScreenSource>,
+    /// Who is attached to which session, for the host's tab chip (DEV-1166).
+    pub viewers: super::viewers::Viewers,
 }
 
 impl ControlContext {
@@ -236,6 +238,7 @@ impl ControlContext {
             host_name: HostName::new(None, || None),
             status_feed: StatusFeed::new(),
             screens: Arc::new(super::screen::NoScreens),
+            viewers: Default::default(),
         }
     }
 }
@@ -343,6 +346,7 @@ async fn run(
         Arc::clone(conn),
         registry.clone(),
         Arc::clone(&ctx.screens),
+        ctx.viewers.clone(),
         out.clone(),
     );
     let ended = loop {

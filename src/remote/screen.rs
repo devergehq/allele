@@ -15,6 +15,9 @@
 //!   screen: resync                      ───►
 //!                                       ◄───       screen {snapshot}
 //!   control: detach, or close the stream ───►    stops
+//!
+//!   screen: input {text, paste?}        ───►     control? (read now) → PTY
+//!                                       ◄───       input_refused {…} if not
 //! ```
 //!
 //! The host sends screen *state*, not PTY bytes (see `terminal::mirror`): a
@@ -26,6 +29,14 @@
 //! listener's first-frame routing; `attach` arrives on the control stream and
 //! [`Attachments`] (one per control stream) owns the streams it started.
 //! `view` is read live: at attach, and on every tick while streaming.
+//!
+//! **Remote input** (DEV-1166) rides the same stream, client to host. It is a
+//! human typing on the other Mac, so it is not gated like `away::decide`;
+//! but `control` is read from the registry for every `input` frame, and a
+//! frame without it is dropped and answered `input_refused`. Input is handled
+//! by the stream's reader, not the frame loop, so a keystroke never waits
+//! behind screen frames queued for a slow link. While a stream is open the
+//! host lists its machine in [`Viewers`] for the tab chip.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,10 +53,12 @@ use tokio::time::{interval, sleep_until, timeout, Instant, MissedTickBehavior};
 use super::control::{allows, Need};
 use super::registry::PeerRegistry;
 use super::transport::{PeerConnection, PeerId, PeerStream};
+use super::viewers::Viewers;
 use super::wire::{self, read_frame, read_frame_within, write_frame, Frame, MAX_PEER_FRAME};
 use crate::dispatch::protocol::ErrorCode;
 use crate::dispatch::server::ScreenLookup;
 use crate::errors::{AlleleError, Result};
+use crate::terminal::keymap::paste_bytes;
 use crate::terminal::mirror::{
     DiffProducer, MirrorTerm, MirroredGrid, Poll, ScreenFrame, MIN_FRAME_INTERVAL,
 };
@@ -63,6 +76,32 @@ pub const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the host waits for the foreground thread to find a session.
 const LOOKUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Most text in one `input` frame. A keystroke is a few bytes; this bounds a
+/// paste. JSON escapes a control byte to six, so even a worst-case frame
+/// stays under `MAX_PEER_FRAME`. The client refuses a larger paste before
+/// sending it.
+pub const MAX_INPUT_BYTES: usize = 64 * 1024;
+
+/// How fast the host writes remote input to a PTY, at most. Far above any
+/// typist, and it keeps a peer from queueing unbounded input behind a
+/// program that has stopped reading.
+const INPUT_BYTES_PER_SEC: u64 = 1024 * 1024;
+
+/// The least time between two input writes, however small.
+const MIN_INPUT_INTERVAL: Duration = Duration::from_millis(1);
+
+/// Input frames the client queues before `send_input` reports the link as
+/// not keeping up.
+const INPUT_QUEUE: usize = 64;
+
+/// Input frames the host reads ahead of the PTY writes. Once full, the
+/// reader stops and the link pushes back on the peer.
+const INPUT_BACKLOG: usize = 16;
+
+/// What the client shows when the host drops its input for want of `control`.
+const NEEDS_CONTROL: &str = "typing needs control permission; grant it to this Mac in the \
+                             other Mac's Settings → Machines";
 
 // ── host: finding a session's terminal ───────────────────────────────────
 
@@ -142,6 +181,7 @@ pub(super) struct Attachments {
     conn: Arc<dyn PeerConnection>,
     registry: PeerRegistry,
     source: Arc<dyn ScreenSource>,
+    viewers: Viewers,
     /// The control stream's outbox, for `attach_failed`.
     out: mpsc::Sender<Frame>,
     live: HashMap<String, AbortOnDrop>,
@@ -152,12 +192,14 @@ impl Attachments {
         conn: Arc<dyn PeerConnection>,
         registry: PeerRegistry,
         source: Arc<dyn ScreenSource>,
+        viewers: Viewers,
         out: mpsc::Sender<Frame>,
     ) -> Self {
         Self {
             conn,
             registry,
             source,
+            viewers,
             out,
             live: HashMap::new(),
         }
@@ -240,6 +282,8 @@ impl Attachments {
             conn: Arc::clone(&self.conn),
             registry: self.registry.clone(),
             peer,
+            machine_name: trusted.machine_name.clone(),
+            viewers: self.viewers.clone(),
             session_id: session_id.clone(),
             term,
         };
@@ -295,6 +339,9 @@ struct Streamer {
     conn: Arc<dyn PeerConnection>,
     registry: PeerRegistry,
     peer: PeerId,
+    /// The peer's name as paired, for the host's tab chip.
+    machine_name: String,
+    viewers: Viewers,
     session_id: String,
     term: Arc<dyn MirrorTerm>,
 }
@@ -327,13 +374,44 @@ impl Streamer {
         // the select below.
         // `hung_up` resolves when the reader stops, i.e. the client closed
         // the stream, which must stop a write that is waiting on that client.
+        //
+        // `input` frames are handled by the reader itself (see [`Input`]), so
+        // typing is never queued behind a scrollback page or a slow write.
+        // Its refusals come back through `notices` for this loop to write.
+        //
+        // Listed on the host's tab before any input can be read, and until
+        // this stream ends, however it ends.
+        let _viewing = self
+            .viewers
+            .register(&self.session_id, self.peer, &self.machine_name);
         let (requests_tx, mut requests) = mpsc::channel::<Frame>(4);
+        let (inputs_tx, mut inputs) = mpsc::channel::<(String, bool)>(INPUT_BACKLOG);
+        let (notices_tx, mut notices) = mpsc::channel::<Frame>(1);
         let (reader_alive, mut hung_up) = oneshot::channel::<()>();
+        let mut input = Input {
+            registry: self.registry.clone(),
+            peer: self.peer,
+            term: Arc::clone(&self.term),
+            notices: notices_tx,
+            next: Instant::now(),
+        };
+        // Input on a task of its own: pacing and a paste's `Term` lock wait
+        // hold up neither screen requests nor screen frames.
+        let _input = AbortOnDrop(tokio::spawn(async move {
+            while let Some((text, paste)) = inputs.recv().await {
+                input.deliver(text, paste).await;
+            }
+        }));
         let _reader = AbortOnDrop(tokio::spawn(async move {
             let _alive = reader_alive;
             let mut recv = recv;
-            while let Ok(frame) = read_frame(&mut recv).await {
-                if requests_tx.send(frame).await.is_err() {
+            // An admitted peer's limit: a paste is up to MAX_INPUT_BYTES.
+            while let Ok(frame) = read_frame_within(&mut recv, MAX_PEER_FRAME).await {
+                let sent = match frame {
+                    Frame::Input { text, paste } => inputs_tx.send((text, paste)).await.is_ok(),
+                    other => requests_tx.send(other).await.is_ok(),
+                };
+                if !sent {
                     break;
                 }
             }
@@ -368,6 +446,18 @@ impl Streamer {
         loop {
             let frames: Vec<ScreenFrame> = tokio::select! {
                 _ = self.conn.closed() => return None,
+                Some(notice) = notices.recv() => {
+                    tokio::select! {
+                        sent = write_frame(&mut send, &notice) => {
+                            if sent.is_err() {
+                                return None;
+                            }
+                        }
+                        _ = self.conn.closed() => return None,
+                        _ = &mut hung_up => return None,
+                    }
+                    continue;
+                }
                 request = requests.recv() => match request {
                     // The client closed the stream: that is a detach.
                     None => return None,
@@ -429,6 +519,69 @@ impl Streamer {
                 }
             }
         }
+    }
+}
+
+/// The host side of remote input on one screen stream (DEV-1166).
+struct Input {
+    registry: PeerRegistry,
+    peer: PeerId,
+    term: Arc<dyn MirrorTerm>,
+    /// To the stream's frame loop, which writes `input_refused`. Capacity
+    /// one: while a refusal is waiting, later ones are dropped, so a peer
+    /// typing into a read-only mirror cannot make the host queue replies.
+    notices: mpsc::Sender<Frame>,
+    /// When the next write may happen (see [`INPUT_BYTES_PER_SEC`]).
+    next: Instant,
+}
+
+impl Input {
+    /// Read live, from the registry, for every frame: `control` can be
+    /// granted or withdrawn while the mirror stays open.
+    fn controllable(&self) -> bool {
+        self.registry
+            .permissions(self.peer)
+            .is_some_and(|p| allows(p, Need::Control))
+    }
+
+    /// Write one `input` frame to the PTY, or drop it and say why.
+    async fn deliver(&mut self, text: String, paste: bool) {
+        // Every frame is paced, refused or not, by the bytes the peer sent;
+        // and before the check, so the permission read is the last thing
+        // before the write.
+        sleep_until(self.next).await;
+        let pace = Duration::from_micros(text.len() as u64 * 1_000_000 / INPUT_BYTES_PER_SEC);
+        self.next = Instant::now() + pace.max(MIN_INPUT_INTERVAL);
+        if text.len() > MAX_INPUT_BYTES {
+            let message = format!("input over {MAX_INPUT_BYTES} bytes was not sent");
+            return self.refuse(ErrorCode::BadRequest, message);
+        }
+        if !self.controllable() {
+            tracing::debug!("remote: {} input dropped: needs control", self.peer.short());
+            return self.refuse(ErrorCode::PermissionDenied, NEEDS_CONTROL.into());
+        }
+        let term = Arc::clone(&self.term);
+        let written = if paste {
+            // Reading the paste mode takes the `Term` lock, which the PTY
+            // reader can hold mid-chunk: wait for it off the runtime's
+            // worker threads. A keystroke needs no lock.
+            tokio::task::spawn_blocking(move || {
+                term.bracketed_paste()
+                    .is_some_and(|bracketed| term.write_input(&paste_bytes(&text, bracketed)))
+            })
+            .await
+            .unwrap_or(false)
+        } else {
+            term.write_input(text.as_bytes())
+        };
+        if !written {
+            let message = "the session no longer takes input".to_string();
+            self.refuse(ErrorCode::SessionNotFound, message);
+        }
+    }
+
+    fn refuse(&self, code: ErrorCode, message: String) {
+        let _ = self.notices.try_send(Frame::InputRefused { code, message });
     }
 }
 
@@ -576,12 +729,20 @@ impl ScreenClient {
 
 /// A mirrored session. The grid is ready to hand to the grid element
 /// (`Arc<FairMutex<MirroredGrid>>` is a `GridSource`).
+///
+/// With `control` it also types into the session: [`Attachment::send_input`]
+/// for keystrokes, [`Attachment::send_paste`] for a paste. Both are
+/// non-blocking, so a key handler on the UI thread can call them.
 #[allow(dead_code)]
 pub struct Attachment {
     session_id: String,
     grid: Arc<FairMutex<MirroredGrid>>,
     changed: watch::Receiver<u64>,
     nudge: Arc<Notify>,
+    /// Input frames for the stream task to write, in order.
+    input: mpsc::Sender<Frame>,
+    /// The host's last `input_refused` message, not yet taken.
+    refusal: Arc<Mutex<Option<String>>>,
     _task: AbortOnDrop,
 }
 
@@ -591,17 +752,25 @@ impl Attachment {
         let grid = Arc::new(FairMutex::new(MirroredGrid::new()));
         let (changed_tx, changed) = watch::channel(0u64);
         let nudge = Arc::new(Notify::new());
+        let (input, input_rx) = mpsc::channel(INPUT_QUEUE);
+        let refusal = Arc::new(Mutex::new(None));
         let task = tokio::spawn(mirror(
             stream,
-            Arc::clone(&grid),
-            changed_tx,
-            Arc::clone(&nudge),
+            Mirror {
+                grid: Arc::clone(&grid),
+                changed: changed_tx,
+                nudge: Arc::clone(&nudge),
+                input: input_rx,
+                refusal: Arc::clone(&refusal),
+            },
         ));
         Self {
             session_id: session_id.to_string(),
             grid,
             changed,
             nudge,
+            input,
+            refusal,
             _task: AbortOnDrop(task),
         }
     }
@@ -627,6 +796,61 @@ impl Attachment {
         self.nudge.notify_one();
     }
 
+    /// Type into the host session. `bytes` is what the local keymap produced
+    /// for the keystroke (`keymap::app_action`'s `SendBytes`, or
+    /// `KeymapConfig::resolve`) — the bytes local typing would write. Ctrl-C
+    /// is `[0x03]`.
+    ///
+    /// Queued, not sent, when this returns: the host checks `control` and,
+    /// without it, answers with a refusal ([`Attachment::take_refusal`]).
+    /// `Err` only when the input never left this machine: the mirror has
+    /// ended, the link is not keeping up, the bytes are not UTF-8 (keymap
+    /// output always is) or there are more than [`MAX_INPUT_BYTES`].
+    pub fn send_input(&self, bytes: &[u8]) -> Result<()> {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| AlleleError::Remote("that key cannot be sent to the other Mac".into()))?;
+        self.queue(text.to_string(), false)
+    }
+
+    /// Paste `text` into the host session as one frame. The host wraps it in
+    /// bracketed-paste markers when its terminal asked for them, so a
+    /// multi-line paste arrives as one paste, never as typed Enter keys.
+    /// Same errors as [`Attachment::send_input`]; a paste over
+    /// [`MAX_INPUT_BYTES`] is refused whole, never split.
+    pub fn send_paste(&self, text: &str) -> Result<()> {
+        self.queue(text.to_string(), true)
+    }
+
+    /// The host's last refusal of this attachment's input, once: a second
+    /// call returns `None` until the host refuses again. [`Attachment::changed`]
+    /// is bumped when one arrives, so a view can show "read only" when the
+    /// user types into a mirror without `control`.
+    pub fn take_refusal(&self) -> Option<String> {
+        self.refusal
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .take()
+    }
+
+    fn queue(&self, text: String, paste: bool) -> Result<()> {
+        if text.len() > MAX_INPUT_BYTES {
+            return Err(AlleleError::Remote(format!(
+                "that is too much to paste to the other Mac at once (over {} KiB)",
+                MAX_INPUT_BYTES / 1024
+            )));
+        }
+        self.input
+            .try_send(Frame::Input { text, paste })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Full(_) => {
+                    AlleleError::Remote("the other Mac is not keeping up; try again".into())
+                }
+                mpsc::error::TrySendError::Closed(_) => {
+                    AlleleError::Remote("this session is no longer attached".into())
+                }
+            })
+    }
+
     /// Stop mirroring: tell the host, then close the stream.
     pub async fn detach<W: AsyncWrite + Unpin + ?Sized>(self, control: &mut W) -> Result<()> {
         let detach = Frame::Detach {
@@ -636,15 +860,26 @@ impl Attachment {
     }
 }
 
-/// Apply the host's frames to `grid`, and ask for scrollback as the view needs
-/// it. Ends when the stream does.
-#[allow(dead_code)]
-async fn mirror(
-    stream: PeerStream,
+/// What the client's stream task updates.
+struct Mirror {
     grid: Arc<FairMutex<MirroredGrid>>,
     changed: watch::Sender<u64>,
     nudge: Arc<Notify>,
-) {
+    input: mpsc::Receiver<Frame>,
+    refusal: Arc<Mutex<Option<String>>>,
+}
+
+/// Apply the host's frames to the grid, ask for scrollback as the view needs
+/// it, and send the user's input. Ends when the stream does.
+#[allow(dead_code)]
+async fn mirror(stream: PeerStream, m: Mirror) {
+    let Mirror {
+        grid,
+        changed,
+        nudge,
+        mut input,
+        refusal,
+    } = m;
     let PeerStream { mut send, recv } = stream;
     let (frames_tx, mut frames) = mpsc::channel::<Frame>(4);
     let _reader = AbortOnDrop(tokio::spawn(async move {
@@ -661,26 +896,39 @@ async fn mirror(
     let mut applied = 0u64;
     loop {
         let reply = tokio::select! {
-            frame = frames.recv() => {
-                let Some(Frame::Screen { frame }) = frame else {
-                    break; // the stream ended, or the host broke the protocol
-                };
-                if matches!(frame, ScreenFrame::Scrollback(_)) {
-                    pending_page = None;
-                }
-                let result = grid.lock().apply(&frame);
-                match result {
-                    Ok(()) => {
-                        applied += 1;
-                        let _ = changed.send(applied);
-                        None
-                    }
-                    Err(e) => {
-                        tracing::debug!("remote: mirror out of step ({e}); asking for a snapshot");
+            frame = frames.recv() => match frame {
+                Some(Frame::Screen { frame }) => {
+                    if matches!(frame, ScreenFrame::Scrollback(_)) {
                         pending_page = None;
-                        Some(Frame::Resync)
+                    }
+                    let result = grid.lock().apply(&frame);
+                    match result {
+                        Ok(()) => {
+                            applied += 1;
+                            let _ = changed.send(applied);
+                            None
+                        }
+                        Err(e) => {
+                            tracing::debug!("remote: mirror out of step ({e}); asking for a snapshot");
+                            pending_page = None;
+                            Some(Frame::Resync)
+                        }
                     }
                 }
+                Some(Frame::InputRefused { message, .. }) => {
+                    *refusal.lock().unwrap_or_else(|p| p.into_inner()) = Some(message);
+                    applied += 1;
+                    let _ = changed.send(applied);
+                    None
+                }
+                // The stream ended, or the host broke the protocol.
+                _ => break,
+            },
+            Some(typed) = input.recv() => {
+                if write_frame(&mut send, &typed).await.is_err() {
+                    break;
+                }
+                None
             }
             _ = nudge.notified() => None,
         };

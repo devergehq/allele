@@ -29,4 +29,4 @@ pub use capture::{capture, capture_history, Capture};
 pub use grid::MirroredGrid;
 pub use model::{RowDiff, ScreenFrame, ScreenSnapshot, ScrollbackPage, WireRow};
 pub use producer::{DiffProducer, Poll, MIN_FRAME_INTERVAL};
-pub use source::{MirrorTerm, SharedTerm};
+pub use source::{InputSink, MirrorTerm, SharedTerm};

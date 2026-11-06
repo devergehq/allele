@@ -55,6 +55,7 @@ pub mod service;
 // Test-only: the file gates itself with `#![cfg(test)]`.
 pub(crate) mod testing;
 pub mod transport;
+pub mod viewers;
 pub mod wire;
 
 pub use control::ControlQueue;

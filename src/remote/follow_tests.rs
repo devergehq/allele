@@ -102,6 +102,7 @@ impl Mac {
             host_name: HostName::new(Some(name.into()), || None),
             status_feed: feed.clone(),
             screens: Arc::new(crate::remote::screen::NoScreens),
+            viewers: Default::default(),
         };
         let svc = RemoteService::new(
             tokio::runtime::Handle::current(),
@@ -346,6 +347,7 @@ async fn raw_host(
             host_name: HostName::new(Some("Desk".into()), || None),
             status_feed: feed.clone(),
             screens: Arc::new(crate::remote::screen::NoScreens),
+            viewers: Default::default(),
         },
     );
     tokio::spawn(listener::run(host.clone() as Arc<dyn PeerTransport>, gate));
