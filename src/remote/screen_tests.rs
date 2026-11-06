@@ -41,6 +41,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use alacritty_terminal::event::VoidListener;
+use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{Config, Term};
@@ -100,6 +101,8 @@ type Typed = Arc<Mutex<Vec<Vec<u8>>>>;
 struct Screens {
     terms: Mutex<HashMap<String, HostTerm>>,
     typed: Typed,
+    /// Every "Fit to this window" that reached the host (DEV-1167).
+    resized: Mutex<Vec<(String, u16, u16)>>,
 }
 
 #[async_trait]
@@ -124,6 +127,19 @@ impl ScreenSource for Screens {
             Arc::new(SharedTerm::new(term, Some(HISTORY)).with_input(Box::new(sink)))
                 as Arc<dyn MirrorTerm>
         }))
+    }
+
+    async fn resize(&self, session_id: &str, columns: u16, lines: u16) -> Result<bool> {
+        let Some(term) = self.terms.lock().unwrap().get(session_id).cloned() else {
+            return Ok(false);
+        };
+        term.lock()
+            .resize(TermSize::new(columns as usize, lines as usize));
+        self.resized
+            .lock()
+            .unwrap()
+            .push((session_id.to_string(), columns, lines));
+        Ok(true)
     }
 }
 
@@ -878,4 +894,79 @@ async fn the_host_lists_an_attached_machine_until_it_detaches() {
     .await
     .expect("the entry goes promptly after detach");
     assert_ne!(host.viewers.version(), version);
+}
+
+// ── Fit to this window (DEV-1167) ───────────────────────────────────────
+
+fn resize(session_id: &str, columns: u16, lines: u16) -> Frame {
+    Frame::Resize {
+        session_id: session_id.into(),
+        columns,
+        lines,
+    }
+}
+
+/// A `resize` has no reply; give the host time to have acted on one.
+async fn settle() {
+    sleep(Duration::from_millis(200)).await;
+}
+
+#[tokio::test]
+async fn fit_to_window_resizes_an_attached_session_and_the_mirror_follows() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, CONTROL).await;
+    let client = ScreenClient::new(Arc::clone(&conn));
+    let attachment = client.attach(&mut control.send, "s-1").await.unwrap();
+
+    write_frame(&mut control.send, &resize("s-1", 100, 30))
+        .await
+        .unwrap();
+    let grid = attachment.grid();
+    eventually("the mirror at the new size", || {
+        use crate::terminal::grid_source::GridView as _;
+        let g = grid.lock();
+        g.columns() == 100 && g.screen_lines() == 30
+    })
+    .await;
+    assert_eq!(
+        *host.screens.resized.lock().unwrap(),
+        vec![("s-1".to_string(), 100, 30)]
+    );
+}
+
+#[tokio::test]
+async fn fit_to_window_needs_control() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, VIEW).await;
+    let client = ScreenClient::new(Arc::clone(&conn));
+    let _attachment = client.attach(&mut control.send, "s-1").await.unwrap();
+
+    write_frame(&mut control.send, &resize("s-1", 100, 30))
+        .await
+        .unwrap();
+    settle().await;
+    assert!(host.screens.resized.lock().unwrap().is_empty());
+    assert_eq!(
+        host.term.lock().columns(),
+        COLUMNS,
+        "the host keeps its size"
+    );
+}
+
+#[tokio::test]
+async fn fit_to_window_ignores_a_session_not_attached_on_this_stream() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, _conn, mut control) = host.peer(&net, CONTROL).await;
+
+    write_frame(&mut control.send, &resize("s-1", 100, 30))
+        .await
+        .unwrap();
+    settle().await;
+    assert!(
+        host.screens.resized.lock().unwrap().is_empty(),
+        "a peer may only resize what it is looking at"
+    );
 }

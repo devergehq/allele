@@ -38,6 +38,7 @@ mod remote;
 mod remote_attention;
 mod remote_browser;
 mod remote_sessions;
+mod remote_tab;
 mod render;
 mod repositories;
 mod rich;
@@ -2279,13 +2280,17 @@ fn main() {
                             crate::platform::global().secrets.clone(),
                             &settings_for_window.remote,
                             std::sync::Arc::new(crate::remote::ControlQueue::new(drains.requests)),
-                            std::sync::Arc::new(crate::remote::ScreenQueue::new(drains.screens)),
+                            std::sync::Arc::new(
+                                crate::remote::ScreenQueue::new(drains.screens)
+                                    .with_resizes(drains.resizes),
+                            ),
                             status_feed.clone(),
                             {
                                 let shell = crate::platform::global().shell.clone();
                                 move || shell.computer_name()
                             },
                         ),
+                        remote_tabs: Default::default(),
                         capture_ui_requested: false,
                         status_feed,
                         // Captured on the first render (see `Render`).

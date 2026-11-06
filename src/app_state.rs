@@ -505,6 +505,8 @@ pub(crate) struct AppState {
     /// This machine's remote endpoint: pairing, trusted peers, the listener
     /// (DEV-1160). Cheap to clone into the Settings window.
     pub(crate) remote: crate::remote::RemoteService,
+    /// Sessions on paired Macs open in tabs (DEV-1167).
+    pub(crate) remote_tabs: crate::remote_tab::RemoteTabs,
     /// Host side of the status feed paired clients subscribe to (DEV-1162).
     /// A cheap clone handle: the transport holds its own copy.
     pub(crate) status_feed: crate::status_feed::StatusFeed,
@@ -1122,6 +1124,7 @@ pub(crate) mod fixture {
                     // depend on startup having installed the global.
                     platform: crate::platform::Platform::detect(),
                     remote: crate::remote::RemoteService::offline(&Default::default()),
+                    remote_tabs: Default::default(),
                     capture_ui_requested: false,
                     status_feed: Default::default(),
                 }

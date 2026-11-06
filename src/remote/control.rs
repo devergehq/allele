@@ -368,7 +368,7 @@ async fn run(
             }
             // Inline: the lookup behind an attach is bounded, and requests
             // already admitted keep running meanwhile.
-            Ok(frame @ (Frame::Attach { .. } | Frame::Detach { .. })) => {
+            Ok(frame @ (Frame::Attach { .. } | Frame::Detach { .. } | Frame::Resize { .. })) => {
                 if attachments.handle(frame).await == Handled::Gone {
                     break Ended::Connection(NOT_PAIRED.into());
                 }

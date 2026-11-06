@@ -28,6 +28,8 @@ enum Target {
     },
     Remote {
         key: String,
+        peer: crate::remote::PeerId,
+        session_id: String,
     },
 }
 
@@ -103,7 +105,11 @@ impl AppState {
         // that order within a kind.
         for row in self.remote_attention_rows() {
             items.push(Item {
-                target: Target::Remote { key: row.key },
+                target: Target::Remote {
+                    key: row.key,
+                    peer: row.peer,
+                    session_id: row.session_id,
+                },
                 label: row.label,
                 kind: row.kind,
                 tool: String::new(),
@@ -165,7 +171,7 @@ impl AppState {
                     project_idx,
                     session_idx,
                 } => format!("attention-row-{project_idx}-{session_idx}"),
-                Target::Remote { key } => format!("attention-remote-{key}"),
+                Target::Remote { key, .. } => format!("attention-remote-{key}"),
             });
 
             let tool_display = if tool.is_empty() {
@@ -174,15 +180,23 @@ impl AppState {
                 format!("{tool}: ")
             };
 
-            let local = match target {
+            let (local, remote) = match target {
                 Target::Local {
                     project_idx,
                     session_idx,
-                } => Some((project_idx, session_idx)),
-                Target::Remote { .. } => None,
+                } => (Some((project_idx, session_idx)), None),
+                Target::Remote {
+                    peer, session_id, ..
+                } => (None, Some((peer, session_id))),
             };
-            let is_active = match (self.active, local) {
-                (Some(c), Some((p_idx, s_idx))) => c.project_idx == p_idx && c.session_idx == s_idx,
+            let remote_shown = self.remote_tabs.shown_key();
+            let is_active = match (self.active, local, &remote) {
+                (Some(c), Some((p_idx, s_idx)), _) if remote_shown.is_none() => {
+                    c.project_idx == p_idx && c.session_idx == s_idx
+                }
+                (_, _, Some((peer, id))) => {
+                    remote_shown.is_some_and(|k| k.peer == *peer && &k.session_id == id)
+                }
                 _ => false,
             };
 
@@ -214,8 +228,24 @@ impl AppState {
                 .flex_row()
                 .items_center()
                 .gap(px(6.0));
-            // Only a local row is a link. A remote session can't be selected
-            // here, so its row doesn't pretend to be clickable.
+            // A remote row opens its session in a tab (DEV-1167). It never
+            // offers Allow: that would have to go to the host through its
+            // `control` check, and must never type a local `\r`.
+            if let Some((peer, session_id)) = remote {
+                body = body.cursor_pointer().on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this: &mut Self, _event, _window, cx| {
+                        this.pending_action = Some(
+                            crate::remote_tab::RemoteTabAction::Open {
+                                peer,
+                                session_id: session_id.clone(),
+                            }
+                            .into(),
+                        );
+                        cx.notify();
+                    }),
+                );
+            }
             if let Some((p_idx, s_idx)) = local {
                 body = body.cursor_pointer().on_mouse_down(
                     MouseButton::Left,

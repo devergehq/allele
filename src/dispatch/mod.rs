@@ -72,11 +72,13 @@ pub(crate) fn update_in_main_window<R>(
 pub(crate) fn spawn_control_socket(cx: &mut Context<AppState>) -> Drains {
     let (tx, rx) = std::sync::mpsc::channel();
     let (screens, screens_rx) = std::sync::mpsc::channel();
+    let (resizes, resizes_rx) = std::sync::mpsc::channel();
     server::spawn_listener(tx.clone());
-    spawn_control_loop(rx, screens_rx, cx);
+    spawn_control_loop(rx, screens_rx, resizes_rx, cx);
     Drains {
         requests: tx,
         screens,
+        resizes,
     }
 }
 
@@ -86,6 +88,8 @@ pub(crate) struct Drains {
     pub requests: Sender<server::ControlRequest>,
     /// Remote screen streams looking up a session's terminal (DEV-1165).
     pub screens: Sender<server::ScreenLookup>,
+    /// Paired machines fitting a session to their window (DEV-1167).
+    pub resizes: Sender<server::ScreenResize>,
 }
 
 /// Answer control-socket requests on the GPUI foreground thread.
@@ -96,6 +100,7 @@ pub(crate) struct Drains {
 fn spawn_control_loop(
     rx: Receiver<server::ControlRequest>,
     screens: Receiver<server::ScreenLookup>,
+    resizes: Receiver<server::ScreenResize>,
     cx: &mut Context<AppState>,
 ) {
     cx.spawn(async move |this, cx| {
@@ -150,6 +155,21 @@ fn spawn_control_loop(
                     .ok()
                     .flatten();
                 let _ = reply.send(found);
+            }
+
+            while let Ok(server::ScreenResize {
+                session_id,
+                columns,
+                lines,
+                reply,
+            }) = resizes.try_recv()
+            {
+                let done = this
+                    .update(cx, |state, cx| {
+                        pty::fit_to_remote(state, &session_id, columns, lines, cx)
+                    })
+                    .unwrap_or(false);
+                let _ = reply.send(done);
             }
 
             if this.upgrade().is_none() {

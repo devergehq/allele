@@ -56,7 +56,7 @@ use super::transport::{PeerConnection, PeerId, PeerStream};
 use super::viewers::Viewers;
 use super::wire::{self, read_frame, read_frame_within, write_frame, Frame, MAX_PEER_FRAME};
 use crate::dispatch::protocol::ErrorCode;
-use crate::dispatch::server::ScreenLookup;
+use crate::dispatch::server::{ScreenLookup, ScreenResize};
 use crate::errors::{AlleleError, Result};
 use crate::terminal::keymap::paste_bytes;
 use crate::terminal::mirror::{
@@ -71,7 +71,6 @@ pub const MAX_ATTACHED: usize = 8;
 pub const MAX_PAGE_ROWS: u32 = 100;
 
 /// How long a client waits for the host to open the screen stream.
-#[allow(dead_code)]
 pub const ATTACH_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the host waits for the foreground thread to find a session.
@@ -113,17 +112,31 @@ pub trait ScreenSource: Send + Sync {
     /// starting, suspended); `Err` when the host could not tell, which is
     /// worth retrying.
     async fn find(&self, session_id: &str) -> Result<Option<Arc<dyn MirrorTerm>>>;
+
+    /// Resize a session's terminal to a paired machine's window (DEV-1167).
+    /// `Ok(false)` when there is no such terminal. The host's next local
+    /// interaction restores its own size; that is the host UI's business.
+    async fn resize(&self, _session_id: &str, _columns: u16, _lines: u16) -> Result<bool> {
+        Ok(false)
+    }
 }
 
 /// The production [`ScreenSource`]: the same foreground drain `control.sock`
 /// uses, which looks the session up in `AppState`.
 pub struct ScreenQueue {
     tx: std_mpsc::Sender<ScreenLookup>,
+    resizes: Option<std_mpsc::Sender<ScreenResize>>,
 }
 
 impl ScreenQueue {
     pub fn new(tx: std_mpsc::Sender<ScreenLookup>) -> Self {
-        Self { tx }
+        Self { tx, resizes: None }
+    }
+
+    /// Also serve "Fit to this window" (DEV-1167) through the same drain.
+    pub fn with_resizes(mut self, resizes: std_mpsc::Sender<ScreenResize>) -> Self {
+        self.resizes = Some(resizes);
+        self
     }
 }
 
@@ -137,6 +150,27 @@ impl ScreenSource for ScreenQueue {
             let (reply, answer) = std_mpsc::channel();
             tx.send(ScreenLookup { session_id, reply })
                 .map_err(|_| busy())?;
+            answer.recv_timeout(LOOKUP_TIMEOUT).map_err(|_| busy())
+        })
+        .await
+        .map_err(|_| busy())?
+    }
+
+    async fn resize(&self, session_id: &str, columns: u16, lines: u16) -> Result<bool> {
+        let Some(tx) = self.resizes.clone() else {
+            return Ok(false);
+        };
+        let session_id = session_id.to_string();
+        let busy = || AlleleError::Remote("the other Mac is busy; try again".into());
+        tokio::task::spawn_blocking(move || {
+            let (reply, answer) = std_mpsc::channel();
+            tx.send(ScreenResize {
+                session_id,
+                columns,
+                lines,
+                reply,
+            })
+            .map_err(|_| busy())?;
             answer.recv_timeout(LOOKUP_TIMEOUT).map_err(|_| busy())
         })
         .await
@@ -159,7 +193,7 @@ impl ScreenSource for NoScreens {
 // ── host: the attachments of one control stream ──────────────────────────
 
 /// Aborts a task when dropped, so nothing a stream started outlives it.
-struct AbortOnDrop(JoinHandle<()>);
+pub(super) struct AbortOnDrop(pub(super) JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
@@ -219,9 +253,50 @@ impl Attachments {
             Frame::Detach { session_id } => {
                 self.live.remove(&session_id);
             }
+            Frame::Resize {
+                session_id,
+                columns,
+                lines,
+            } => self.resize(session_id, columns, lines),
             _ => {}
         }
         Handled::Continue
+    }
+
+    /// "Fit to this window" (DEV-1167): needs `control`, read now, and the
+    /// session must be attached on this stream, so a peer can only resize
+    /// what it is looking at. Run off the read loop; there is no reply.
+    fn resize(&mut self, session_id: String, columns: u16, lines: u16) {
+        let peer = self.conn.remote_id();
+        let permitted = self
+            .registry
+            .permissions(peer)
+            .is_some_and(|p| allows(p, Need::Control));
+        let attached = self
+            .live
+            .get(&session_id)
+            .is_some_and(|task| !task.0.is_finished());
+        tracing::info!(
+            "remote: {} resize {} to {}x{} {}",
+            peer.short(),
+            session_id,
+            columns,
+            lines,
+            match (permitted, attached) {
+                (true, true) => "allowed",
+                (false, _) => "refused: needs control",
+                (true, false) => "refused: not attached",
+            }
+        );
+        if !(permitted && attached) {
+            return;
+        }
+        let source = Arc::clone(&self.source);
+        tokio::spawn(async move {
+            if let Err(e) = source.resize(&session_id, columns, lines).await {
+                tracing::debug!("remote: resize of {session_id} failed: {e}");
+            }
+        });
     }
 
     async fn attach(&mut self, attach_id: u64, session_id: String) -> Handled {
@@ -617,7 +692,6 @@ fn revoked() -> Stopped {
 // No caller in the app yet: the client UI that shows a mirrored session is
 // its own ticket. The MemNet tests drive it end to end.
 
-#[allow(dead_code)]
 /// Pending attaches, by `attach_id`.
 type Waiting = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<PeerStream>>>>>;
 
@@ -627,14 +701,12 @@ type Waiting = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<PeerStream>>>>>;
 /// The control stream belongs to whoever opened it, so this takes its writer
 /// per call, and the control stream's reader hands `attach_failed` frames to
 /// [`ScreenClient::on_control_frame`].
-#[allow(dead_code)]
 pub struct ScreenClient {
     waiting: Waiting,
     next_id: AtomicU64,
     _accept: AbortOnDrop,
 }
 
-#[allow(dead_code)]
 impl ScreenClient {
     /// Start accepting the screen streams the host opens on `conn`.
     pub fn new(conn: Arc<dyn PeerConnection>) -> Self {
@@ -670,38 +742,40 @@ impl ScreenClient {
     /// Mirror `session_id`. Writes `attach` to `control` and waits for the
     /// host's screen stream; the returned [`Attachment`] keeps its
     /// [`MirroredGrid`] up to date until it is detached or dropped.
+    #[cfg(test)] // the app attaches through `request` (the follower's outbox)
     pub async fn attach<W: AsyncWrite + Unpin + ?Sized>(
         &self,
         control: &mut W,
         session_id: &str,
     ) -> Result<Attachment> {
+        let (attach, pending) = self.request(session_id);
+        write_frame(control, &attach).await?;
+        pending.wait().await
+    }
+
+    /// Start an attach without writing it: returns the `attach` frame for the
+    /// caller to send on the control stream, and the wait for its answer.
+    ///
+    /// For a control stream whose writer is shared (the follower's outbox), so
+    /// a slow host never holds the writer while it decides.
+    pub fn request(&self, session_id: &str) -> (Frame, PendingAttach) {
         let attach_id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         self.waiting
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(attach_id, tx);
-        let attach = Frame::Attach {
+        let frame = Frame::Attach {
             attach_id,
             session_id: session_id.to_string(),
         };
-        let sent = write_frame(control, &attach).await;
-        let answer = match sent {
-            Ok(()) => timeout(ATTACH_TIMEOUT, rx).await,
-            Err(e) => Ok(Ok(Err(e))),
+        let pending = PendingAttach {
+            attach_id,
+            session_id: session_id.to_string(),
+            rx: Some(rx),
+            waiting: Arc::clone(&self.waiting),
         };
-        self.waiting
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(&attach_id);
-        match answer {
-            Ok(Ok(Ok(stream))) => Ok(Attachment::start(session_id, stream)),
-            Ok(Ok(Err(e))) => Err(e),
-            Ok(Err(_)) => Err(AlleleError::Remote("the attach was abandoned".into())),
-            Err(_) => Err(AlleleError::Remote(
-                "the other Mac did not open the screen in time".into(),
-            )),
-        }
+        (frame, pending)
     }
 
     /// Offer a frame read from the control stream. Returns true if it was an
@@ -727,14 +801,50 @@ impl ScreenClient {
     }
 }
 
+/// An attach sent and not yet answered. Dropping it gives the attach up; a
+/// stream the host opens for it afterwards is closed, which the host takes as
+/// a detach.
+pub struct PendingAttach {
+    attach_id: u64,
+    session_id: String,
+    rx: Option<oneshot::Receiver<Result<PeerStream>>>,
+    waiting: Waiting,
+}
+
+impl PendingAttach {
+    /// Wait up to [`ATTACH_TIMEOUT`] for the host's screen stream.
+    pub async fn wait(mut self) -> Result<Attachment> {
+        let Some(rx) = self.rx.take() else {
+            return Err(AlleleError::Remote("the attach was abandoned".into()));
+        };
+        match timeout(ATTACH_TIMEOUT, rx).await {
+            Ok(Ok(Ok(stream))) => Ok(Attachment::start(&self.session_id, stream)),
+            Ok(Ok(Err(e))) => Err(e),
+            Ok(Err(_)) => Err(AlleleError::Remote("the attach was abandoned".into())),
+            Err(_) => Err(AlleleError::Remote(
+                "the other Mac did not open the screen in time".into(),
+            )),
+        }
+    }
+}
+
+impl Drop for PendingAttach {
+    fn drop(&mut self) {
+        self.waiting
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.attach_id);
+    }
+}
+
 /// A mirrored session. The grid is ready to hand to the grid element
 /// (`Arc<FairMutex<MirroredGrid>>` is a `GridSource`).
 ///
 /// With `control` it also types into the session: [`Attachment::send_input`]
 /// for keystrokes, [`Attachment::send_paste`] for a paste. Both are
 /// non-blocking, so a key handler on the UI thread can call them.
-#[allow(dead_code)]
 pub struct Attachment {
+    #[allow(dead_code)] // read by `detach`
     session_id: String,
     grid: Arc<FairMutex<MirroredGrid>>,
     changed: watch::Receiver<u64>,
@@ -746,7 +856,6 @@ pub struct Attachment {
     _task: AbortOnDrop,
 }
 
-#[allow(dead_code)]
 impl Attachment {
     fn start(session_id: &str, stream: PeerStream) -> Self {
         let grid = Arc::new(FairMutex::new(MirroredGrid::new()));
@@ -775,6 +884,7 @@ impl Attachment {
         }
     }
 
+    #[allow(dead_code)] // remote tabs key on their own `TabKey`
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
@@ -852,6 +962,7 @@ impl Attachment {
     }
 
     /// Stop mirroring: tell the host, then close the stream.
+    #[allow(dead_code)] // a remote tab detaches by closing the stream (drop)
     pub async fn detach<W: AsyncWrite + Unpin + ?Sized>(self, control: &mut W) -> Result<()> {
         let detach = Frame::Detach {
             session_id: self.session_id.clone(),
@@ -871,7 +982,6 @@ struct Mirror {
 
 /// Apply the host's frames to the grid, ask for scrollback as the view needs
 /// it, and send the user's input. Ends when the stream does.
-#[allow(dead_code)]
 async fn mirror(stream: PeerStream, m: Mirror) {
     let Mirror {
         grid,

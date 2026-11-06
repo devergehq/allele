@@ -94,13 +94,21 @@ impl AppState {
             PendingAction::Overlay(a) => {
                 self.handle_overlay_action(a, &mut skip_refocus, window, cx)
             }
+            PendingAction::RemoteTab(a) => {
+                self.handle_remote_tab_action(a, &mut skip_refocus, window, cx)
+            }
         }
 
         // After any sidebar-triggered action, re-focus the active
         // terminal so keyboard input goes back to Claude Code.
         // ToggleDrawer manages its own focus, so skip it.
         if !skip_refocus {
-            if let Some(session) = self.active_session() {
+            // A remote tab on screen keeps the keyboard; the local session
+            // under it is hidden and must not receive typing (DEV-1167).
+            if let Some(tab) = self.remote_tabs.shown() {
+                let fh = tab.view.read(cx).focus_handle.clone();
+                fh.focus(window, cx);
+            } else if let Some(session) = self.active_session() {
                 if let Some(tv) = session.terminal_view.as_ref() {
                     let fh = tv.read(cx).focus_handle.clone();
                     fh.focus(window, cx);
@@ -255,6 +263,9 @@ impl AppState {
                     .map(|s| s.status == SessionStatus::Suspended)
                     .unwrap_or(false);
 
+                // A local click always shows the local session, even the one
+                // already under an open remote tab (DEV-1167).
+                self.remote_tabs.hide();
                 if is_suspended {
                     self.resume_session(cursor, window, cx);
                 } else {

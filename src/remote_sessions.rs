@@ -60,8 +60,6 @@ pub(crate) enum RemoteSessionAction {
         label: String,
         host_name: String,
     },
-    /// Stand-in for opening the session attached (DEV-1167): highlight it.
-    Select(RemoteSessionKey),
 }
 
 /// A remote session's right-click menu.
@@ -86,8 +84,6 @@ pub(crate) struct StartingRemote {
 /// The remote-session UI state on `AppState`.
 #[derive(Default)]
 pub(crate) struct RemoteUi {
-    /// The remote row last opened. Attach (DEV-1167) will replace this.
-    pub selected: Option<RemoteSessionKey>,
     pub starting: Vec<StartingRemote>,
     pub menu: Option<RemoteMenu>,
     next_token: u64,
@@ -284,10 +280,6 @@ impl AppState {
                 };
                 self.manage_remote_session(key, label, host_name, op, cx);
             }
-            RemoteSessionAction::Select(key) => {
-                self.remote_ui.selected = Some(key);
-                cx.notify();
-            }
         }
     }
 
@@ -306,13 +298,15 @@ impl AppState {
             let _ = this.update(cx, |this, cx| {
                 this.remote_ui.finish(token);
                 if let Ok(Response::Created { session }) = &result {
-                    // "Opens attached" is DEV-1167; until then the new row is
-                    // selected, which is where attach will start from. The
-                    // row itself arrives on the status feed.
-                    this.remote_ui.selected = Some(RemoteSessionKey {
-                        peer,
-                        session_id: session.session_id.clone(),
-                    });
+                    // Opens attached (DEV-1167). The sidebar row arrives on
+                    // the status feed; the tab does not wait for it.
+                    this.pending_action = Some(
+                        crate::remote_tab::RemoteTabAction::Open {
+                            peer,
+                            session_id: session.session_id.clone(),
+                        }
+                        .into(),
+                    );
                 }
                 this.note_grant(peer, &result);
                 if let Some(text) = create_failure_text(&host_name, &label, &result) {
@@ -337,11 +331,9 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let result = answer.await;
             let _ = this.update(cx, |this, cx| {
-                if discarding
-                    && matches!(result, Ok(Response::Discarded { .. }))
-                    && this.remote_ui.selected.as_ref() == Some(&key)
-                {
-                    this.remote_ui.selected = None;
+                if discarding && matches!(result, Ok(Response::Discarded { .. })) {
+                    // Its tab, if open, has nothing left to show.
+                    this.remote_tabs.close_session(key.peer, &key.session_id);
                 }
                 this.note_grant(key.peer, &result);
                 // Success needs no message: the row's status (or its

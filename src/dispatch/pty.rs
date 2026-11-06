@@ -216,6 +216,28 @@ pub(crate) fn mirror_of(
     found
 }
 
+/// Resize a session's terminal to a paired machine's window (DEV-1167). The
+/// session's own view keeps its local size and restores it on the next local
+/// keystroke or click. `false` when there is no such session or terminal.
+pub(crate) fn fit_to_remote(
+    state: &AppState,
+    session_id: &str,
+    columns: u16,
+    lines: u16,
+    cx: &mut Context<AppState>,
+) -> bool {
+    let Some(view) = state
+        .projects
+        .iter()
+        .flat_map(|p| p.sessions.iter())
+        .find(|s| s.id == session_id)
+        .and_then(|s| s.terminal_view.clone())
+    else {
+        return false;
+    };
+    view.update(cx, |view, cx| view.fit_to_remote(columns, lines, cx))
+}
+
 /// Run `f` against a session's PTY. Returns false when the session is unknown
 /// or has no terminal yet — still being cloned, or suspended — which callers
 /// treat as "not delivered" rather than as an error.

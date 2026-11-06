@@ -348,6 +348,32 @@ impl RemoteService {
         self.inner.control.viewers.clone()
     }
 
+    /// Mirror one of `peer`'s sessions for a tab (DEV-1167). It attaches over
+    /// the peer's control stream whenever one is up, reattaching after each
+    /// reconnect, until the returned screen is dropped.
+    /// Resize one of `peer`'s sessions to this Mac's window ("Fit to this
+    /// window", DEV-1167). Best effort: the host checks `control` and that
+    /// the session is attached on this stream; the new size arrives as the
+    /// next snapshot. `false` when there is no control stream to send it on.
+    pub fn fit_screen(&self, peer: PeerId, session_id: &str, columns: u16, lines: u16) -> bool {
+        let link = self.inner.feeds.screen_link(peer).borrow().clone();
+        link.is_some_and(|link| {
+            link.try_send(super::wire::Frame::Resize {
+                session_id: session_id.to_string(),
+                columns,
+                lines,
+            })
+        })
+    }
+
+    pub fn open_screen(&self, peer: PeerId, session_id: &str) -> super::viewer::RemoteScreen {
+        super::viewer::RemoteScreen::open(
+            &self.inner.rt,
+            self.inner.feeds.screen_link(peer),
+            session_id,
+        )
+    }
+
     pub fn status(&self) -> RemoteStatus {
         let inner = &self.inner;
         let peers = inner

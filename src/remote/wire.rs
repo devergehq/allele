@@ -48,6 +48,9 @@
 //!     client → host  scrollback_request { start, count } | resync
 //!     client → host  input { text, paste? }            needs control (DEV-1166)
 //!     host → client  input_refused { code, message }   input dropped, not written
+//!
+//!   resizing (DEV-1167; control stream, needs `control`, attached sessions only)
+//!     client → host  resize { session_id, columns, lines }   no reply
 //! ```
 //!
 //! `op` and `result` are `crate::dispatch::protocol`'s own types, nested
@@ -218,6 +221,15 @@ pub enum Frame {
     /// `bad_request` (too large) or `session_not_found` (the terminal went).
     InputRefused { code: ErrorCode, message: String },
 
+    /// Client → host, on the control stream: resize this attached session's
+    /// terminal to the client's window ("Fit to this window"). Needs
+    /// `control`. Not answered: the new size arrives as the next snapshot,
+    /// and the host's next local keystroke or click puts its own size back.
+    Resize {
+        session_id: String,
+        columns: u16,
+        lines: u16,
+    },
     // ── status feed (DEV-1162) ────────────────────────────────────────────
     /// Client → host: send me every session, then every change. Sent again
     /// after a gap, it replaces the subscription with a fresh snapshot.

@@ -42,6 +42,7 @@ use super::control::HostName;
 use super::link::{LinkState, PeerLink, ReconnectPolicy};
 use super::pairing::host::HELLO_TIMEOUT;
 use super::peers::PeerPermissions;
+use super::screen::{PendingAttach, ScreenClient};
 use super::transport::{PeerConnection, PeerId, PeerStream, PeerTransport};
 use super::wire::{read_frame_within, write_frame, Frame, MAX_PEER_FRAME, PROTOCOL_VERSION};
 use crate::dispatch::protocol::{Request, Response};
@@ -66,6 +67,38 @@ const OPS_QUEUE: usize = 8;
 
 /// Frames read ahead of the follower's loop.
 const FRAMES_AHEAD: usize = 16;
+
+/// Screen frames (attach, resize) queued for one control stream. Each is a
+/// few bytes; a full queue means the link is stalled anyway.
+const SCREEN_QUEUE: usize = 16;
+
+/// The live control stream to one host, for mirroring its sessions
+/// (DEV-1167). Attaches ride the follower's stream: the host allows one
+/// control stream per connection, and opens one screen stream per attach on
+/// it, which a single [`ScreenClient`] per connection must pick up.
+pub struct ScreenLink {
+    client: ScreenClient,
+    outbox: mpsc::Sender<Frame>,
+}
+
+impl ScreenLink {
+    /// Ask the host to mirror `session_id`. `None` when the control stream
+    /// has ended (the link is about to be replaced).
+    pub async fn attach(&self, session_id: &str) -> Option<PendingAttach> {
+        let (frame, pending) = self.client.request(session_id);
+        self.outbox.send(frame).await.ok()?;
+        Some(pending)
+    }
+
+    /// Queue a frame for the control stream; false once it has ended or the
+    /// queue is full.
+    pub fn try_send(&self, frame: Frame) -> bool {
+        self.outbox.try_send(frame).is_ok()
+    }
+}
+
+/// Each followed host's current [`ScreenLink`], `None` while there is none.
+type Links = Arc<Mutex<HashMap<PeerId, watch::Sender<Option<Arc<ScreenLink>>>>>>;
 
 /// Why a remote op got no answer from the host. The host's own refusals
 /// (cap, unknown project, permission) are not here: they are a
@@ -117,6 +150,7 @@ pub struct HostFeeds {
     grants: Arc<Mutex<HashMap<PeerId, PeerPermissions>>>,
     changed: Arc<watch::Sender<u64>>,
     transitions: broadcast::Sender<HostTransition>,
+    links: Links,
 }
 
 impl Default for HostFeeds {
@@ -126,6 +160,7 @@ impl Default for HostFeeds {
             grants: Arc::default(),
             changed: Arc::new(watch::channel(0).0),
             transitions: broadcast::channel(TRANSITIONS).0,
+            links: Links::default(),
         }
     }
 }
@@ -237,8 +272,36 @@ impl HostFeeds {
     }
 
     /// Stop following `peer` and drop what we knew (it was unpaired).
+    /// Watch `peer`'s [`ScreenLink`]: `Some` while a control stream to it is
+    /// up, replaced on every reconnect (DEV-1167).
+    pub fn screen_link(&self, peer: PeerId) -> watch::Receiver<Option<Arc<ScreenLink>>> {
+        self.links
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(peer)
+            .or_insert_with(|| watch::channel(None).0)
+            .subscribe()
+    }
+
+    fn set_link(&self, peer: PeerId, link: Option<Arc<ScreenLink>>) {
+        self.links
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(peer)
+            .or_insert_with(|| watch::channel(None).0)
+            .send_replace(link);
+    }
+
     pub(crate) fn forget(&self, peer: PeerId) {
         self.lock().remove(&peer);
+        let link = self
+            .links
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&peer);
+        if let Some(link) = link {
+            link.send_replace(None);
+        }
         self.grants
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -410,6 +473,16 @@ async fn session(
         return SessionEnd::Dropped;
     }
 
+    // Mirroring rides this stream too (DEV-1167): publish it for remote
+    // tabs, and withdraw it when the stream ends, however it ends.
+    let (screen_out, mut screen_frames) = mpsc::channel::<Frame>(SCREEN_QUEUE);
+    let screen = Arc::new(ScreenLink {
+        client: ScreenClient::new(Arc::clone(conn)),
+        outbox: screen_out,
+    });
+    feeds.set_link(peer, Some(Arc::clone(&screen)));
+    let _unpublish = Unpublish { feeds, peer };
+
     let mut pending: HashMap<u64, oneshot::Sender<Result<Response, CallError>>> = HashMap::new();
     let mut next_id: u64 = 1;
     let end = loop {
@@ -443,10 +516,16 @@ async fn session(
                             peer.short()
                         ),
                     },
+                    ref other if screen.client.on_control_frame(other) => {}
                     other => tracing::debug!(
                         "remote: {} sent an unexpected frame on the control stream: {other:?}",
                         peer.short()
                     ),
+                }
+            }
+            Some(frame) = screen_frames.recv() => {
+                if write_frame(&mut send, &frame).await.is_err() {
+                    break SessionEnd::Dropped;
                 }
             }
             Some(call) = ops.recv() => {
@@ -468,6 +547,18 @@ async fn session(
         let _ = reply.send(Err(CallError::Dropped));
     }
     end
+}
+
+/// Withdraws a host's [`ScreenLink`] when its control stream ends.
+struct Unpublish<'a> {
+    feeds: &'a HostFeeds,
+    peer: PeerId,
+}
+
+impl Drop for Unpublish<'_> {
+    fn drop(&mut self) {
+        self.feeds.set_link(self.peer, None);
+    }
 }
 
 /// Read frames until the stream or the connection ends, handing each to the

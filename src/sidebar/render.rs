@@ -568,6 +568,9 @@ pub(crate) fn build_sidebar_items(
     // Build sidebar items: for each project, a header then its sessions
     let mut sidebar_items: Vec<AnyElement> = Vec::new();
     let active_cursor = state.active;
+    // While a remote tab is on screen the local session under it is not what
+    // the user is looking at, so its row is not highlighted (DEV-1167).
+    let remote_shown = state.remote_tabs.shown().is_some();
     let filter = &state.sidebar_filter;
     let filtering = !filter.is_empty();
     let active_only = state.user_settings.sidebar_active_only;
@@ -1157,9 +1160,10 @@ pub(crate) fn build_sidebar_items(
 
             let session = &project.sessions[s_idx];
 
-            let is_active = active_cursor
-                .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
-                .unwrap_or(false);
+            let is_active = !remote_shown
+                && active_cursor
+                    .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
+                    .unwrap_or(false);
 
             let is_suspended = session.status == SessionStatus::Suspended;
             // A session in AwaitingInput takes its shape and colour from *why*
@@ -1903,7 +1907,11 @@ fn build_machines_section(state: &AppState, cx: &mut Context<AppState>) -> Vec<A
                     peer: machine.id,
                     session_id: session.id.clone(),
                 };
-                let selected = state.remote_ui.selected.as_ref() == Some(&key);
+                // Highlighted while its tab is the one on screen (DEV-1167).
+                let selected = state
+                    .remote_tabs
+                    .shown_key()
+                    .is_some_and(|k| k.peer == key.peer && k.session_id == key.session_id);
                 items.push(render_remote_session_row(
                     machine, session, key, selected, manageable, cx,
                 ));
@@ -2078,10 +2086,7 @@ fn render_remote_session_row(
     } else {
         status_dot.into_any_element()
     };
-    let tooltip = SharedString::from(format!(
-        "On {} — opening a session on another Mac isn't available yet",
-        machine.name
-    ));
+    let tooltip = SharedString::from(format!("On {} — click to open it here", machine.name));
     let menu_key = row_key.clone();
     let menu_label = session.label.clone();
     let menu_host = machine.name.clone();
@@ -2119,15 +2124,19 @@ fn render_remote_session_row(
             })
             .into()
         })
-        // Stopped here so it never reaches whatever the sidebar does with a
-        // click on empty space. Selecting stands in for attaching until
-        // DEV-1167 replaces it.
+        // Opens the session in a tab, attached (DEV-1167). Stopped here so
+        // it never reaches whatever the sidebar does with a click on empty
+        // space.
+        .cursor_pointer()
         .on_mouse_down(
             MouseButton::Left,
             cx.listener(move |this: &mut AppState, _event, _window, cx| {
                 cx.stop_propagation();
-                let action = crate::remote_sessions::RemoteSessionAction::Select(row_key.clone());
-                this.pending_action = Some(SessionAction::Remote(action).into());
+                let action = crate::remote_tab::RemoteTabAction::Open {
+                    peer: row_key.peer,
+                    session_id: row_key.session_id.clone(),
+                };
+                this.pending_action = Some(action.into());
                 cx.notify();
             }),
         );
