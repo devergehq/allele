@@ -8,11 +8,12 @@
 //! a flag on `AppState` and notifies. The work itself lives in
 //! `pending_actions.rs`, which is why this file is wiring rather than logic.
 
-use gpui::{App, Context};
+use gpui::{App, Context, WeakEntity, WindowHandle};
 use tracing::warn;
 
 use crate::actions::{DrawerAction, OverlayAction, SessionAction, SessionCursor, SidebarAction};
 use crate::app_state::{AppState, MainTab};
+use crate::pairing_alert::OpenPairingApproval;
 use crate::session::{self, SessionStatus};
 use crate::{
     dispatch, settings_window, CaptureUi, CycleAttentionSession, OpenCommandPaletteAction,
@@ -199,42 +200,30 @@ pub(crate) fn register_all(cx: &mut Context<AppState>) {
     App::on_action::<OpenSettings>(cx, {
         let handle = toggle_handle.clone();
         move |_, cx| {
-            // Must happen here (not via PendingAction) — the
-            // pending-action dispatch runs inside render(),
-            // and cx.open_window() during a render tears
-            // GPUI's element arena apart with
-            // "attempted to dereference an ArenaRef after
-            // its Arena was cleared".
-            let Some(strong) = handle.upgrade() else {
+            open_or_focus_settings(&handle, cx);
+        }
+    });
+    // The pairing banner's *Review* button (DEV-1188): Settings, at the
+    // Machines section's approval card.
+    App::on_action::<OpenPairingApproval>(cx, {
+        let handle = toggle_handle.clone();
+        move |_, cx| {
+            let Some(win) = open_or_focus_settings(&handle, cx) else {
                 return;
             };
-            // The window reads its per-section state from
-            // `user_settings` itself; here we only need the
-            // handle to an already-open window.
-            let existing = strong.update(cx, |state: &mut AppState, _cx| state.settings_window);
-
-            if let Some(win) = existing {
-                if win
-                    .update(cx, |_state, window, _cx| {
-                        window.activate_window();
-                    })
-                    .is_ok()
-                {
-                    return;
-                }
-            }
-
-            let weak = handle.clone();
-            match settings_window::open_settings_window(cx, weak) {
-                Ok(new_handle) => {
-                    strong.update(cx, |state: &mut AppState, _cx| {
-                        state.settings_window = Some(new_handle);
-                    });
-                }
-                Err(e) => {
-                    warn!("Failed to open settings window: {e}");
-                }
-            }
+            win.update(cx, |settings, _window, cx| settings.show_pairing(cx))
+                .ok();
+        }
+    });
+    App::on_action::<crate::away::AwayAction>(cx, {
+        let handle = toggle_handle.clone();
+        move |_, cx| {
+            handle
+                .update(cx, |this: &mut AppState, cx| {
+                    this.pending_action = Some(SessionAction::RequestRemoteControlAll.into());
+                    cx.notify();
+                })
+                .ok();
         }
     });
     App::on_action::<CaptureUi>(cx, {
@@ -248,4 +237,44 @@ pub(crate) fn register_all(cx: &mut Context<AppState>) {
                 .ok();
         }
     });
+}
+
+/// Focus the Settings window, opening it if needed, and return its handle.
+///
+/// Must run from an action handler, not via `PendingAction`: the
+/// pending-action dispatch runs inside render(), and cx.open_window() during
+/// a render tears GPUI's element arena apart with "attempted to dereference an
+/// ArenaRef after its Arena was cleared".
+fn open_or_focus_settings(
+    handle: &WeakEntity<AppState>,
+    cx: &mut App,
+) -> Option<WindowHandle<settings_window::SettingsWindowState>> {
+    let strong = handle.upgrade()?;
+    // The window reads its per-section state from `user_settings` itself;
+    // here we only need the handle to an already-open window.
+    let existing = strong.update(cx, |state: &mut AppState, _cx| state.settings_window);
+
+    if let Some(win) = existing {
+        if win
+            .update(cx, |_state, window, _cx| {
+                window.activate_window();
+            })
+            .is_ok()
+        {
+            return Some(win);
+        }
+    }
+
+    match settings_window::open_settings_window(cx, handle.clone()) {
+        Ok(new_handle) => {
+            strong.update(cx, |state: &mut AppState, _cx| {
+                state.settings_window = Some(new_handle);
+            });
+            Some(new_handle)
+        }
+        Err(e) => {
+            warn!("Failed to open settings window: {e}");
+            None
+        }
+    }
 }

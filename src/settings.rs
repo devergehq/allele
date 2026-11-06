@@ -252,6 +252,12 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub promote_attention_sessions: bool,
 
+    /// When true, Allele holds a power assertion that prevents idle system
+    /// sleep while any session is Running or AwaitingInput. The display still
+    /// sleeps. Default: ON — a sleeping host stops every agent (DEV-1156).
+    #[serde(default = "default_true")]
+    pub keep_awake_while_working: bool,
+
     /// When true, the sidebar shows only sessions with a live agent attached
     /// (see `SessionStatus::is_active`) and hides any project left with
     /// nothing to show. Suspended/Done sessions are hidden, not deleted —
@@ -290,6 +296,31 @@ pub struct Settings {
     /// rather than a stray click.
     #[serde(default)]
     pub dispatch: DispatchLimits,
+
+    /// Multi-machine identity and transport (DEV-1159): this machine's name
+    /// and the relay its endpoint uses. The machine's secret key is not here —
+    /// it lives in the Keychain (`remote::identity`).
+    #[serde(default)]
+    pub remote: RemoteSettings,
+}
+
+/// Multi-machine settings, edited under *Settings → Machines*. Both fields are
+/// `None` until the user sets them, so the defaults (the computer name, n0's
+/// relays) keep tracking the OS and iroh rather than being frozen on first run.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteSettings {
+    /// The name peers see. `None` or blank means the computer name — see
+    /// `remote::resolve_machine_name`.
+    #[serde(default)]
+    pub machine_name: Option<String>,
+    /// A self-hosted `iroh-relay` URL. `None` or blank means n0's public relays.
+    #[serde(default)]
+    pub relay_url: Option<String>,
+    /// *Allow remote connections* (DEV-1160). Off until the first pairing
+    /// turns it on; off means no paired machine can connect. Pairing itself
+    /// still works while it is off.
+    #[serde(default)]
+    pub allow_connections: bool,
 }
 
 /// Session-sync store configuration. All plain strings — no credentials are
@@ -467,11 +498,13 @@ impl Default for Settings {
             tool_visibility: std::collections::HashMap::new(),
             git_pull_before_new_session: false,
             promote_attention_sessions: true,
+            keep_awake_while_working: true,
             sidebar_active_only: false,
             attention_bar_collapsed: false,
             naming: NamingConfig::default(),
             sync: SyncSettings::default(),
             dispatch: DispatchLimits::default(),
+            remote: RemoteSettings::default(),
         }
     }
 }
@@ -700,6 +733,26 @@ mod tests {
         let round_tripped: Settings =
             serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(round_tripped.dispatch, s.dispatch);
+    }
+
+    #[test]
+    fn a_renamed_machine_survives_save_and_reload() {
+        // A restart is `save_to` then a fresh parse of the same file.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut s = Settings::default();
+        s.remote.machine_name = Some("Desk".into());
+        s.remote.relay_url = Some("https://relay.example.com".into());
+        s.save_to(&path).unwrap();
+        let reloaded: Settings =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(reloaded.remote, s.remote);
+    }
+
+    #[test]
+    fn settings_without_a_remote_block_load_with_defaults() {
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.remote, RemoteSettings::default());
     }
 
     #[test]

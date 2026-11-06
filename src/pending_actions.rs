@@ -94,13 +94,21 @@ impl AppState {
             PendingAction::Overlay(a) => {
                 self.handle_overlay_action(a, &mut skip_refocus, window, cx)
             }
+            PendingAction::RemoteTab(a) => {
+                self.handle_remote_tab_action(a, &mut skip_refocus, window, cx)
+            }
         }
 
         // After any sidebar-triggered action, re-focus the active
         // terminal so keyboard input goes back to Claude Code.
         // ToggleDrawer manages its own focus, so skip it.
         if !skip_refocus {
-            if let Some(session) = self.active_session() {
+            // A remote tab on screen keeps the keyboard; the local session
+            // under it is hidden and must not receive typing (DEV-1167).
+            if let Some(tab) = self.remote_tabs.shown() {
+                let fh = tab.view.read(cx).focus_handle.clone();
+                fh.focus(window, cx);
+            } else if let Some(session) = self.active_session() {
                 if let Some(tv) = session.terminal_view.as_ref() {
                     let fh = tv.read(cx).focus_handle.clone();
                     fh.focus(window, cx);
@@ -117,6 +125,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         match action {
+            SessionAction::RequestRemoteControlAll => self.away_and_report(cx),
             SessionAction::NewSessionInActiveProject => {
                 if let Some(active) = self.active {
                     self.add_session_to_project(active.project_idx, window, cx);
@@ -144,6 +153,7 @@ impl AppState {
                 *skip_refocus = true;
                 self.open_new_session_modal(project_idx, window, cx);
             }
+            SessionAction::Remote(action) => self.handle_remote_session_action(action, cx),
             SessionAction::AddSessionWithDetails {
                 project_idx,
                 label,
@@ -253,6 +263,9 @@ impl AppState {
                     .map(|s| s.status == SessionStatus::Suspended)
                     .unwrap_or(false);
 
+                // A local click always shows the local session, even the one
+                // already under an open remote tab (DEV-1167).
+                self.remote_tabs.hide();
                 if is_suspended {
                     self.resume_session(cursor, window, cx);
                 } else {
@@ -1348,6 +1361,12 @@ impl AppState {
                 };
                 snapshot.save();
             }
+            SettingsAction::UpdateKeepAwake(enabled) => {
+                *skip_refocus = true;
+                self.user_settings.keep_awake_while_working = enabled;
+                self.mark_settings_dirty();
+                self.reconcile_keep_awake();
+            }
             SettingsAction::UpdateFontSize(size) => {
                 *skip_refocus = true;
                 let new_size = clamp_font_size(size);
@@ -1438,6 +1457,71 @@ impl AppState {
                     project.settings = settings;
                 }
                 self.mark_settings_dirty();
+            }
+            SettingsAction::UpdateMachineName(name) => {
+                *skip_refocus = true;
+                self.user_settings.remote.machine_name = non_blank(name);
+                self.remote.set_settings(&self.user_settings.remote);
+                self.mark_settings_dirty();
+            }
+            SettingsAction::UpdateRelayUrl(url) => {
+                *skip_refocus = true;
+                self.user_settings.remote.relay_url = non_blank(url);
+                self.remote.set_settings(&self.user_settings.remote);
+                self.mark_settings_dirty();
+            }
+            SettingsAction::SetAllowRemoteConnections(on) => {
+                *skip_refocus = true;
+                self.user_settings.remote.allow_connections = on;
+                self.remote.set_allow(on);
+                self.mark_settings_dirty();
+            }
+            SettingsAction::StartPairing { machine_name } => {
+                *skip_refocus = true;
+                self.remote.start_pairing(machine_name);
+            }
+            SettingsAction::CancelPairing => {
+                *skip_refocus = true;
+                self.remote.cancel_pairing();
+            }
+            SettingsAction::DismissPairing => {
+                *skip_refocus = true;
+                self.remote.dismiss_pairing();
+            }
+            SettingsAction::AnswerPairing { request, approve } => {
+                *skip_refocus = true;
+                let answer = self.remote.answer(request, approve);
+                if answer.switch_turned_on {
+                    self.user_settings.remote.allow_connections = true;
+                    self.mark_settings_dirty();
+                }
+            }
+            SettingsAction::AddMachine { code, machine_name } => {
+                *skip_refocus = true;
+                self.remote.add_machine(&code, machine_name);
+            }
+            SettingsAction::ConfirmAddMachine { confirmed } => {
+                *skip_refocus = true;
+                self.remote.confirm_client(confirmed);
+            }
+            SettingsAction::DismissAddMachine => {
+                *skip_refocus = true;
+                self.remote.dismiss_client();
+            }
+            SettingsAction::SetPeerControl { peer, allowed } => {
+                *skip_refocus = true;
+                if let Err(e) = self.remote.set_control(peer, allowed) {
+                    warn!("could not change {}'s permissions: {e}", peer.short());
+                }
+            }
+            SettingsAction::RemovePeer(peer) => {
+                *skip_refocus = true;
+                if let Err(e) = self.remote.remove_peer(peer) {
+                    warn!(
+                        "{} was disconnected but its removal was not saved: {e}",
+                        peer.short()
+                    );
+                }
             }
             SettingsAction::UpdateBaseInfra(enabled) => {
                 *skip_refocus = true;
@@ -1552,6 +1636,13 @@ impl AppState {
             }
         }
     }
+}
+
+/// `None` for blank input, the trimmed text otherwise — how optional text
+/// settings are stored, so "cleared" and "never set" mean the same thing.
+fn non_blank(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -1729,6 +1820,98 @@ mod tests {
             Some("develop")
         );
         assert_eq!(fx.state.save_count(), 0);
+    }
+
+    /// Settings family (DEV-1159). The machine name persists to
+    /// settings.json, trimmed; clearing it stores `None`, which resolves back
+    /// to the computer name.
+    #[gpui::test]
+    fn update_machine_name_persists_trimmed_and_clears_to_none(cx: &mut TestAppContext) {
+        let fx = Fixture::new(cx);
+
+        let dirty = fx.dispatch(SettingsAction::UpdateMachineName("  Desk  ".into()), cx);
+        assert_eq!(dirty, (false, true));
+        fx.checkpoint(cx);
+        assert_eq!(
+            fx.settings.snapshot().remote.machine_name.as_deref(),
+            Some("Desk")
+        );
+
+        // Clearing marks settings dirty and stores `None`. (Read from the app,
+        // not the repository: the coordinator throttles back-to-back saves.)
+        let dirty = fx.dispatch(SettingsAction::UpdateMachineName("   ".into()), cx);
+        assert_eq!(dirty, (false, true));
+        let name = fx.update(cx, |state, _w, _cx| {
+            state.user_settings.remote.machine_name.clone()
+        });
+        assert_eq!(name, None);
+        assert_eq!(fx.state.save_count(), 0);
+    }
+
+    /// Settings family (DEV-1159). The relay URL persists to settings.json.
+    #[gpui::test]
+    fn update_relay_url_persists_to_settings_json(cx: &mut TestAppContext) {
+        let fx = Fixture::new(cx);
+        fx.dispatch(
+            SettingsAction::UpdateRelayUrl("https://relay.example.com".into()),
+            cx,
+        );
+        fx.checkpoint(cx);
+        assert_eq!(
+            fx.settings.snapshot().remote.relay_url.as_deref(),
+            Some("https://relay.example.com")
+        );
+    }
+
+    /// Settings family (DEV-1160). The switch persists to settings.json and
+    /// reaches the remote service.
+    #[gpui::test]
+    fn allow_remote_connections_persists_and_reaches_the_service(cx: &mut TestAppContext) {
+        let fx = Fixture::new(cx);
+        let dirty = fx.dispatch(SettingsAction::SetAllowRemoteConnections(true), cx);
+        assert_eq!(dirty, (false, true));
+        assert!(fx.update(cx, |state, _w, _cx| state.remote.allows_connections()));
+        fx.checkpoint(cx);
+        assert!(fx.settings.snapshot().remote.allow_connections);
+
+        fx.dispatch(SettingsAction::SetAllowRemoteConnections(false), cx);
+        assert!(!fx.update(cx, |state, _w, _cx| state.remote.allows_connections()));
+    }
+
+    /// Settings family (DEV-1160). Revoking and the control toggle go through
+    /// the service to peers.json, not settings.json.
+    #[gpui::test]
+    fn peer_control_and_removal_go_to_the_peer_list(cx: &mut TestAppContext) {
+        let fx = Fixture::new(cx);
+        let id = crate::remote::LocalIdentity::ephemeral().id();
+        fx.update(cx, |state, _w, _cx| {
+            state
+                .remote
+                .registry()
+                .add_paired(crate::remote::peers::TrustedPeer::newly_paired(
+                    id, "Laptop",
+                ))
+                .unwrap()
+        });
+
+        let dirty = fx.dispatch(
+            SettingsAction::SetPeerControl {
+                peer: id,
+                allowed: true,
+            },
+            cx,
+        );
+        assert_eq!(dirty, (false, false), "permissions live in peers.json");
+        let control = fx.update(cx, |state, _w, _cx| {
+            state.remote.registry().permissions(id).map(|p| p.control)
+        });
+        assert_eq!(control, Some(true));
+
+        fx.dispatch(SettingsAction::RemovePeer(id), cx);
+        let gone = fx.update(cx, |state, _w, _cx| {
+            state.remote.registry().get(id).is_none()
+        });
+        assert!(gone);
     }
 
     /// Archive family, via the dispatcher's stale-confirmation guard. A

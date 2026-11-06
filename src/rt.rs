@@ -1,8 +1,12 @@
-//! GPUI ↔ tokio bridge for session sync.
+//! GPUI ↔ tokio bridge, shared by session sync and multi-machine.
 //!
 //! The app runs on GPUI's executor, but rust-s3's async I/O (reqwest/hyper)
-//! requires a **tokio** runtime. This module owns a shared multi-threaded tokio
-//! runtime and a [`block_on`] that drives a sync future to completion.
+//! and iroh both require a **tokio** runtime. This module owns a shared
+//! multi-threaded tokio runtime, a [`block_on`] that drives a future to
+//! completion, and a [`handle`] for long-lived tasks (the remote listener).
+//!
+//! It lives at the crate root rather than under `sync` so `remote` can use it
+//! without one feature module depending on another (ARCHITECTURE.md §7.11).
 //!
 //! Usage: run the S3 work on a GPUI background task and block on it there —
 //! never on the main/UI thread:
@@ -26,7 +30,7 @@ fn runtime() -> &'static Runtime {
             .worker_threads(2)
             .enable_all()
             .build()
-            .expect("failed to build the session-sync tokio runtime")
+            .expect("failed to build the shared tokio runtime")
     })
 }
 
@@ -35,6 +39,11 @@ fn runtime() -> &'static Runtime {
 /// never the UI thread.
 pub fn block_on<F: Future>(future: F) -> F::Output {
     runtime().block_on(future)
+}
+
+/// A handle to the shared runtime, for spawning tasks that outlive the call.
+pub fn handle() -> tokio::runtime::Handle {
+    runtime().handle().clone()
 }
 
 #[cfg(test)]

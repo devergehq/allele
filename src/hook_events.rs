@@ -144,6 +144,16 @@ impl AppState {
             }
         };
 
+        // Any event proves this agent process is past its startup dialogs,
+        // which is what lets Away trust its `Idle` (DEV-1157).
+        self.note_hook_from(
+            crate::actions::SessionCursor {
+                project_idx: p_idx,
+                session_idx: s_idx,
+            },
+            cx,
+        );
+
         // Resolve the adapter for this session's agent BEFORE taking a mutable
         // borrow of the session. Sessions with no recorded agent (legacy)
         // default to Claude, preserving prior behaviour.
