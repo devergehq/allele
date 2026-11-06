@@ -17,7 +17,7 @@ Allele is a GPU-accelerated native macOS app that manages multiple Claude Code s
 
 1. **Embedded real terminals.** Each session runs the real `claude` CLI in a real PTY, rendered via GPUI + alacritty_terminal. No output interception, no JSON wrapping, no IPC boundary — what you see is exactly what Claude Code printed. Full 256-colour + truecolor support, cursor shapes, text selection, in-terminal search, and a cell-accurate grid renderer.
 2. **APFS copy-on-write workspaces.** Every session runs in an instant copy-on-write clone of your repo, created via macOS's `clonefile(2)` syscall. No waiting for `cp -r` on a 50k-file monorepo. No disk space used until files are modified. Clones are auto-trusted in Claude Code's `~/.claude.json` so there's no trust prompt on first entry.
-3. **Session lifecycle management.** A sidebar tracks running, idle, awaiting-input, and finished sessions. Sessions persist across app restarts (cold resume via `claude --resume`). Discarded sessions are archived into canonical git refs so work is never lost. An archive browser lets you merge or delete archived sessions.
+3. **Session lifecycle management.** A sidebar tracks running, idle, awaiting-input, and finished sessions. Sessions persist across app restarts (cold resume via `claude --resume`). Discarded sessions are archived into canonical git refs so work is never lost. An archive browser lets you restore or delete archived sessions.
 
 ## What it isn't
 
@@ -80,7 +80,7 @@ If that's not you, you're probably better served by tmux, iTerm2 split panes, or
 - Session branches in clones (`allele/session/<id>`)
 - Auto-commit dirty state before archiving
 - Archive refs in canonical (`refs/allele/archive/<id>`)
-- Archive browser with merge/delete actions
+- Archive browser with restore/delete actions
 - Periodic archive ref pruning matching trash TTL
 
 ### Projects
@@ -219,8 +219,8 @@ All core phases complete. Working:
 - Session persistence and cold resume across app restarts
 - APFS clone-backed workspace isolation with auto-trust
 - Claude Code hook integration for attention routing (6 status states)
-- Git plumbing for session archiving and merge-back
-- Archive browser UI with merge/delete actions
+- Git plumbing for session archiving
+- Archive browser UI with restore/delete actions
 - Policy-based terminal keymap with readline support
 - Per-session drawer terminal panel
 - Auto-naming sessions from first prompt

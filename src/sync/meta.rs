@@ -168,7 +168,6 @@ impl SessionBundleMeta {
             started_at: self.started_at,
             last_active: self.last_active,
             active_runtime_secs: self.active_runtime_secs,
-            merged: false,
             drawer_tab_names: Vec::new(),
             drawer_tabs: Vec::new(),
             drawer_active_tab: 0,
@@ -177,8 +176,13 @@ impl SessionBundleMeta {
             agent_id: self.agent_id.clone(),
             pinned: self.pinned,
             comment: self.comment.clone(),
+            // A pulled session arrives ungrouped (DEV-853). Groups are scoped
+            // to one project on one machine, and the bundle carries no group —
+            // so the alternative would be inventing a group on the target
+            // machine from a name that means nothing there. Out of scope by
+            // decision, not by omission.
+            group: None,
             branch_name: self.branch_name.clone(),
-            merge_strategy_override: None,
             branch_locked: false,
             skip_orchestration: self.skip_orchestration,
             orchestration: Some(self.orchestration()),
@@ -257,7 +261,6 @@ mod tests {
             started_at: SystemTime::UNIX_EPOCH,
             last_active: SystemTime::UNIX_EPOCH,
             active_runtime_secs: 120,
-            merged: true,
             drawer_tab_names: vec!["build".into(), "logs".into()],
             drawer_tabs: vec![
                 crate::state::PersistedDrawerTab {
@@ -275,8 +278,8 @@ mod tests {
             agent_id: Some("claude".into()),
             pinned: true,
             comment: Some("wip on auth".into()),
+            group: Some("review".into()),
             branch_name: Some("fix-auth-5dc47535".into()),
-            merge_strategy_override: None,
             branch_locked: true,
             skip_orchestration: true,
             orchestration: Some(crate::session::Orchestration::Nothing),
@@ -338,13 +341,15 @@ mod tests {
         assert_eq!(back.browser_last_url, None);
         assert!(back.drawer_tab_names.is_empty());
         assert_eq!(back.drawer_active_tab, 0);
-        assert!(back.merge_strategy_override.is_none());
         assert!(!back.branch_locked);
+        // A group is scoped to one project on one machine, and the bundle does
+        // not carry it — so a pulled session lands ungrouped rather than in a
+        // group whose name means nothing on this machine (DEV-853).
+        assert_eq!(back.group, None);
         // A lightweight session must stay lightweight after a sync hop —
         // otherwise the first resume on the target machine runs *that*
         // machine's project scripts, which is what the user opted out of.
         assert!(back.skip_orchestration);
-        assert!(!back.merged);
         assert_eq!(back.clone_path, None);
 
         // Portable fields survive intact.

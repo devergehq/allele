@@ -24,7 +24,8 @@ cargo fmt && cargo clippy          # format + lint
 
 ## Releasing
 
-**To cut a release, follow [RELEASING.md](RELEASING.md).** In short: make a release-prep
+**To cut a release, follow [RELEASING.md](RELEASING.md).** [`script/cut-release.sh`](script/cut-release.sh)
+automates the prep (`./script/cut-release.sh minor --dry-run` first). In short: make a release-prep
 commit that bumps the version in **`Cargo.toml`, `Cargo.lock`, and `resources/Info.plist`**
 (all to `X.Y.Z`) and moves `CHANGELOG.md`'s `[Unreleased]` into a dated `[X.Y.Z]` section;
 merge it to `master`; then tag and push:

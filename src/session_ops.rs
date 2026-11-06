@@ -20,10 +20,7 @@ use crate::session::{
 };
 use crate::state::ArchivedSession;
 use crate::terminal::{clamp_font_size, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
-use crate::{
-    agents, browser, claude_session_history_exists, clone, config, conversations, git, project,
-    settings,
-};
+use crate::{agents, browser, clone, config, conversations, git, project, settings};
 
 /// Subtitle for a freshly created session, given whether the APFS clone took.
 ///
@@ -31,6 +28,18 @@ use crate::{
 /// keep announcing a clone that finished long ago. Failure *is* a state — the
 /// session is working directly in the project source with no isolation — so
 /// that warning stays put until something replaces it.
+/// Delete a clone without blocking the UI thread: a paced delete of a large
+/// tree takes tens of seconds (DEV-755).
+pub(crate) fn delete_clone_in_background(cx: &mut gpui::App, clone_path: std::path::PathBuf) {
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(e) = clone::delete_clone(&clone_path) {
+                warn!("failed to delete clone {}: {e}", clone_path.display());
+            }
+        })
+        .detach();
+}
+
 fn clone_operation_result(clone_succeeded: bool) -> OperationResult {
     if clone_succeeded {
         OperationResult::transient("Workspace cloned successfully.")
@@ -129,6 +138,7 @@ impl AppState {
             label: &display_label,
             hooks_settings_path: hooks_path_str.as_deref(),
             has_history: false,
+            initial_prompt: None,
         };
         let command = agent
             .as_ref()
@@ -149,6 +159,10 @@ impl AppState {
         // Spawn the clone on a background task, then finish on the main thread
         let source_for_task = source_path.clone();
         let project_name_for_task = project_name.clone();
+        // The project's default branch, if set, is the base this session's own
+        // branch starts from (DEV-691). Empty means "wherever the project is".
+        let base_branch = project.settings.default_branch.clone();
+        let session_remote = project.settings.resolved_remote().to_string();
         let pull_before_clone = self.user_settings.git_pull_before_new_session;
         let cleanup_paths_for_task = self.user_settings.session_cleanup_paths.clone();
         // Two copies: one moves into the background clonefile closure (where
@@ -158,6 +172,7 @@ impl AppState {
         let session_id_for_session = session_id.clone();
         let display_label_for_task = display_label.clone();
         let agent_id_for_task = agent_id.clone();
+        let source_for_prepare = source_path.clone();
 
         cx.spawn_in(window, async move |this, cx| {
             let (clone_result, pull_error) = cx
@@ -196,6 +211,40 @@ impl AppState {
                         &session_id_for_clone,
                         &cleanup_paths_for_task,
                     );
+
+                    // Everything that touches the clone on disk runs here, off
+                    // the UI thread: a file write there stalls behind any
+                    // other clone holding the volume (DEV-755). Only when the
+                    // clone succeeded — on fallback to the source path we must
+                    // NOT mutate canonical's HEAD.
+                    if let Ok(ref clone_path) = clone {
+                        if clone_path != &source_for_prepare {
+                            clone::prepare_session_workspace(
+                                clone_path,
+                                &session_id_for_clone,
+                                &cleanup_paths_for_task,
+                            );
+
+                            // Create the session branch in the clone rooted at
+                            // HEAD, or at the project's default branch.
+                            let branched = match base_branch.as_deref() {
+                                Some(base) => git::create_session_branch_from(
+                                    clone_path,
+                                    &session_id_for_clone,
+                                    base,
+                                    &session_remote,
+                                ),
+                                None => {
+                                    git::create_session_branch(clone_path, &session_id_for_clone)
+                                }
+                            };
+                            if let Err(e) = branched {
+                                warn!(
+                                    "create_session_branch failed for {session_id_for_clone}: {e}"
+                                );
+                            }
+                        }
+                    }
                     (clone, pull_error)
                 })
                 .await;
@@ -222,45 +271,16 @@ impl AppState {
 
                 let clone_succeeded = clone_path != source_path;
 
-                // Purge stale runtime files (Overmind/Foreman sockets, server
-                // pid files, etc.) that the parent left in the working tree —
-                // clonefile(2) faithfully copied them. Must happen before any
-                // drawer tab spawns its command.
-                if clone_succeeded {
-                    clone::cleanup_stale_runtime(
-                        &clone_path,
-                        &this.user_settings.session_cleanup_paths,
-                    );
-                }
-
                 // Find the project again (indices may have shifted if user removed projects)
                 let Some(project) = this.projects.get_mut(project_idx) else {
-                    let _ = clone::delete_clone(&clone_path);
+                    if clone_succeeded {
+                        delete_clone_in_background(cx, clone_path);
+                    }
                     return;
                 };
 
                 // Remove the loading placeholder
                 project.loading_sessions.retain(|l| l.id != session_id);
-
-                // Create the session branch in the clone rooted at HEAD.
-                // Only do this when clonefile succeeded — when we fell back
-                // to source_path we must NOT mutate canonical's HEAD.
-                if clone_succeeded {
-                    if let Err(e) = git::create_session_branch(&clone_path, &session_id_for_session)
-                    {
-                        warn!("create_session_branch failed for {session_id_for_session}: {e}");
-                    }
-
-                    // Write marker file for orphan cleanup identification.
-                    let marker_path = clone_path.join(".allele-session");
-                    if let Err(e) = std::fs::write(&marker_path, &session_id_for_session) {
-                        warn!("failed to write .allele-session marker: {e}");
-                    }
-
-                    // Exclude the marker from git so auto-commit never
-                    // captures it into the session branch.
-                    crate::git::exclude_pattern_in_clone(&clone_path, ".allele-session");
-                }
 
                 // Create the terminal view with the clone as PWD
                 // Materialise the project environment against the clone. `{{unique_port}}`
@@ -412,11 +432,21 @@ impl AppState {
         .detach();
     }
 
-    /// Create a new session with custom details (name, branch, agent, prompt).
+    /// Create a new session with custom details (name, branch, agent, prompt),
+    /// returning the id it was given.
     ///
     /// This is the "with details" counterpart to `add_session_to_project`.
     /// It accepts optional overrides for label, branch slug, agent, and an
     /// initial prompt to send to the agent after creation.
+    ///
+    /// `None` means nothing was started — an unknown project, or a source path
+    /// that has gone missing (which raises the Relocate modal instead).
+    ///
+    /// **The id is returned rather than discovered.** Callers that need to
+    /// follow the session afterwards used to snapshot the project's session
+    /// list and diff it once this returned, which silently claimed a different
+    /// session's id whenever anything else was mid-provisioning. The id is
+    /// minted here, so it is handed back here (DEV-601).
     pub(crate) fn add_session_to_project_with_details(
         &mut self,
         project_idx: usize,
@@ -427,15 +457,13 @@ impl AppState {
         orchestration: crate::session::Orchestration,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some(project) = self.projects.get_mut(project_idx) else {
-            return;
-        };
+    ) -> Option<String> {
+        let project = self.projects.get_mut(project_idx)?;
 
         if !project.source_path.exists() {
             self.pending_action = Some(ProjectAction::RelocateProject(project_idx).into());
             cx.notify();
-            return;
+            return None;
         }
 
         let source_path = project.source_path.clone();
@@ -481,10 +509,16 @@ impl AppState {
             label: &display_label,
             hooks_settings_path: hooks_path_str.as_deref(),
             has_history: false,
+            initial_prompt: initial_prompt.as_deref(),
         };
         let command = agent
             .as_ref()
             .and_then(|a| agents::build_command(a, &ctx, false));
+
+        // When the agent takes the brief as an argument, it arrives already
+        // submitted and nothing is typed into the TUI at all. Only agents that
+        // cannot do that fall back to the typed path below (DEV-604).
+        let agent_takes_prompt = agent.as_ref().is_some_and(agents::consumes_initial_prompt);
 
         project.loading_sessions.push(project::LoadingSession {
             id: session_id.clone(),
@@ -505,6 +539,9 @@ impl AppState {
         let agent_id_for_task = agent_id.clone();
         let pull_before_clone = self.user_settings.git_pull_before_new_session;
         let cleanup_paths_for_task = self.user_settings.session_cleanup_paths.clone();
+        // An explicitly named branch always wins; the project's default branch
+        // is only the base for sessions that did not name one (DEV-691).
+        let base_branch = project.settings.default_branch.clone();
         let branch_slug = custom_branch_slug;
         // The user picked this branch — auto-naming may relabel the session but
         // must never rename the branch out from under them.
@@ -514,87 +551,115 @@ impl AppState {
         // background task below so the network call never blocks the UI.
         let branch_slug_for_clone = branch_slug.clone();
         let session_id_for_branch = session_id.clone();
+        // Cloned before the task takes ownership, so the id can be returned to
+        // the caller that asked for this session (DEV-601).
+        let created_session_id = session_id.clone();
 
         cx.spawn_in(window, async move |this, cx| {
-            let (clone_result, pull_error, branch_warning, branch_error) = cx
-                .background_executor()
-                .spawn(async move {
-                    let pull_error = if pull_before_clone {
-                        match git::pull(&source_for_task) {
-                            Ok(git::PullOutcome::UpToDate) => None,
-                            Ok(git::PullOutcome::Diverged) => {
-                                // Benign: the source branch has local/remote
-                                // divergence and can't fast-forward. Clone from
-                                // current HEAD; no user-facing warning.
-                                info!(
-                                    "git pull on {} skipped: branch diverged from \
+            let (clone_result, pull_error, branch_warning, branch_error) =
+                cx.background_executor()
+                    .spawn(async move {
+                        let pull_error = if pull_before_clone {
+                            match git::pull(&source_for_task) {
+                                Ok(git::PullOutcome::UpToDate) => None,
+                                Ok(git::PullOutcome::Diverged) => {
+                                    // Benign: the source branch has local/remote
+                                    // divergence and can't fast-forward. Clone from
+                                    // current HEAD; no user-facing warning.
+                                    info!(
+                                        "git pull on {} skipped: branch diverged from \
                                      upstream, cloning from current source",
-                                    source_for_task.display()
-                                );
-                                None
-                            }
-                            Err(e) => {
-                                let msg = format!("{e}");
-                                warn!(
-                                    "git pull on {} failed before new session: {msg} \
-                                     (continuing with clone)",
-                                    source_for_task.display()
-                                );
-                                Some(msg)
-                            }
-                        }
-                    } else {
-                        None
-                    };
-                    let clone = clone::create_session_clone(
-                        &source_for_task,
-                        &project_name_for_task,
-                        &session_id_for_clone,
-                        &cleanup_paths_for_task,
-                    );
-
-                    // Resolve the session branch here (off the UI thread):
-                    // fetch and reset onto the remote tip if the user named a
-                    // branch, otherwise create a fresh session branch.
-                    let mut branch_warning = None;
-                    let mut branch_error = None;
-                    if let Ok(ref clone_path) = clone {
-                        if clone_path != &source_for_task {
-                            match git::checkout_or_create_session_branch(
-                                clone_path,
-                                &session_id_for_branch,
-                                branch_slug_for_clone.as_deref(),
-                                &session_remote,
-                            ) {
-                                Ok(resolution) => branch_warning = resolution.warning,
-                                Err(e) => {
-                                    warn!(
-                                        "session branch setup failed for \
-                                         {session_id_for_branch}: {e}"
+                                        source_for_task.display()
                                     );
-                                    // Fail closed: opening the session anyway
-                                    // would put work on a base the user did not
-                                    // ask for, which is the whole failure mode
-                                    // this path exists to prevent.
-                                    branch_error = Some(format!("{e}"));
+                                    None
+                                }
+                                Err(e) => {
+                                    let msg = format!("{e}");
+                                    warn!(
+                                        "git pull on {} failed before new session: {msg} \
+                                     (continuing with clone)",
+                                        source_for_task.display()
+                                    );
+                                    Some(msg)
+                                }
+                            }
+                        } else {
+                            None
+                        };
+                        let clone = clone::create_session_clone(
+                            &source_for_task,
+                            &project_name_for_task,
+                            &session_id_for_clone,
+                            &cleanup_paths_for_task,
+                        );
+
+                        // Resolve the session branch here (off the UI thread):
+                        // fetch and reset onto the remote tip if the user named a
+                        // branch, otherwise create a fresh session branch.
+                        let mut branch_warning = None;
+                        let mut branch_error = None;
+                        if let Ok(ref clone_path) = clone {
+                            if clone_path != &source_for_task {
+                                // No branch named, but the project has a default:
+                                // root the session branch there instead of at the
+                                // clone's HEAD (DEV-691). A named branch still goes
+                                // through the resolver below, unchanged.
+                                let resolved = match (&branch_slug_for_clone, &base_branch) {
+                                    (None, Some(base)) => git::create_session_branch_from(
+                                        clone_path,
+                                        &session_id_for_branch,
+                                        base,
+                                        &session_remote,
+                                    )
+                                    .map(|()| git::SessionBranchResolution {
+                                        outcome: git::SessionBranchOutcome::CreatedNew,
+                                        warning: None,
+                                    }),
+                                    _ => git::checkout_or_create_session_branch(
+                                        clone_path,
+                                        &session_id_for_branch,
+                                        branch_slug_for_clone.as_deref(),
+                                        &session_remote,
+                                    ),
+                                };
+                                match resolved {
+                                    Ok(resolution) => branch_warning = resolution.warning,
+                                    Err(e) => {
+                                        warn!(
+                                            "session branch setup failed for \
+                                         {session_id_for_branch}: {e}"
+                                        );
+                                        // Fail closed: opening the session anyway
+                                        // would put work on a base the user did not
+                                        // ask for, which is the whole failure mode
+                                        // this path exists to prevent.
+                                        branch_error = Some(format!("{e}"));
+                                    }
+                                }
+
+                                // Off the UI thread, for the same reason as the
+                                // branch work above (DEV-755).
+                                if branch_error.is_none() {
+                                    clone::prepare_session_workspace(
+                                        clone_path,
+                                        &session_id_for_branch,
+                                        &cleanup_paths_for_task,
+                                    );
+                                } else {
+                                    let _ = clone::delete_clone(clone_path);
                                 }
                             }
                         }
-                    }
 
-                    (clone, pull_error, branch_warning, branch_error)
-                })
-                .await;
+                        (clone, pull_error, branch_warning, branch_error)
+                    })
+                    .await;
 
             let _ = this.update_in(cx, move |this: &mut Self, window, cx| {
                 // Branch resolution failed → abort. Tear the clone down, drop
                 // the loading placeholder, and tell the user how to fix it.
+                // The background task already deleted the clone.
                 if let Some(msg) = branch_error {
-                    if let Ok(ref p) = clone_result {
-                        if p != &source_path {
-                            let _ = clone::delete_clone(p);
-                        }
-                    }
                     if let Some(project) = this.projects.get_mut(project_idx) {
                         project.loading_sessions.retain(|l| l.id != session_id);
                     }
@@ -626,32 +691,16 @@ impl AppState {
 
                 let clone_succeeded = clone_path != source_path;
 
-                if clone_succeeded {
-                    clone::cleanup_stale_runtime(
-                        &clone_path,
-                        &this.user_settings.session_cleanup_paths,
-                    );
-                }
-
+                // The session branch, stale-runtime sweep and marker were all
+                // handled in the background task above (DEV-755).
                 let Some(project) = this.projects.get_mut(project_idx) else {
-                    let _ = clone::delete_clone(&clone_path);
+                    if clone_succeeded {
+                        delete_clone_in_background(cx, clone_path);
+                    }
                     return;
                 };
 
                 project.loading_sessions.retain(|l| l.id != session_id);
-
-                if clone_succeeded {
-                    // The session branch (existing branch checkout, or a fresh
-                    // branch) was already resolved in the background task above.
-
-                    // Write marker file for orphan cleanup identification.
-                    let marker_path = clone_path.join(".allele-session");
-                    if let Err(e) = std::fs::write(&marker_path, &session_id_for_session) {
-                        warn!("failed to write .allele-session marker: {e}");
-                    }
-
-                    crate::git::exclude_pattern_in_clone(&clone_path, ".allele-session");
-                }
 
                 // Materialise the project environment against the clone. `{{unique_port}}`
                 // is not available here — the port is allocated later, in
@@ -781,6 +830,14 @@ impl AppState {
                 if let Some(origin) = this.pending_dispatch_origins.remove(&session.id) {
                     session.origin = origin;
                 }
+                // Same for the sidebar group (DEV-853) — and for the same
+                // reason: the clone lands asynchronously, so the group cannot be
+                // set by the call that asked for it. The name was already
+                // interned against the project when it was parked, so what comes
+                // back here is the project's spelling.
+                if let Some(group) = this.pending_session_groups.remove(&session.id) {
+                    session.group = Some(group);
+                }
                 let dispatched = session.origin.is_dispatched();
 
                 let Some(project) = this.projects.get_mut(project_idx) else {
@@ -808,26 +865,29 @@ impl AppState {
                 Self::schedule_operation_result_repaint(cx);
 
                 // Send the initial prompt if provided.
-                if let Some(ref prompt_text) = prompt {
-                    if let Some(terminal) = terminal_view.read(cx).pty() {
-                        terminal.write(b"\x1b[200~");
-                        terminal.write(prompt_text.as_bytes());
-                        terminal.write(b"\x1b[201~");
+                //
+                // An agent that takes it as an argument already has it: the
+                // prompt was on the command line at spawn and arrived
+                // submitted, so there is nothing to type and nothing to
+                // confirm by keystroke. That is the whole point of DEV-604 —
+                // the typed path raced the agent's TUI boot, and lost.
+                //
+                // Everything else still types: a bare shell, or an adapter
+                // with no positional-prompt support. There the race is not in
+                // play — a shell has no TUI to boot — so the lossier path is
+                // acceptable where it is the only one.
+                if let Some(prompt_text) = prompt {
+                    if agent_takes_prompt {
+                        info!("initial prompt handed to the agent at spawn; not typing it");
+                    } else {
+                        info!("agent takes no prompt argument; typing the initial prompt");
+                        crate::dispatch::pty::deliver(
+                            &terminal_view,
+                            prompt_text,
+                            crate::dispatch::pty::CREATION_SUBMIT_RETRIES_MS,
+                            cx,
+                        );
                     }
-                    let tv_weak = terminal_view.downgrade();
-                    cx.spawn(async move |_this, cx| {
-                        cx.background_executor()
-                            .timer(std::time::Duration::from_millis(80))
-                            .await;
-                        cx.update(|cx| {
-                            if let Some(tv) = tv_weak.upgrade() {
-                                if let Some(terminal) = tv.read(cx).pty() {
-                                    terminal.write(b"\r");
-                                }
-                            }
-                        });
-                    })
-                    .detach();
                 }
 
                 cx.notify();
@@ -848,6 +908,8 @@ impl AppState {
             }
         })
         .detach();
+
+        Some(created_session_id)
     }
 
     /// Called when the user presses Enter in a terminal. If the owning
@@ -1215,7 +1277,22 @@ impl AppState {
 
         // Only adapters that understand session ids care about history —
         // for claude this gates `--resume` vs `--session-id`.
-        let has_history = claude_session_history_exists(&session_id);
+        //
+        // Derive the transcript path from the workspace first: that is a single
+        // stat on `~/.claude/projects/<dashed-cwd>/<id>.jsonl`, where the scan
+        // below reads all ~580 project directories and stats each one. The scan
+        // costs 6.5ms idle but 86ms under the disk load a dispatch creates — on
+        // the thread that has to draw, once per click, while someone resumes a
+        // list of sessions. It is the same defect DEV-602 took out of the render
+        // path and left here.
+        //
+        // The scan stays as a fallback, so a transcript filed somewhere the
+        // derivation does not predict is still found and the session still
+        // resumes its conversation rather than silently starting a new one
+        // (DEV-609).
+        let has_history = crate::transcript::expected_session_jsonl(&clone_path, &session_id)
+            .is_some_and(|p| p.exists())
+            || crate::transcript::claude_session_history_exists(&session_id);
         let hooks_path_str = self
             .hooks_settings_path
             .as_ref()
@@ -1225,6 +1302,7 @@ impl AppState {
             label: &label,
             hooks_settings_path: hooks_path_str.as_deref(),
             has_history,
+            initial_prompt: None,
         };
         let command = agent
             .as_ref()
@@ -1391,7 +1469,6 @@ impl AppState {
         let removed = project.sessions.remove(cursor.session_idx);
         let clone_path = removed.clone_path.clone();
         let removed_label = removed.label.clone();
-        let already_merged = removed.merged;
         let removed_session_id = removed.id.clone();
         let removed_browser_tab_id = removed.browser_tab_id;
         let runs_shutdown = removed.orchestration.runs_startup();
@@ -1400,21 +1477,23 @@ impl AppState {
         let session_id_for_task = removed.id.clone();
 
         // Preserve the session's metadata in the archive list so the
-        // sidebar archive browser can show a human-readable label —
-        // but skip this if the session was already merged (work is in canonical).
-        if !already_merged {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
-            project.archives.push(ArchivedSession {
-                id: removed.id.clone(),
-                project_id: project.id.clone(),
-                label: removed_label.clone(),
-                archived_at: now,
-                merge_error: None,
-            });
-        }
+        // sidebar archive browser can show a human-readable label.
+        //
+        // Unconditional since DEV-686 removed merge-and-close: there is no
+        // longer any path by which a session's work is already in canonical,
+        // so there is nothing to skip for. Always preserving is also the safe
+        // direction — an extra archive entry costs a row, a missing one costs
+        // the only handle on the work.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        project.archives.push(ArchivedSession {
+            id: removed.id.clone(),
+            project_id: project.id.clone(),
+            label: removed_label.clone(),
+            archived_at: now,
+        });
 
         // Register Chrome-tab cleanup as a hook on the PTY: when the
         // terminal is dropped below, the tab closes as part of the same
@@ -1467,11 +1546,15 @@ impl AppState {
                 // Same environment the session ran under, so a teardown script
                 // resolves the same toolchain its startup counterpart did.
                 let inherited_path = std::env::var("PATH").ok();
-                let env = config::ProjectEnv::from_config(&cfg, &project.settings).materialise(
+                let mut env = config::ProjectEnv::from_config(&cfg, &project.settings).materialise(
                     removed.allocated_port,
                     clone_path,
                     inherited_path.as_deref(),
                 );
+                // Symmetrically with `startup` (DEV-950): a teardown script is
+                // arbitrary shell too, and a redirected instance's one must not
+                // resolve the live app's root.
+                crate::paths::overlay_child_home(&mut env);
                 Some((cmd, env))
             });
 
@@ -1608,6 +1691,58 @@ impl AppState {
             })
             .detach();
         }
+    }
+
+    /// Sessions whose resumability wants refreshing, as `(id, clone path)`.
+    ///
+    /// Collected on the foreground and answered off it: each answer costs a
+    /// stat on the clone plus a scan of `~/.claude/projects`, which is why it
+    /// is never computed during render (DEV-602).
+    pub(crate) fn resumable_targets(&self) -> Vec<(String, Option<std::path::PathBuf>)> {
+        self.projects
+            .iter()
+            .flat_map(|p| p.sessions.iter())
+            .map(|s| (s.id.clone(), s.clone_path.clone()))
+            .collect()
+    }
+
+    /// Store a refreshed resumability flag, returning whether it changed — so
+    /// a caller can skip a repaint that would show nothing new.
+    pub(crate) fn record_resumable(&mut self, session_id: &str, resumable: bool) -> bool {
+        for project in &mut self.projects {
+            for session in &mut project.sessions {
+                if session.id == session_id {
+                    if session.resumable == Some(resumable) {
+                        return false;
+                    }
+                    session.resumable = Some(resumable);
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Every session id that may legitimately own a file in `~/.allele/events`.
+    ///
+    /// Both ids per session, deliberately: `/clear` rotates the Claude
+    /// conversation id, and the hook receiver names the events file after
+    /// whichever id the hook fired under. Pruning on `Session::id` alone would
+    /// delete the live events of every session that has ever been cleared.
+    /// Loading sessions count too — their agent can be writing events before
+    /// the clone lands (DEV-602).
+    pub(crate) fn live_event_ids(&self) -> std::collections::HashSet<String> {
+        let mut live = std::collections::HashSet::new();
+        for project in self.projects.iter() {
+            for session in project.sessions.iter() {
+                live.insert(session.id.clone());
+                live.insert(session.claude_session_id().to_string());
+            }
+            for loading in project.loading_sessions.iter() {
+                live.insert(loading.id.clone());
+            }
+        }
+        live
     }
 
     /// Push a session's bundle (metadata) up to the configured sync store.
@@ -1763,7 +1898,7 @@ impl AppState {
             let _ = this.update(cx, |this, cx| {
                 match outcome {
                     Ok(PullOutcome::Ready(session, revision)) => {
-                        this.apply_pulled_session(*session, revision);
+                        this.apply_pulled_session(*session, revision, cx);
                     }
                     Ok(PullOutcome::ProjectMissing(name)) => {
                         this.sync_notice = Some(format!(
@@ -1787,7 +1922,12 @@ impl AppState {
     /// Apply a resolved pulled session: insert it (first pull), replace it and
     /// drop the stale clone (newer revision), or leave it (same/older). Records
     /// the pulled revision as this device's base in the ledger on apply.
-    fn apply_pulled_session(&mut self, session: crate::state::PersistedSession, revision: u64) {
+    fn apply_pulled_session(
+        &mut self,
+        session: crate::state::PersistedSession,
+        revision: u64,
+        cx: &mut Context<Self>,
+    ) {
         let id = session.id.clone();
         let label = session.label.clone();
 
@@ -1815,10 +1955,11 @@ impl AppState {
                 let source = self.projects[pi].source_path.clone();
                 if let Some(clone_path) = old_clone {
                     if clone_path.exists() && clone_path != source {
-                        let _ = clone::delete_clone(&clone_path);
+                        delete_clone_in_background(cx, clone_path);
                     }
                 }
-                self.projects[pi].sessions[si] = session_from_persisted(&session);
+                self.projects[pi].sessions[si] =
+                    replace_preserving_local(&self.projects[pi].sessions[si], &session);
                 self.sync_notice = Some(format!(
                     "Updated \u{201c}{label}\u{201d} to revision {revision} — open it to load the work."
                 ));
@@ -1936,7 +2077,6 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
         persisted.last_active,
         std::time::Duration::from_secs(persisted.active_runtime_secs),
         persisted.clone_path.clone(),
-        persisted.merged,
     )
     .with_drawer_tabs(persisted.drawer_tabs(), persisted.drawer_active_tab)
     .with_browser(persisted.browser_tab_id, persisted.browser_last_url.clone())
@@ -1945,11 +2085,35 @@ fn session_from_persisted(persisted: &crate::state::PersistedSession) -> Session
     session.pinned = persisted.pinned;
     session.comment = persisted.comment.clone();
     session.branch_name = persisted.branch_name.clone();
-    session.merge_strategy_override = persisted.merge_strategy_override;
     session.branch_locked = persisted.branch_locked;
     session.orchestration = persisted.orchestration();
     session.origin = persisted.origin.clone();
+    // `session.group` is deliberately left `None`: a pulled session arrives
+    // ungrouped (DEV-853), and `SessionBundleMeta::to_persisted` already drops
+    // the field on the way in. Stated here so this reads as a decision rather
+    // than a field someone forgot.
     session
+}
+
+/// Build the replacement row for a session this machine already has, carrying
+/// across the state the bundle does not.
+///
+/// A *new* pulled session arrives ungrouped because nothing here has filed it
+/// yet (DEV-853). Replacing one that already exists is the opposite case:
+/// someone put it in a group on this machine, and a sync hop must not quietly
+/// take it out of one — if it was the group's only member, the header would
+/// vanish too, and the loss persists on the next state write.
+///
+/// `pinned` and `comment` survive this path only because the bundle carries
+/// them. `group` does not travel, so it has to be carried by hand, and anything
+/// else added later that is local-only belongs here beside it.
+fn replace_preserving_local(
+    existing: &Session,
+    pulled: &crate::state::PersistedSession,
+) -> Session {
+    let mut replacement = session_from_persisted(pulled);
+    replacement.group = existing.group.clone();
+    replacement
 }
 
 /// Owned result of a background pull, handed back to the main thread.
@@ -1967,7 +2131,7 @@ fn list_remote_blocking(
     settings: &crate::settings::SyncSettings,
 ) -> anyhow::Result<Vec<crate::sync::pull::RemoteSession>> {
     let store = crate::sync::config::build_store_from_settings(settings)?;
-    crate::sync::rt::block_on(crate::sync::pull::list_remote_sessions(store.as_ref()))
+    crate::rt::block_on(crate::sync::pull::list_remote_sessions(store.as_ref()))
 }
 
 /// Background worker: fetch a bundle, resolve it against local projects, and —
@@ -1979,13 +2143,11 @@ fn pull_blocking(
     session_id: &str,
 ) -> anyhow::Result<PullOutcome> {
     let store = crate::sync::config::build_store_from_settings(settings)?;
-    let meta = match crate::sync::rt::block_on(crate::sync::pull::fetch_bundle(
-        store.as_ref(),
-        session_id,
-    ))? {
-        Some(meta) => meta,
-        None => return Ok(PullOutcome::Vanished),
-    };
+    let meta =
+        match crate::rt::block_on(crate::sync::pull::fetch_bundle(store.as_ref(), session_id))? {
+            Some(meta) => meta,
+            None => return Ok(PullOutcome::Vanished),
+        };
 
     let idents: Vec<(String, crate::sync::meta::ProjectIdentity)> = projects
         .into_iter()
@@ -2062,7 +2224,7 @@ fn materialize_blocking(
     //    conversation. Best-effort — a metadata-only bundle just yields a
     //    fresh Claude session in the materialized workspace.
     let store = crate::sync::config::build_store_from_settings(settings)?;
-    if let Some(bytes) = crate::sync::rt::block_on(crate::sync::pull::fetch_transcript(
+    if let Some(bytes) = crate::rt::block_on(crate::sync::pull::fetch_transcript(
         store.as_ref(),
         session_id,
     ))? {
@@ -2117,7 +2279,7 @@ fn sync_up_blocking(
     };
     let store = crate::sync::config::build_store_from_settings(settings)?;
     let mut ledger = crate::sync::ledger::SyncLedger::load();
-    let revision = crate::sync::rt::block_on(crate::sync::push::push_session_bundle(
+    let revision = crate::rt::block_on(crate::sync::push::push_session_bundle(
         store.as_ref(),
         &mut ledger,
         &synced,
@@ -2135,7 +2297,7 @@ fn sync_up_blocking(
             crate::transcript::expected_session_jsonl(clone, conversation_id)
         {
             if let Ok(bytes) = std::fs::read(&transcript_path) {
-                crate::sync::rt::block_on(crate::sync::push::push_transcript(
+                crate::rt::block_on(crate::sync::push::push_transcript(
                     store.as_ref(),
                     &synced.id,
                     bytes,
@@ -2146,4 +2308,62 @@ fn sync_up_blocking(
 
     ledger.save()?;
     Ok(revision)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::replace_preserving_local;
+    use crate::session::Session;
+    use crate::state::PersistedSession;
+    use std::time::{Duration, SystemTime};
+
+    fn local(group: Option<&str>) -> Session {
+        let now = SystemTime::now();
+        let mut s = Session::suspended_from_persisted(
+            "s1".into(),
+            "Review #9586".into(),
+            now,
+            now,
+            Duration::ZERO,
+            None,
+        );
+        s.group = group.map(str::to_string);
+        s
+    }
+
+    /// A bundle never carries a group, so `to_persisted` always produces one
+    /// with `group: None` — which is exactly what makes the replace path
+    /// dangerous.
+    fn pulled() -> PersistedSession {
+        let json = r#"{
+            "id": "s1",
+            "project_id": "p1",
+            "label": "Review #9586",
+            "clone_path": null,
+            "last_known_status": "Suspended",
+            "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "drawer_tab_names": [],
+            "drawer_active_tab": 0
+        }"#;
+        serde_json::from_str(json).expect("parses")
+    }
+
+    /// Pulling a newer revision of a session this machine already has must not
+    /// take it out of its group. The group is local state the bundle knows
+    /// nothing about; replacing the row wholesale silently dropped it, and if
+    /// the session was its group's only member the header went with it.
+    #[test]
+    fn pulling_a_newer_revision_keeps_the_local_group() {
+        let replacement = replace_preserving_local(&local(Some("review")), &pulled());
+        assert_eq!(replacement.group.as_deref(), Some("review"));
+    }
+
+    /// And a session that was ungrouped here stays ungrouped — the pull cannot
+    /// invent a group either.
+    #[test]
+    fn pulling_over_an_ungrouped_session_leaves_it_ungrouped() {
+        let replacement = replace_preserving_local(&local(None), &pulled());
+        assert_eq!(replacement.group, None);
+    }
 }

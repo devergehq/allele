@@ -20,6 +20,7 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
@@ -34,7 +35,15 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 ///
 /// Checked before any GUI setup: this mode must open no window. It is a client
 /// of a *running* Allele, not a second one.
-pub fn exit_if_serving() {
+///
+/// `root` is the data root [`crate::paths::launch_root`] resolved from
+/// `--sandbox`, `--home` and `ALLELE_HOME`, and fixing it here is what points
+/// the control socket at the instance the caller asked for. Before DEV-943 this
+/// ran above that decision, so a client launched with `--sandbox` reached the
+/// *live* app: the socket resolved against the default root, and nothing in the
+/// reply said which instance had answered. Taken by reference because an
+/// ordinary launch comes through here too and should not pay for a clone.
+pub fn exit_if_serving(root: &Option<PathBuf>) {
     if !std::env::args().any(|arg| arg == "--mcp-serve") {
         return;
     }
@@ -42,6 +51,9 @@ pub fn exit_if_serving() {
     // stream here, and one stray log line desynchronises the client's parser
     // — a failure that looks like a malformed server rather than a log.
     crate::errors::init_tracing_stderr();
+    // Then the root, before `serve()` resolves a single path. Only the line
+    // above may come first, and only because it writes to stderr.
+    crate::paths::init(root.clone());
     std::process::exit(serve());
 }
 
@@ -110,7 +122,9 @@ fn tool_definitions() -> Value {
                  sidebar. `reply_to` is a `uds:` address derived from the session's process: \
                  pass it straight to SendMessage. It survives renaming and cannot collide. \
                  A session finds its own address by looking up its own session_id here; \
-                 ListAgents does not list self.",
+                 ListAgents does not list self. Each session also carries its `group` — \
+                 the sidebar group it sits in, or null — so a dispatcher can tell its own \
+                 workers apart without keeping a map of session ids to the work it sent.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
         },
         {
@@ -120,7 +134,8 @@ fn tool_definitions() -> Value {
                  means it is blocked on a permission prompt and nobody is coming unless a \
                  human acts; `state_age_secs` says how long it has been that way. `reply_to` \
                  is a `uds:` address usable directly as SendMessage's `to` — use it instead \
-                 of resolving `name`, which addresses the process name rather than this one.",
+                 of resolving `name`, which addresses the process name rather than this one. \
+                 `group` is the sidebar group the session sits in, or null.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -164,6 +179,20 @@ fn tool_definitions() -> Value {
                                         project's startup command — a provisioned database, \
                                         say — before its tests will run, or full to also open \
                                         the drawer terminals and preview.",
+                    },
+                    "group": {
+                        "type": "string",
+                        "description": "Optional sidebar group to place the session in, so a \
+                                        dispatcher's workers sit together instead of scattered \
+                                        through every other session in the project. Free text, \
+                                        trimmed, at most 40 characters. Matched ignoring case \
+                                        against the project's existing groups, and the first \
+                                        spelling that project saw is the one shown — so \
+                                        'Review' passed into a project that already has \
+                                        'review' joins it rather than creating a second group. \
+                                        Omit it to leave the session ungrouped. One group per \
+                                        kind of work reads better than one per dispatch: \
+                                        'review' beats 'review #9586'.",
                     },
                 },
                 "required": ["project", "name", "prompt"],
@@ -319,6 +348,77 @@ fn round_trip(request: &Value) -> Result<Response, String> {
 mod tests {
     use super::*;
 
+    /// Which control socket each `--mcp-serve` launch picks (DEV-943).
+    ///
+    /// Composed from the functions `main` and [`exit_if_serving`] actually use —
+    /// `cli::classify`, `paths::launch_root_from`, `server::control_socket_in` —
+    /// rather than rebuilding a path here. ARCHITECTURE.md §7.8 records the last
+    /// bug on this path: "Every unit test passed with the bug present." A test
+    /// that computed the expected socket itself would have done the same, since
+    /// the defect was in the *order* two correct functions ran.
+    ///
+    /// `exit_if_serving` itself cannot be called here — it ends in
+    /// `process::exit` — so the hand-off that feeds this root in is covered by
+    /// driving the built binary, not by this test.
+    #[test]
+    fn the_socket_follows_the_launch_root() {
+        use crate::cli::{classify, Launch};
+        use crate::dispatch::server::control_socket_in;
+        use crate::paths::launch_root_from;
+        use std::path::PathBuf;
+
+        let home = PathBuf::from("/Users/test");
+        let socket_for = |args: &[&str], home_env: Option<&str>| -> PathBuf {
+            let Launch::Gui {
+                home: flag,
+                sandbox,
+            } = classify(args)
+            else {
+                panic!("{args:?} is a recognised launch");
+            };
+            let root = launch_root_from(
+                flag,
+                sandbox,
+                home_env.map(str::to_string),
+                Some(home.clone()),
+            )
+            .expect("a root");
+            control_socket_in(&root)
+        };
+
+        // `--sandbox`: the sandbox instance's socket, which is the whole bug.
+        assert_eq!(
+            socket_for(&["--mcp-serve", "--sandbox"], None),
+            home.join(".allele-sandbox/.allele/control.sock"),
+        );
+        // `ALLELE_HOME` with no flag.
+        assert_eq!(
+            socket_for(&["--mcp-serve"], Some("/tmp/env-home")),
+            PathBuf::from("/tmp/env-home/.allele/control.sock"),
+        );
+        // Neither: the live app, exactly as before DEV-943. The regression that
+        // would matter most is this one silently moving.
+        assert_eq!(
+            socket_for(&["--mcp-serve"], None),
+            home.join(".allele/control.sock"),
+        );
+        // `--home` is the third way to name a root, and beats the environment.
+        assert_eq!(
+            socket_for(
+                &["--mcp-serve", "--home", "/tmp/flag-home"],
+                Some("/tmp/env-home"),
+            ),
+            PathBuf::from("/tmp/flag-home/.allele/control.sock"),
+        );
+        // A sandboxed client never falls back to the live socket, even with
+        // `ALLELE_HOME` set: that fallback is what sent a create to the wrong
+        // instance.
+        assert_ne!(
+            socket_for(&["--mcp-serve", "--sandbox"], Some("/tmp/env-home")),
+            socket_for(&["--mcp-serve"], None),
+        );
+    }
+
     /// Every advertised tool must map to a control-socket op — an MCP client
     /// that calls a listed tool and gets "unknown tool" is worse than one that
     /// never saw it.
@@ -372,6 +472,40 @@ mod tests {
     fn unknown_tools_are_rejected() {
         let params = json!({ "name": "allele_delete_everything", "arguments": {} });
         assert!(call_tool(&params).unwrap_err().starts_with("unknown tool"));
+    }
+
+    /// `group` must be advertised and optional. DEV-938 passes it per dispatch
+    /// mode, and a required field would break every caller that does not.
+    #[test]
+    fn create_advertises_an_optional_group() {
+        let tools = tool_definitions();
+        let create = tools
+            .as_array()
+            .expect("array")
+            .iter()
+            .find(|t| t["name"] == "allele_sessions_create")
+            .expect("create is advertised");
+        let props = create["inputSchema"]["properties"]
+            .as_object()
+            .expect("properties");
+        assert_eq!(props["group"]["type"], "string");
+        let required = create["inputSchema"]["required"]
+            .as_array()
+            .expect("required");
+        assert!(
+            !required.iter().any(|r| r == "group"),
+            "group is optional — a session without one is ungrouped"
+        );
+        // `additionalProperties: false` means an unadvertised `group` would be
+        // rejected by a strict client before it ever reached allele.
+        assert_eq!(create["inputSchema"]["additionalProperties"], false);
+        assert!(
+            props["group"]["description"]
+                .as_str()
+                .expect("description")
+                .contains("40"),
+            "the limit belongs in the schema a caller reads, not only in the refusal"
+        );
     }
 
     /// The create tool must not advertise a permission-mode parameter: it was

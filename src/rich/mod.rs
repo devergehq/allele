@@ -19,6 +19,9 @@
 //! the same bracketed-paste path the Scratch Pad uses.
 
 pub mod attachments;
+// Content column measures (DEV-571): the shared block frame and the narrower
+// running-text measure inside it.
+pub(crate) mod column;
 pub mod compose_bar;
 mod document;
 pub use document::truncate_to_char_boundary;

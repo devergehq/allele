@@ -9,11 +9,9 @@
 
 pub(crate) mod command;
 pub(crate) mod deeplink;
-pub(crate) mod highlight;
 pub(crate) mod index;
 pub(crate) mod palette;
 pub(crate) mod search;
-pub(crate) mod ts_highlight;
 
 use crate::theme::theme;
 use gpui::prelude::FluentBuilder as _;
@@ -481,21 +479,8 @@ impl AppState {
             .extension()
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
-        let colors = highlight::TokenColors {
-            text: theme().text_primary,
-            comment: theme().text_faint,
-            string: theme().success,
-            keyword: theme().lavender,
-            number: theme().warning,
-            function: theme().info,
-            type_: theme().accent,
-            constant: theme().warning,
-            property: theme().text_body,
-            operator: theme().text_secondary,
-            punctuation: theme().text_muted,
-            variable: theme().text_primary,
-        };
-        let lines = highlight::highlight(contents, &ext, colors);
+        let colors = crate::syntax::theme_colors();
+        let lines = crate::syntax::highlight(contents, &ext, colors);
         let total = lines.len();
         let shown = total.min(Self::MAX_RENDER_LINES);
         let gutter_w = px((format!("{total}").len().max(2) as f32) * 8.0 + 16.0);
@@ -620,8 +605,12 @@ impl AppState {
             .overflow_scroll()
             .px(px(20.0))
             .py(px(14.0));
-        for chunk in &sections {
-            rendered = rendered.child(crate::rich::markdown::render(chunk, false, font_size));
+        for (ix, chunk) in sections.iter().enumerate() {
+            // The seed keeps each chunk's code fences on their own scroll
+            // offset (DEV-577); chunk index is stable for a given preview.
+            rendered = rendered.child(crate::rich::markdown::render(
+                chunk, false, font_size, ix as u64,
+            ));
         }
 
         let mut row = div()

@@ -22,9 +22,10 @@ impl AppState {
     /// Record an observed working-tree change count against whichever session
     /// owns `repo`.
     ///
-    /// Both writers of session dirtiness funnel through here — the 15s
-    /// background poller and the changes panel's own refresh — so the sidebar
-    /// dot, the session header, and the panel can never disagree. Matching on
+    /// All three writers of the observed count funnel through here — the 15s
+    /// background tick, the changes panel's own refresh, and
+    /// `ensure_active_changes_observed` — so the session header and the panel
+    /// can never disagree. Matching on
     /// `clone_path` rather than a session index keeps the write correct when
     /// the session list is reordered or a session is removed while a `git
     /// status` is in flight.
@@ -40,10 +41,72 @@ impl AppState {
             for session in &mut project.sessions {
                 if session.clone_path.as_deref() == Some(repo) {
                     session.git_dirty_count = count;
-                    session.git_dirty = count.map(|n| n > 0);
                 }
             }
         }
+    }
+
+    /// Render-time staleness check for the active session's header count.
+    ///
+    /// Sibling to `ensure_changes_fresh` below and guarded the same way — by
+    /// a directory comparison, so it fires at most once per session switch.
+    /// It exists because the two have different visibility: the panel's data
+    /// only matters while the panel is open, but the `{n} changed` header is
+    /// on screen either way.
+    ///
+    /// Before DEV-684 the background tick polled every clone, so switching to
+    /// a session found its count already warm. Now only the active session is
+    /// polled, and `self.active` is assigned from eleven call sites — so the
+    /// observation follows the active session from here rather than from a
+    /// hook on each of them.
+    ///
+    /// The outgoing count is deliberately **not** cleared first. Doing so
+    /// would flash "— changed" on every switch, and the stale value is only
+    /// on screen for the length of one `git status` against one clone
+    /// (measured 20-120ms) rather than the up-to-15s of the tick.
+    pub(crate) fn ensure_active_changes_observed(&mut self, cx: &mut Context<Self>) {
+        let dir = self.active_session().and_then(|s| s.clone_path.clone());
+        if self.changes.observed_dir == dir {
+            return;
+        }
+        self.changes.observed_dir = dir.clone();
+        let Some(dir) = dir else {
+            return;
+        };
+
+        // `ensure_changes_fresh` runs immediately before this one and, when the
+        // panel is open, has already kicked a status against this same clone —
+        // and folds its result back through `record_workspace_change_count`.
+        // Without this guard a switch would run two concurrent `git status`
+        // calls on one clone, which on a large repo costs more than the poll
+        // this whole change exists to shrink. The two are guarded by different
+        // fields, so neither sees the other; only this one can see both.
+        if self.right_panel.visible && self.changes.repo_dir.as_ref() == Some(&dir) {
+            return;
+        }
+
+        let repo_dir = dir.clone();
+        cx.spawn(async move |this, cx| {
+            let count = cx
+                .background_executor()
+                .spawn(async move { crate::git::working_tree_change_count(&dir) })
+                .await;
+            let _ = this.update(cx, |this: &mut AppState, cx| {
+                // Compare before notifying, as the poller does — switching to
+                // an already-clean session should not cost a frame.
+                let current = this
+                    .projects
+                    .iter()
+                    .flat_map(|p| p.sessions.iter())
+                    .find(|s| s.clone_path.as_deref() == Some(&*repo_dir))
+                    .map(|s| s.git_dirty_count);
+                if current != Some(count) {
+                    this.record_workspace_change_count(&repo_dir, count);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Render-time staleness check: when the panel is visible but its data

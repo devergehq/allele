@@ -369,6 +369,47 @@ impl TranscriptTailer {
     }
 }
 
+/// Whether a session can be revived with its prior conversation: its clone is
+/// still on disk *and* Claude has a history jsonl for it.
+///
+/// Both halves touch the filesystem, so this is answered on the background
+/// executor and cached in `Session::resumable`. It must never be called from
+/// render — that is the defect DEV-602 exists to fix.
+pub(crate) fn session_is_resumable(clone_path: Option<&std::path::Path>, session_id: &str) -> bool {
+    clone_path.is_some_and(|p| p.exists()) && claude_session_history_exists(session_id)
+}
+
+/// Check whether Claude Code has on-disk history for a given session ID.
+///
+/// Claude stores each conversation at `~/.claude/projects/<slug>/<id>.jsonl`,
+/// where `<slug>` is the cwd encoded with `/` → `-`. This does not assume the
+/// slug format — it scans the `projects` directory for any matching filename,
+/// which is why it is expensive and why [`expected_session_jsonl`] above is
+/// preferred wherever the workspace is known (DEV-609).
+///
+/// Returns `false` on any IO error so the caller falls back to `--session-id`
+/// (fresh session, same UUID) rather than failing into "Session ended".
+pub(crate) fn claude_session_history_exists(session_id: &str) -> bool {
+    let Some(home) = dirs::home_dir() else {
+        return false;
+    };
+    let projects_dir = home.join(".claude").join("projects");
+    let needle = format!("{session_id}.jsonl");
+    let Ok(entries) = std::fs::read_dir(&projects_dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let sub = entry.path();
+        if !sub.is_dir() {
+            continue;
+        }
+        if sub.join(&needle).exists() {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
