@@ -99,7 +99,6 @@ impl RemoteHostState {
     }
 
     /// Host sessions in host sidebar order. Last known while unreachable.
-    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub(crate) fn sessions(&self) -> &[SessionEntry] {
         &self.sessions
     }
@@ -116,7 +115,6 @@ impl RemoteHostState {
             .filter(|s| s.status == FeedStatus::AwaitingInput)
     }
 
-    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub(crate) fn reachability(&self) -> Reachability {
         self.reachability
     }

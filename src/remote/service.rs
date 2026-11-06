@@ -245,6 +245,12 @@ impl RemoteService {
         )
     }
 
+    /// The paired machines, in pairing order. Cheaper than [`Self::status`]
+    /// for a caller that draws every frame (the MACHINES sidebar, DEV-1163).
+    pub fn paired(&self) -> Vec<TrustedPeer> {
+        self.inner.registry.list()
+    }
+
     #[cfg(test)]
     pub fn registry(&self) -> &PeerRegistry {
         &self.inner.registry

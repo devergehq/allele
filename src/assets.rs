@@ -41,6 +41,7 @@ assets!(
     "icons/svg/image.svg",
     "icons/svg/loader.svg",
     "icons/svg/lock.svg",
+    "icons/svg/monitor.svg",
     "icons/svg/paperclip.svg",
     "icons/svg/pause.svg",
     "icons/svg/pin.svg",

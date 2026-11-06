@@ -31,6 +31,7 @@ use super::link::{LinkState, PeerLink, ReconnectPolicy};
 use super::pairing::host::HELLO_TIMEOUT;
 use super::transport::{PeerConnection, PeerId, PeerStream, PeerTransport};
 use super::wire::{read_frame_within, write_frame, Frame, MAX_PEER_FRAME, PROTOCOL_VERSION};
+use crate::status_feed::client::Reachability;
 use crate::status_feed::{DeltaOutcome, RemoteHostState, StatusDelta, StatusSnapshot, Transition};
 
 /// How long to leave a host alone after it refused the feed (no `view`)
@@ -77,21 +78,27 @@ impl HostFeeds {
     }
 
     /// One host's state, if it is followed.
-    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub fn get(&self, peer: PeerId) -> Option<RemoteHostState> {
         self.lock().get(&peer).cloned()
     }
 
     /// Every followed host's state.
-    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
+    #[allow(dead_code)] // the sidebar reads per paired peer through `get`
     pub fn all(&self) -> Vec<(PeerId, RemoteHostState)> {
         self.lock().iter().map(|(p, h)| (*p, h.clone())).collect()
     }
 
     /// Ticks whenever any host's state changes. For a UI that redraws.
-    #[allow(dead_code)] // first caller: the Machines sidebar (DEV-1163)
     pub fn subscribe_changes(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
+    }
+
+    /// True when any followed host has dropped. Its "last seen" text is
+    /// ageing, so the sidebar redraws it periodically.
+    pub fn any_unreachable(&self) -> bool {
+        self.lock()
+            .values()
+            .any(|h| matches!(h.reachability(), Reachability::Unreachable { .. }))
     }
 
     /// Live status transitions, for notifications.
