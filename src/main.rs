@@ -50,6 +50,7 @@ mod shell_env;
 mod sidebar;
 mod startup;
 mod state;
+mod status_feed;
 mod stream;
 mod sync;
 mod syntax;
@@ -2164,6 +2165,8 @@ fn main() {
                             .detach();
                     }
 
+                    let status_feed = status_feed::StatusFeed::seeded(&projects);
+
                     AppState {
                         projects,
                         active: initial_active,
@@ -2265,12 +2268,14 @@ fn main() {
                             crate::platform::global().secrets.clone(),
                             &settings_for_window.remote,
                             std::sync::Arc::new(crate::remote::ControlQueue::new(dispatch_queue)),
+                            status_feed.clone(),
                             {
                                 let shell = crate::platform::global().shell.clone();
                                 move || shell.computer_name()
                             },
                         ),
                         capture_ui_requested: false,
+                        status_feed,
                         // Captured on the first render (see `Render`).
                         main_window: None,
                         pending_dispatch_origins: Default::default(), // DEV-415
