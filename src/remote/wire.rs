@@ -37,6 +37,15 @@
 //!     host → client  status_snapshot { seq, sessions } replaces everything
 //!                  | status_refused  { message }       no `view`, or it was revoked
 //!     host → client  status_delta    { seq, change }   seq = previous + 1
+//!
+//!     client → host  attach   { attach_id, session_id }   needs view (DEV-1165)
+//!                  | detach   { session_id }
+//!     host → client  attach_failed { attach_id, session_id, code, message }
+//!
+//!   screen stream (one per attached session; HOST-opened, DEV-1165)
+//!     host → client  screen_open { attach_id, session_id }   first frame
+//!     host → client  screen { frame: snapshot | diff | scrollback }
+//!     client → host  scrollback_request { start, count } | resync
 //! ```
 //!
 //! `op` and `result` are `crate::dispatch::protocol`'s own types, nested
@@ -46,8 +55,9 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-use crate::dispatch::protocol::{Request, Response};
+use crate::dispatch::protocol::{ErrorCode, Request, Response};
 use crate::errors::{AlleleError, Result};
+use crate::terminal::mirror::ScreenFrame;
 
 use super::peers::PeerPermissions;
 use crate::status_feed::{SessionEntry, StatusChange, StatusDelta, StatusSnapshot};
@@ -157,6 +167,36 @@ pub enum Frame {
     /// Host → client: the answer to request `id`. Exactly one per request.
     Response { id: u64, result: Response },
 
+    // ── screens (DEV-1165) ────────────────────────────────────────────────
+    /// Client → host, on the control stream: mirror this session's screen.
+    /// Needs `view`. The host answers by opening a screen stream, or with
+    /// [`Frame::AttachFailed`].
+    ///
+    /// `attach_id` is the client's own number for this attach; the host
+    /// echoes it in `screen_open` or `attach_failed`, so an answer can never
+    /// be taken for a different attach of the same session.
+    Attach { attach_id: u64, session_id: String },
+    /// Client → host, on the control stream: stop mirroring this session.
+    /// Closing the screen stream does the same.
+    Detach { session_id: String },
+    /// Host → client, on the control stream: the attach is not going ahead,
+    /// or an attached stream stopped (session gone, `view` revoked).
+    AttachFailed {
+        attach_id: u64,
+        session_id: String,
+        code: ErrorCode,
+        message: String,
+    },
+    /// Host → client: the first frame on a host-opened screen stream.
+    ScreenOpen { attach_id: u64, session_id: String },
+    /// Host → client, on a screen stream: a snapshot, diff or scrollback page.
+    Screen { frame: ScreenFrame },
+    /// Client → host, on a screen stream: send scrollback rows
+    /// `start..start + count` (0 = the line just above the screen).
+    ScrollbackRequest { start: u32, count: u32 },
+    /// Client → host, on a screen stream: the mirror lost track (a frame it
+    /// could not apply); send a full snapshot.
+    Resync,
     // ── status feed (DEV-1162) ────────────────────────────────────────────
     /// Client → host: send me every session, then every change. Sent again
     /// after a gap, it replaces the subscription with a fresh snapshot.

@@ -1,5 +1,7 @@
 mod grid_element;
+pub mod grid_source;
 pub mod keymap;
+pub mod mirror;
 pub mod pty_terminal;
 mod terminal_view;
 

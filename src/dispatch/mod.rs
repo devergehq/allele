@@ -69,11 +69,23 @@ pub(crate) fn update_in_main_window<R>(
 /// The drain runs even when the socket cannot be bound (another Allele already
 /// serves it, or the path is unusable): local dispatch is then unavailable,
 /// but paired machines are not affected, and nor is the rest of the app.
-pub(crate) fn spawn_control_socket(cx: &mut Context<AppState>) -> Sender<server::ControlRequest> {
+pub(crate) fn spawn_control_socket(cx: &mut Context<AppState>) -> Drains {
     let (tx, rx) = std::sync::mpsc::channel();
+    let (screens, screens_rx) = std::sync::mpsc::channel();
     server::spawn_listener(tx.clone());
-    spawn_control_loop(rx, cx);
-    tx
+    spawn_control_loop(rx, screens_rx, cx);
+    Drains {
+        requests: tx,
+        screens,
+    }
+}
+
+/// The foreground drain's inputs.
+pub(crate) struct Drains {
+    /// Dispatch requests: `control.sock` and paired machines alike.
+    pub requests: Sender<server::ControlRequest>,
+    /// Remote screen streams looking up a session's terminal (DEV-1165).
+    pub screens: Sender<server::ScreenLookup>,
 }
 
 /// Answer control-socket requests on the GPUI foreground thread.
@@ -81,7 +93,11 @@ pub(crate) fn spawn_control_socket(cx: &mut Context<AppState>) -> Sender<server:
 /// Accept and per-connection reads happen on `server`'s own threads because
 /// `UnixListener` is blocking; this is the other end, where a `&mut Window`
 /// exists and session creation is therefore possible.
-fn spawn_control_loop(rx: Receiver<server::ControlRequest>, cx: &mut Context<AppState>) {
+fn spawn_control_loop(
+    rx: Receiver<server::ControlRequest>,
+    screens: Receiver<server::ScreenLookup>,
+    cx: &mut Context<AppState>,
+) {
     cx.spawn(async move |this, cx| {
         loop {
             cx.background_executor()
@@ -125,6 +141,15 @@ fn spawn_control_loop(rx: Receiver<server::ControlRequest>, cx: &mut Context<App
                 });
                 // A client that hung up mid-request is normal, not an error.
                 let _ = reply.send(response);
+            }
+
+            // A lookup only reads `AppState`, so it is answered inline.
+            while let Ok(server::ScreenLookup { session_id, reply }) = screens.try_recv() {
+                let found = this
+                    .update(cx, |state, cx| pty::mirror_of(state, &session_id, cx))
+                    .ok()
+                    .flatten();
+                let _ = reply.send(found);
             }
 
             if this.upgrade().is_none() {
