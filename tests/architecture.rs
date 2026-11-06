@@ -342,6 +342,83 @@ impl<'ast> Visit<'ast> for AnyhowFinder {
 }
 
 // ---------------------------------------------------------------------------
+// §7.13 / DEV-1159 — iroh stays behind the PeerTransport seam
+// ---------------------------------------------------------------------------
+
+/// The one file allowed to name the `iroh` crate. Everything else speaks
+/// `remote::PeerTransport`, so the transport can be swapped or faked.
+const IROH_ALLOWLIST: &[&str] = &["src/remote/iroh_transport.rs"];
+
+#[test]
+fn iroh_is_named_only_by_its_adapter() {
+    let observed: BTreeSet<String> = source_files()
+        .into_iter()
+        .filter(|(_, path)| {
+            let src = read(path);
+            let file = parse(path, &src);
+            let mut finder = CrateFinder {
+                krate: "iroh",
+                found: false,
+            };
+            finder.visit_file(&file);
+            finder.found
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+
+    assert_matches_allowlist(
+        &observed,
+        IROH_ALLOWLIST,
+        "ARCHITECTURE.md §7.13 — only the iroh adapter may name `iroh`. Go through \
+         `crate::remote::PeerTransport` / `PeerConnection` instead, or translate the \
+         iroh type into a crate type inside `src/remote/iroh_transport.rs`.",
+    );
+}
+
+/// Detects a crate used as the *first* segment of a path (`iroh::Endpoint`,
+/// `::iroh::X`) or a `use` root. First-segment only, so a module that merely
+/// shares the prefix (`remote::iroh_transport`) is not a match.
+struct CrateFinder {
+    krate: &'static str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for CrateFinder {
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if path.segments.len() > 1 && path.segments[0].ident == self.krate {
+            self.found = true;
+        }
+        syn::visit::visit_path(self, path);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if use_tree_roots_at(&item.tree, self.krate) {
+            self.found = true;
+        }
+        syn::visit::visit_item_use(self, item);
+    }
+
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        if item.ident == self.krate {
+            self.found = true;
+        }
+        syn::visit::visit_item_extern_crate(self, item);
+    }
+}
+
+/// Whether a `use` tree starts at `krate` in any of its shapes: `use k::x`,
+/// `use k;`, `use k as y;`, or inside a group, `use {k::x, std::y};`.
+fn use_tree_roots_at(tree: &syn::UseTree, krate: &str) -> bool {
+    match tree {
+        syn::UseTree::Path(p) => p.ident == krate,
+        syn::UseTree::Name(n) => n.ident == krate,
+        syn::UseTree::Rename(r) => r.ident == krate,
+        syn::UseTree::Group(g) => g.items.iter().any(|t| use_tree_roots_at(t, krate)),
+        syn::UseTree::Glob(_) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // §7.3 — platform::global() is a leaf-only escape hatch
 // ---------------------------------------------------------------------------
 
@@ -627,6 +704,7 @@ fn architecture_doc_still_documents_the_enforced_rules() {
         "### 7.6 Don't use `anyhow::Result<T>` for new public functions",
         "### 7.7 Don't introduce a new god-object",
         "### 7.11 Don't make two feature modules depend on each other",
+        "### 7.13 Don't name `iroh` outside its adapter",
     ] {
         assert!(
             doc.contains(anchor),

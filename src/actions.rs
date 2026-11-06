@@ -354,6 +354,12 @@ pub enum SettingsAction {
     /// When enabled, brings it up; when disabled, tears it down. Both run
     /// on a background task. Emitted by the Settings window.
     UpdateBaseInfra(bool),
+    /// Replace this machine's name as peers see it (DEV-1159). Blank means
+    /// "use the computer name". Emitted by *Settings → Machines* on every edit.
+    UpdateMachineName(String),
+    /// Replace the relay URL (DEV-1159). Blank means n0's public relays. Only
+    /// a valid URL is ever emitted; the Machines section validates first.
+    UpdateRelayUrl(String),
 }
 
 /// Chrome browser integration — sync / close linked tabs.
