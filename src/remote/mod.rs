@@ -41,12 +41,15 @@ pub mod follow;
 mod follow_tests;
 // Test-only: the file gates itself with `#![cfg(test)]`.
 mod control_tests;
+pub mod endpoint;
 pub mod identity;
 pub mod iroh_transport;
 pub mod link;
 pub mod listener;
 pub mod pairing;
 pub mod peers;
+// Test-only: the file gates itself with `#![cfg(test)]`.
+mod rebind_tests;
 pub mod registry;
 pub mod screen;
 // Test-only: the file gates itself with `#![cfg(test)]`.

@@ -57,7 +57,8 @@ use crate::status_feed::{RemoteHostState, StatusFeed};
 use crate::terminal::mirror::MirrorTerm;
 
 /// Binds on the in-memory network and keeps every endpoint it made, so a test
-/// can reach the host's side of a connection.
+/// can reach the host's side of a connection. Like the Keychain-backed
+/// production binder, every bind after the first reuses the first identity.
 pub(super) struct MemBinder {
     net: Arc<MemNet>,
     made: Mutex<Vec<Arc<MemTransport>>>,
@@ -66,8 +67,12 @@ pub(super) struct MemBinder {
 #[async_trait]
 impl Binder for MemBinder {
     async fn bind(&self, _: &TransportConfig) -> Result<Arc<dyn PeerTransport>> {
-        let t = self.net.endpoint();
-        self.made.lock().unwrap().push(Arc::clone(&t));
+        let mut made = self.made.lock().unwrap();
+        let t = match made.first() {
+            Some(first) => self.net.endpoint_as(first.local_id()),
+            None => self.net.endpoint(),
+        };
+        made.push(Arc::clone(&t));
         Ok(t)
     }
 }
@@ -313,6 +318,60 @@ async fn a_dropped_host_is_resubscribed_without_user_action() {
         desk.accepted().len() >= 2,
         "a second connection carried the new subscription"
     );
+}
+
+/// DEV-1186: a relay change on the follower rebinds its endpoint; the
+/// follower's link reconnects through the new one and the host's state
+/// recovers without anyone touching it.
+#[tokio::test]
+async fn a_follower_recovers_after_its_relay_changes() {
+    let net = MemNet::new();
+    let (desk, laptop) = desk_and_laptop(&net).await;
+    desk.feed
+        .publish(vec![entry("a", "one", FeedStatus::Running)]);
+    until(&laptop, &desk, |h| {
+        h.reachability() == Reachability::Connected
+    })
+    .await;
+    let first = desk.accepted();
+    assert_eq!(first.len(), 1);
+
+    laptop.svc.set_settings(&RemoteSettings {
+        relay_url: Some("https://relay.example.com".into()),
+        ..Default::default()
+    });
+    let rebound = timeout(Duration::from_secs(5), async {
+        while laptop.binder.made.lock().unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(rebound.is_ok(), "the laptop rebinds once the relay settles");
+    assert!(
+        first[0].is_closed(),
+        "the rebind dropped the old connection"
+    );
+    assert_eq!(laptop.svc.transport().await.unwrap().local_id(), laptop.id);
+
+    // The host moves on; the follower catches up over the new endpoint.
+    desk.feed.publish(vec![
+        entry("a", "one", FeedStatus::ResponseReady),
+        entry("b", "two", FeedStatus::Idle),
+    ]);
+    until(&laptop, &desk, |h| {
+        h.reachability() == Reachability::Connected
+            && status_of(h, "a") == Some(FeedStatus::ResponseReady)
+            && h.sessions().len() == 2
+    })
+    .await;
+    assert!(desk.accepted().len() >= 2, "a new connection carried it");
+    let cleared = timeout(Duration::from_secs(2), async {
+        while laptop.svc.status().reconnecting {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(cleared.is_ok(), "the pane notice clears once it is back");
 }
 
 #[tokio::test]
