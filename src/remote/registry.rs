@@ -70,6 +70,7 @@ impl PeerRegistry {
 
     /// A receiver that wakes on every change to the list or the open
     /// connections.
+    #[allow(dead_code)] // read through `RemoteService::changed`
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
     }

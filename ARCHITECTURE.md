@@ -672,6 +672,13 @@ the failure this whole surface exists to avoid — see
 `ErrorCode::AlleleNotRunning`, which allele can never send because a
 refused `connect()` is what makes "not running" legible.
 
+The same holds for **paired machines** (DEV-1161). `remote::control` hands a
+peer's request to the very drain `control.sock` feeds, so it meets the same
+non-interactive handler — and it must not bring the window forward either: a
+person at the other Mac is not at this one. `tests/architecture.rs` allows a
+window-raising call (`activate`, `activate_window`) only in `src/main.rs` and
+`src/startup/actions.rs`, which act for the person at this machine.
+
 ### 7.10 A session address is never derived from its name
 
 A session carries two names. Allele's label is mutable — the sidebar renames

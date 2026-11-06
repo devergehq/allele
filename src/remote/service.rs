@@ -25,6 +25,7 @@ use tokio::sync::{oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use super::control::{ControlContext, HostName, RemoteDispatch};
 use super::identity::LocalIdentity;
 use super::iroh_transport::IrohTransport;
 use super::listener::{self, Gate, SWITCHED_OFF_REASON};
@@ -126,6 +127,8 @@ struct Inner {
     pairing: Arc<HostPairing>,
     allow: Arc<AtomicBool>,
     binder: Arc<dyn Binder>,
+    /// What admitted peers' requests are answered by (DEV-1161).
+    control: ControlContext,
     config: Mutex<Option<TransportConfig>>,
     life: tokio::sync::Mutex<Life>,
     listening: AtomicBool,
@@ -152,6 +155,7 @@ impl RemoteService {
         repo: Arc<dyn PeersRepository>,
         binder: Arc<dyn Binder>,
         settings: &RemoteSettings,
+        control: ControlContext,
     ) -> Self {
         let (config, error) = match TransportConfig::from_settings(settings) {
             Ok(c) => (Some(c), None),
@@ -163,6 +167,7 @@ impl RemoteService {
             pairing: Arc::new(HostPairing::default()),
             allow: Arc::new(AtomicBool::new(settings.allow_connections)),
             binder,
+            control,
             config: Mutex::new(config),
             life: tokio::sync::Mutex::new(Life::default()),
             listening: AtomicBool::new(false),
@@ -179,12 +184,26 @@ impl RemoteService {
 
     /// The app's service: `peers.json` under this data root, the Keychain
     /// identity, and iroh. Starts listening at once if the switch is on.
-    pub(crate) fn production(secrets: Arc<dyn SecretStore>, settings: &RemoteSettings) -> Self {
+    ///
+    /// `dispatch` answers paired machines' requests — in the app, the same
+    /// queue `control.sock` feeds. `computer_name` is this Mac's name, looked
+    /// up only when a peer first needs it.
+    pub(crate) fn production(
+        secrets: Arc<dyn SecretStore>,
+        settings: &RemoteSettings,
+        dispatch: Arc<dyn RemoteDispatch>,
+        computer_name: impl Fn() -> Option<String> + Send + Sync + 'static,
+    ) -> Self {
+        let control = ControlContext {
+            dispatch,
+            host_name: HostName::new(settings.machine_name.clone(), computer_name),
+        };
         Self::new(
             crate::rt::handle(),
             Arc::new(JsonFilePeersRepo::production()),
             Arc::new(IrohBinder { secrets }),
             settings,
+            control,
         )
     }
 
@@ -204,14 +223,17 @@ impl RemoteService {
             Arc::new(crate::repositories::fakes::InMemoryPeersRepository::default()),
             Arc::new(Offline),
             settings,
+            ControlContext::unavailable(),
         )
     }
 
+    #[cfg(test)]
     pub fn registry(&self) -> &PeerRegistry {
         &self.inner.registry
     }
 
     /// Resolve on the next change the UI shows.
+    #[allow(dead_code)] // for a UI that waits rather than polls `status`
     pub async fn changed(&self) {
         let mut ui = self.inner.ui.subscribe();
         let mut peers = self.inner.registry.subscribe();
@@ -261,8 +283,13 @@ impl RemoteService {
         self.inner.wake_up();
     }
 
-    /// New relay settings. Applies the next time the endpoint binds.
+    /// New relay or machine-name settings. The name applies to the next
+    /// control stream; the relay the next time the endpoint binds.
     pub fn set_settings(&self, settings: &RemoteSettings) {
+        self.inner
+            .control
+            .host_name
+            .set(settings.machine_name.clone());
         match TransportConfig::from_settings(settings) {
             Ok(c) => *lock(&self.inner.config) = Some(c),
             Err(e) => self.inner.set_error(Some(e.to_string())),
@@ -479,6 +506,7 @@ impl Inner {
             self.registry.clone(),
             Arc::clone(&self.pairing),
             Arc::clone(&self.allow),
+            self.control.clone(),
         );
         life.accept = Some(self.rt.spawn(listener::run(Arc::clone(&transport), gate)));
         life.transport = Some(Arc::clone(&transport));

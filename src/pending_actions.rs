@@ -1449,6 +1449,7 @@ impl AppState {
             SettingsAction::UpdateMachineName(name) => {
                 *skip_refocus = true;
                 self.user_settings.remote.machine_name = non_blank(name);
+                self.remote.set_settings(&self.user_settings.remote);
                 self.mark_settings_dirty();
             }
             SettingsAction::UpdateRelayUrl(url) => {
@@ -1875,7 +1876,9 @@ mod tests {
             state
                 .remote
                 .registry()
-                .add_paired(crate::remote::TrustedPeer::newly_paired(id, "Laptop"))
+                .add_paired(crate::remote::peers::TrustedPeer::newly_paired(
+                    id, "Laptop",
+                ))
                 .unwrap()
         });
 

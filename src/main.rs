@@ -1986,7 +1986,7 @@ fn main() {
                         project.sessions.push(session);
                     }
 
-                    dispatch::spawn_control_socket(cx);
+                    let dispatch_queue = dispatch::spawn_control_socket(cx);
 
                     startup::pollers::spawn_all(cx);
                     startup::actions::register_all(cx);
@@ -2264,6 +2264,11 @@ fn main() {
                         remote: crate::remote::RemoteService::production(
                             crate::platform::global().secrets.clone(),
                             &settings_for_window.remote,
+                            std::sync::Arc::new(crate::remote::ControlQueue::new(dispatch_queue)),
+                            {
+                                let shell = crate::platform::global().shell.clone();
+                                move || shell.computer_name()
+                            },
                         ),
                         capture_ui_requested: false,
                         // Captured on the first render (see `Render`).

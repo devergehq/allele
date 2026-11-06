@@ -701,6 +701,48 @@ impl<'ast> Visit<'ast> for PanicSiteFinder {
 }
 
 // ---------------------------------------------------------------------------
+// §7.9 — requests from outside the process never raise the window
+// ---------------------------------------------------------------------------
+
+/// The only files that may bring Allele's window forward. Both are a person
+/// acting on the app — the dock icon, a menu item — never a request.
+const WINDOW_RAISE_ALLOWLIST: &[&str] = &["src/main.rs", "src/startup/actions.rs"];
+
+/// §7.9: neither `control.sock` nor a paired machine (DEV-1161) may bring the
+/// window forward. Both reach the app through `dispatch`, so the rule is
+/// enforced where it can be: a call that raises the window (`activate`,
+/// `activate_window`) may appear only in the allowlisted files, so no request
+/// path can contain one.
+#[test]
+fn window_raising_stays_out_of_request_paths() {
+    struct Raise(bool);
+    impl<'ast> Visit<'ast> for Raise {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "activate" || call.method == "activate_window" {
+                self.0 = true;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let observed: BTreeSet<String> = source_files()
+        .into_iter()
+        .filter(|(_, path)| {
+            let src = read(path);
+            let mut finder = Raise(false);
+            finder.visit_file(&parse(path, &src));
+            finder.0
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+    assert_matches_allowlist(
+        &observed,
+        WINDOW_RAISE_ALLOWLIST,
+        "ARCHITECTURE.md §7.9 — only a person's own action may raise Allele's window. \
+         Dispatch requests, local or remote, must never bring it forward.",
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Meta — the docs and the tests must agree
 // ---------------------------------------------------------------------------
 
@@ -716,6 +758,7 @@ fn architecture_doc_still_documents_the_enforced_rules() {
         "### 7.4 Don't sprinkle `#[cfg(target_os = \"macos\")]` in business logic",
         "### 7.6 Don't use `anyhow::Result<T>` for new public functions",
         "### 7.7 Don't introduce a new god-object",
+        "### 7.9 Don't let the control socket raise UI",
         "### 7.11 Don't make two feature modules depend on each other",
         "### 7.13 Don't name `iroh` outside its adapter",
     ] {

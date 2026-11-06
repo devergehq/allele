@@ -153,6 +153,7 @@ impl IrohTransport {
 
     /// Wait until the endpoint is reachable (connected to its home relay),
     /// for at most `within`. `false` if it is not online by then.
+    #[allow(dead_code)] // first caller: the client dialing a host (DEV-1162)
     pub async fn wait_online(&self, within: Duration) -> bool {
         tokio::time::timeout(within, self.endpoint.online())
             .await
@@ -161,6 +162,7 @@ impl IrohTransport {
 
     /// The relay URLs this endpoint currently advertises — its home relay
     /// once [`Self::wait_online`] succeeds.
+    #[cfg(test)]
     pub fn relay_urls(&self) -> Vec<String> {
         self.endpoint
             .addr()
@@ -205,21 +207,40 @@ impl PeerTransport for IrohTransport {
     }
 }
 
+/// Handshakes in progress at once, counting finished ones still waiting for
+/// room in the backlog. Past this, a new connection is refused on arrival
+/// rather than given a task: anyone who knows this machine's id can start a
+/// handshake, so the number of tasks they can make it run must be bounded.
+const MAX_HANDSHAKES: usize = 32;
+
+/// How long one handshake may take. QUIC's idle timeout bounds it too; this
+/// makes the bound explicit and independent of the heartbeat setting.
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Accept every incoming connection and finish each handshake in its own
 /// task, forwarding the ones that complete. A failed handshake is logged and
-/// dropped; it never ends the loop. Stops when the endpoint closes.
+/// dropped; it never ends the loop. At most [`MAX_HANDSHAKES`] run at once.
+/// Stops when the endpoint closes.
 fn spawn_accept_loop(endpoint: Endpoint) -> mpsc::Receiver<Connection> {
     let (tx, rx) = mpsc::channel(ACCEPT_BACKLOG);
+    let slots = Arc::new(tokio::sync::Semaphore::new(MAX_HANDSHAKES));
     tokio::spawn(async move {
         while let Some(incoming) = endpoint.accept().await {
+            let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
+                tracing::debug!("remote: {MAX_HANDSHAKES} handshakes in progress; one refused");
+                incoming.refuse();
+                continue;
+            };
             let tx = tx.clone();
             tokio::spawn(async move {
-                match incoming.await {
-                    Ok(conn) => {
+                match tokio::time::timeout(HANDSHAKE_TIMEOUT, incoming).await {
+                    Ok(Ok(conn)) => {
                         let _ = tx.send(conn).await;
                     }
-                    Err(e) => tracing::debug!("remote: incoming handshake failed: {e}"),
+                    Ok(Err(e)) => tracing::debug!("remote: incoming handshake failed: {e}"),
+                    Err(_) => tracing::debug!("remote: incoming handshake timed out"),
                 }
+                drop(slot);
             });
         }
     });
