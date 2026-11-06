@@ -17,20 +17,34 @@
 //! Reconnecting is the link's job (backoff, sleep and wake). The follower
 //! only notices each new connection and resubscribes on it, so a host that
 //! sleeps and wakes comes back without anyone clicking anything.
+//!
+//! **Remote ops ride the same stream (DEV-1168).** The host allows one
+//! control stream per connection, and this is it, so a `projects_list` or
+//! `sessions_create` from the New Session picker is queued to the follower
+//! ([`Follower::ops`]) and sent as `request { id, op }`; the matching
+//! `response { id }` is routed back. Frames are read by a separate task that
+//! forwards them over a channel, so waiting for "a frame or a queued op"
+//! never cancels a half-read frame. The grant the host states in its hello
+//! is kept per host ([`HostFeeds::grant`]) so the UI can hide what this Mac
+//! may not do.
 
 use std::collections::HashMap;
+use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use tokio::sync::{broadcast, watch};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use super::control::HostName;
 use super::link::{LinkState, PeerLink, ReconnectPolicy};
 use super::pairing::host::HELLO_TIMEOUT;
+use super::peers::PeerPermissions;
 use super::transport::{PeerConnection, PeerId, PeerStream, PeerTransport};
 use super::wire::{read_frame_within, write_frame, Frame, MAX_PEER_FRAME, PROTOCOL_VERSION};
+use crate::dispatch::protocol::{Request, Response};
 use crate::status_feed::client::Reachability;
 use crate::status_feed::{DeltaOutcome, RemoteHostState, StatusDelta, StatusSnapshot, Transition};
 
@@ -46,6 +60,46 @@ const TRANSITIONS: usize = 64;
 /// Pause before reopening a stream that broke while its connection stayed up.
 const STREAM_RETRY: Duration = Duration::from_secs(1);
 
+/// Ops queued to one host before more are refused as busy. A human clicks
+/// far slower than this; it bounds a stuck host, not normal use.
+const OPS_QUEUE: usize = 8;
+
+/// Frames read ahead of the follower's loop.
+const FRAMES_AHEAD: usize = 16;
+
+/// Why a remote op got no answer from the host. The host's own refusals
+/// (cap, unknown project, permission) are not here: they are a
+/// [`Response::Error`] and come back as an answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallError {
+    /// No live control stream to the host.
+    Unreachable,
+    /// Too many ops already waiting for this host.
+    Busy,
+    /// The stream or connection ended before the answer came.
+    Dropped,
+    /// No answer within the caller's deadline.
+    TimedOut,
+}
+
+impl fmt::Display for CallError {
+    /// Worded to follow the host's name: "Studio isn't connected right now".
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Unreachable => "isn't connected right now",
+            Self::Busy => "is still answering earlier requests; try again shortly",
+            Self::Dropped => "dropped the connection before answering",
+            Self::TimedOut => "didn't answer in time",
+        })
+    }
+}
+
+/// One op on its way to a host, with where to send the answer.
+pub(crate) struct OpCall {
+    pub(crate) op: Request,
+    pub(crate) reply: oneshot::Sender<Result<Response, CallError>>,
+}
+
 /// A live status change on a paired host — what DEV-1164 notifies on. Only
 /// deltas produce these; a reconnect snapshot never does.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,6 +112,9 @@ pub struct HostTransition {
 #[derive(Clone)]
 pub struct HostFeeds {
     hosts: Arc<Mutex<HashMap<PeerId, RemoteHostState>>>,
+    /// What each host last said this Mac may do, from its hello. Kept across
+    /// drops (liveness is the feed's reachability); replaced on every hello.
+    grants: Arc<Mutex<HashMap<PeerId, PeerPermissions>>>,
     changed: Arc<watch::Sender<u64>>,
     transitions: broadcast::Sender<HostTransition>,
 }
@@ -66,6 +123,7 @@ impl Default for HostFeeds {
     fn default() -> Self {
         Self {
             hosts: Arc::default(),
+            grants: Arc::default(),
             changed: Arc::new(watch::channel(0).0),
             transitions: broadcast::channel(TRANSITIONS).0,
         }
@@ -80,6 +138,28 @@ impl HostFeeds {
     /// One host's state, if it is followed.
     pub fn get(&self, peer: PeerId) -> Option<RemoteHostState> {
         self.lock().get(&peer).cloned()
+    }
+
+    /// What `peer` last told this Mac it may do, or `None` if it never got
+    /// as far as a hello. The host re-checks every request regardless; this
+    /// only decides what the UI offers.
+    pub fn grant(&self, peer: PeerId) -> Option<PeerPermissions> {
+        self.grants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&peer)
+            .copied()
+    }
+
+    pub(crate) fn set_grant(&self, peer: PeerId, grant: PeerPermissions) {
+        let old = self
+            .grants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(peer, grant);
+        if old != Some(grant) {
+            self.changed.send_modify(|n| *n = n.wrapping_add(1));
+        }
     }
 
     /// Every followed host's state.
@@ -159,14 +239,20 @@ impl HostFeeds {
     /// Stop following `peer` and drop what we knew (it was unpaired).
     pub(crate) fn forget(&self, peer: PeerId) {
         self.lock().remove(&peer);
+        self.grants
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&peer);
         self.changed.send_modify(|n| *n = n.wrapping_add(1));
     }
 }
 
-/// One followed host: its link and the task reading its feed.
+/// One followed host: its link, the task reading its feed, and the queue its
+/// remote ops go through.
 pub(crate) struct Follower {
     link: PeerLink,
     task: JoinHandle<()>,
+    ops: mpsc::Sender<OpCall>,
 }
 
 impl Follower {
@@ -182,8 +268,15 @@ impl Follower {
         // still shows up.
         feeds.update(peer, |_| ());
         let link = PeerLink::spawn(rt, transport, peer, policy);
-        let task = rt.spawn(follow(link.subscribe(), peer, feeds, name));
-        Self { link, task }
+        let (ops, queue) = mpsc::channel(OPS_QUEUE);
+        let task = rt.spawn(follow(link.subscribe(), peer, feeds, name, queue));
+        Self { link, task, ops }
+    }
+
+    /// Where to queue an op for this host. Answered with
+    /// [`CallError::Unreachable`] while there is no live control stream.
+    pub(crate) fn ops(&self) -> mpsc::Sender<OpCall> {
+        self.ops.clone()
     }
 
     pub(crate) async fn stop(self) {
@@ -206,12 +299,13 @@ async fn follow(
     peer: PeerId,
     feeds: HostFeeds,
     name: Arc<HostName>,
+    mut ops: mpsc::Receiver<OpCall>,
 ) {
     loop {
         let state = link.borrow_and_update().clone();
         match state {
             LinkState::Connected(conn) => {
-                let end = session(&conn, peer, &feeds, &name).await;
+                let end = session(&conn, peer, &feeds, &name, &mut ops).await;
                 feeds.lost(peer);
                 if !conn.is_closed() {
                     // The stream ended but the connection is up. Pause — never
@@ -222,9 +316,15 @@ async fn follow(
                         SessionEnd::Refused => REFUSED_RETRY,
                         SessionEnd::Dropped => STREAM_RETRY,
                     };
-                    tokio::select! {
-                        _ = conn.closed() => {}
-                        _ = tokio::time::sleep(pause) => continue,
+                    let retry = refusing_ops(&mut ops, async {
+                        tokio::select! {
+                            _ = conn.closed() => false,
+                            _ = tokio::time::sleep(pause) => true,
+                        }
+                    })
+                    .await;
+                    if retry {
+                        continue;
                     }
                 }
             }
@@ -234,32 +334,66 @@ async fn follow(
             LinkState::Connecting { .. } => {}
             LinkState::Stopped => return,
         }
-        if link.changed().await.is_err() {
+        if refusing_ops(&mut ops, link.changed()).await.is_err() {
             return;
         }
     }
 }
 
-/// Hello, subscribe, then fold frames into `feeds` until something ends it.
+/// Run `until`, answering every op queued meanwhile as unreachable: with no
+/// control stream there is nobody to send it to, and a caller left waiting
+/// for a reconnect would see a create land minutes after it gave up.
+async fn refusing_ops<T>(ops: &mut mpsc::Receiver<OpCall>, until: impl Future<Output = T>) -> T {
+    tokio::pin!(until);
+    loop {
+        tokio::select! {
+            out = &mut until => return out,
+            Some(call) = ops.recv() => {
+                let _ = call.reply.send(Err(CallError::Unreachable));
+            }
+        }
+    }
+}
+
+/// Stops the frame reader when the session it feeds ends, however it ends.
+struct Reader(JoinHandle<()>);
+
+impl Drop for Reader {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Hello, subscribe, then fold frames into `feeds` and carry queued ops to
+/// the host until something ends it.
 async fn session(
     conn: &Arc<dyn PeerConnection>,
     peer: PeerId,
     feeds: &HostFeeds,
     name: &Arc<HostName>,
+    ops: &mut mpsc::Receiver<OpCall>,
 ) -> SessionEnd {
-    let Ok(mut stream) = conn.open_stream().await else {
+    let Ok(stream) = conn.open_stream().await else {
         return SessionEnd::Dropped;
     };
+    let PeerStream { mut send, recv } = stream;
     let hello = Frame::Hello {
         protocol: PROTOCOL_VERSION,
         machine_name: name.get().await,
         permissions: None,
     };
-    if write_frame(&mut stream.send, &hello).await.is_err() {
+    if write_frame(&mut send, &hello).await.is_err() {
         return SessionEnd::Dropped;
     }
-    match timeout(HELLO_TIMEOUT, read(conn, &mut stream)).await {
-        Ok(Some(Frame::Hello { .. })) => {}
+    let (frames_tx, mut frames) = mpsc::channel(FRAMES_AHEAD);
+    let _reader = Reader(tokio::spawn(read_frames(Arc::clone(conn), recv, frames_tx)));
+
+    match timeout(HELLO_TIMEOUT, frames.recv()).await {
+        Ok(Some(Frame::Hello { permissions, .. })) => {
+            if let Some(grant) = permissions {
+                feeds.set_grant(peer, grant);
+            }
+        }
         Ok(Some(Frame::Refused { message, .. })) => {
             tracing::info!(
                 "remote: {} refused the control stream: {message}",
@@ -269,54 +403,95 @@ async fn session(
         }
         _ => return SessionEnd::Dropped,
     }
-    if write_frame(&mut stream.send, &Frame::SubscribeStatus)
+    if write_frame(&mut send, &Frame::SubscribeStatus)
         .await
         .is_err()
     {
         return SessionEnd::Dropped;
     }
-    loop {
-        let Some(frame) = read(conn, &mut stream).await else {
-            return SessionEnd::Dropped;
-        };
-        match frame {
-            Frame::StatusSnapshot { seq, sessions } => {
-                feeds.snapshot(peer, StatusSnapshot { seq, sessions })
-            }
-            Frame::StatusDelta { seq, change } => {
-                if feeds.delta(peer, StatusDelta { seq, change })
-                    && write_frame(&mut stream.send, &Frame::SubscribeStatus)
-                        .await
-                        .is_err()
-                {
-                    return SessionEnd::Dropped;
+
+    let mut pending: HashMap<u64, oneshot::Sender<Result<Response, CallError>>> = HashMap::new();
+    let mut next_id: u64 = 1;
+    let end = loop {
+        tokio::select! {
+            frame = frames.recv() => {
+                let Some(frame) = frame else { break SessionEnd::Dropped };
+                match frame {
+                    Frame::StatusSnapshot { seq, sessions } => {
+                        feeds.snapshot(peer, StatusSnapshot { seq, sessions })
+                    }
+                    Frame::StatusDelta { seq, change } => {
+                        if feeds.delta(peer, StatusDelta { seq, change })
+                            && write_frame(&mut send, &Frame::SubscribeStatus).await.is_err()
+                        {
+                            break SessionEnd::Dropped;
+                        }
+                    }
+                    Frame::StatusRefused { message } => {
+                        tracing::info!(
+                            "remote: {} refused the status feed: {message}",
+                            peer.short()
+                        );
+                        break SessionEnd::Refused;
+                    }
+                    Frame::Response { id, result } => match pending.remove(&id) {
+                        Some(reply) => {
+                            let _ = reply.send(Ok(result));
+                        }
+                        None => tracing::debug!(
+                            "remote: {} answered request {id}, which nobody is waiting for",
+                            peer.short()
+                        ),
+                    },
+                    other => tracing::debug!(
+                        "remote: {} sent an unexpected frame on the control stream: {other:?}",
+                        peer.short()
+                    ),
                 }
             }
-            Frame::StatusRefused { message } => {
-                tracing::info!(
-                    "remote: {} refused the status feed: {message}",
-                    peer.short()
-                );
-                return SessionEnd::Refused;
+            Some(call) = ops.recv() => {
+                // Callers that gave up (timed out) have dropped their end;
+                // forget them rather than hold them for the stream's life.
+                pending.retain(|_, reply| !reply.is_closed());
+                let id = next_id;
+                next_id += 1;
+                let request = Frame::Request { id, op: call.op };
+                if write_frame(&mut send, &request).await.is_err() {
+                    let _ = call.reply.send(Err(CallError::Dropped));
+                    break SessionEnd::Dropped;
+                }
+                pending.insert(id, call.reply);
             }
-            other => tracing::debug!(
-                "remote: {} sent an unexpected frame on the status stream: {other:?}",
-                peer.short()
-            ),
+        }
+    };
+    for (_, reply) in pending.drain() {
+        let _ = reply.send(Err(CallError::Dropped));
+    }
+    end
+}
+
+/// Read frames until the stream or the connection ends, handing each to the
+/// session. Runs as its own task so the session can wait on "a frame or a
+/// queued op" without ever cancelling a half-read frame.
+async fn read_frames(
+    conn: Arc<dyn PeerConnection>,
+    mut recv: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+    out: mpsc::Sender<Frame>,
+) {
+    loop {
+        // `select!`ing on `closed()` matters: a closed in-memory connection
+        // does not fail a pending read. The read is never resumed after a
+        // close — this task ends.
+        let frame = tokio::select! {
+            frame = read_frame_within(&mut recv, MAX_PEER_FRAME) => frame.ok(),
+            _ = conn.closed() => None,
+        };
+        let Some(frame) = frame else { return };
+        if out.send(frame).await.is_err() {
+            return;
         }
     }
 }
-
-/// The next frame, or `None` once the stream or the connection is gone.
-/// `select!`ing on `closed()` matters: a closed in-memory connection does not
-/// fail a pending read. The read is never resumed after a close.
-async fn read(conn: &Arc<dyn PeerConnection>, stream: &mut PeerStream) -> Option<Frame> {
-    tokio::select! {
-        frame = read_frame_within(&mut stream.recv, MAX_PEER_FRAME) => frame.ok(),
-        _ = conn.closed() => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

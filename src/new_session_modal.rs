@@ -1,8 +1,16 @@
 //! "New Session with Details" modal — lets the user customise session name,
 //! branch slug, agent, and initial prompt before creating a session.
+//!
+//! With a paired Mac connected, a Machine picker comes first (DEV-1168).
+//! Choosing a host loads its projects over `projects_list` and the create
+//! becomes a `sessions_create` on that host — see [`crate::remote_sessions`].
 
 use crate::accessibility::DENSE_CONTROL_MIN_HEIGHT;
+use crate::dispatch::protocol::{CreateRequest, ProjectSummary, Request, Response};
 use crate::icon::{icon, name as icons};
+use crate::remote::follow::CallError;
+use crate::remote::RemoteService;
+use crate::remote_sessions::{default_project, failure_text, PickerHost, RemoteCreate};
 use crate::session::Orchestration;
 use crate::sidebar::groups::GroupNameTooLong;
 use crate::text_input::{TextInput, TextInputEvent};
@@ -24,7 +32,34 @@ pub enum NewSessionModalEvent {
         /// project's first spelling wins (DEV-853).
         group: Option<String>,
     },
+    /// Create on a paired Mac (DEV-1168).
+    CreateRemote(RemoteCreate),
     Close,
+}
+
+/// What the Machine picker can offer: the connected hosts, the service to ask
+/// them through, and the local project's name, which preselects the host
+/// project of the same name.
+pub struct MachineChoices {
+    pub hosts: Vec<PickerHost>,
+    pub remote: RemoteService,
+    pub project_name: String,
+}
+
+/// Where the session will be created.
+enum Target {
+    Local,
+    Remote { host: usize, projects: HostProjects },
+}
+
+/// A host's project list, as far as it has arrived.
+enum HostProjects {
+    Loading,
+    Loaded {
+        list: Vec<ProjectSummary>,
+        selected: usize,
+    },
+    Failed(String),
 }
 
 /// Element ids for the project-setup segments, positionally matched to
@@ -133,10 +168,16 @@ pub struct NewSessionModal {
     orchestration: Orchestration,
     /// Optional sidebar group for the new session (DEV-853).
     group: GroupField,
+    /// Paired Macs the session could start on instead (DEV-1168).
+    machines: MachineChoices,
+    target: Target,
+    machine_selector_open: bool,
+    project_selector_open: bool,
     focus_handle: FocusHandle,
 }
 
 impl NewSessionModal {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cx: &mut Context<Self>,
         project_idx: usize,
@@ -145,6 +186,7 @@ impl NewSessionModal {
         default_label: String,
         existing_branches: Vec<String>,
         existing_groups: Vec<String>,
+        machines: MachineChoices,
     ) -> Self {
         let name_input = cx.new(|cx| TextInput::new(cx, "", default_label.to_string()));
         let branch_input =
@@ -205,7 +247,97 @@ impl NewSessionModal {
             branch_hint: BranchHint::Empty,
             orchestration: Orchestration::default(),
             group,
+            machines,
+            target: Target::Local,
+            machine_selector_open: false,
+            project_selector_open: false,
             focus_handle: cx.focus_handle(),
+        }
+    }
+
+    /// The host the session will start on, or `None` for this Mac.
+    fn remote_host(&self) -> Option<&PickerHost> {
+        match self.target {
+            Target::Local => None,
+            Target::Remote { host, .. } => self.machines.hosts.get(host),
+        }
+    }
+
+    /// Pick where to create: `None` for this Mac, else an index into the
+    /// hosts. Choosing a host asks it for its projects.
+    fn choose_machine(&mut self, choice: Option<usize>, cx: &mut Context<Self>) {
+        self.machine_selector_open = false;
+        self.project_selector_open = false;
+        let Some(host) = choice.and_then(|i| self.machines.hosts.get(i).map(|h| (i, h.id))) else {
+            self.target = Target::Local;
+            cx.notify();
+            return;
+        };
+        let (index, peer) = host;
+        self.target = Target::Remote {
+            host: index,
+            projects: HostProjects::Loading,
+        };
+        let answer = self.machines.remote.call(peer, Request::ProjectsList);
+        cx.spawn(async move |this, cx| {
+            let result = answer.await;
+            let _ = this.update(cx, |this, cx| this.projects_arrived(index, result, cx));
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn projects_arrived(
+        &mut self,
+        index: usize,
+        result: Result<Response, CallError>,
+        cx: &mut Context<Self>,
+    ) {
+        let host_name = match self.machines.hosts.get(index) {
+            Some(h) => h.name.clone(),
+            None => return,
+        };
+        let local_name = self.machines.project_name.clone();
+        // The user may have picked another machine while this one answered.
+        let Target::Remote { host, projects } = &mut self.target else {
+            return;
+        };
+        if *host != index {
+            return;
+        }
+        *projects = match result {
+            Ok(Response::Projects { projects: list }) if !list.is_empty() => HostProjects::Loaded {
+                selected: default_project(&list, &local_name),
+                list,
+            },
+            Ok(Response::Projects { .. }) => HostProjects::Failed(format!(
+                "{host_name} has no projects yet. Add one on {host_name} first."
+            )),
+            other => HostProjects::Failed(
+                failure_text(&host_name, None, &other)
+                    .unwrap_or_else(|| format!("{host_name} sent an unexpected answer.")),
+            ),
+        };
+        cx.notify();
+    }
+
+    /// Why Create is unavailable right now, if it is.
+    fn blocked_reason(&self) -> Option<String> {
+        let Target::Remote { projects, .. } = &self.target else {
+            return None;
+        };
+        let host = self.remote_host()?;
+        if !host.can_create {
+            return Some(format!(
+                "{0} lets this Mac see its sessions but not start them. Turn on control \
+                 for this Mac in {0}'s Settings → Machines.",
+                host.name
+            ));
+        }
+        match projects {
+            HostProjects::Loaded { .. } => None,
+            HostProjects::Loading => Some(format!("Loading {}'s projects…", host.name)),
+            HostProjects::Failed(why) => Some(why.clone()),
         }
     }
 
@@ -272,6 +404,36 @@ impl NewSessionModal {
             }
         };
 
+        if let Target::Remote { projects, .. } = &self.target {
+            if self.blocked_reason().is_some() {
+                return;
+            }
+            let (Some(host), HostProjects::Loaded { list, selected }) =
+                (self.remote_host(), projects)
+            else {
+                return;
+            };
+            let Some(project) = list.get(*selected) else {
+                return;
+            };
+            // Branch and agent are not sent: the host's dispatch API takes
+            // neither, and picks both as it would for any create.
+            cx.emit(NewSessionModalEvent::CreateRemote(RemoteCreate {
+                peer: host.id,
+                host_name: host.name.clone(),
+                request: CreateRequest {
+                    project: project.id.clone(),
+                    name: label,
+                    prompt: initial_prompt.unwrap_or_default(),
+                    orchestration: self.orchestration,
+                    caller_session_id: None,
+                    caller_reply_to: None,
+                    group,
+                },
+            }));
+            return;
+        }
+
         cx.emit(NewSessionModalEvent::Create {
             project_idx: self.project_idx,
             label,
@@ -295,6 +457,252 @@ impl NewSessionModal {
     fn set_orchestration(&mut self, mode: Orchestration, cx: &mut Context<Self>) {
         self.orchestration = mode;
         cx.notify();
+    }
+
+    /// A dropdown's closed face, styled as the Agent selector.
+    fn selector_face(id: impl Into<ElementId>, text: String) -> Stateful<Div> {
+        div()
+            .id(id)
+            .cursor_pointer()
+            .w_full()
+            .px(px(8.0))
+            .py(px(5.0))
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme().border_default)
+            .bg(theme().bg_sunken)
+            .flex()
+            .items_center()
+            .justify_between()
+            .text_size(px(12.0))
+            .text_color(theme().accent)
+            .hover(|s| s.bg(theme().bg_surface))
+            .child(text)
+            .child(icon(icons::CHEVRON_DOWN, 11.0, theme().text_faint))
+    }
+
+    /// One option in an open dropdown.
+    fn selector_option(id: impl Into<ElementId>, text: String, selected: bool) -> Stateful<Div> {
+        div()
+            .id(id)
+            .cursor_pointer()
+            .px(px(8.0))
+            .py(px(5.0))
+            .text_size(px(12.0))
+            .text_color(if selected {
+                theme().accent
+            } else {
+                theme().text_primary
+            })
+            .hover(|s| s.bg(theme().bg_hover))
+            .child(text)
+    }
+
+    fn selector_list() -> Div {
+        div()
+            .w_full()
+            .rounded(px(6.0))
+            .border_1()
+            .border_color(theme().border_default)
+            .bg(theme().bg_surface)
+            .flex()
+            .flex_col()
+    }
+
+    /// The Machine row (DEV-1168): "This Mac", then each connected host.
+    /// A host that granted only `view` says so in its option.
+    fn machine_row(&self, cx: &mut Context<Self>) -> Div {
+        let current = self
+            .remote_host()
+            .map_or_else(|| "This Mac".to_string(), |h| h.name.clone());
+        let mut body = div().w_full().flex().flex_col().gap(px(3.0)).child(
+            Self::selector_face("new-session-machine-selector", current).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this: &mut Self, _ev, _w, cx| {
+                    cx.stop_propagation();
+                    this.machine_selector_open = !this.machine_selector_open;
+                    this.project_selector_open = false;
+                    cx.notify();
+                }),
+            ),
+        );
+        if self.machine_selector_open {
+            let mut options = Self::selector_list().child(
+                Self::selector_option(
+                    "new-session-machine-local",
+                    "This Mac".to_string(),
+                    matches!(self.target, Target::Local),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this: &mut Self, _ev, _w, cx| {
+                        cx.stop_propagation();
+                        this.choose_machine(None, cx);
+                    }),
+                ),
+            );
+            for (idx, host) in self.machines.hosts.iter().enumerate() {
+                let selected = matches!(self.target, Target::Remote { host, .. } if host == idx);
+                let text = if host.can_create {
+                    host.name.clone()
+                } else {
+                    format!("{} (view only)", host.name)
+                };
+                options = options.child(
+                    Self::selector_option(
+                        SharedString::from(format!("new-session-machine-{idx}")),
+                        text,
+                        selected,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this: &mut Self, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            this.choose_machine(Some(idx), cx);
+                        }),
+                    ),
+                );
+            }
+            body = body.child(options);
+        }
+        if let Some(host) = self.remote_host() {
+            body = body.child(
+                div()
+                    .text_size(px(10.0))
+                    .text_color(theme().text_faint)
+                    .child(format!("{} picks the branch and the agent.", host.name)),
+            );
+        }
+        Self::render_form_row("Machine", body)
+    }
+
+    /// The host's Project row: its projects once they arrive, or why not.
+    fn remote_project_row(&self, cx: &mut Context<Self>) -> Option<Div> {
+        let Target::Remote { projects, .. } = &self.target else {
+            return None;
+        };
+        let body = match projects {
+            HostProjects::Loading => div()
+                .py(px(5.0))
+                .text_size(px(12.0))
+                .text_color(theme().text_dim)
+                .child("Loading projects…"),
+            HostProjects::Failed(why) => div()
+                .py(px(5.0))
+                .text_size(px(11.0))
+                .text_color(theme().warning)
+                .child(why.clone()),
+            HostProjects::Loaded { list, selected } => {
+                let current = list
+                    .get(*selected)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
+                let mut body = div().w_full().flex().flex_col().gap(px(3.0)).child(
+                    Self::selector_face("new-session-remote-project-selector", current)
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|this: &mut Self, _ev, _w, cx| {
+                                cx.stop_propagation();
+                                this.project_selector_open = !this.project_selector_open;
+                                this.machine_selector_open = false;
+                                cx.notify();
+                            }),
+                        ),
+                );
+                if self.project_selector_open {
+                    let mut options = Self::selector_list();
+                    for (idx, project) in list.iter().enumerate() {
+                        options = options.child(
+                            Self::selector_option(
+                                SharedString::from(format!("new-session-remote-project-{idx}")),
+                                project.name.clone(),
+                                idx == *selected,
+                            )
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut Self, _ev, _w, cx| {
+                                    cx.stop_propagation();
+                                    if let Target::Remote {
+                                        projects: HostProjects::Loaded { selected, .. },
+                                        ..
+                                    } = &mut this.target
+                                    {
+                                        *selected = idx;
+                                    }
+                                    this.project_selector_open = false;
+                                    cx.notify();
+                                }),
+                            ),
+                        );
+                    }
+                    body = body.child(options);
+                }
+                body
+            }
+        };
+        Some(Self::render_form_row("Project", body))
+    }
+
+    /// The Machine row, shown once any paired Mac is connected.
+    fn machine_row_if_paired(&self, cx: &mut Context<Self>) -> Option<Div> {
+        (!self.machines.hosts.is_empty()).then(|| self.machine_row(cx))
+    }
+
+    fn branch_row(&self) -> Div {
+        Self::render_form_row(
+            "Branch name",
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(3.0))
+                .child(Self::input_frame(self.branch_input.clone()))
+                .child(match self.branch_hint {
+                    BranchHint::Empty => div().h(px(13.0)),
+                    BranchHint::ExistingLocal => div()
+                        .text_size(px(10.0))
+                        .text_color(theme().success)
+                        .child("✓ existing branch — will be checked out"),
+                    BranchHint::NewOrRemote => div()
+                        .text_size(px(10.0))
+                        .text_color(theme().text_faint)
+                        .child("new branch — or an existing remote branch is checked out"),
+                }),
+        )
+    }
+
+    fn agent_row(&self, agent_display: String, cx: &mut Context<Self>) -> Div {
+        let mut selector = div().w_full().flex().flex_col().gap(px(3.0)).child(
+            Self::selector_face("new-session-agent-selector", agent_display).on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this: &mut Self, _ev, _w, cx| {
+                    cx.stop_propagation();
+                    this.toggle_agent_selector(cx);
+                }),
+            ),
+        );
+        if self.agent_selector_open {
+            let mut options = Self::selector_list();
+            for (idx, (_, name)) in self.agents.iter().enumerate() {
+                options = options.child(
+                    Self::selector_option(
+                        SharedString::from(format!("new-session-agent-{idx}")),
+                        name.clone(),
+                        idx == self.selected_agent_idx,
+                    )
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this: &mut Self, _ev, _w, cx| {
+                            cx.stop_propagation();
+                            this.selected_agent_idx = idx;
+                            this.agent_selector_open = false;
+                            cx.notify();
+                        }),
+                    ),
+                );
+            }
+            selector = selector.child(options);
+        }
+        Self::render_form_row("Agent", selector)
     }
 
     fn render_form_row(label_text: &str, content: impl IntoElement) -> Div {
@@ -494,6 +902,9 @@ impl Render for NewSessionModal {
             "Shell (no agent)".to_string()
         };
 
+        let local = self.remote_host().is_none();
+        let blocked = self.blocked_reason();
+
         let card = div()
             .id("new-session-card")
             .track_focus(&self.focus_handle)
@@ -564,72 +975,17 @@ impl Render for NewSessionModal {
                     .flex()
                     .flex_col()
                     .gap(px(2.0))
+                    .children(self.machine_row_if_paired(cx))
+                    .children(self.remote_project_row(cx))
                     // Session name
                     .child(Self::render_form_row(
                         "Session name",
                         Self::input_frame(self.name_input.clone()),
                     ))
-                    // Branch name (with live existing/new hint underneath)
-                    .child(Self::render_form_row(
-                        "Branch name",
-                        div()
-                            .flex()
-                            .flex_col()
-                            .gap(px(3.0))
-                            .child(Self::input_frame(self.branch_input.clone()))
-                            .child(match self.branch_hint {
-                                BranchHint::Empty => div().h(px(13.0)),
-                                BranchHint::ExistingLocal => div()
-                                    .text_size(px(10.0))
-                                    .text_color(theme().success)
-                                    .child("✓ existing branch — will be checked out"),
-                                BranchHint::NewOrRemote => div()
-                                    .text_size(px(10.0))
-                                    .text_color(theme().text_faint)
-                                    .child(
-                                        "new branch — or an existing remote branch is checked out",
-                                    ),
-                            }),
-                    ))
-                    // Agent selector
-                    .child(Self::render_form_row(
-                        "Agent",
-                        {
-                            let mut selector = div().w_full().flex().flex_col().gap(px(3.0)).child(
-                                div().id("new-session-agent-selector").cursor_pointer().w_full()
-                                    .px(px(8.0)).py(px(5.0)).rounded(px(6.0)).border_1()
-                                    .border_color(theme().border_default).bg(theme().bg_sunken)
-                                    .flex().items_center().justify_between().text_size(px(12.0))
-                                    .text_color(theme().accent).hover(|s| s.bg(theme().bg_surface))
-                                    .child(agent_display).child(icon(icons::CHEVRON_DOWN, 11.0, theme().text_faint))
-                                    .on_mouse_down(MouseButton::Left, cx.listener(|this: &mut Self, _ev, _w, cx| {
-                                        cx.stop_propagation();
-                                        this.toggle_agent_selector(cx);
-                                    })),
-                            );
-                            if self.agent_selector_open {
-                                let mut options = div().w_full().rounded(px(6.0)).border_1()
-                                    .border_color(theme().border_default).bg(theme().bg_surface).flex().flex_col();
-                                for (idx, (_, name)) in self.agents.iter().enumerate() {
-                                    let selected = idx == self.selected_agent_idx;
-                                    options = options.child(
-                                        div().id(SharedString::from(format!("new-session-agent-{idx}")))
-                                            .cursor_pointer().px(px(8.0)).py(px(5.0)).text_size(px(12.0))
-                                            .text_color(if selected { theme().accent } else { theme().text_primary })
-                                            .hover(|s| s.bg(theme().bg_hover)).child(name.clone())
-                                            .on_mouse_down(MouseButton::Left, cx.listener(move |this: &mut Self, _ev, _w, cx| {
-                                                cx.stop_propagation();
-                                                this.selected_agent_idx = idx;
-                                                this.agent_selector_open = false;
-                                                cx.notify();
-                                            })),
-                                    );
-                                }
-                                selector = selector.child(options);
-                            }
-                            selector
-                        },
-                    ))
+                    // Branch name and agent: this Mac only. A host's dispatch
+                    // API takes neither, and picks both itself.
+                    .children(local.then(|| self.branch_row()))
+                    .children(local.then(|| self.agent_row(agent_display.clone(), cx)))
                     // Initial prompt
                     .child(Self::render_form_row(
                         "Initial prompt",
@@ -644,7 +1000,9 @@ impl Render for NewSessionModal {
                         Self::group_field_body(
                             "new-session",
                             &self.group,
-                            self.group.suggestions(cx),
+                            // This project's groups mean nothing on another
+                            // Mac; the host matches the name against its own.
+                            if local { self.group.suggestions(cx) } else { Vec::new() },
                             cx.listener(|this: &mut Self, name: &SharedString, _w, cx| {
                                 this.group
                                     .input
@@ -702,13 +1060,21 @@ impl Render for NewSessionModal {
                         "Outcome",
                         div().text_size(px(11.0)).text_color(theme().text_dim).child(format!(
                             "{}{}",
-                            match self.branch_hint {
+                            match (self.remote_host(), self.branch_hint) {
+                                (Some(host), _) => format!(
+                                    "Starts on {} in an isolated workspace on an automatically \
+                                     named branch",
+                                    host.name
+                                ),
+                                (None, hint) => match hint {
                                 BranchHint::Empty =>
                                     "Creates an isolated workspace on an automatically named branch",
                                 BranchHint::ExistingLocal =>
                                     "Creates an isolated workspace on the existing local branch",
                                 BranchHint::NewOrRemote =>
                                     "Creates an isolated workspace on a matching remote or new branch",
+                                }
+                                .to_string(),
                             },
                             match self.orchestration {
                                 Orchestration::Full => ", then runs the project's setup.",
@@ -729,8 +1095,18 @@ impl Render for NewSessionModal {
                     .border_color(theme().border_subtle)
                     .flex()
                     .flex_row()
+                    .items_center()
                     .justify_end()
                     .gap(px(8.0))
+                    // Why Create does nothing yet, beside the button it explains.
+                    .children(blocked.clone().map(|why| {
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .text_size(px(11.0))
+                            .text_color(theme().text_dim)
+                            .child(why)
+                    }))
                     .child(
                         div()
                             .id("new-session-cancel-btn")
@@ -763,6 +1139,7 @@ impl Render for NewSessionModal {
                             .text_size(px(11.0))
                             .text_color(theme().text_on_accent)
                             .hover(|s| s.bg(theme().teal))
+                            .opacity(if blocked.is_some() { 0.45 } else { 1.0 })
                             .child("Create")
                             .on_mouse_down(
                                 MouseButton::Left,

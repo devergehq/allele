@@ -23,8 +23,10 @@
 //! everything that touches the network runs on the shared tokio runtime.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::runtime::Handle;
@@ -33,7 +35,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
 use super::control::{ControlContext, HostName, RemoteDispatch};
-use super::follow::{Follower, HostFeeds};
+use super::follow::{CallError, Follower, HostFeeds, OpCall};
 use super::identity::LocalIdentity;
 use super::iroh_transport::IrohTransport;
 use super::link::ReconnectPolicy;
@@ -44,6 +46,7 @@ use super::pairing::{
 use super::peers::TrustedPeer;
 use super::registry::PeerRegistry;
 use super::transport::{PeerId, PeerTransport, TransportConfig};
+use crate::dispatch::protocol::{Request, Response};
 use crate::errors::{AlleleError, Result};
 use crate::platform::SecretStore;
 use crate::repositories::{JsonFilePeersRepo, PeersRepository};
@@ -142,6 +145,10 @@ struct Inner {
     /// What admitted peers' requests are answered by (DEV-1161).
     control: ControlContext,
     feeds: HostFeeds,
+    /// Each running follower's op queue (DEV-1168). Mirrors
+    /// `Life.followers`, but under a plain lock, so a click's call never waits
+    /// behind a reconcile holding `life`.
+    ops: Mutex<HashMap<PeerId, tokio::sync::mpsc::Sender<OpCall>>>,
     follow_policy: ReconnectPolicy,
     config: Mutex<Option<TransportConfig>>,
     life: tokio::sync::Mutex<Life>,
@@ -183,6 +190,7 @@ impl RemoteService {
             binder,
             control,
             feeds: HostFeeds::default(),
+            ops: Mutex::default(),
             follow_policy: ReconnectPolicy::default(),
             config: Mutex::new(config),
             life: tokio::sync::Mutex::new(Life::default()),
@@ -274,6 +282,53 @@ impl RemoteService {
     /// (DEV-1164).
     pub fn hosts(&self) -> &HostFeeds {
         &self.inner.feeds
+    }
+
+    /// Call a paired host's dispatch API over the control stream its
+    /// follower already holds (DEV-1168).
+    ///
+    /// **For the human's UI only** — the New Session picker and the remote
+    /// session menu. Nothing on `control.sock` or the MCP server reaches this
+    /// (`tests/architecture.rs` checks), so an agent cannot start or remove
+    /// sessions on another Mac (DEV-1187).
+    ///
+    /// Runs on the service's runtime; the returned future can be awaited from
+    /// any executor. A host refusal (cap, unknown project, permission) is an
+    /// `Ok(Response::Error)`; `Err` means the host never answered.
+    pub fn call(
+        &self,
+        peer: PeerId,
+        op: Request,
+    ) -> impl Future<Output = std::result::Result<Response, CallError>> + Send + 'static {
+        let deadline = call_deadline(&op);
+        self.call_within(peer, op, deadline)
+    }
+
+    /// [`Self::call`] with an explicit deadline.
+    pub(crate) fn call_within(
+        &self,
+        peer: PeerId,
+        op: Request,
+        deadline: Duration,
+    ) -> impl Future<Output = std::result::Result<Response, CallError>> + Send + 'static {
+        let inner = Arc::clone(&self.inner);
+        let task = self.inner.rt.spawn(async move {
+            let queue = lock(&inner.ops).get(&peer).cloned();
+            let Some(queue) = queue else {
+                return Err(CallError::Unreachable);
+            };
+            let (reply, answer) = oneshot::channel();
+            queue.try_send(OpCall { op, reply }).map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => CallError::Busy,
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => CallError::Unreachable,
+            })?;
+            match tokio::time::timeout(deadline, answer).await {
+                Ok(Ok(result)) => result,
+                Ok(Err(_)) => Err(CallError::Dropped),
+                Err(_) => Err(CallError::TimedOut),
+            }
+        });
+        async move { task.await.unwrap_or(Err(CallError::Dropped)) }
     }
 
     /// The name a trusted peer gave when it paired, or `None` if it is not
@@ -537,13 +592,14 @@ impl Inner {
             .copied()
             .collect();
         for id in gone {
+            lock(&self.ops).remove(&id);
             if let Some(f) = life.followers.remove(&id) {
                 f.stop().await;
             }
             self.feeds.forget(id);
         }
         for id in trusted {
-            life.followers.entry(id).or_insert_with(|| {
+            let follower = life.followers.entry(id).or_insert_with(|| {
                 Follower::spawn(
                     &self.rt,
                     Arc::clone(&transport),
@@ -553,6 +609,7 @@ impl Inner {
                     Arc::clone(&self.control.host_name),
                 )
             });
+            lock(&self.ops).insert(id, follower.ops());
         }
     }
 
@@ -603,6 +660,7 @@ impl Inner {
             // Unpairing the last peer is one way to get here: a peer that is
             // no longer trusted is forgotten, not left listed as unreachable.
             let trusted = self.registry.list();
+            lock(&self.ops).clear();
             for (id, f) in life.followers.drain() {
                 f.stop().await;
                 if trusted.iter().any(|p| p.id == id) {
@@ -622,6 +680,21 @@ impl Inner {
                 self.bump_ui();
             }
         }
+    }
+}
+
+/// How long to wait for a host's answer. A create clones a workspace and the
+/// host's drain allows it five minutes (`dispatch::server::REPLY_TIMEOUT`);
+/// the rest answer in seconds, and a human should not wait minutes to learn
+/// that they won't.
+pub(crate) fn call_deadline(op: &Request) -> Duration {
+    match op {
+        Request::SessionsCreate(_) => Duration::from_secs(330),
+        Request::SessionsDiscard { .. } => Duration::from_secs(120),
+        Request::ProjectsList
+        | Request::SessionsList
+        | Request::SessionsStatus { .. }
+        | Request::SessionsInterrupt { .. } => Duration::from_secs(30),
     }
 }
 
