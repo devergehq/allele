@@ -442,6 +442,21 @@ fn render_section_pane(
     }
 }
 
+impl SettingsWindowState {
+    /// Show the Machines section scrolled to the pairing controls, where a
+    /// waiting request's Approve prompt is (DEV-1188).
+    pub fn show_pairing(&mut self, cx: &mut Context<Self>) {
+        self.selected = Section::Machines;
+        // Clear any search filter so the Machines row is listed beside it.
+        self.settings_search_input
+            .update(cx, |input, cx| input.set_text_silent("", cx));
+        let app = self.app.clone();
+        self.machines.load(&app, cx);
+        self.machines.scroll_to_pairing();
+        cx.notify();
+    }
+}
+
 /// Open the Settings window, or focus the existing one if it's already
 /// visible. Returns the window handle so the caller can track it on
 /// `AppState`.

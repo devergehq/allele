@@ -20,6 +20,8 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
     spawn_viewers_redraw(cx);
     // Paired Macs' sessions waiting for the user: notify and redraw (DEV-1164).
     crate::remote_attention::spawn(cx);
+    // Announce pairing requests while Settings is closed (DEV-1188).
+    crate::pairing_alert::spawn_watcher(cx);
     // Hold off idle sleep while any session is working (DEV-1156).
     crate::session::keep_awake::spawn(cx);
 

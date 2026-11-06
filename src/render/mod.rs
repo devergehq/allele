@@ -1961,6 +1961,12 @@ impl Render for AppState {
                     );
                 }
 
+                // --- Pairing request banner (DEV-1188). Drawn first so the
+                // short-lived banners below sit on top of it. ---
+                if let Some(banner) = crate::pairing_alert::render_banner(self, cx) {
+                    main_area = main_area.child(banner);
+                }
+
                 // --- Quit confirmation banner (absolute overlay at top) ---
                 if self.confirming.quit {
                     let active_count = self
