@@ -74,7 +74,7 @@ pub(crate) fn labeled_row(label: &'static str, control: impl IntoElement) -> Div
 
 /// Animated toggle switch — 36x20 track, 16px knob, 120ms travel.
 /// Pure display; the enclosing row owns the click handler.
-pub(crate) fn toggle_switch(id: &'static str, enabled: bool) -> impl IntoElement {
+pub(crate) fn toggle_switch(id: impl std::fmt::Display, enabled: bool) -> impl IntoElement {
     div()
         .w(px(36.0))
         .h(px(20.0))

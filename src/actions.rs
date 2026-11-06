@@ -360,6 +360,34 @@ pub enum SettingsAction {
     /// Replace the relay URL (DEV-1159). Blank means n0's public relays. Only
     /// a valid URL is ever emitted; the Machines section validates first.
     UpdateRelayUrl(String),
+    /// *Allow remote connections* (DEV-1160). Off closes every remote
+    /// connection and, once no pairing needs it, the endpoint.
+    SetAllowRemoteConnections(bool),
+    /// *Pair a new machine*: show a one-time code and QR. Carries this
+    /// machine's resolved name, which the client is told on approval.
+    StartPairing { machine_name: String },
+    /// Stop showing the code; a pending request is declined.
+    CancelPairing,
+    /// Clear a finished pairing from the Machines pane.
+    DismissPairing,
+    /// The host user's Approve / Decline on a pairing request.
+    AnswerPairing {
+        request: crate::remote::pairing::RequestId,
+        approve: bool,
+    },
+    /// *Add machine*: pair with the host whose code was entered.
+    AddMachine { code: String, machine_name: String },
+    /// This Mac's Confirm / Cancel on *Add machine*'s confirmation number.
+    ConfirmAddMachine { confirmed: bool },
+    /// Clear the result of *Add machine*.
+    DismissAddMachine,
+    /// Grant or withdraw a paired machine's `control` permission.
+    SetPeerControl {
+        peer: crate::remote::PeerId,
+        allowed: bool,
+    },
+    /// *Remove*: revoke a paired machine and close its connections now.
+    RemovePeer(crate::remote::PeerId),
 }
 
 /// Chrome browser integration — sync / close linked tabs.

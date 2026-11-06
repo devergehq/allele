@@ -661,6 +661,19 @@ struct PanicSiteFinder {
 }
 
 impl<'ast> Visit<'ast> for PanicSiteFinder {
+    /// A file that gates itself with an inner `#![cfg(test)]` is test code
+    /// throughout — test doubles that live in their own file, like
+    /// `src/remote/testing.rs`, are declared `#[cfg(test)] mod testing;` in
+    /// the parent, which this per-file walk cannot see.
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        let was = self.in_test;
+        if is_test_gated(&file.attrs) {
+            self.in_test = true;
+        }
+        syn::visit::visit_file(self, file);
+        self.in_test = was;
+    }
+
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
         let was = self.in_test;
         if is_test_gated(&item.attrs) {

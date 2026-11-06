@@ -39,6 +39,7 @@ mod remote_browser;
 mod render;
 mod repositories;
 mod rich;
+mod rt;
 mod sandbox;
 mod scratch_pad;
 mod session;
@@ -2260,6 +2261,10 @@ fn main() {
                         persist_flush_scheduled: false,
                         repos: repositories::Repositories::production(),
                         platform: crate::platform::global().clone_arcs(),
+                        remote: crate::remote::RemoteService::production(
+                            crate::platform::global().secrets.clone(),
+                            &settings_for_window.remote,
+                        ),
                         capture_ui_requested: false,
                         // Captured on the first render (see `Render`).
                         main_window: None,

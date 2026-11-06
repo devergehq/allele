@@ -316,6 +316,11 @@ pub struct RemoteSettings {
     /// A self-hosted `iroh-relay` URL. `None` or blank means n0's public relays.
     #[serde(default)]
     pub relay_url: Option<String>,
+    /// *Allow remote connections* (DEV-1160). Off until the first pairing
+    /// turns it on; off means no paired machine can connect. Pairing itself
+    /// still works while it is off.
+    #[serde(default)]
+    pub allow_connections: bool,
 }
 
 /// Session-sync store configuration. All plain strings — no credentials are

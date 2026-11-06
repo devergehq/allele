@@ -1,9 +1,9 @@
 //! Machines settings section (DEV-1159) — this machine's name and id on the
-//! network, and the relay server its endpoint uses.
+//! network, and the relay server its endpoint uses — plus pairing and the
+//! paired machines (DEV-1160, rendered by `super::pairing`).
 //!
-//! Pairing other machines (DEV-1160) will add to this pane. For now it shows
-//! who this machine is. Opening it is the identity's "first use": the secret
-//! key is generated and stored in the Keychain the first time it is needed.
+//! Opening it is the identity's "first use": the secret key is generated and
+//! stored in the Keychain the first time it is needed.
 
 use std::sync::Arc;
 
@@ -11,7 +11,9 @@ use gpui::*;
 
 use super::widgets::{card, input_frame, labeled_row, section_note, section_title};
 use super::SettingsWindowState;
-use crate::remote::{resolve_machine_name, LocalIdentity, RelayChoice};
+use crate::remote::{
+    resolve_machine_name, LocalIdentity, PeerId, RelayChoice, RemoteService, RemoteStatus,
+};
 use crate::settings::RemoteSettings;
 use crate::text_input::{TextInput, TextInputEvent};
 use crate::theme::theme;
@@ -34,6 +36,14 @@ pub(super) struct MachinesSection {
     load_started: bool,
     /// What the name resolves to when the field is blank.
     computer_name: Option<String>,
+    /// The app's remote service, taken on first show.
+    remote: Option<RemoteService>,
+    /// Its last status, refreshed while the window is open.
+    status: Option<RemoteStatus>,
+    /// *Add machine*'s code field.
+    code_input: Entity<TextInput>,
+    /// The peer whose *Remove* was clicked once and awaits a second click.
+    pub(super) confirm_remove: Option<PeerId>,
 }
 
 impl MachinesSection {
@@ -87,6 +97,8 @@ impl MachinesSection {
             .err()
             .map(|e| e.to_string());
 
+        let code_input = cx.new(|cx| TextInput::new(cx, String::new(), "Pairing code"));
+
         Self {
             name_input,
             relay_input,
@@ -94,7 +106,44 @@ impl MachinesSection {
             id: IdStatus::Loading,
             load_started: false,
             computer_name: None,
+            remote: None,
+            status: None,
+            code_input,
+            confirm_remove: None,
         }
+    }
+
+    /// This machine's name as peers will see it: the field, else the computer
+    /// name.
+    pub(super) fn machine_name(&self, cx: &App) -> String {
+        let typed = self.name_input.read(cx).text().to_string();
+        resolve_machine_name(Some(&typed), self.computer_name.clone())
+    }
+
+    /// Follow the remote service's status while this window is open. Polled
+    /// twice a second: cheap, and it also drives the code's countdown.
+    fn watch_remote(&mut self, app: &WeakEntity<AppState>, cx: &mut Context<SettingsWindowState>) {
+        let Some(remote) = app.upgrade().map(|a| a.read(cx).remote.clone()) else {
+            return;
+        };
+        self.status = Some(remote.status());
+        self.remote = Some(remote);
+        cx.spawn(async move |this, cx| loop {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(500))
+                .await;
+            let alive = this.update(cx, |this, cx| {
+                let next = this.machines.remote.as_ref().map(RemoteService::status);
+                if next != this.machines.status {
+                    this.machines.status = next;
+                    cx.notify();
+                }
+            });
+            if alive.is_err() {
+                break;
+            }
+        })
+        .detach();
     }
 
     /// Resolve the machine id and the computer name off the UI thread, once,
@@ -110,6 +159,7 @@ impl MachinesSection {
         if std::mem::replace(&mut self.load_started, true) {
             return;
         }
+        self.watch_remote(app, cx);
         let Some(platform) = app.upgrade().map(|a| a.read(cx).platform.clone_arcs()) else {
             return;
         };
@@ -216,6 +266,16 @@ impl MachinesSection {
                  through a relay stays end-to-end encrypted. Takes effect the next \
                  time the connection starts.",
             ))
+            .child(match &self.status {
+                Some(status) => {
+                    let allow = self
+                        .remote
+                        .as_ref()
+                        .is_some_and(RemoteService::allows_connections);
+                    super::pairing::render(status, allow, &self.code_input, self.confirm_remove, cx)
+                }
+                None => div(),
+            })
     }
 }
 
@@ -229,4 +289,20 @@ fn push(
         cx.notify();
     })
     .ok();
+}
+
+impl SettingsWindowState {
+    /// Queue a settings action on the app and redraw. Used by the pairing UI.
+    pub(super) fn push_settings(
+        &mut self,
+        action: crate::SettingsAction,
+        cx: &mut Context<SettingsWindowState>,
+    ) {
+        push(action, &self.app, cx);
+        // Pull the change through now rather than on the next poll.
+        if let Some(remote) = &self.machines.remote {
+            self.machines.status = Some(remote.status());
+        }
+        cx.notify();
+    }
 }

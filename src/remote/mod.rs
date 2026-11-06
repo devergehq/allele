@@ -15,24 +15,44 @@
 //! `tests/architecture.rs` enforces it, so a later adapter (Tailscale, plain
 //! LAN) or a test double can stand in without touching callers.
 //!
-//! What is deliberately not here: pairing and the trusted-peers list (DEV-1160)
-//! and the remote listener with its wire protocol (DEV-1161). `accept` hands
-//! back *authenticated* connections — the peer proved it holds the key behind
-//! `remote_id()` — but nothing here *authorises* them. That is the caller's job.
+//! Trust (DEV-1160) sits on top:
+//!
+//! ```text
+//!   peers / registry ► TrustedPeer, PeerRegistry     peers.json (0600) + open
+//!                                                    connections, one lock
+//!   pairing ─────────► code, window, host, client    one-time code + host approval
+//!   listener ────────► Gate                          who gets in, decided before
+//!                                                    anything is read
+//!   service ─────────► RemoteService                 binds the endpoint only while
+//!                                                    something needs it
+//! ```
+//!
+//! `accept` hands back *authenticated* connections — the peer proved it holds
+//! the key behind `remote_id()`. [`listener::Gate`] is what *authorises* them,
+//! against the trusted list. What an admitted peer may do is DEV-1161.
 
-// The transport, the link and most of the identity API have no caller in the
-// app until the remote listener lands (DEV-1161); this ticket ships the seam
-// and the Settings → Machines pane. Remove this allow when DEV-1161 wires it.
+// The link and parts of the transport API have no caller in the app until the
+// dispatch listener lands (DEV-1161). Remove this allow when DEV-1161 wires it.
 #![allow(dead_code, unused_imports)]
 
 pub mod identity;
 pub mod iroh_transport;
 pub mod link;
+pub mod listener;
+pub mod pairing;
+pub mod peers;
+pub mod registry;
+pub mod service;
+// Test-only: the file gates itself with `#![cfg(test)]`.
+pub(crate) mod testing;
 pub mod transport;
 
 pub use identity::{resolve_machine_name, LocalIdentity};
 pub use iroh_transport::IrohTransport;
 pub use link::{LinkState, PeerLink, ReconnectPolicy};
+pub use peers::{PeerList, PeerPermissions, TrustedPeer};
+pub use registry::PeerRegistry;
+pub use service::{ClientView, PeerRow, RemoteService, RemoteStatus};
 pub use transport::{
     Heartbeat, PeerConnection, PeerId, PeerStream, PeerTransport, RelayChoice, TransportConfig,
     ALPN,
