@@ -17,6 +17,8 @@ use crate::{debug_capture, git, hooks, interrupted};
 
 /// Start every background poller. Called once, from `main`.
 pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
+    // Paired Macs' sessions waiting for the user: notify and redraw (DEV-1164).
+    crate::remote_attention::spawn(cx);
     // Hold off idle sleep while any session is working (DEV-1156).
     crate::session::keep_awake::spawn(cx);
 

@@ -35,6 +35,7 @@ mod proc;
 mod project;
 mod reader;
 mod remote;
+mod remote_attention;
 mod remote_browser;
 mod render;
 mod repositories;
