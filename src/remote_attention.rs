@@ -243,34 +243,46 @@ impl AppState {
 
 /// Start the two remote-attention tasks. Called once, at launch.
 pub(crate) fn spawn(cx: &mut Context<AppState>) {
-    let hosts = cx.entity().read(cx).remote.hosts().clone();
+    // This runs inside `AppState`'s constructor, so the entity cannot be read
+    // here — that is a double-lease panic, and at launch it aborts the app.
+    // Each task reads the feeds once it first runs, after construction.
 
     // Notifications: live transitions only.
-    let mut transitions = hosts.subscribe_transitions();
-    cx.spawn(async move |this, cx| loop {
-        let t = match transitions.recv().await {
-            Ok(t) => t,
-            Err(RecvError::Lagged(n)) => {
-                // The state is intact in HostFeeds; only these
-                // announcements are lost.
-                tracing::warn!("remote attention: skipped {n} transition(s)");
-                continue;
-            }
-            Err(RecvError::Closed) => break,
+    cx.spawn(async move |this, cx| {
+        let Ok(mut transitions) =
+            this.read_with(cx, |state, _| state.remote.hosts().subscribe_transitions())
+        else {
+            return;
         };
-        if this
-            .update(cx, |this: &mut AppState, _cx| this.on_remote_transition(&t))
-            .is_err()
-        {
-            break; // AppState dropped — app is exiting
+        loop {
+            let t = match transitions.recv().await {
+                Ok(t) => t,
+                Err(RecvError::Lagged(n)) => {
+                    // The state is intact in HostFeeds; only these
+                    // announcements are lost.
+                    tracing::warn!("remote attention: skipped {n} transition(s)");
+                    continue;
+                }
+                Err(RecvError::Closed) => break,
+            };
+            if this
+                .update(cx, |this: &mut AppState, _cx| this.on_remote_transition(&t))
+                .is_err()
+            {
+                break; // AppState dropped — app is exiting
+            }
         }
     })
     .detach();
 
     // Redraw: the attention bar reads the feeds at render time, so any change
     // to any host only needs a frame.
-    let mut changes = hosts.subscribe_changes();
     cx.spawn(async move |this, cx| {
+        let Ok(mut changes) =
+            this.read_with(cx, |state, _| state.remote.hosts().subscribe_changes())
+        else {
+            return;
+        };
         while changes.changed().await.is_ok() {
             if this.update(cx, |_: &mut AppState, cx| cx.notify()).is_err() {
                 break;
