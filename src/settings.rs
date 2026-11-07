@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use tracing::warn;
 
@@ -276,6 +276,26 @@ pub struct Settings {
     #[serde(default)]
     pub attention_bar_collapsed: bool,
 
+    /// Sidebar fold state (DEV-1235). Ids of local projects whose rows are
+    /// folded under their header. Keyed by project id, so a rename or a
+    /// reorder keeps the fold.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub sidebar_collapsed_projects: BTreeSet<String>,
+
+    /// Paired hosts (by peer id) folded under their MACHINES row (DEV-1235).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub sidebar_collapsed_machines: BTreeSet<String>,
+
+    /// Remote projects folded under their heading in the MACHINES section,
+    /// keyed by [`crate::sidebar::machines::remote_project_key`] (DEV-1235).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub sidebar_collapsed_remote_projects: BTreeSet<String>,
+
+    /// When true the MACHINES section sits above the local projects instead
+    /// of below them (DEV-1235). Toggled from the section header.
+    #[serde(default)]
+    pub sidebar_machines_on_top: bool,
+
     /// Branch naming configuration — controls how session branches are named
     /// (LLM model, mode, per-platform settings).
     #[serde(default)]
@@ -501,6 +521,10 @@ impl Default for Settings {
             keep_awake_while_working: true,
             sidebar_active_only: false,
             attention_bar_collapsed: false,
+            sidebar_collapsed_projects: BTreeSet::new(),
+            sidebar_collapsed_machines: BTreeSet::new(),
+            sidebar_collapsed_remote_projects: BTreeSet::new(),
+            sidebar_machines_on_top: false,
             naming: NamingConfig::default(),
             sync: SyncSettings::default(),
             dispatch: DispatchLimits::default(),
@@ -596,6 +620,14 @@ impl Settings {
     }
 }
 
+/// Add `key` to a fold set if it is absent, remove it if present. The one
+/// toggle behind every sidebar fold (DEV-1235).
+pub(crate) fn toggle_membership(set: &mut BTreeSet<String>, key: &str) {
+    if !set.remove(key) {
+        set.insert(key.to_string());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -675,6 +707,45 @@ mod tests {
         let legacy = r#"{ "sidebar_width": 240.0 }"#;
         let s: Settings = serde_json::from_str(legacy).expect("should deserialize");
         assert!(!s.attention_bar_collapsed);
+    }
+
+    #[test]
+    fn sidebar_fold_state_defaults_to_everything_expanded() {
+        let s = Settings::default();
+        assert!(s.sidebar_collapsed_projects.is_empty());
+        assert!(s.sidebar_collapsed_machines.is_empty());
+        assert!(s.sidebar_collapsed_remote_projects.is_empty());
+        assert!(!s.sidebar_machines_on_top);
+        // An old settings file with none of the keys loads the same way.
+        let s: Settings = serde_json::from_str("{}").unwrap();
+        assert!(s.sidebar_collapsed_projects.is_empty());
+        assert!(!s.sidebar_machines_on_top);
+    }
+
+    #[test]
+    fn sidebar_fold_state_round_trips() {
+        let mut s = Settings::default();
+        s.sidebar_collapsed_projects.insert("p1".into());
+        s.sidebar_collapsed_machines.insert("peer".into());
+        s.sidebar_collapsed_remote_projects
+            .insert("peer/allele".into());
+        s.sidebar_machines_on_top = true;
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert!(back.sidebar_collapsed_projects.contains("p1"));
+        assert!(back.sidebar_collapsed_machines.contains("peer"));
+        assert!(back
+            .sidebar_collapsed_remote_projects
+            .contains("peer/allele"));
+        assert!(back.sidebar_machines_on_top);
+    }
+
+    #[test]
+    fn toggle_membership_adds_then_removes() {
+        let mut set = BTreeSet::new();
+        toggle_membership(&mut set, "a");
+        assert!(set.contains("a"));
+        toggle_membership(&mut set, "a");
+        assert!(set.is_empty());
     }
 
     #[test]

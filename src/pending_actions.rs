@@ -1040,6 +1040,39 @@ impl AppState {
                     !self.user_settings.attention_bar_collapsed;
                 self.mark_settings_dirty();
             }
+            // Sidebar folds (DEV-1235). Folding rows away changes which rows
+            // exist, so an armed confirmation strip is dropped, as for groups.
+            SidebarAction::ToggleProjectCollapsed(id) => {
+                crate::settings::toggle_membership(
+                    &mut self.user_settings.sidebar_collapsed_projects,
+                    &id,
+                );
+                self.confirming.dismiss_armed();
+                self.mark_settings_dirty();
+                cx.notify();
+            }
+            SidebarAction::ToggleMachineCollapsed(peer) => {
+                crate::settings::toggle_membership(
+                    &mut self.user_settings.sidebar_collapsed_machines,
+                    &peer,
+                );
+                self.mark_settings_dirty();
+                cx.notify();
+            }
+            SidebarAction::ToggleRemoteProjectCollapsed(key) => {
+                crate::settings::toggle_membership(
+                    &mut self.user_settings.sidebar_collapsed_remote_projects,
+                    &key,
+                );
+                self.mark_settings_dirty();
+                cx.notify();
+            }
+            SidebarAction::ToggleMachinesPosition => {
+                self.user_settings.sidebar_machines_on_top =
+                    !self.user_settings.sidebar_machines_on_top;
+                self.mark_settings_dirty();
+                cx.notify();
+            }
             SidebarAction::RefreshChanges => {
                 self.refresh_changes(cx);
             }
@@ -2542,6 +2575,46 @@ mod tests {
             cx,
         );
         assert!(!collapsed(cx), "and clicking again unfolds it");
+    }
+
+    /// DEV-1235: a project header folds and unfolds, and the fold is written
+    /// to settings.json so it comes back after a restart.
+    #[gpui::test]
+    fn toggling_a_project_folds_it_and_persists_the_fold(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![grouped_project(&[None])], cx);
+        let id = fx.update(cx, |state, _w, _cx| state.projects[0].id.clone());
+
+        let dirty = fx.dispatch(SidebarAction::ToggleProjectCollapsed(id.clone()), cx);
+        assert_eq!(dirty, (false, true), "the fold lives in settings.json only");
+        fx.checkpoint(cx);
+        assert!(fx
+            .settings
+            .snapshot()
+            .sidebar_collapsed_projects
+            .contains(&id));
+
+        // The unfold is not written straight away (writes are debounced,
+        // DEV-609), so check it in memory and marked for the next write.
+        let dirty = fx.dispatch(SidebarAction::ToggleProjectCollapsed(id.clone()), cx);
+        assert_eq!(dirty, (false, true));
+        assert!(fx.update(cx, |state, _w, _cx| state
+            .user_settings
+            .sidebar_collapsed_projects
+            .is_empty()));
+    }
+
+    /// DEV-1235: the MACHINES section moves to the top and back, persisted.
+    #[gpui::test]
+    fn toggling_machines_position_flips_and_persists(cx: &mut TestAppContext) {
+        let fx = Fixture::new(cx);
+        fx.dispatch(SidebarAction::ToggleMachinesPosition, cx);
+        fx.checkpoint(cx);
+        assert!(fx.settings.snapshot().sidebar_machines_on_top);
+        let dirty = fx.dispatch(SidebarAction::ToggleMachinesPosition, cx);
+        assert_eq!(dirty, (false, true));
+        assert!(!fx.update(cx, |state, _w, _cx| state
+            .user_settings
+            .sidebar_machines_on_top));
     }
 
     /// The acceptance criterion: renaming a group from its header renames it for
