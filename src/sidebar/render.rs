@@ -11,11 +11,14 @@ use gpui::*;
 
 use crate::accessibility::DENSE_CONTROL_MIN_HEIGHT;
 use crate::actions::{
-    ArchiveAction, DraggedProject, DraggedSession, ProjectAction, SessionAction, SessionCursor,
+    ArchiveAction, DraggedGroup, DraggedProject, DraggedSession, ProjectAction, SessionAction,
+    SessionCursor, SidebarAction,
 };
-use crate::app_state::AppState;
+use crate::app_state::{AppState, GroupRename};
 use crate::project::Project;
-use crate::session::SessionStatus;
+use crate::session::{AttentionKind, SessionStatus};
+use crate::sidebar::groups::{self, GroupCounts, GroupHeader};
+use crate::sidebar::machines;
 use crate::SimpleTooltip;
 
 /// Left indents matching the rows each confirmation strip sits beneath, so the
@@ -170,6 +173,31 @@ pub(crate) fn project_survives_active_only(
         })
 }
 
+/// Does this session survive the text filter?
+///
+/// Takes the four strings the decision rests on rather than a `Session`, so it
+/// can be checked without a window — and so the project-level and session-level
+/// passes cannot drift apart, which is how a project with no visible sessions
+/// ends up drawn with a header and nothing under it.
+///
+/// `filter` is already lowercased by the caller (`AppState::sidebar_filter`).
+///
+/// A **group** name matches (DEV-853): typing a group's name shows that group's
+/// sessions, which is the whole point of having named them. A matching *project*
+/// name keeps all its sessions, as it did before groups existed.
+pub(crate) fn session_matches_filter(
+    label: &str,
+    comment: Option<&str>,
+    group: Option<&str>,
+    project_name: &str,
+    filter: &str,
+) -> bool {
+    label.to_lowercase().contains(filter)
+        || comment.is_some_and(|c| c.to_lowercase().contains(filter))
+        || group.is_some_and(|g| g.to_lowercase().contains(filter))
+        || project_name.to_lowercase().contains(filter)
+}
+
 /// How many sessions and projects the active-only filter would hide, as
 /// `(sessions, projects)`. Drives the hint row's "N hidden" copy.
 ///
@@ -199,6 +227,331 @@ pub(crate) fn active_only_hidden_counts(
     (sessions, hidden_projects)
 }
 
+/// How many sessions across every project have a live agent behind them.
+///
+/// Counted through [`session_survives_active_only`] rather than by calling
+/// [`SessionStatus::is_active`] again, so this number and the rows the sidebar
+/// draws cannot disagree — a count that drifts from the filter is the defect
+/// DEV-789 exists to fix.
+///
+/// The cursor exception is deliberately not applied. The filter pins the
+/// selected row visible even when it is `Suspended`, which keeps a failed
+/// resume reachable; it does not make that session live, and a count that
+/// ticked up by one because of where the cursor happens to sit would be
+/// reporting the UI's state rather than the machine's.
+///
+/// Consequence worth knowing: this and [`active_only_hidden_counts`] therefore
+/// do **not** sum to the session total while a `Suspended` or `Done` row is
+/// selected — that row is on screen, counted neither live nor hidden. Both
+/// numbers are right about their own question; the pair is not a partition.
+/// Keep them out of one sentence that invites subtracting them.
+pub(crate) fn active_session_count(projects: &[Project]) -> usize {
+    projects
+        .iter()
+        .flat_map(|p| p.sessions.iter())
+        .filter(|s| session_survives_active_only(s.status, false))
+        .count()
+}
+
+/// A group header row: the group's name, and how many of its sessions are
+/// running, finished and blocked (DEV-853).
+///
+/// Sits between the project header's indent and the session rows' — the rows it
+/// owns are indented past it, so the hierarchy reads without a connecting line.
+/// Upper-cased and letter-spaced rather than bold, matching the ARCHIVES
+/// section header: it is a divider, and a second bold weight under the project
+/// name would compete with it for the eye.
+///
+/// Every gesture the group has lives here (DEV-937):
+///
+/// | Gesture | Effect |
+/// | -- | -- |
+/// | Click | Fold the group's rows away, or unfold them |
+/// | Drag onto another header | Move this group to that slot |
+/// | Drop a session row on it | Move that session into this group |
+/// | Right-click | Move up / move down / collapse / rename |
+///
+/// **Collapse is an `on_click`, not an `on_mouse_down`.** The header is also
+/// draggable, and a mouse-down fires at the start of a drag — so collapsing on
+/// mouse-down would fold the group away every time you picked it up to move it.
+/// GPUI takes the pending mouse-down when a drag begins, so a click and a drag
+/// are mutually exclusive; `on_click` needs the `.id()` this row now carries.
+///
+/// `rename` is `Some` only when *this* header is the one being renamed. While it
+/// is, the name becomes an inline field and the click and drag handlers are not
+/// attached at all — a click meant for the text must not fold the group under it.
+fn render_group_header(
+    header: &GroupHeader,
+    p_idx: usize,
+    rename: Option<&GroupRenameField>,
+    cx: &mut Context<AppState>,
+) -> AnyElement {
+    let counts: GroupCounts = header.counts;
+    let name = header.name.clone();
+    let collapsed = header.collapsed;
+    let renaming = rename.is_some();
+
+    let mut row = div()
+        .id(SharedString::from(format!("group-{p_idx}-{name}")))
+        .w_full()
+        .pl(px(16.0))
+        .pr(px(12.0))
+        .pt(px(6.0))
+        .pb(px(2.0))
+        .bg(theme().bg_surface)
+        .flex()
+        .flex_row()
+        .gap(px(6.0))
+        .items_center()
+        .justify_between()
+        // A session dropped here joins this group. No position is implied — a
+        // header sits between rows rather than among them — so this is a
+        // regroup and nothing else, unlike a drop on a row.
+        .drag_over::<DraggedSession>(move |style, dragged: &DraggedSession, _, _| {
+            if dragged.project_idx == p_idx {
+                style.bg(theme().bg_hover_soft)
+            } else {
+                style
+            }
+        })
+        .on_drop(cx.listener({
+            let name = name.clone();
+            move |this: &mut AppState, dragged: &DraggedSession, _window, cx| {
+                // Same project only: a session is a clone of its project's repo
+                // and cannot change parents, so neither can its group.
+                if dragged.project_idx == p_idx {
+                    this.pending_action = Some(
+                        SessionAction::RegroupSession {
+                            project_idx: p_idx,
+                            session_idx: dragged.session_idx,
+                            group: Some(name.clone()),
+                        }
+                        .into(),
+                    );
+                    cx.notify();
+                }
+            }
+        }))
+        // A group dragged from another project is not a drop target: the same
+        // name in two projects is two groups, and an order is per project.
+        .drag_over::<DraggedGroup>(move |style, dragged: &DraggedGroup, _, _| {
+            if dragged.project_idx == p_idx {
+                style.bg(theme().bg_hover_soft)
+            } else {
+                style
+            }
+        })
+        .on_drop(cx.listener({
+            let name = name.clone();
+            move |this: &mut AppState, dragged: &DraggedGroup, _window, cx| {
+                if dragged.project_idx == p_idx {
+                    this.pending_action = Some(
+                        SidebarAction::ReorderGroup {
+                            project_idx: p_idx,
+                            from: dragged.name.clone(),
+                            to: name.clone(),
+                        }
+                        .into(),
+                    );
+                    cx.notify();
+                }
+            }
+        }))
+        .on_mouse_down(
+            MouseButton::Right,
+            cx.listener({
+                let name = name.clone();
+                move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
+                    cx.stop_propagation();
+                    this.session_context_menu = None;
+                    this.project_context_menu = None;
+                    this.remote_ui.menu = None;
+                    this.group_headers.context_menu = Some((p_idx, name.clone(), event.position));
+                    cx.notify();
+                }
+            }),
+        );
+
+    if !renaming {
+        row = row
+            .cursor_pointer()
+            .hover(|s| s.bg(theme().bg_raised))
+            .on_drag(
+                DraggedGroup {
+                    project_idx: p_idx,
+                    name: name.clone(),
+                },
+                {
+                    let preview = name.clone();
+                    move |_drag, _offset, _window, cx| {
+                        cx.new(|_| crate::DragPreview(preview.to_uppercase()))
+                    }
+                },
+            )
+            .on_click(cx.listener({
+                let name = name.clone();
+                move |this: &mut AppState, _event, _window, cx| {
+                    this.pending_action = Some(
+                        SidebarAction::ToggleGroupCollapsed {
+                            project_idx: p_idx,
+                            name: name.clone(),
+                        }
+                        .into(),
+                    );
+                    cx.notify();
+                }
+            }));
+    }
+
+    row.child(
+        div()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(4.0))
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .child(icon(
+                if collapsed {
+                    icons::CHEVRON_RIGHT
+                } else {
+                    icons::CHEVRON_DOWN
+                },
+                10.0,
+                theme().text_faint,
+            ))
+            .child(match rename {
+                Some(field) => render_group_rename_field(field, cx),
+                None => render_group_name(&name),
+            }),
+    )
+    .children(counts.summary().map(|summary| {
+        // The counts hold their width instead: they are short, bounded, and
+        // the reason to look at the header at all.
+        div()
+            .flex_shrink_0()
+            .text_size(px(10.0))
+            .text_color(theme().text_dim)
+            .child(summary)
+    }))
+    .into_any_element()
+}
+
+/// An in-progress group rename, and the focus handle the field needs.
+///
+/// The handle lives on `AppState` beside the rename itself but is created
+/// lazily, so it is passed in rather than looked up — the render path holds an
+/// immutable borrow of `AppState` and cannot create one.
+struct GroupRenameField<'a> {
+    state: &'a GroupRename,
+    focus: Option<FocusHandle>,
+}
+
+/// The header's name as an inline editable field.
+///
+/// Character-by-character on `on_key_down`, the same shape as the drawer's
+/// inline tab rename (`drawer/mod.rs`) rather than a `TextInput` entity: a
+/// `TextInput` is an entity per field, and a sidebar can hold one header being
+/// renamed but any number of headers.
+///
+/// A refusal keeps the field open with what was typed still in it, so a name
+/// over the limit or already taken can be corrected rather than retyped. Typing
+/// clears the refusal — it was about the name as it stood, not about the group.
+fn render_group_rename_field(field: &GroupRenameField, cx: &mut Context<AppState>) -> AnyElement {
+    let refusal = field.state.refusal.clone();
+    // A zero-width field would collapse to the caret alone and look broken.
+    let display = if field.state.buffer.is_empty() {
+        " ".to_string()
+    } else {
+        field.state.buffer.clone()
+    };
+    let mut input = div()
+        .min_w(px(60.0))
+        .px(px(4.0))
+        .border_1()
+        .border_color(if refusal.is_some() {
+            theme().danger
+        } else {
+            theme().accent
+        })
+        .rounded(px(4.0))
+        .bg(theme().bg_surface)
+        .text_size(px(10.0))
+        .text_color(theme().text_primary)
+        .child(format!("{display}▎"));
+
+    if let Some(fh) = field.focus.clone() {
+        input = input.track_focus(&fh).on_key_down(cx.listener(
+            |this: &mut AppState, event: &KeyDownEvent, _window, cx| {
+                let key = event.keystroke.key.as_str();
+                let mods = &event.keystroke.modifiers;
+                match key {
+                    "enter" => {
+                        this.pending_action = Some(SidebarAction::CommitGroupRename.into());
+                        cx.notify();
+                    }
+                    "escape" => {
+                        this.pending_action = Some(SidebarAction::CancelGroupRename.into());
+                        cx.notify();
+                    }
+                    "backspace" => {
+                        if let Some(rename) = this.group_headers.rename.as_mut() {
+                            rename.buffer.pop();
+                            rename.refusal = None;
+                            cx.notify();
+                        }
+                    }
+                    _ => {
+                        if let Some(ref ch) = event.keystroke.key_char {
+                            if !mods.control && !mods.platform {
+                                if let Some(rename) = this.group_headers.rename.as_mut() {
+                                    rename.buffer.push_str(ch);
+                                    rename.refusal = None;
+                                    cx.notify();
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+        ));
+    }
+
+    div()
+        .flex()
+        .flex_col()
+        .gap(px(2.0))
+        .min_w(px(0.0))
+        .child(input)
+        .children(refusal.map(|message| {
+            div()
+                .text_size(px(9.0))
+                .text_color(theme().danger)
+                .child(message)
+        }))
+        .into_any_element()
+}
+
+/// The group's name as a label.
+fn render_group_name(name: &str) -> AnyElement {
+    (
+        // Truncates rather than refusing to shrink. A group name is free
+        // text up to 40 characters and the sidebar is user-resizable, so a
+        // `flex_shrink_0` name would push the counts out entirely at a
+        // narrow width — removing the one thing this header exists to say.
+        // Matches how the session rows below treat their labels.
+        div()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .text_ellipsis()
+            .text_size(px(10.0))
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(theme().text_faint)
+            .child(name.to_uppercase())
+    )
+    .into_any_element()
+}
+
 pub(crate) fn build_sidebar_items(
     state: &mut AppState,
     _window: &mut Window,
@@ -215,9 +568,15 @@ pub(crate) fn build_sidebar_items(
     // Build sidebar items: for each project, a header then its sessions
     let mut sidebar_items: Vec<AnyElement> = Vec::new();
     let active_cursor = state.active;
+    // While a remote tab is on screen the local session under it is not what
+    // the user is looking at, so its row is not highlighted (DEV-1167).
+    let remote_shown = state.remote_tabs.shown().is_some();
     let filter = &state.sidebar_filter;
     let filtering = !filter.is_empty();
     let active_only = state.user_settings.sidebar_active_only;
+    // Cloned up front: the walk below holds an immutable borrow of `state`,
+    // and the handle is created lazily by `StartGroupRename` rather than here.
+    let group_rename_focus = state.group_headers.rename_focus.clone();
 
     for (p_idx, project) in state.projects.iter().enumerate() {
         let project_name = project.name.clone();
@@ -238,12 +597,17 @@ pub(crate) fn build_sidebar_items(
         if filtering {
             let project_matches = project_name.to_lowercase().contains(filter);
             let any_session_matches = project.sessions.iter().any(|s| {
-                s.label.to_lowercase().contains(filter)
-                    || s.comment
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(filter)
+                session_matches_filter(
+                    &s.label,
+                    s.comment.as_deref(),
+                    s.group.as_deref(),
+                    // Deliberately not `project_name`: this pass asks whether
+                    // any *session* matches, and passing the project name in
+                    // would make every session match whenever the project does,
+                    // which the `project_matches` check beside it already covers.
+                    "",
+                    filter,
+                )
             });
             if !project_matches && !any_session_matches {
                 continue;
@@ -279,6 +643,7 @@ pub(crate) fn build_sidebar_items(
                     move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
                         cx.stop_propagation();
                         this.session_context_menu = None;
+                        this.remote_ui.menu = None;
                         this.project_context_menu = Some((p_idx, event.position));
                         cx.notify();
                     },
@@ -560,19 +925,6 @@ pub(crate) fn build_sidebar_items(
 
         // Inline project settings panel
         if state.editing_project_settings == Some(p_idx) {
-            let current_strategy = match project.settings.merge_strategy {
-                crate::settings::MergeStrategy::Merge => "Merge (--no-ff)",
-                crate::settings::MergeStrategy::Squash => "Squash",
-                crate::settings::MergeStrategy::RebaseThenMerge => "Rebase + FF",
-            };
-            let rebase_label = if project.settings.rebase_before_merge {
-                "Yes"
-            } else {
-                "No"
-            };
-
-            // Helper: a settings row with label + clickable value
-
             // Settings header
             sidebar_items.push(
                 div()
@@ -588,102 +940,6 @@ pub(crate) fn build_sidebar_items(
                             .font_weight(FontWeight::BOLD)
                             .text_color(theme().accent)
                             .child("PROJECT SETTINGS"),
-                    )
-                    .into_any_element(),
-            );
-
-            // Merge strategy — clickable to cycle
-            sidebar_items.push(
-                div()
-                    .id(SharedString::from(format!("setting-strategy-{p_idx}")))
-                    .cursor_pointer()
-                    .pl(px(24.0))
-                    .pr(px(12.0))
-                    .py(px(3.0))
-                    .bg(theme().bg_base)
-                    .hover(|s| s.bg(theme().bg_raised))
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme().text_faint)
-                            .child("Merge strategy"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme().accent)
-                            .child(SharedString::from(current_strategy.to_string())),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                            cx.stop_propagation();
-                            if let Some(project) = this.projects.get_mut(p_idx) {
-                                project.settings.merge_strategy =
-                                    match project.settings.merge_strategy {
-                                        crate::settings::MergeStrategy::Merge => {
-                                            crate::settings::MergeStrategy::Squash
-                                        }
-                                        crate::settings::MergeStrategy::Squash => {
-                                            crate::settings::MergeStrategy::RebaseThenMerge
-                                        }
-                                        crate::settings::MergeStrategy::RebaseThenMerge => {
-                                            crate::settings::MergeStrategy::Merge
-                                        }
-                                    };
-                            }
-                            this.mark_settings_dirty();
-                            cx.notify();
-                        }),
-                    )
-                    .into_any_element(),
-            );
-
-            // Rebase before merge — clickable to toggle
-            sidebar_items.push(
-                div()
-                    .id(SharedString::from(format!("setting-rebase-{p_idx}")))
-                    .cursor_pointer()
-                    .pl(px(24.0))
-                    .pr(px(12.0))
-                    .py(px(3.0))
-                    .bg(theme().bg_base)
-                    .hover(|s| s.bg(theme().bg_raised))
-                    .flex()
-                    .flex_row()
-                    .justify_between()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(theme().text_faint)
-                            .child("Sync remote first"),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(12.0))
-                            .text_color(if project.settings.rebase_before_merge {
-                                theme().success // green = on
-                            } else {
-                                theme().danger // red = off
-                            })
-                            .child(SharedString::from(rebase_label.to_string())),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                            cx.stop_propagation();
-                            if let Some(project) = this.projects.get_mut(p_idx) {
-                                project.settings.rebase_before_merge =
-                                    !project.settings.rebase_before_merge;
-                            }
-                            this.mark_settings_dirty();
-                            cx.notify();
-                        }),
                     )
                     .into_any_element(),
             );
@@ -800,46 +1056,130 @@ pub(crate) fn build_sidebar_items(
             let s = &project.sessions[idx];
             let attention: u8 = if promote {
                 match s.status {
-                    SessionStatus::AwaitingInput => 0,
-                    SessionStatus::ResponseReady => 1,
-                    _ => 2,
+                    // Not every AwaitingInput is a blocker (DEV-788). A session
+                    // waiting on a permission or a question is promoted above a
+                    // finished one; a session with nothing to do sorts *below*
+                    // it, because "ready to review" is the more useful signal.
+                    SessionStatus::AwaitingInput => {
+                        match s.attention_context.as_ref().map(|c| c.kind) {
+                            Some(AttentionKind::Permission) => 0,
+                            Some(AttentionKind::Question) => 1,
+                            Some(AttentionKind::Idle) => 3,
+                            // No context: treat as blocking, the safer default.
+                            None => 0,
+                        }
+                    }
+                    SessionStatus::ResponseReady => 2,
+                    _ => 4,
                 }
             } else {
-                2
+                4
             };
             (attention, !s.pinned, idx)
         });
 
-        for s_idx in session_order {
+        // Which rows will actually be drawn. Decided before grouping, so a
+        // group whose every row is hidden by the active-only toggle or the
+        // filter contributes no block — and therefore no header — and the counts
+        // on the headers that remain describe the rows beside them rather than a
+        // membership the user cannot see (the DEV-789 lesson, see
+        // `active_session_count`).
+        let visible: Vec<usize> = session_order
+            .into_iter()
+            .filter(|&s_idx| {
+                let session = &project.sessions[s_idx];
+                let is_active = active_cursor
+                    == Some(SessionCursor {
+                        project_idx: p_idx,
+                        session_idx: s_idx,
+                    });
+                if active_only && !session_survives_active_only(session.status, is_active) {
+                    return false;
+                }
+                !filtering
+                    || session_matches_filter(
+                        &session.label,
+                        session.comment.as_deref(),
+                        session.group.as_deref(),
+                        &project.name,
+                        filter,
+                    )
+            })
+            .collect();
+
+        // Blocks in the project's recorded slot order, the ungrouped block among
+        // them (DEV-853, slots in DEV-937). The sort above is left untouched and
+        // simply partitioned, which is what keeps attention and pinning ordering
+        // sessions *inside* their group rather than across the project.
+        //
+        // Three passes, and the order of the last two matters: counts are taken
+        // over the whole visible group, *then* a collapsed group's rows are
+        // folded away. Counting after folding would print `0 running` on a
+        // header whose group is busy.
+        let blocks = groups::group_blocks(
+            &visible,
+            |s_idx| project.sessions[s_idx].group.clone(),
+            |s_idx| {
+                let session = &project.sessions[s_idx];
+                groups::attention_of(
+                    session.status,
+                    session.attention_context.as_ref().map(|c| c.kind),
+                )
+            },
+            &project.group_order,
+        );
+        let active_in_project = active_cursor
+            .filter(|c| c.project_idx == p_idx)
+            .map(|c| c.session_idx);
+        let ordered_rows = groups::draw_order(groups::collapse_blocks(
+            blocks,
+            &project.group_order,
+            active_in_project,
+        ));
+
+        for (group_header, s_idx) in ordered_rows {
+            if let Some(header) = group_header {
+                // `Some` only while this very header is the one being renamed.
+                let renaming = state
+                    .group_headers
+                    .rename
+                    .as_ref()
+                    .filter(|r| r.project_idx == p_idx && groups::same_group(&r.from, &header.name))
+                    .map(|rename| GroupRenameField {
+                        state: rename,
+                        focus: group_rename_focus.clone(),
+                    });
+                sidebar_items.push(render_group_header(&header, p_idx, renaming.as_ref(), cx));
+            }
+
+            // `None` is a collapsed group's header-only row: the group folded
+            // every row away, and the header above is the whole of it.
+            let Some(s_idx) = s_idx else {
+                continue;
+            };
+
             let session = &project.sessions[s_idx];
 
-            let is_active = active_cursor
-                .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
-                .unwrap_or(false);
-
-            // Active-only: drop sessions with no live agent behind them.
-            if active_only && !session_survives_active_only(session.status, is_active) {
-                continue;
-            }
-
-            // Skip sessions that don't match the filter.
-            if filtering {
-                let label_matches = session.label.to_lowercase().contains(filter);
-                let comment_matches = session
-                    .comment
-                    .as_deref()
-                    .unwrap_or("")
-                    .to_lowercase()
-                    .contains(filter);
-                let project_matches = project.name.to_lowercase().contains(filter);
-                if !label_matches && !comment_matches && !project_matches {
-                    continue;
-                }
-            }
+            let is_active = !remote_shown
+                && active_cursor
+                    .map(|c| c.project_idx == p_idx && c.session_idx == s_idx)
+                    .unwrap_or(false);
 
             let is_suspended = session.status == SessionStatus::Suspended;
-            let status_color = session.status.color();
-            let status_icon = session.status.icon_name();
+            // A session in AwaitingInput takes its shape and colour from *why*
+            // it is waiting (DEV-788): a padlock for a permission prompt, a
+            // question mark for a tool asking something, a receding dot for
+            // "nothing to do". The status-level triangle remains the fallback
+            // for an AwaitingInput with no context attached.
+            let attention_kind = (session.status == SessionStatus::AwaitingInput)
+                .then(|| session.attention_context.as_ref().map(|c| c.kind))
+                .flatten();
+            let status_color = attention_kind
+                .map(|k| k.color())
+                .unwrap_or_else(|| session.status.color());
+            let status_icon = attention_kind
+                .map(|k| k.icon_name())
+                .unwrap_or_else(|| session.status.icon_name());
             // Prefer the auto-named label once it's no longer a
             // placeholder ("Claude N" / "Shell N").  Fall back to the
             // terminal's OSC title only while waiting for auto-naming,
@@ -862,7 +1202,6 @@ pub(crate) fn build_sidebar_items(
                 session_idx: s_idx,
             };
             let is_confirming_discard = state.confirming.discard == Some(session_cursor);
-            let is_confirming_merge = state.confirming.dirty_merge == Some(session_cursor);
 
             let label_color = if is_suspended {
                 theme().text_faint // greyed out for Suspended
@@ -874,8 +1213,6 @@ pub(crate) fn build_sidebar_items(
 
             let row_bg = if is_confirming_discard {
                 theme().tint_danger // subtle red tint while confirming discard
-            } else if is_confirming_merge {
-                theme().tint_warning // subtle amber tint while confirming merge with uncommitted
             } else if is_active {
                 theme().bg_raised
             } else {
@@ -895,7 +1232,19 @@ pub(crate) fn build_sidebar_items(
                         cx.new(|_| crate::DragPreview(row_drag_label.clone()))
                     },
                 )
-                .drag_over::<DraggedSession>(|style, _, _, _| style.bg(theme().bg_hover_soft))
+                // Every row in the same project is a landing target now
+                // (DEV-937): a drop on a row in another group reorders *and*
+                // retags, so there is no drop here that is quietly discarded.
+                // DEV-853 had to check the dragged session's group, because a
+                // cross-group drop did nothing and an affordance for it read as
+                // a lost event rather than a refusal.
+                .drag_over::<DraggedSession>(move |style, dragged: &DraggedSession, _, _| {
+                    if dragged.project_idx == p_idx {
+                        style.bg(theme().bg_hover_soft)
+                    } else {
+                        style
+                    }
+                })
                 .on_drop(cx.listener(
                     move |this: &mut AppState, dragged: &DraggedSession, _window, cx| {
                         // Same-project reorder only — sessions are clones of
@@ -945,6 +1294,7 @@ pub(crate) fn build_sidebar_items(
                         move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
                             cx.stop_propagation();
                             this.project_context_menu = None;
+                            this.remote_ui.menu = None;
                             this.session_context_menu = Some((
                                 SessionCursor {
                                     project_idx: p_idx,
@@ -1020,21 +1370,6 @@ pub(crate) fn build_sidebar_items(
                                 .min_w(px(60.0))
                                 .child(elapsed),
                         );
-                    if session.git_dirty == Some(true) {
-                        label_row = label_row.child(
-                            div()
-                                .id(SharedString::from(format!("dirty-{p_idx}-{s_idx}")))
-                                .flex_shrink_0()
-                                .child(icon(icons::CIRCLE_FILL, 7.0, theme().warning))
-                                .tooltip(|_window, cx| {
-                                    cx.new(|_| SimpleTooltip {
-                                        text: "Uncommitted changes in workspace".into(),
-                                    })
-                                    .into()
-                                }),
-                        );
-                    }
-
                     let mut info_col = div()
                         .flex_1()
                         .min_w(px(0.0))
@@ -1085,7 +1420,6 @@ pub(crate) fn build_sidebar_items(
                         let retry_kind = error.kind;
                         let retry_label = match retry_kind {
                             crate::session::OperationErrorKind::Resume => "Retry",
-                            crate::session::OperationErrorKind::MergeAndClose => "Retry merge",
                             crate::session::OperationErrorKind::Startup => "Retry",
                         };
                         info_col = info_col.child(
@@ -1099,9 +1433,6 @@ pub(crate) fn build_sidebar_items(
                                             let action = match retry_kind {
                                                 crate::session::OperationErrorKind::Resume => {
                                                     SessionAction::ResumeSession { project_idx: p_idx, session_idx: s_idx }
-                                                }
-                                                crate::session::OperationErrorKind::MergeAndClose => {
-                                                    SessionAction::MergeAndClose { project_idx: p_idx, session_idx: s_idx }
                                                 }
                                                 crate::session::OperationErrorKind::Startup => {
                                                     SessionAction::RetryStartup { project_idx: p_idx, session_idx: s_idx }
@@ -1120,213 +1451,104 @@ pub(crate) fn build_sidebar_items(
                     info_col
                 });
 
-            if is_confirming_merge {
-                row = row.child(
-                    div()
-                        .flex_shrink_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .child(
-                            div()
-                                .text_size(px(12.0))
-                                .text_color(theme().warning)
-                                .child("Uncommitted changes"),
-                        )
-                        .child(
-                            div()
-                                .flex()
-                                .flex_row()
-                                .gap(px(4.0))
-                                .items_center()
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "confirm-merge-{p_idx}-{s_idx}"
-                                        )))
-                                        .cursor_pointer()
-                                        .px(px(6.0))
-                                        .py(px(2.0))
-                                        .rounded(px(6.0))
-                                        .bg(theme().bg_hover)
-                                        .text_size(px(12.0))
-                                        .text_color(theme().warning)
-                                        .hover(|s| s.bg(theme().tint_warning_hover))
-                                        .child("Merge committed")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(
-                                                move |this: &mut AppState, _event, _window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.pending_action = Some(
-                                                        SessionAction::ProceedDirtyMerge {
-                                                            project_idx: p_idx,
-                                                            session_idx: s_idx,
-                                                        }
-                                                        .into(),
-                                                    );
-                                                    cx.notify();
-                                                },
-                                            ),
-                                        ),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!(
-                                            "cancel-merge-{p_idx}-{s_idx}"
-                                        )))
-                                        .cursor_pointer()
-                                        .px(px(6.0))
-                                        .py(px(2.0))
-                                        .rounded(px(6.0))
-                                        .text_size(px(12.0))
-                                        .text_color(theme().text_muted)
-                                        .hover(|s| s.text_color(theme().text_primary))
-                                        .child("Cancel")
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(
-                                                |this: &mut AppState, _event, _window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.pending_action = Some(
-                                                        SessionAction::CancelDirtyMerge.into(),
-                                                    );
-                                                    cx.notify();
-                                                },
-                                            ),
-                                        ),
-                                ),
-                        ),
-                );
-            } else {
-                // Normal state: Merge & Close, Close (keep clone), and Discard.
-                // Action cluster revealed on row hover.
-                row = row.child(
-                    div()
-                        .flex_shrink_0()
-                        .invisible()
-                        .group_hover(format!("sess-{p_idx}-{s_idx}"), |s| s.visible())
-                        .flex()
-                        .flex_row()
-                        .gap(px(2.0))
-                        .items_center()
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("sync-up-{p_idx}-{s_idx}")))
-                                .cursor_pointer()
-                                .p(px(4.0))
-                                .rounded(px(6.0))
-                                .hover(|s| s.bg(theme().bg_raised))
-                                .child(icon(icons::CLOUD_UPLOAD, 13.0, theme().text_ghost))
-                                .tooltip(|_window, cx| {
-                                    cx.new(|_| SimpleTooltip {
-                                        text: "Sync session up".into(),
-                                    })
-                                    .into()
+            // Normal state: Close (keep clone) and Discard.
+            // Action cluster revealed on row hover.
+            row = row.child(
+                div()
+                    .flex_shrink_0()
+                    .invisible()
+                    .group_hover(format!("sess-{p_idx}-{s_idx}"), |s| s.visible())
+                    .flex()
+                    .flex_row()
+                    .gap(px(2.0))
+                    .items_center()
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("sync-up-{p_idx}-{s_idx}")))
+                            .cursor_pointer()
+                            .p(px(4.0))
+                            .rounded(px(6.0))
+                            .hover(|s| s.bg(theme().bg_raised))
+                            .child(icon(icons::CLOUD_UPLOAD, 13.0, theme().text_ghost))
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| SimpleTooltip {
+                                    text: "Sync session up".into(),
                                 })
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.sync_up_session(
-                                            SessionCursor {
-                                                project_idx: p_idx,
-                                                session_idx: s_idx,
-                                            },
-                                            cx,
-                                        );
-                                    }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("merge-{p_idx}-{s_idx}")))
-                                .cursor_pointer()
-                                .p(px(4.0))
-                                .rounded(px(6.0))
-                                .hover(|s| s.bg(theme().bg_raised))
-                                .child(icon(icons::CHECK, 13.0, theme().text_ghost))
-                                .tooltip(|_window, cx| {
-                                    cx.new(|_| SimpleTooltip {
-                                        text: "Merge and close session".into(),
-                                    })
-                                    .into()
+                                .into()
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.sync_up_session(
+                                        SessionCursor {
+                                            project_idx: p_idx,
+                                            session_idx: s_idx,
+                                        },
+                                        cx,
+                                    );
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("close-{p_idx}-{s_idx}")))
+                            .cursor_pointer()
+                            .p(px(4.0))
+                            .rounded(px(6.0))
+                            .hover(|s| s.bg(theme().bg_raised))
+                            .child(icon(icons::X, 13.0, theme().text_ghost))
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| SimpleTooltip {
+                                    text: "Suspend session".into(),
                                 })
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.pending_action = Some(
-                                            SessionAction::MergeAndClose {
-                                                project_idx: p_idx,
-                                                session_idx: s_idx,
-                                            }
-                                            .into(),
-                                        );
-                                        cx.notify();
-                                    }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("close-{p_idx}-{s_idx}")))
-                                .cursor_pointer()
-                                .p(px(4.0))
-                                .rounded(px(6.0))
-                                .hover(|s| s.bg(theme().bg_raised))
-                                .child(icon(icons::X, 13.0, theme().text_ghost))
-                                .tooltip(|_window, cx| {
-                                    cx.new(|_| SimpleTooltip {
-                                        text: "Suspend session".into(),
-                                    })
-                                    .into()
+                                .into()
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.pending_action = Some(
+                                        SessionAction::CloseSessionKeepClone {
+                                            project_idx: p_idx,
+                                            session_idx: s_idx,
+                                        }
+                                        .into(),
+                                    );
+                                    cx.notify();
+                                }),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("discard-{p_idx}-{s_idx}")))
+                            .cursor_pointer()
+                            .p(px(4.0))
+                            .rounded(px(6.0))
+                            .hover(|s| s.bg(theme().bg_raised))
+                            .child(icon(icons::TRASH, 13.0, theme().text_ghost))
+                            .tooltip(|_window, cx| {
+                                cx.new(|_| SimpleTooltip {
+                                    text: "Discard session".into(),
                                 })
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.pending_action = Some(
-                                            SessionAction::CloseSessionKeepClone {
-                                                project_idx: p_idx,
-                                                session_idx: s_idx,
-                                            }
-                                            .into(),
-                                        );
-                                        cx.notify();
-                                    }),
-                                ),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("discard-{p_idx}-{s_idx}")))
-                                .cursor_pointer()
-                                .p(px(4.0))
-                                .rounded(px(6.0))
-                                .hover(|s| s.bg(theme().bg_raised))
-                                .child(icon(icons::TRASH, 13.0, theme().text_ghost))
-                                .tooltip(|_window, cx| {
-                                    cx.new(|_| SimpleTooltip {
-                                        text: "Discard session".into(),
-                                    })
-                                    .into()
-                                })
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this: &mut AppState, _event, _window, cx| {
-                                        cx.stop_propagation();
-                                        this.pending_action = Some(
-                                            SessionAction::RequestDiscardSession {
-                                                project_idx: p_idx,
-                                                session_idx: s_idx,
-                                            }
-                                            .into(),
-                                        );
-                                        cx.notify();
-                                    }),
-                                ),
-                        ),
-                );
-            }
+                                .into()
+                            })
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                                    cx.stop_propagation();
+                                    this.pending_action = Some(
+                                        SessionAction::RequestDiscardSession {
+                                            project_idx: p_idx,
+                                            session_idx: s_idx,
+                                        }
+                                        .into(),
+                                    );
+                                    cx.notify();
+                                }),
+                            ),
+                    ),
+            );
 
             sidebar_items.push(row.into_any_element());
 
@@ -1545,41 +1767,6 @@ pub(crate) fn build_sidebar_items(
                                         ),
                                 )
                                 .child(
-                                    // Merge button
-                                    div()
-                                        .id(SharedString::from(format!("merge-{p_idx}-{a_idx}")))
-                                        .cursor_pointer()
-                                        .px(px(4.0))
-                                        .py(px(1.0))
-                                        .rounded(px(6.0))
-                                        .text_size(px(12.0))
-                                        .text_color(theme().success)
-                                        .hover(|s| s.bg(theme().bg_raised))
-                                        .child("merge")
-                                        .tooltip(|_window, cx| {
-                                            cx.new(|_| SimpleTooltip {
-                                                text: "Merge archive into project".into(),
-                                            })
-                                            .into()
-                                        })
-                                        .on_mouse_down(
-                                            MouseButton::Left,
-                                            cx.listener(
-                                                move |this: &mut AppState, _event, _window, cx| {
-                                                    cx.stop_propagation();
-                                                    this.pending_action = Some(
-                                                        ArchiveAction::MergeArchive {
-                                                            project_idx: p_idx,
-                                                            archive_idx: a_idx,
-                                                        }
-                                                        .into(),
-                                                    );
-                                                    cx.notify();
-                                                },
-                                            ),
-                                        ),
-                                )
-                                .child(
                                     // Delete button
                                     div()
                                         .id(SharedString::from(format!(
@@ -1639,58 +1826,351 @@ pub(crate) fn build_sidebar_items(
                         cx,
                     ));
                 }
-                if let Some(message) = archive.merge_error.clone() {
-                    sidebar_items.push(
-                        div()
-                            .border_l_2()
-                            .border_color(with_alpha(theme().danger, 0.4))
-                            .pl(px(40.0))
-                            .pr(px(12.0))
-                            .pb(px(4.0))
-                            .flex()
-                            .items_center()
-                            .gap(px(6.0))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_size(px(11.0))
-                                    .text_color(theme().danger)
-                                    .child(message),
-                            )
-                            .child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "retry-archive-{p_idx}-{a_idx}"
-                                    )))
-                                    .cursor_pointer()
-                                    .text_size(px(11.0))
-                                    .text_color(theme().accent)
-                                    .child("Retry")
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(
-                                            move |this: &mut AppState, _event, _window, cx| {
-                                                cx.stop_propagation();
-                                                this.pending_action = Some(
-                                                    ArchiveAction::MergeArchive {
-                                                        project_idx: p_idx,
-                                                        archive_idx: a_idx,
-                                                    }
-                                                    .into(),
-                                                );
-                                                cx.notify();
-                                            },
-                                        ),
-                                    ),
-                            )
-                            .into_any_element(),
-                    );
-                }
             }
         }
     }
 
+    sidebar_items.extend(build_machines_section(state, cx));
     sidebar_items
+}
+
+/// The MACHINES section (DEV-1163): every paired host, and under it that
+/// host's sessions grouped by project. Empty — so the section is absent — when
+/// nothing is paired.
+///
+/// Remote rows are read-only for now. Clicking one does nothing until attach
+/// lands (DEV-1167); the tooltip says so, and the row keeps the default cursor
+/// so it never promises more than it does.
+fn build_machines_section(state: &AppState, cx: &mut Context<AppState>) -> Vec<AnyElement> {
+    let remote = &state.remote;
+    let machines = machines::machine_views(&remote.paired(), |id| remote.hosts().get(id));
+    if machines.is_empty() {
+        return Vec::new();
+    }
+
+    let filter = state.sidebar_filter.as_str();
+    let active_only = state.user_settings.sidebar_active_only;
+    let now = std::time::SystemTime::now();
+    let mut items: Vec<AnyElement> = Vec::new();
+
+    for machine in &machines {
+        let host_matches = filter.is_empty() || machine.name.to_lowercase().contains(filter);
+        let keep = |s: &machines::RemoteSessionView, project: &str| {
+            (!active_only || session_survives_active_only(s.status, false))
+                && (host_matches
+                    || session_matches_filter(&s.label, None, s.group.as_deref(), project, filter))
+        };
+        let projects: Vec<(&str, Vec<&machines::RemoteSessionView>)> = machine
+            .projects
+            .iter()
+            .map(|p| {
+                let rows = p.sessions.iter().filter(|s| keep(s, &p.name)).collect();
+                (p.name.as_str(), rows)
+            })
+            .filter(|(_, rows): &(&str, Vec<_>)| !rows.is_empty())
+            .collect();
+        // A text filter that matches neither the host nor any of its sessions
+        // hides the host, as it hides a local project. Active-only does not:
+        // the host row carries reachability, which is news in itself.
+        if !host_matches && projects.is_empty() {
+            continue;
+        }
+        items.push(render_machine_row(machine, now));
+        // Creates sent from the picker and not yet answered (DEV-1168).
+        for starting in state.remote_ui.starting_on(machine.id) {
+            items.push(render_starting_remote_row(&starting.label));
+        }
+        let manageable = crate::remote_sessions::can_manage(
+            machine.link == machines::MachineLink::Connected,
+            remote.hosts().grant(machine.id),
+        );
+        for (project_name, rows) in projects {
+            items.push(
+                div()
+                    .pl(px(24.0))
+                    .pr(px(12.0))
+                    .pt(px(4.0))
+                    .pb(px(2.0))
+                    .bg(theme().bg_surface)
+                    .min_w(px(0.0))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_size(px(11.0))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(theme().text_dim)
+                    .child(project_name.to_string())
+                    .into_any_element(),
+            );
+            for session in rows {
+                let key = crate::remote_sessions::RemoteSessionKey {
+                    peer: machine.id,
+                    session_id: session.id.clone(),
+                };
+                // Highlighted while its tab is the one on screen (DEV-1167).
+                let selected = state
+                    .remote_tabs
+                    .shown_key()
+                    .is_some_and(|k| k.peer == key.peer && k.session_id == key.session_id);
+                items.push(render_remote_session_row(
+                    machine, session, key, selected, manageable, cx,
+                ));
+            }
+        }
+    }
+
+    if items.is_empty() {
+        return items;
+    }
+    let header = div()
+        .px(px(12.0))
+        .py(px(6.0))
+        .bg(theme().bg_sunken)
+        .border_t_1()
+        .border_b_1()
+        .border_color(theme().border_subtle)
+        .text_size(px(10.0))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(theme().text_faint)
+        .child("MACHINES")
+        .into_any_element();
+    items.insert(0, header);
+    items
+}
+
+/// A host row: name and how many of its sessions need the user, then a dot
+/// and the link state ("connected", "unreachable · last seen 4m ago") on a
+/// second line so a narrow sidebar never truncates the part that matters.
+fn render_machine_row(machine: &machines::MachineView, now: std::time::SystemTime) -> AnyElement {
+    let (dot_color, text_color) = match machine.link {
+        machines::MachineLink::Connected => (theme().success, theme().text_dim),
+        machines::MachineLink::Connecting => (theme().warning, theme().text_dim),
+        machines::MachineLink::Unreachable { .. } => (theme().text_faint, theme().text_faint),
+    };
+    let mut name_row = div()
+        .flex()
+        .flex_row()
+        .gap(px(6.0))
+        .items_center()
+        .child(icon(icons::MONITOR, 12.0, theme().text_muted))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(12.0))
+                .font_weight(FontWeight::BOLD)
+                .text_color(if machine.is_stale() {
+                    theme().text_muted
+                } else {
+                    theme().text_primary
+                })
+                .child(machine.name.clone()),
+        );
+    if machine.awaiting_input > 0 {
+        name_row = name_row.child(
+            div()
+                .flex_shrink_0()
+                .px(px(6.0))
+                .rounded(px(6.0))
+                .bg(with_alpha(theme().attention, 0.18))
+                .text_size(px(11.0))
+                .text_color(theme().attention)
+                .child(format!("{} waiting", machine.awaiting_input)),
+        );
+    }
+    div()
+        .px(px(12.0))
+        .py(px(5.0))
+        .bg(theme().bg_surface)
+        .flex()
+        .flex_col()
+        .gap(px(1.0))
+        .child(name_row)
+        .child(
+            div()
+                .pl(px(18.0))
+                .flex()
+                .flex_row()
+                .gap(px(5.0))
+                .items_center()
+                .child(icon(icons::CIRCLE_FILL, 7.0, dot_color))
+                .child(
+                    div()
+                        .min_w(px(0.0))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .text_size(px(11.0))
+                        .text_color(text_color)
+                        .child(machine.link.describe(now)),
+                ),
+        )
+        .into_any_element()
+}
+
+/// One remote session: the same status icon and colour as a local row, a
+/// monitor marker on the right so it never reads as a session on this Mac,
+/// and everything greyed while its host is unreachable.
+/// A create in flight on a host: shown at once under the host, so the click
+/// visibly did something while the host clones a workspace.
+fn render_starting_remote_row(label: &str) -> AnyElement {
+    div()
+        .pl(px(32.0))
+        .pr(px(12.0))
+        .py(px(5.0))
+        .bg(theme().bg_surface)
+        .flex()
+        .flex_row()
+        .gap(px(6.0))
+        .items_center()
+        .child(icon(icons::CIRCLE_FILL, 7.0, theme().text_faint))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(12.0))
+                .text_color(theme().text_faint)
+                .child(format!("Starting \u{201c}{label}\u{201d}…")),
+        )
+        .into_any_element()
+}
+
+/// `manageable`: this Mac holds `control` on a live host, so a right-click
+/// offers Interrupt and Discard (DEV-1168). Otherwise there is no menu.
+fn render_remote_session_row(
+    machine: &machines::MachineView,
+    session: &machines::RemoteSessionView,
+    key: crate::remote_sessions::RemoteSessionKey,
+    selected: bool,
+    manageable: bool,
+    cx: &mut Context<AppState>,
+) -> AnyElement {
+    let stale = machine.is_stale();
+    let attention = (session.status == SessionStatus::AwaitingInput)
+        .then_some(session.attention)
+        .flatten();
+    let status_icon = attention
+        .map(|k| k.icon_name())
+        .unwrap_or_else(|| session.status.icon_name());
+    let status_color = if stale {
+        theme().text_faint
+    } else {
+        attention
+            .map(|k| k.color())
+            .unwrap_or_else(|| session.status.color())
+    };
+    let label_color = if stale || session.status == SessionStatus::Suspended {
+        theme().text_faint
+    } else {
+        theme().text_muted
+    };
+    let row_key = key;
+    let key = format!("{}-{}", machine.id.short(), session.id);
+    let status_dot = icon(status_icon, 11.0, status_color);
+    let status_dot = if session.status == SessionStatus::Running && !stale {
+        status_dot
+            .with_animation(
+                SharedString::from(format!("remote-pulse-{key}")),
+                Animation::new(std::time::Duration::from_millis(2200))
+                    .repeat()
+                    .with_easing(pulsating_between(0.35, 1.0)),
+                |dot, delta| dot.opacity(delta),
+            )
+            .into_any_element()
+    } else {
+        status_dot.into_any_element()
+    };
+    let tooltip = SharedString::from(format!("On {} — click to open it here", machine.name));
+    let menu_key = row_key.clone();
+    let menu_label = session.label.clone();
+    let menu_host = machine.name.clone();
+    let row = div()
+        .id(SharedString::from(format!("remote-session-{key}")))
+        .pl(px(32.0))
+        .pr(px(12.0))
+        .py(px(5.0))
+        .bg(if selected {
+            theme().bg_active
+        } else {
+            theme().bg_surface
+        })
+        .hover(|s| s.bg(theme().bg_hover_soft))
+        .flex()
+        .flex_row()
+        .gap(px(6.0))
+        .items_center()
+        .child(status_dot)
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(12.0))
+                .text_color(label_color)
+                .child(session.label.clone()),
+        )
+        .child(icon(icons::MONITOR, 10.0, theme().text_faint))
+        .tooltip(move |_window, cx| {
+            cx.new(|_| SimpleTooltip {
+                text: tooltip.clone(),
+            })
+            .into()
+        })
+        // Opens the session in a tab, attached (DEV-1167). Stopped here so
+        // it never reaches whatever the sidebar does with a click on empty
+        // space.
+        .cursor_pointer()
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                cx.stop_propagation();
+                let action = crate::remote_tab::RemoteTabAction::Open {
+                    peer: row_key.peer,
+                    session_id: row_key.session_id.clone(),
+                };
+                this.pending_action = Some(action.into());
+                cx.notify();
+            }),
+        );
+    if !manageable {
+        // No menu, and nothing else either: a right-click on a remote row
+        // must not fall through to the sidebar's own menus.
+        return row
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|_this: &mut AppState, _event, _window, cx| {
+                    cx.stop_propagation();
+                }),
+            )
+            .into_any_element();
+    }
+    row.on_mouse_down(
+        MouseButton::Right,
+        cx.listener(
+            move |this: &mut AppState, event: &MouseDownEvent, _window, cx| {
+                cx.stop_propagation();
+                this.session_context_menu = None;
+                this.project_context_menu = None;
+                this.remote_ui.menu = Some(crate::remote_sessions::RemoteMenu {
+                    key: menu_key.clone(),
+                    label: menu_label.clone(),
+                    host_name: menu_host.clone(),
+                    position: event.position,
+                    confirming_discard: false,
+                });
+                cx.notify();
+            },
+        ),
+    )
+    .into_any_element()
 }
 
 #[cfg(test)]
@@ -1699,7 +2179,8 @@ mod tests {
     // `use gpui::*`, whose glob shadows the standard `#[test]` attribute with
     // gpui's own `test` macro. See src/session/mod.rs for the same note.
     use super::{
-        active_only_hidden_counts, project_survives_active_only, session_survives_active_only,
+        active_only_hidden_counts, active_session_count, project_survives_active_only,
+        session_matches_filter, session_survives_active_only,
     };
     use crate::actions::SessionCursor;
     use crate::project::Project;
@@ -1723,7 +2204,6 @@ mod tests {
             now,
             Duration::ZERO,
             None,
-            false,
         );
         s.status = status;
         s
@@ -1848,5 +2328,107 @@ mod tests {
     fn hidden_counts_are_zero_when_everything_is_live() {
         let projects = vec![project(&LIVE)];
         assert_eq!(active_only_hidden_counts(&projects, None), (0, 0));
+    }
+
+    // ── live session count (DEV-789) ───────────────────────────────
+
+    #[test]
+    fn active_count_counts_only_sessions_with_a_live_agent() {
+        let projects = vec![
+            project(&LIVE),
+            project(&[SessionStatus::Suspended, SessionStatus::Done]),
+        ];
+        assert_eq!(active_session_count(&projects), LIVE.len());
+    }
+
+    /// The invariant that keeps the status bar and the hint row honest: with no
+    /// row pinned by the cursor, every session is either counted as active or
+    /// counted as hidden, never both and never neither. If a future status
+    /// lands on one side of `is_active()` and not the other, this is what
+    /// fails.
+    ///
+    /// Scoped to `None` on purpose — see `active_session_count`'s doc comment.
+    /// A pinned inactive row is visible, so it is counted neither way, and the
+    /// two figures legitimately stop summing.
+    #[test]
+    fn active_count_plus_hidden_count_is_every_session_with_no_row_pinned() {
+        let projects = vec![
+            project(&[SessionStatus::Suspended, SessionStatus::Done]),
+            project(&[SessionStatus::Suspended, SessionStatus::Running]),
+            project(&LIVE),
+        ];
+        let total: usize = projects.iter().map(|p| p.sessions.len()).sum();
+        let (hidden_sessions, _) = active_only_hidden_counts(&projects, None);
+        assert_eq!(active_session_count(&projects) + hidden_sessions, total);
+    }
+
+    #[test]
+    fn active_count_ignores_the_selected_session() {
+        // Selecting the Suspended row keeps it on screen, but it is not live
+        // and must not be counted as such — so 1 active, and the hidden tally
+        // drops it too. The two deliberately fail to account for all 2 here;
+        // the pinned row is visible without being either.
+        let projects = vec![project(&[SessionStatus::Suspended, SessionStatus::Running])];
+        assert_eq!(active_session_count(&projects), 1);
+        assert_eq!(active_only_hidden_counts(&projects, cursor(0, 0)), (0, 0));
+    }
+
+    /// `hidden_projects` counts projects where *every* session is hidden, so it
+    /// is not a container for `hidden_sessions`. The hint row's copy must say
+    /// "and", not "in" — this pins the fact that made "in" false.
+    #[test]
+    fn hidden_sessions_can_span_more_projects_than_are_hidden() {
+        let projects = vec![
+            project(&[SessionStatus::Done, SessionStatus::Done]),
+            project(&[SessionStatus::Running, SessionStatus::Done]),
+        ];
+        assert_eq!(active_only_hidden_counts(&projects, None), (3, 1));
+    }
+
+    // ── DEV-853: the filter matches a group's name ─────────────────────
+
+    /// `filter` arrives lowercased from `AppState::sidebar_filter`, so these
+    /// pass it the way the sidebar does.
+    fn matches(label: &str, group: Option<&str>, filter: &str) -> bool {
+        session_matches_filter(label, None, group, "tc-portal", filter)
+    }
+
+    /// The acceptance criterion: typing a group's name shows that group's
+    /// sessions, even when the name appears nowhere else on the row.
+    #[test]
+    fn typing_a_group_name_matches_its_sessions() {
+        assert!(matches("Claude 14", Some("review"), "review"));
+        assert!(
+            !matches("Claude 14", Some("linear"), "review"),
+            "a session in another group must not be dragged in with it"
+        );
+    }
+
+    /// Matching is case-insensitive here too, so a filter does not depend on
+    /// the user remembering which spelling the project settled on.
+    #[test]
+    fn the_group_filter_ignores_case() {
+        assert!(matches("Claude 14", Some("Review"), "review"));
+    }
+
+    /// An ungrouped session has no group to match on, and must not match a
+    /// group filter just because it has no group.
+    #[test]
+    fn an_ungrouped_session_matches_no_group_filter() {
+        assert!(!matches("Claude 14", None, "review"));
+    }
+
+    /// The pre-existing matches still work: label, comment and project name.
+    #[test]
+    fn the_other_filter_matches_are_unchanged() {
+        assert!(matches("Review #9586", None, "9586"), "label");
+        assert!(
+            session_matches_filter("Claude 14", Some("wip on auth"), None, "tc-portal", "auth"),
+            "comment"
+        );
+        assert!(
+            matches("Claude 14", None, "tc-portal"),
+            "a matching project keeps all its sessions, as it did before groups"
+        );
     }
 }

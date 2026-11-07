@@ -23,12 +23,324 @@ Changes on `master` awaiting the next tagged release.
   than a Rust enum, so Locus can rename, add or drop phases without breaking this view.
 
 ### Changed
+- The control socket answers a session id it has no record of with its own
+  error code, **`session_not_found`**, on `sessions.status`, `sessions.discard`
+  and `sessions.interrupt`. It was `bad_request`, the same code as a request
+  that could not be parsed, so a caller could tell "that session is gone" only
+  by matching the message. The message is unchanged (`no session with id …`),
+  so a caller still matching it keeps working. Review Desk's session strip and
+  the Locus dispatcher both read this answer and already accept either form.
 - Prose phase-header parsing is demoted to a **fallback** for producers that have not adopted
   the contract, and is now attributed: a stage inferred from prose renders dimmed so a guess
   never looks like a reported fact.
 - A status frame declaring a contract version Allele does not implement now degrades
   **visibly** — a transcript notice, with the last good stage left on screen — instead of
   silently rendering nothing.
+
+### Fixed
+- Tools installed outside the system directories are reachable again from sessions
+  started by an Allele you launched from Finder, the Dock, or Spotlight. Allele already
+  adopted the login shell's PATH when it detected launchd's stripped GUI environment,
+  but the detector counted `/usr/local/bin` as proof of a terminal launch — and that
+  directory is line 1 of stock `/etc/paths`, so launchd supplies it to every app. The
+  probe was therefore skipped in exactly the case it was written for, and only a
+  terminal launch (`cargo run`) appeared to work. Allele now treats a PATH as stripped
+  when every entry on it is one macOS supplies itself, so anything from Homebrew,
+  cargo, nvm, or `~/.local/bin` marks a genuine terminal launch. Agent hooks that
+  shell out to user-installed binaries no longer fail with "command not found".
+- Settings changes made from the Settings window (font size, cleanup paths, browser
+  integration, git-pull-before-new-session, attention promotion, external editor,
+  naming config) went straight to disk instead of through the render-tick
+  coordinator, so a burst of changes — dragging the font-size slider, say — wrote
+  `settings.json` once per step rather than once per frame.
+- Agent configuration changed in the Settings window was never marked for
+  persistence, so it could be lost on quit unless some unrelated change happened to
+  write `settings.json` first.
+
+## [0.7.2] - 2026-10-13
+
+### Fixed
+- Everything else Allele spawns now carries the data root too, not just the
+  agent: a **drawer terminal**, a **`Generic`** agent, an **opencode** agent,
+  and a project's `startup`/`shutdown` scripts. 0.7.1 handed the root to the
+  Claude adapter and left three doors open, each reproducing the same symptom
+  by a different route. The drawer was the one that bit: no adapter runs for a
+  bare shell, and a redirected instance has no `ALLELE_HOME` in its own
+  environment for one to inherit, so `claude` typed in the drawer of a
+  `--sandbox` window resolved the real home and listed the **live** app's
+  projects — reproduced live before the fix. A `Generic` agent is handed the
+  root the same as Claude: it may be an arbitrary binary the variable means
+  nothing to, but the case that matters is a generic entry wrapping `claude`,
+  which would otherwise keep exactly the behaviour 0.7.1 fixed. An ordinary
+  launch still exports nothing.
+- A project that declares its own `ALLELE_HOME` in `allele.json` no longer
+  overrides the instance's root for the terminals and scripts that project
+  spawns. It only loses when there is an instance root to lose to — on an
+  ordinary launch the declared value still stands.
+- A redirected instance's sessions now write their hook events under **that**
+  instance's root, so `allele_sessions_create` against a `--sandbox`, `--home`
+  or `ALLELE_HOME` instance confirms normally instead of reporting
+  `prompt_delivery_unconfirmed` after 120 seconds. The receiver script
+  hard-coded `$HOME/.allele/events`, and Allele has watched
+  `<root>/.allele/events` since DEV-487 — so every redirected instance's events
+  landed in the live tree while the instance watched an empty directory, and the
+  status change a create waits on could never arrive. The agent had in fact
+  received its prompt and answered, which made the error false rather than
+  merely pessimistic, and an orchestrator that retried on it would start a
+  second session alongside a live one. The events directory is now substituted
+  into the script at install time, the way the receiver's own absolute path
+  already was. The receiver is rewritten on every launch, so an existing install
+  picks this up on next start with no settings migration; an ordinary launch
+  keeps writing to `~/.allele/events` exactly as before.
+- A data root containing a space now works at all. Claude Code evaluates a hook
+  `command` through a shell, and the receiver's path was interpolated into
+  `hooks.json` unquoted — so under `--home "/Users/me/My Roots/alpha"` the
+  command word-split into a path that does not exist, no hook ever fired, and
+  the symptom was indistinguishable from the fix above: no status transitions,
+  and every create burning its full 120s budget. Both the receiver path and the
+  events directory are now shell-quoted.
+
+## [0.7.1] - 2026-10-12
+
+### Fixed
+- A session Allele spawns now inherits the data root of the instance that
+  spawned it, so an agent working in a `--sandbox` (or `--home`, or
+  `ALLELE_HOME`) window drives **that** instance rather than your live one.
+  Claude Code hands its own environment to the MCP servers it launches, and the
+  `allele` server is registered globally as a bare `--mcp-serve` with no root in
+  it — so an agent in a sandbox window resolved the real home and reached the
+  live app, where `allele_sessions_create` would have started a real session
+  that nobody opened there. The root travels as `ALLELE_HOME` on the spawned
+  agent's environment, on a fresh session and on a resume; an ordinary launch
+  exports nothing, because the real home is the root Allele is still entitled
+  to resolve for itself — unless it inherited an `ALLELE_HOME` of its own, in
+  which case it states a blank, so a child cannot resolve a root its parent
+  was launched with a flag to override. Nothing outside Allele is redirected: `~/.claude.json`
+  still registers a bare `--mcp-serve`. **The server binary must itself be new
+  enough to honour the root** — a `--mcp-serve` built before the fix below
+  ignores it, so a stale binary registered there still reaches the live app.
+- `--mcp-serve` now resolves its control socket from the same data root the app
+  would use, so `allele --mcp-serve --sandbox` (or `ALLELE_HOME=<dir>`, or
+  `--home <dir>`) reaches *that* instance. It previously took over the process
+  before the root was chosen and always connected to the live app, which made
+  `--sandbox` — the documented way to try a change without disturbing the
+  instance you are working in — silently untrue for anything driving Allele
+  over MCP: an agent aiming at a sandbox could have created a real session in
+  the live app. A sandboxed client whose instance is not running now reports
+  that sandbox's socket as missing rather than falling back to the live one.
+  **The MCP registration is unchanged**, so a client must still be *launched*
+  with the flag (or the environment variable) to reach a redirected instance —
+  a bare `--mcp-serve`, including the one `~/.claude.json` registers globally,
+  still reaches the live app by design. A relative `--home`/`ALLELE_HOME` is
+  now made absolute, so the app and the server cannot resolve it against two
+  different working directories.
+
+## [0.7.0] - 2026-10-12
+
+### Added
+- Sessions can sit in a named **group** in the sidebar. With 36 sessions running — 56 in one
+  project — the flat list could not answer "which of these is waiting on me", and the
+  sessions a dispatcher started were mixed in with the ones being driven by hand. A group is
+  just an optional name on a session: set it in New Session, in Edit Session, or by passing
+  `group` to `allele_sessions_create`, and a group exists because a session carries its name.
+  Ungrouped sessions still come first with no header, so a project nobody has grouped looks
+  exactly as it did. Each group gets a header saying how many of its sessions are running,
+  finished and blocked. Groups hold the order the project first saw them, across restarts and
+  across a group emptying and refilling, and blocked and pinned sessions sort *inside* their
+  group rather than being pulled out of it — the attention bar already covers the alert.
+  `allele_sessions_list` and `allele_sessions_status` report each session's group.
+- Sidebar groups can now be **managed from their header**. Drag one group header onto
+  another to reorder them; click a header to fold its rows away, leaving the header and its
+  running / finished / blocked counts; drop a session row on a header, or on a row in
+  another group, to move that session into it, and on an ungrouped row to take it out of
+  every group — when a project has no ungrouped session there is no such row to drop on, and
+  Edit Session is still the way to clear a group. The header's right-click menu offers the
+  same without dragging — move up,
+  move down, collapse, rename — and renaming a group renames it for every session in it. The
+  ungrouped block has a position among the groups rather than always being first: it draws no
+  header, so it is placed by moving groups past it. The order, the ungrouped block's position
+  and which groups are folded are all saved per project and come back after a restart.
+
+### Changed
+- The sidebar now says how many sessions have a live agent behind them. Its status bar
+  read `54s · 6 running`, where the first number counted every session in the sidebar —
+  suspended and finished ones included — and the second counted only the ones
+  actively producing output, so with 25+ sessions open neither answered "how many are
+  actually going". It now reads `21/54 active · 6 running`.
+- The active-only hint row leads with what it is doing: "Active only · hiding 54 sessions
+  and 33 projects", not "Active only · 54 sessions, 33 projects hidden". Both numbers were
+  always correct, but the word that gave them their meaning arrived twelve words after the
+  first one, so the count read as sessions shown rather than sessions held back.
+
+## [0.6.0] - 2026-09-30
+
+### Added
+- The sidebar now shows *why* a session is waiting, not just that it is. A session
+  blocked on a permission prompt gets a padlock, one blocked on a question — an
+  `AskUserQuestion` or a plan approval — gets a question mark, and one that simply has
+  nothing to do gets a receding dot. Shapes differ, not only colours, so the three read
+  apart without colour vision. Blocked sessions sort above idle ones, and the attention
+  bar's headline splits them: "3 sessions blocked on you · 15 waiting for a prompt"
+  rather than one number that could mean either.
+
+### Fixed
+- A session that finished its turn no longer degrades to "needs input" a minute later.
+  Claude Code fires an idle notification about sixty seconds after a response ends, and
+  Allele took it at face value, repainting the mauve "ready to review" star as the peach
+  "blocked" triangle. With many sessions open this made the two states impossible to
+  tell apart. The idle nudge is now absorbed while a session is ready to review; a real
+  permission prompt still escalates.
+- The attention bar's **Allow** button no longer appears on prompts where pressing Enter
+  is not "allow". It is gated on the tool having a name, and `AskUserQuestion` has one —
+  so one click silently selected whichever option happened to be highlighted, with
+  nothing recording that an answer had been given or which it was. Allow is now offered
+  for permission prompts only.
+
+## [0.5.1] - 2026-09-23
+
+### Fixed
+- Creating a session no longer freezes other apps. A workspace clone used to be one
+  `clonefile(2)` call per top-level folder, and APFS blocks every other process's file
+  saves for the whole call — 15 seconds for a large `node_modules`, long enough to
+  beachball any app that saves on its main thread. Clones now run in chunks of at most
+  2,000 entries with a short pause between them (worst stall measured: 0.3 s), one
+  clone at a time. Deleting a workspace is paced the same way, and the post-clone file
+  work no longer runs on Allele's UI thread.
+
+## [0.5.0] - 2026-09-22
+
+### Added
+- The limits on MCP-dispatched sessions are now configurable. By default a session
+  a human started may dispatch, the sessions it dispatches may not, and at most 20
+  dispatched sessions exist at once — unchanged. An orchestrator whose workers need
+  to dispatch an independent reviewer or investigator of their own can now be given
+  one more level by adding `"dispatch": { "max_depth": 2, "max_sessions": 30 }` to
+  `~/.config/allele/settings.json` (edit it while Allele is quit; it is read at
+  launch). A refused dispatch now says which depth the caller is at and what the
+  limit is, rather than "dispatched sessions may not dispatch", which is no longer
+  true in general.
+
+### Changed
+- The transcript has been reworked to read like a document rather than a log of
+  boxed messages. Assistant prose renders as one continuous, measured column
+  with no per-message speaker chrome, and a whole turn's prose flows together as
+  a single document. Markdown headings, lists and tables are laid out on a
+  consistent rhythm, and code fences are syntax-highlighted. Code blocks and
+  diffs scroll sideways instead of wrapping, so long lines stay intact. Routine
+  tool calls collapse into a one-line rail you can expand, and long tool output
+  is clamped with a control to reveal the rest rather than being silently
+  truncated.
+- The attention bar collapses. It now opens with a summary header — a count of
+  the sessions waiting on you, and a chevron — and clicking that header folds
+  the per-session rows away and back. Even expanded, the list is capped at six
+  rows and scrolls past that. Running twenty-odd sessions used to mean an
+  attention bar that took most of the window and a terminal you could not read;
+  the count is the part worth glancing at, so collapsing keeps it and gives the
+  space back. The collapsed choice persists across restarts, and a bar with
+  nothing waiting still renders nothing at all.
+- A project's **default branch** setting now does something. It has been
+  editable, saved and shown as "Project setting" while changing nothing at all;
+  set it and new sessions are based on that branch, fetched from the remote
+  first so you start from the current tip rather than whatever the project
+  happened to have checked out. Naming a branch in the new-session dialog still
+  wins, leaving it blank still starts from the project's current branch, and
+  the session still gets its own branch either way — the default branch is the
+  starting point, not somewhere sessions pile up. If it names a branch that
+  exists neither locally nor on the remote, the session is not created rather
+  than quietly starting somewhere else.
+- The workspace status poller now looks at the session you are on, not all of
+  them. It ran `git status` once per session clone every fifteen seconds; on a
+  machine with eighty-three clones one pass took over two minutes, so it was
+  running essentially without pause, and because `git status` stats every file
+  it held filesystem locks the whole time — which other applications on the
+  machine felt more than Allele did. The cost scaled with how many clones you
+  had accumulated rather than with anything you were doing. It is now bounded
+  by the single repository you are looking at.
+
+### Removed
+- The per-session dirty dot in the sidebar, and its "Uncommitted changes in
+  workspace" tooltip, along with the project tile's "Changed workspaces"
+  metric. Knowing whether every workspace has uncommitted work was what
+  required walking every clone, and it is the session's business — yours or
+  the agent's — not the app's. The session you are on still shows its changed
+  count in the header, and the changes panel is unaffected.
+- Merge-and-close, and with it Allele's opinion on how session work gets
+  integrated. The session row's "Merge and close" button, the archive
+  browser's "Merge" action, the project-level merge strategy
+  (merge / squash / rebase+merge) and sync-remote-first toggles, and the
+  per-session strategy override in the session header are all gone. A session
+  clones the project and you do the work; what happens to the branch
+  afterwards is yours to decide, and for most people that is already a pull
+  request. The archive browser keeps restore and delete, and discarding a
+  session still archives its work into a canonical git ref first — archiving
+  is now unconditional, since nothing can put a session's work into canonical
+  ahead of time. Existing `settings.json` files carrying `merge_strategy` or
+  `rebase_before_merge` load exactly as before; the keys are ignored.
+
+### Fixed
+- Allele no longer beachballs while a session is being dispatched. The window
+  could stop responding for tens of seconds at a time — worst while a dispatch
+  was provisioning and you were resuming other sessions alongside it — then
+  recover on its own once provisioning finished. Three separate pieces of work
+  were running on the thread that draws the window: a scan of every directory
+  under `~/.claude/projects`, repeated on every frame, to decide whether each
+  session could be resumed; a sweep of `~/.allele/events`, which had grown to
+  months of history; and a rewrite of the whole of `state.json` on every frame
+  that anything had changed. Each is cheap against an idle disk and slow under
+  the load a dispatch generates, which is why the freeze needed both things
+  happening at once before it appeared — and why it went unreproduced for so
+  long when either was tested on its own. Resumability is now remembered and
+  refreshed on a timer, the event directory is pruned, and `state.json` and
+  `settings.json` are written at most twice a second and off the drawing
+  thread. Quitting still flushes everything to disk first.
+- A newly created session reliably receives its first prompt. Dispatched
+  sessions, and ones you start yourself with an opening message, could come up
+  idle having never submitted anything. The prompt was typed into the agent's
+  terminal on a fixed timer that raced the agent's own startup, so it either
+  landed before anything was listening and was swallowed, or arrived as visible
+  escape characters. Claude sessions are now handed the prompt as an argument
+  when the process starts — already submitted before the terminal exists, so
+  there is nothing left to race. Other agents still receive it by typing, but
+  only once their terminal reports that it can accept one, with a bounded wait
+  and retries rather than a single guess.
+- Dispatching a session while another is still being created no longer returns
+  the wrong one. `sessions.create` identified what it had just made by
+  comparing the project's session list before and after the call, which ignored
+  the sessions still being cloned — so with anything else in flight it returned
+  an id belonging to a different caller. The consequences were quiet rather
+  than loud: the new session was recorded as human-created, so it did not count
+  against the dispatch cap and could not be discarded through the MCP tools,
+  and the keystrokes meant to submit its prompt went to another session's
+  terminal instead. Creation now reports the id it actually minted.
+- `settings.json` can no longer be left truncated by a crash. It was written by
+  emptying the file and then writing over it, so losing power or filling the
+  disk in between left it half-written, and the next launch fell back to
+  defaults — taking the project list, the agent configuration, the sync
+  settings and the dispatch limits with it. It is now written to a temporary
+  file and moved into place, the way `state.json` always has been, so either
+  the new settings are complete on disk or the old ones are untouched.
+- Allele no longer leaks processes. Every notification sound, system
+  notification and hand-off to `open` was spawned and then forgotten, and Rust
+  does not clean up a child process you stop holding onto — so each one stayed
+  in the process table as a zombie until the app quit. One long-running machine
+  had accumulated 3,351 of them. They are now waited on, and a test asserts it
+  stays that way.
+- Clicks in the sidebar no longer reach the terminal underneath. A mouse
+  release was forwarded to the Claude Code TUI even when the press it belonged
+  to had landed on the sidebar, so selecting a session could also trigger
+  whatever sat under the cursor in the terminal. A release is now forwarded
+  only when its matching press was.
+
+### Security
+- Session event files and prompt sidecars are no longer world-readable. Every
+  session's opening prompt is written to `~/.allele/events`, and those are the
+  briefs sessions are dispatched with, so they routinely carry whatever context
+  you gave them; the event streams beside them record tool names and input
+  summaries. Both were readable by any process running as you, in a directory
+  that was itself listable, and were kept for the life of the session. The
+  directory is now created private, new files are written private, and a sweep
+  at startup tightens whatever an existing install has already accumulated —
+  on the machine this was found on, four months of briefs.
 
 ## [0.4.0] - 2026-08-30
 
@@ -201,7 +513,13 @@ merge batch. Core proof-of-concept complete and runnable.
   browser with merge/delete actions.
 - Per-session drawer terminal panel and auto-naming of sessions from the first prompt.
 
-[Unreleased]: https://github.com/devergehq/allele/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/devergehq/allele/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/devergehq/allele/compare/v0.7.1...v0.7.2
+[0.7.1]: https://github.com/devergehq/allele/compare/v0.7.0...v0.7.1
+[0.7.0]: https://github.com/devergehq/allele/compare/v0.6.0...v0.7.0
+[0.6.0]: https://github.com/devergehq/allele/compare/v0.5.1...v0.6.0
+[0.5.1]: https://github.com/devergehq/allele/compare/v0.5.0...v0.5.1
+[0.5.0]: https://github.com/devergehq/allele/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/devergehq/allele/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/devergehq/allele/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/devergehq/allele/compare/v0.1.0...v0.2.0

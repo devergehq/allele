@@ -26,6 +26,16 @@ pub(crate) const RIGHT_SIDEBAR_MIN_WIDTH: f32 = 160.0;
 /// never push the content column into overflow.
 pub(crate) const MAIN_AREA_MIN_HEIGHT: f32 = 100.0;
 
+/// Rendered height of one attention-bar row: 11pt text on 5px padding either
+/// side. Used only to derive the list's max height, so it tracks the row's
+/// `py` and text size in `render_attention_bar`.
+pub(crate) const ATTENTION_BAR_ROW_HEIGHT: f32 = 24.0;
+/// How many attention rows the expanded bar shows before it starts scrolling.
+/// The bar sits above the terminal, so it is capped rather than allowed to
+/// grow with the session count — six rows is enough to triage at a glance
+/// without the bar becoming the window (DEV-525).
+pub(crate) const ATTENTION_BAR_MAX_ROWS: f32 = 6.0;
+
 /// Which view is shown in the main (center) column.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum MainTab {
@@ -72,6 +82,11 @@ pub(crate) struct ChangesPanelState {
     /// against the active session's clone dir each render to detect that a
     /// refresh is needed (session switch, first open).
     pub(crate) repo_dir: Option<PathBuf>,
+    /// Clone directory the active session's *header count* was last observed
+    /// for. Distinct from `repo_dir`, which tracks the panel's file list and
+    /// only moves while the panel is open — the header is visible either way
+    /// (DEV-684).
+    pub(crate) observed_dir: Option<PathBuf>,
     /// False when `repo_dir` turned out not to be a git work tree.
     pub(crate) is_repo: bool,
     pub(crate) loading: bool,
@@ -86,6 +101,43 @@ pub(crate) struct ChangesPanelState {
     pub(crate) refresh_gen: u64,
     /// Same contract as `refresh_gen`, for diff loads.
     pub(crate) diff_gen: u64,
+}
+
+/// An in-progress group rename, driven from the group header (DEV-937).
+///
+/// Holds the name it started from rather than a slot index: a rename is
+/// committed a keystroke later than it was begun, and by then the order may have
+/// been permuted by a drag or the group emptied — a stale index would rename
+/// whichever group now sits there.
+pub(crate) struct GroupRename {
+    pub(crate) project_idx: usize,
+    /// The group's name when the rename began. The handler matches on this.
+    pub(crate) from: String,
+    /// What has been typed so far.
+    pub(crate) buffer: String,
+    /// Why the last commit attempt was refused, shown beside the field. The
+    /// field stays open on a refusal so the name can be corrected rather than
+    /// retyped — the same shape as the Group field in both modals.
+    pub(crate) refusal: Option<String>,
+}
+
+/// Sidebar group headers: their right-click menu and their inline rename
+/// (DEV-937).
+///
+/// One struct rather than three loose `AppState` fields, because they are one
+/// interaction: the menu is what starts a rename, and only one header can be
+/// doing either at a time.
+#[derive(Default)]
+pub(crate) struct GroupHeaderState {
+    /// Right-click menu on a group header: (project index, group name, click
+    /// position). The name, not a slot, for the same reason as
+    /// [`GroupRename::from`].
+    pub(crate) context_menu: Option<(usize, String, Point<Pixels>)>,
+    /// Active inline rename. When `Some`, that header renders an editable name.
+    pub(crate) rename: Option<GroupRename>,
+    /// Focus handle for the inline rename field, created lazily on first use —
+    /// the same lifecycle as [`DrawerState::rename_focus`].
+    pub(crate) rename_focus: Option<FocusHandle>,
 }
 
 /// Drawer terminal geometry + inline-rename state.
@@ -227,8 +279,6 @@ pub(crate) struct ConfirmationState {
     /// Project index awaiting remove-project confirmation. When `Some(idx)`
     /// the project header row shows Confirm/Cancel instead of the ✕ button.
     pub(crate) remove_project: Option<usize>,
-    /// Session cursor awaiting merge-with-uncommitted-changes confirmation.
-    pub(crate) dirty_merge: Option<SessionCursor>,
     /// Archive awaiting permanent ref deletion confirmation.
     pub(crate) delete_archive: Option<(usize, usize)>,
     /// Project index whose *entire* archive list awaits bulk-deletion
@@ -251,7 +301,6 @@ impl ConfirmationState {
         self.discard.is_some()
             || self.dirty_session.is_some()
             || self.remove_project.is_some()
-            || self.dirty_merge.is_some()
             || self.delete_archive.is_some()
             || self.delete_all_archives.is_some()
     }
@@ -264,7 +313,6 @@ impl ConfirmationState {
         self.discard = None;
         self.dirty_session = None;
         self.remove_project = None;
-        self.dirty_merge = None;
         self.delete_archive = None;
         self.delete_all_archives = None;
         self.armed_at = None;
@@ -337,11 +385,24 @@ pub(crate) struct AppState {
     /// were quit in between.
     pub(crate) pending_dispatch_origins:
         std::collections::HashMap<String, crate::session::SessionOrigin>,
+    /// Sidebar group for sessions still being provisioned (DEV-853).
+    ///
+    /// Parked by session id and applied when the session materialises, exactly
+    /// as `pending_dispatch_origins` above and for the same reason: a clone
+    /// lands asynchronously, so the modal — or the dispatch — that chose the
+    /// group has returned long before there is a `Session` to put it on.
+    ///
+    /// Values are already interned against the owning project, so what lands on
+    /// the session is the project's canonical spelling. An entry is dropped if
+    /// provisioning never completes, which costs a short string per failed
+    /// clone — the same trade `pending_dispatch_origins` makes.
+    pub(crate) pending_session_groups: std::collections::HashMap<String, String>,
     /// Transient warning shown when `git pull` on the source root fails
     /// before session creation. Auto-dismissed after a few seconds.
     pub(crate) pull_warning: Option<String>,
     /// Transient status/result banner for session-sync actions (sync-up /
-    /// pull). Dismissed by the user or replaced by the next message.
+    /// pull) and Away's summary (DEV-1157). Dismissed by the user or replaced
+    /// by the next message.
     pub(crate) sync_notice: Option<String>,
     /// Which view the center column is currently showing.
     pub(crate) main_tab: MainTab,
@@ -353,6 +414,9 @@ pub(crate) struct AppState {
     pub(crate) scratch_pad: Option<Entity<scratch_pad::ScratchPad>>,
     /// "New session with details" modal. `Some` while the overlay is visible.
     pub(crate) new_session_modal: Option<Entity<new_session_modal::NewSessionModal>>,
+    /// Remote sessions: the selected row, creates in flight, the open menu
+    /// (DEV-1168).
+    pub(crate) remote_ui: crate::remote_sessions::RemoteUi,
     /// Sidebar search/filter input entity.
     pub(crate) sidebar_filter_input: Entity<text_input::TextInput>,
     /// Reader in-file find input entity. Its text mirrors into
@@ -383,6 +447,8 @@ pub(crate) struct AppState {
     pub(crate) session_context_menu: Option<(SessionCursor, Point<Pixels>)>,
     /// Right-click context menu for a project header: (project_idx, position).
     pub(crate) project_context_menu: Option<(usize, Point<Pixels>)>,
+    /// Right-click menu and inline rename for a sidebar group header (DEV-937).
+    pub(crate) group_headers: GroupHeaderState,
     /// "Edit session" modal for renaming/commenting an existing session.
     pub(crate) edit_session_modal: Option<Entity<new_session_modal::EditSessionModal>>,
     /// Interactive naming modal — shown when NamingMode::Interactive generates suggestions.
@@ -419,6 +485,15 @@ pub(crate) struct AppState {
     pub(crate) state_dirty: bool,
     /// Same contract as `state_dirty` but for the settings.json file.
     pub(crate) settings_dirty: bool,
+    /// Debounce state for `state.json` — see [`PERSIST_DEBOUNCE`].
+    pub(crate) state_gate: PersistGate,
+    /// Same, for `settings.json`. Written far less often — every call site is
+    /// a discrete user action, not a per-frame mutation — but the write is the
+    /// same kind of foreground filesystem work (DEV-623).
+    pub(crate) settings_gate: PersistGate,
+    /// True when a deferred flush timer is already pending, so a state that
+    /// stays dirty across many frames schedules one timer, not one per frame.
+    pub(crate) persist_flush_scheduled: bool,
     /// Persistence backends for settings.json and state.json. Arc-cloned
     /// into background tasks so they can write without borrowing AppState.
     /// See `src/repositories.rs` and ARCHITECTURE.md §3.3.
@@ -427,8 +502,48 @@ pub(crate) struct AppState {
     /// startup. Background tasks get cheap Arc clones. See
     /// ARCHITECTURE.md §3.2 + §4.1.
     pub(crate) platform: crate::platform::Platform,
+    /// This machine's remote endpoint: pairing, trusted peers, the listener
+    /// (DEV-1160). Cheap to clone into the Settings window.
+    pub(crate) remote: crate::remote::RemoteService,
+    /// Sessions on paired Macs open in tabs (DEV-1167).
+    pub(crate) remote_tabs: crate::remote_tab::RemoteTabs,
+    /// Host side of the status feed paired clients subscribe to (DEV-1162).
+    /// A cheap clone handle: the transport holds its own copy.
+    pub(crate) status_feed: crate::status_feed::StatusFeed,
+    /// The pairing request waiting for approval, if any, for the main
+    /// window's banner (DEV-1188).
+    pub(crate) pairing_alert: crate::pairing_alert::PairingAlert,
     /// Set by the Debug menu or agent request-file watcher.
     pub(crate) capture_ui_requested: bool,
+}
+
+/// How long to wait between `state.json` writes.
+///
+/// The file is a crash-recovery snapshot, not a transaction log: losing half a
+/// second of sidebar state to a hard kill is immaterial, while writing it on
+/// every frame is not. Measured at 0.3ms idle but **37ms under the disk load a
+/// dispatch creates** — per frame, against a 16ms budget at 60fps. Quitting
+/// flushes synchronously, so an orderly exit loses nothing (DEV-609).
+pub(crate) const PERSIST_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Whether a write is due, given when the last one happened.
+///
+/// Pure, so the cadence can be tested without a clock or a filesystem.
+pub(crate) fn persist_is_due(last: Option<std::time::Instant>, now: std::time::Instant) -> bool {
+    match last {
+        None => true,
+        Some(last) => now.duration_since(last) >= PERSIST_DEBOUNCE,
+    }
+}
+
+/// Debounce bookkeeping for one persisted file.
+#[derive(Default)]
+pub(crate) struct PersistGate {
+    /// When the last write started. `None` until the first one.
+    pub(crate) written_at: Option<std::time::Instant>,
+    /// True while a background write is running, so two writes can never race
+    /// to rename over the same path.
+    pub(crate) in_flight: bool,
 }
 
 impl AppState {
@@ -437,6 +552,19 @@ impl AppState {
     /// Do NOT call `save_state()` directly — see ARCHITECTURE.md §7.2.
     pub(crate) fn mark_state_dirty(&mut self) {
         self.state_dirty = true;
+        // Every add, remove, rename and status change ends here, so this is
+        // the one trigger the status feed needs (DEV-1162). The publisher
+        // diffs, so a call that changed nothing it reports costs a compare.
+        self.publish_status_feed();
+    }
+
+    /// Republish the status feed from the current sessions. Cheap and
+    /// idempotent; see [`crate::status_feed::StatusFeed::publish`].
+    pub(crate) fn publish_status_feed(&self) {
+        self.status_feed
+            .publish(crate::status_feed::host::entries_from_projects(
+                &self.projects,
+            ));
     }
 
     /// Flag that user settings (`settings.json`) have been mutated
@@ -446,10 +574,126 @@ impl AppState {
         self.settings_dirty = true;
     }
 
-    /// Drain the dirty flags and flush pending writes. Called once at
-    /// the end of every `Render::render` tick so N mutations per frame
-    /// coalesce to at most one write per file.
-    pub(crate) fn checkpoint_persistence(&mut self) {
+    /// Drain the dirty flags and flush pending writes. Called once at the end
+    /// of every `Render::render` tick.
+    ///
+    /// Coalescing used to be per-frame only, which meant a state that stayed
+    /// dirty — resuming sessions, hook events, a dispatch churning
+    /// `loading_sessions` — wrote the whole file every frame. See
+    /// [`PERSIST_DEBOUNCE`] (DEV-609).
+    pub(crate) fn checkpoint_persistence(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.state_dirty {
+            self.flush_state(cx);
+        }
+        if self.settings_dirty {
+            self.flush_settings(cx);
+        }
+    }
+
+    /// Write `settings.json` off the foreground, on the same terms as
+    /// [`flush_state`](Self::flush_state).
+    ///
+    /// Measured at 0.1ms idle and 9.5ms under the disk load a dispatch creates
+    /// — a single hitch on mouse-up rather than the per-frame storm `state.json`
+    /// had, since every caller is a discrete user action (DEV-623).
+    fn flush_settings(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.settings_gate.in_flight {
+            return;
+        }
+        if !persist_is_due(self.settings_gate.written_at, std::time::Instant::now()) {
+            self.schedule_persist_flush(cx);
+            return;
+        }
+
+        self.settings_dirty = false;
+        self.settings_gate.written_at = Some(std::time::Instant::now());
+        self.settings_gate.in_flight = true;
+
+        let snapshot = self.settings_snapshot();
+        let repo = self.repos.settings.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = repo.save(&snapshot) {
+                        tracing::warn!("Failed to save settings.json: {e}");
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                this.settings_gate.in_flight = false;
+                if this.settings_dirty {
+                    this.schedule_persist_flush(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Write `state.json` if one is due; otherwise make sure one is coming.
+    ///
+    /// The write itself goes to the background executor. Serialising is
+    /// in-memory and stays here; the write is the part that blocks, and it was
+    /// blocking the thread that draws.
+    fn flush_state(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.state_gate.in_flight {
+            // Stays dirty. The in-flight write reschedules on completion, so
+            // the newest state still lands.
+            return;
+        }
+        if !persist_is_due(self.state_gate.written_at, std::time::Instant::now()) {
+            self.schedule_persist_flush(cx);
+            return;
+        }
+
+        self.state_dirty = false;
+        self.state_gate.written_at = Some(std::time::Instant::now());
+        self.state_gate.in_flight = true;
+
+        let snapshot = self.state_snapshot();
+        let repo = self.repos.state.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = repo.save(&snapshot) {
+                        tracing::warn!("Failed to save state.json: {e}");
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                this.state_gate.in_flight = false;
+                if this.state_dirty {
+                    this.schedule_persist_flush(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Guarantee a deferred write lands even if rendering stops.
+    ///
+    /// Without this, a change made in the last 500ms before the app goes idle
+    /// would sit dirty until something else happened to trigger a frame.
+    fn schedule_persist_flush(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.persist_flush_scheduled {
+            return;
+        }
+        self.persist_flush_scheduled = true;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(PERSIST_DEBOUNCE).await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                this.persist_flush_scheduled = false;
+                this.checkpoint_persistence(cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Write anything outstanding right now, blocking the caller.
+    ///
+    /// Only for quit. The debounce means up to [`PERSIST_DEBOUNCE`] of changes
+    /// may not have reached disk, and the process is about to stop existing —
+    /// so an orderly exit pays the write rather than losing the state.
+    pub(crate) fn flush_persistence_blocking(&mut self) {
         if self.state_dirty {
             self.save_state();
             self.state_dirty = false;
@@ -463,7 +707,38 @@ impl AppState {
 
 #[cfg(test)]
 mod tests {
-    use super::{structural_stamp, ConfirmationState};
+    use super::{persist_is_due, structural_stamp, ConfirmationState, PERSIST_DEBOUNCE};
+
+    /// DEV-609: writes are debounced across frames, not merely within one.
+    ///
+    /// A state that stays dirty — someone resuming sessions while a dispatch
+    /// churns `loading_sessions` — used to rewrite the whole file every frame,
+    /// at 37ms a write under that load against a 16ms frame budget.
+    #[test]
+    fn the_first_write_is_due_and_the_next_is_not() {
+        let now = std::time::Instant::now();
+        assert!(persist_is_due(None, now), "nothing written yet");
+        assert!(!persist_is_due(Some(now), now), "not twice in a frame");
+    }
+
+    #[test]
+    fn a_write_is_due_again_once_the_window_has_passed() {
+        let now = std::time::Instant::now();
+        let earlier = now
+            .checked_sub(PERSIST_DEBOUNCE + std::time::Duration::from_millis(1))
+            .expect("representable");
+        assert!(persist_is_due(Some(earlier), now));
+    }
+
+    /// The window bounds what a hard kill can lose. An orderly quit flushes
+    /// synchronously, so this only governs a crash — and it must stay small
+    /// enough that the loss is immaterial, large enough to stop per-frame
+    /// writes.
+    #[test]
+    fn the_debounce_window_is_bounded_at_both_ends() {
+        assert!(PERSIST_DEBOUNCE >= std::time::Duration::from_millis(100));
+        assert!(PERSIST_DEBOUNCE <= std::time::Duration::from_secs(1));
+    }
     use crate::actions::{
         ArchiveAction, PendingAction, ProjectAction, SessionAction, SessionCursor,
     };
@@ -482,7 +757,6 @@ mod tests {
             now,
             Duration::ZERO,
             None,
-            false,
         )
     }
 
@@ -492,7 +766,6 @@ mod tests {
             project_id: "proj".into(),
             label: "archived".into(),
             archived_at: 0,
-            merge_error: None,
         }
     }
 
@@ -509,7 +782,6 @@ mod tests {
             dirty_session: None,
             quit: false,
             remove_project: None,
-            dirty_merge: None,
             delete_archive: None,
             delete_all_archives: None,
             armed_at: None,
@@ -573,7 +845,6 @@ mod tests {
             Box::new(move |c| c.discard = Some(cursor)),
             Box::new(|c| c.dirty_session = Some(0)),
             Box::new(|c| c.remove_project = Some(0)),
-            Box::new(move |c| c.dirty_merge = Some(cursor)),
             Box::new(|c| c.delete_archive = Some((0, 0))),
             Box::new(|c| c.delete_all_archives = Some(0)),
         ];
@@ -605,7 +876,6 @@ mod tests {
         state.discard = Some(cursor);
         state.dirty_session = Some(1);
         state.remove_project = Some(1);
-        state.dirty_merge = Some(cursor);
         state.delete_archive = Some((1, 2));
         state.delete_all_archives = Some(1);
         state.armed_at = Some((1, 2, 3));
@@ -620,11 +890,6 @@ mod tests {
     fn only_confirmation_gated_actions_are_droppable() {
         let gated: Vec<PendingAction> = vec![
             SessionAction::DiscardSession {
-                project_idx: 0,
-                session_idx: 0,
-            }
-            .into(),
-            SessionAction::ProceedDirtyMerge {
                 project_idx: 0,
                 session_idx: 0,
             }
@@ -663,17 +928,281 @@ mod tests {
                 archive_idx: 0,
             }
             .into(),
-            ArchiveAction::MergeArchive {
-                project_idx: 0,
-                archive_idx: 0,
-            }
-            .into(),
         ];
         for action in ungated {
             assert!(
                 !action.needs_confirmation(),
                 "{action:?} should not be gated"
             );
+        }
+    }
+}
+
+/// Test-only harness that stands an `AppState` up under GPUI with in-memory
+/// repositories. See ARCHITECTURE.md §5.6 for the extension recipe.
+#[cfg(test)]
+pub(crate) mod fixture {
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    use gpui::{AppContext as _, Context, TestAppContext, Window, WindowHandle};
+
+    use super::{
+        AppState, ChangesPanelState, ConfirmationState, DrawerState, MainTab, ReaderState,
+        RichState, RightPanelState, SidebarState, DRAWER_MIN_HEIGHT, RIGHT_SIDEBAR_MIN_WIDTH,
+        SIDEBAR_MIN_WIDTH,
+    };
+    use crate::actions::PendingAction;
+    use crate::project::Project;
+    use crate::repositories::fakes::{InMemorySettingsRepository, InMemoryStateRepository};
+    use crate::repositories::Repositories;
+    use crate::settings::Settings;
+    use crate::state::PersistedState;
+    use crate::text_input;
+
+    /// A live `AppState` in a headless GPUI window, plus handles on the fakes
+    /// behind `AppState.repos` so a test can assert what was persisted.
+    ///
+    /// Deliberately *not* a full replica of the production window: the text
+    /// inputs are created bare, without the `cx.subscribe` wiring `main.rs`
+    /// attaches, and no terminals are spawned. Handlers that spawn a PTY or
+    /// shell out to git are out of scope — this fixture exists for the
+    /// state-transition half of the dispatcher.
+    pub(crate) struct Fixture {
+        pub(crate) window: WindowHandle<AppState>,
+        /// The fake behind `AppState.repos.settings`.
+        pub(crate) settings: Arc<InMemorySettingsRepository>,
+        /// The fake behind `AppState.repos.state`.
+        pub(crate) state: Arc<InMemoryStateRepository>,
+    }
+
+    /// What the fixture starts with. Defaults are "empty app, default
+    /// settings"; a test overrides only the fields it cares about.
+    #[derive(Default)]
+    pub(crate) struct FixtureSpec {
+        pub(crate) projects: Vec<Project>,
+        pub(crate) settings: Settings,
+        pub(crate) state: PersistedState,
+        pub(crate) active: Option<crate::actions::SessionCursor>,
+    }
+
+    impl Fixture {
+        /// Empty app: no projects, default settings, nothing active.
+        pub(crate) fn new(cx: &mut TestAppContext) -> Self {
+            Self::build(FixtureSpec::default(), cx)
+        }
+
+        /// App pre-loaded with `projects`, everything else defaulted.
+        pub(crate) fn with_projects(projects: Vec<Project>, cx: &mut TestAppContext) -> Self {
+            Self::build(
+                FixtureSpec {
+                    projects,
+                    ..FixtureSpec::default()
+                },
+                cx,
+            )
+        }
+
+        pub(crate) fn build(spec: FixtureSpec, cx: &mut TestAppContext) -> Self {
+            let settings_repo = Arc::new(InMemorySettingsRepository::new(spec.settings.clone()));
+            let state_repo = Arc::new(InMemoryStateRepository::new(spec.state.clone()));
+
+            let repos = Repositories {
+                settings: settings_repo.clone(),
+                state: state_repo.clone(),
+            };
+
+            let user_settings = spec.settings;
+            let projects = spec.projects;
+            let active = spec.active;
+            let scratch_pad_history = spec.state.scratch_pad_history.clone();
+
+            let window = cx.add_window(move |_window, cx| {
+                let input = |cx: &mut Context<AppState>| {
+                    cx.new(|cx| text_input::TextInput::new(cx, "", ""))
+                };
+
+                AppState {
+                    projects,
+                    active,
+                    overview_project_id: None,
+                    pending_action: None,
+                    sidebar: SidebarState {
+                        visible: user_settings.sidebar_visible,
+                        width: user_settings.sidebar_width.max(SIDEBAR_MIN_WIDTH),
+                        resizing: false,
+                    },
+                    right_panel: RightPanelState {
+                        visible: user_settings.right_sidebar_visible,
+                        width: user_settings
+                            .right_sidebar_width
+                            .max(RIGHT_SIDEBAR_MIN_WIDTH),
+                        resizing: false,
+                    },
+                    changes: ChangesPanelState::default(),
+                    drawer: DrawerState {
+                        height: user_settings.drawer_height.max(DRAWER_MIN_HEIGHT),
+                        resizing: false,
+                        rename: None,
+                        rename_focus: None,
+                        main_area_top: Default::default(),
+                    },
+                    reader: ReaderState {
+                        selected_path: None,
+                        expanded_dirs: HashSet::new(),
+                        preview: None,
+                        context_menu: None,
+                        find_query: String::new(),
+                        find_active: false,
+                        find_matches: Vec::new(),
+                        find_current: 0,
+                        md_view_source: false,
+                        md_scroll: gpui::ScrollHandle::new(),
+                        recent: Vec::new(),
+                        reveal_line: None,
+                        source_scroll: gpui::ScrollHandle::new(),
+                        active_root: None,
+                        sessions: std::collections::HashMap::new(),
+                    },
+                    confirming: ConfirmationState {
+                        discard: None,
+                        dirty_session: None,
+                        quit: false,
+                        remove_project: None,
+                        delete_archive: None,
+                        delete_all_archives: None,
+                        armed_at: None,
+                    },
+                    rich: RichState {
+                        view: None,
+                        transcript_tailer: None,
+                        cursor: None,
+                    },
+                    hooks_settings_path: None,
+                    editing_project_settings: None,
+                    user_settings,
+                    settings_window: None,
+                    main_window: None,
+                    pending_dispatch_origins: Default::default(),
+                    pending_session_groups: Default::default(),
+                    pull_warning: None,
+                    sync_notice: None,
+                    pairing_alert: Default::default(),
+                    main_tab: MainTab::Claude,
+                    browser_status: String::new(),
+                    scratch_pad: None,
+                    new_session_modal: None,
+                    remote_ui: Default::default(),
+                    sidebar_filter_input: input(cx),
+                    reader_find_input: input(cx),
+                    file_palette: None,
+                    file_palette_input: input(cx),
+                    file_index: Default::default(),
+                    search: None,
+                    search_input: input(cx),
+                    command_palette: None,
+                    command_palette_input: input(cx),
+                    project_branch_input: input(cx),
+                    project_remote_input: input(cx),
+                    sidebar_filter: String::new(),
+                    session_context_menu: None,
+                    project_context_menu: None,
+                    group_headers: Default::default(),
+                    edit_session_modal: None,
+                    naming_modal: None,
+                    conversation_picker: None,
+                    pending_conversation_choice: None,
+                    conversation_choice_confirmed: None,
+                    remote_browser: None,
+                    scratch_pad_history,
+                    pending_startup: None,
+                    base_infra_status: None,
+                    state_dirty: false,
+                    settings_dirty: false,
+                    state_gate: Default::default(),
+                    settings_gate: Default::default(),
+                    persist_flush_scheduled: false,
+                    repos,
+                    // `detect()` is pure — it builds the adapter bundle without
+                    // touching the process-wide `OnceLock`, so tests never
+                    // depend on startup having installed the global.
+                    platform: crate::platform::Platform::detect(),
+                    remote: crate::remote::RemoteService::offline(&Default::default()),
+                    remote_tabs: Default::default(),
+                    capture_ui_requested: false,
+                    status_feed: Default::default(),
+                }
+            });
+
+            Self {
+                window,
+                settings: settings_repo,
+                state: state_repo,
+            }
+        }
+
+        /// Run `f` against the live `AppState` with a real `Window` in hand.
+        pub(crate) fn update<R>(
+            &self,
+            cx: &mut TestAppContext,
+            f: impl FnOnce(&mut AppState, &mut Window, &mut Context<AppState>) -> R,
+        ) -> R {
+            self.window
+                .update(cx, f)
+                .expect("fixture window is still open")
+        }
+
+        /// Enqueue `action` and drain it exactly as the render tick does.
+        /// This is the handler-level entry point: it goes through
+        /// `dispatch_pending_action`, so the stale-confirmation guard and the
+        /// refocus epilogue run too.
+        ///
+        /// Returns `(state_dirty, settings_dirty)` **as the handler left
+        /// them**, read in the same update block. Read them later and you may
+        /// read zeroes: a handler that calls `cx.notify()` schedules a redraw,
+        /// and the real `Render::render` ends in `checkpoint_persistence()`,
+        /// so the flags can already have been drained into the repos by the
+        /// time the next `update` runs. That is the production coordinator
+        /// working, not a fixture artefact — but it means persistence *intent*
+        /// has to be captured in-band.
+        pub(crate) fn dispatch(
+            &self,
+            action: impl Into<PendingAction>,
+            cx: &mut TestAppContext,
+        ) -> (bool, bool) {
+            self.update(cx, |state, window, cx| {
+                state.pending_action = Some(action.into());
+                state.dispatch_pending_action(window, cx);
+                (state.state_dirty, state.settings_dirty)
+            })
+        }
+
+        /// Run the persistence coordinator, as the end of a render tick would.
+        /// Writes land in the in-memory repos, never on disk.
+        ///
+        /// The write itself is handed to the background executor (DEV-609), so
+        /// the repos are untouched until that task runs — parking here keeps
+        /// this helper's contract true for callers that assert `save_count()`
+        /// on the next line.
+        ///
+        /// Parking drains a write that is *due*. It does not advance the
+        /// [`PERSIST_DEBOUNCE`] timer, so a checkpoint that re-dirties within
+        /// 500ms of the last one defers to a scheduled flush and lands no
+        /// write here. No test needs that yet; one that does should advance
+        /// the clock rather than park harder.
+        pub(crate) fn checkpoint(&self, cx: &mut TestAppContext) {
+            self.update(cx, |state, _window, cx| state.checkpoint_persistence(cx));
+            cx.run_until_parked();
+        }
+
+        /// `(state_dirty, settings_dirty)` right now. For a handler's own
+        /// intent prefer [`Fixture::dispatch`]'s return value — see its note
+        /// on redraws draining the flags first.
+        #[allow(dead_code)]
+        pub(crate) fn dirty_flags(&self, cx: &mut TestAppContext) -> (bool, bool) {
+            self.update(cx, |state, _window, _cx| {
+                (state.state_dirty, state.settings_dirty)
+            })
         }
     }
 }

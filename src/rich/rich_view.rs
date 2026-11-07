@@ -18,6 +18,7 @@ use crate::theme::{theme, with_alpha};
 use gpui::*;
 use similar::{ChangeTag, TextDiff};
 
+use super::column::{framed, mono_width, prose_width, scroll_x};
 use super::compose_bar::{ComposeBar, ComposeBarEvent};
 use super::document::{
     short_path, truncate_to_char_boundary, Block, BlockId, BlockKind, RichDocument,
@@ -61,6 +62,22 @@ pub struct RichView {
     document: RichDocument,
     compose_bar: Entity<ComposeBar>,
     font_size: f32,
+    /// Per-block override of whether a tool result is expanded (DEV-576).
+    ///
+    /// An override rather than a set of open blocks, because the default is not
+    /// uniform: a failed call opens by default and everything else clamps, and
+    /// the reader must be able to reverse either.
+    output_open: std::collections::HashMap<super::document::BlockId, bool>,
+    /// Rail runs the reader has opened (DEV-575), by the run's first block id.
+    ///
+    /// Kept here rather than on `Block.collapsed`: whether the rail is open is
+    /// a different question from whether a given call's input JSON is
+    /// expanded, and sharing one flag would answer both at once.
+    expanded_rails: std::collections::HashSet<super::document::BlockId>,
+    /// What to call the agent when a turn's prose is attributed (DEV-574).
+    /// Derived from the session's configured agent, so an OpenCode session
+    /// does not get labelled "Claude".
+    agent_label: SharedString,
     /// Whether the compose bar is locked because a turn is in flight.
     /// Driven externally via `set_busy` — the sidecar view itself never
     /// computes this, since busy state depends on the PTY/transcript
@@ -111,6 +128,7 @@ impl RichView {
         session_id: String,
         font_size: f32,
         tool_visibility: std::collections::HashMap<String, bool>,
+        agent_kind: crate::settings::AgentKind,
     ) -> Self {
         let focus_handle = cx.focus_handle();
 
@@ -153,6 +171,9 @@ impl RichView {
             document,
             compose_bar,
             font_size,
+            output_open: std::collections::HashMap::new(),
+            expanded_rails: std::collections::HashSet::new(),
+            agent_label: agent_display_name(agent_kind).into(),
             busy: false,
             list_state,
             index: NarrativeIndex::new(),
@@ -370,6 +391,41 @@ impl RichView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let font_size = self.font_size;
+        // DEV-574: a run of settled text blocks in one turn renders as a single
+        // markdown document. `run_len_at` reports 0 for a block an earlier run
+        // already absorbed — it still occupies its list slot, so every index
+        // the jump and search indexes hold stays valid, it just draws nothing.
+        let run_len = self.document.run_len_at(ix);
+        if run_len == 0 {
+            return div().into_any_element();
+        }
+
+        // DEV-575: a run of routine calls draws as one line unless opened. When
+        // it is opened the same line stays on as a header, so the run is still
+        // legible as a group and there is somewhere to click to close it again.
+        let mut rail_header = None;
+        if let Some((start, len)) = self.document.rail_run_at(ix) {
+            let Some(start_id) = self.document.blocks().get(start).map(|b| b.id) else {
+                return div().into_any_element();
+            };
+            let open = self.expanded_rails.contains(&start_id);
+            if !open && ix != start {
+                return div().into_any_element();
+            }
+            if ix == start {
+                let (summary, count) = self.document.rail_summary(start, len);
+                let header = render_rail(start_id, &summary, count, open, font_size, cx);
+                if !open {
+                    return framed(font_size, header).into_any_element();
+                }
+                rail_header = Some(header);
+            }
+        }
+        let merged = (run_len > 1).then(|| self.document.run_content(ix, run_len));
+        let speaker = self
+            .document
+            .starts_turn_prose(ix)
+            .then(|| self.agent_label.clone());
         let Some(block) = self.document.blocks().get(ix) else {
             return div().into_any_element();
         };
@@ -387,8 +443,22 @@ impl RichView {
             render_agent_header(cur_agent.map(short_agent).unwrap_or_default(), font_size)
         });
 
-        let block_el = render_block(block, annotation, font_size, cx);
-        if let Some(header) = agent_header {
+        let output_open = self.output_open.get(&block.id).copied();
+        let block_el = render_block(
+            block,
+            annotation,
+            font_size,
+            merged,
+            speaker,
+            output_open,
+            cx,
+        );
+        // DEV-571: every item shares one centred frame, so the whole feed
+        // reads down a single column instead of stretching to the pane. The
+        // frame goes here rather than inside `render_block` so that the
+        // agent header, the run's left border and the role accent bars all
+        // land inside the column with the content they belong to.
+        let block_el = if let Some(header) = rail_header {
             div()
                 .flex()
                 .flex_col()
@@ -397,7 +467,18 @@ impl RichView {
                 .into_any_element()
         } else {
             block_el.into_any_element()
-        }
+        };
+        let content = if let Some(header) = agent_header {
+            div()
+                .flex()
+                .flex_col()
+                .child(header)
+                .child(block_el)
+                .into_any_element()
+        } else {
+            block_el.into_any_element()
+        };
+        framed(font_size, content).into_any_element()
     }
 
     fn render_scrollbar(&self) -> Div {
@@ -518,12 +599,34 @@ impl Render for RichView {
     }
 }
 
+/// What to call the agent in a turn's speaker label (DEV-574).
+///
+/// Allele normalises Claude, OpenCode and generic agents into the same text
+/// block, so the label has to come from the session's configuration. The
+/// previous hardcoded "Claude" was simply wrong on every block of an OpenCode
+/// session.
+fn agent_display_name(kind: crate::settings::AgentKind) -> &'static str {
+    match kind {
+        crate::settings::AgentKind::Claude => "Claude",
+        crate::settings::AgentKind::Opencode => "OpenCode",
+        crate::settings::AgentKind::Generic => "Agent",
+    }
+}
+
 // ── Block renderers ───────────────────────────────────────────────
 
 fn render_block(
     block: &Block,
     annotation: Option<&Annotation>,
     font_size: f32,
+    // `merged`: Some when this block starts a merged run (DEV-574) — the
+    // joined markdown source for the whole run, replacing this block's own.
+    // `speaker`: Some when this block is the first prose of its turn, and so
+    // the one place that turn's speaker is named.
+    merged: Option<String>,
+    speaker: Option<SharedString>,
+    // `output_open`: the reader's override of this block's output clamp.
+    output_open: Option<bool>,
     cx: &mut Context<RichView>,
 ) -> Div {
     let indent = if block.parent_agent_id.is_some() {
@@ -568,7 +671,10 @@ fn render_block(
 
     match &block.kind {
         BlockKind::Text { content, streaming } => {
-            wrapper = wrapper.child(render_text_block(content, *streaming, font_size));
+            let content = merged.as_deref().unwrap_or(content);
+            wrapper = wrapper.child(render_text_block(
+                content, *streaming, font_size, block_id, speaker,
+            ));
         }
         BlockKind::Thinking { content } => {
             wrapper = wrapper.child(render_thinking_block(
@@ -593,6 +699,7 @@ fn render_block(
                 input_full,
                 block.collapsed,
                 result.as_ref(),
+                output_open,
                 font_size,
                 cx,
             ));
@@ -660,6 +767,63 @@ fn render_block(
     }
 
     wrapper
+}
+
+/// The collapsed routine rail: one line standing in for a run of low-signal
+/// calls (DEV-575).
+///
+/// Deliberately quieter than a tool card — no status border, no surface. The
+/// point of the rail is that these calls stop competing with the prose; giving
+/// the summary a card's weight would spend most of what the aggregation saved.
+fn render_rail(
+    start_id: super::document::BlockId,
+    summary: &str,
+    count: u32,
+    open: bool,
+    font_size: f32,
+    cx: &mut Context<RichView>,
+) -> Stateful<Div> {
+    div()
+        .id(ElementId::Name(format!("rail-{start_id}").into()))
+        .w_full()
+        .min_w_0()
+        .px(px(10.0))
+        .py(px(3.0))
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        // One line, whatever the summary says. A tool target can be arbitrarily
+        // long, and a rail that wraps to three lines gives back the space the
+        // aggregation just saved.
+        .whitespace_nowrap()
+        .overflow_hidden()
+        .cursor(gpui::CursorStyle::PointingHand)
+        .child(chevron(!open))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_color(theme().text_faint)
+                .text_size(px(font_size - 2.0))
+                .child(summary.to_string()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_color(with_alpha(theme().text_faint, 0.6))
+                .text_size(px(font_size - 3.0))
+                .child(format!("({count} calls)")),
+        )
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _event, _window, cx| {
+                if !this.expanded_rails.remove(&start_id) {
+                    this.expanded_rails.insert(start_id);
+                }
+                cx.notify();
+            }),
+        )
 }
 
 // ── Navigation strip (DEV-31) ─────────────────────────────────────
@@ -1010,11 +1174,25 @@ fn phase_pill(stage: &Stage, source: StageSource, font_size: f32) -> Div {
 
 // ── Text block ────────────────────────────────────────────────────
 
-fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
-    // Claude's prose IS the main content of the transcript — tool calls
-    // and thinking are supporting context. Visually: a speaker pill on
-    // the left mirroring the "You" user-prompt pattern, and generous
-    // vertical rhythm to separate it from surrounding cards.
+fn render_text_block(
+    content: &str,
+    streaming: bool,
+    font_size: f32,
+    block_id: super::document::BlockId,
+    speaker: Option<SharedString>,
+) -> Div {
+    // Claude's prose IS the main content of the transcript — tool calls and
+    // thinking are supporting context — so it carries no speaker chrome of its
+    // own (DEV-572). A turn emits several text blocks, and a label on each one
+    // stuttered down the left edge and stole width from the measure.
+    //
+    // `speaker` is set on the first prose block of a turn and nowhere else
+    // (DEV-574). A label on EVERY block stuttered down the left edge and stole
+    // width from the measure, which is what DEV-572 removed — but removing it
+    // outright left a block reached by search with no visible owner, so it
+    // comes back once per turn. The name is the session's configured agent, not
+    // a hardcoded "Claude", which was wrong on every block of an OpenCode
+    // session. Subagents are attributed separately by `render_agent_header`.
     div()
         .w_full()
         .min_w_0()
@@ -1022,22 +1200,21 @@ fn render_text_block(content: &str, streaming: bool, font_size: f32) -> Div {
         .px(px(10.0))
         .py(px(6.0))
         .flex()
-        .gap(px(8.0))
-        .items_start()
-        .child(
+        .flex_col()
+        .children(speaker.map(|name| {
             div()
-                .flex_shrink_0()
+                .pb(px(2.0))
                 .text_color(theme().ready)
-                .text_size(px(font_size - 1.0))
+                .text_size(px(font_size - 2.0))
                 .font_weight(FontWeight::BOLD)
-                .child("Claude"),
-        )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .child(super::markdown::render(content, streaming, font_size)),
-        )
+                .child(name)
+        }))
+        .child(div().w_full().min_w_0().child(super::markdown::render(
+            content,
+            streaming,
+            font_size,
+            block_id as u64,
+        )))
 }
 
 // ── Thinking block (collapsed by default, subtle) ─────────────────
@@ -1123,6 +1300,8 @@ fn render_tool_call(
     input_full: &serde_json::Value,
     collapsed: bool,
     result: Option<&super::document::ToolCallResult>,
+    // The reader's override of this result's clamp, if they set one (DEV-576).
+    output_open: Option<bool>,
     font_size: f32,
     cx: &mut Context<RichView>,
 ) -> Div {
@@ -1191,24 +1370,24 @@ fn render_tool_call(
     }
 
     if let Some(r) = result {
-        if r.is_error {
-            let cleaned = strip_ansi(&r.content);
-            let preview = if cleaned.len() > 200 {
-                format!("{}...", truncate_to_char_boundary(&cleaned, 197))
-            } else {
-                cleaned
-            };
-            card = card.child(
-                div()
-                    .w_full()
-                    .min_w_0()
-                    .mt(px(4.0))
-                    .text_color(theme().danger)
-                    .text_size(px(font_size - 1.0))
-                    .child(preview),
-            );
-        } else if !collapsed && !r.content.trim().is_empty() {
-            card = card.child(render_tool_result_output(&r.content, font_size));
+        // A failure used to take a separate path that hard-truncated to 200
+        // characters with no way to reach the rest — which made "an errored
+        // result opens by default" mean almost nothing, since the part worth
+        // reading was usually already gone. Both paths now clamp, which is
+        // reversible (DEV-576).
+        //
+        // A failure also shows even while the card is collapsed: it is the one
+        // thing a reader scanning a turn must not have to open a card to see.
+        let show = r.is_error || (!collapsed && !r.content.trim().is_empty());
+        if show {
+            card = card.child(render_tool_result_output(
+                block_id,
+                &r.content,
+                r.is_error,
+                output_open,
+                font_size,
+                cx,
+            ));
         }
     }
 
@@ -1399,43 +1578,118 @@ fn render_tool_expanded_input(tool_name: &str, input: &serde_json::Value, font_s
 
 // ── Tool result output (shown when expanded) ─────────────────────
 
-const MAX_RESULT_LINES: usize = 80;
+/// Lines of tool output shown before the block clamps (DEV-576).
+///
+/// The old value here was 80, and it did not clamp — it truncated, printing
+/// "…N more lines" with no way to reach them. A `cargo test` run lost its tail
+/// outright. 14 is about a third of a screen: enough to see what a command did,
+/// short enough that a noisy turn stays readable, and now reversible.
+const CLAMP_LINES: usize = 14;
 
-fn render_tool_result_output(content: &str, font_size: f32) -> Div {
+/// Whether output of `line_count` lines should clamp, given whether the reader
+/// has overridden the default and whether the call failed.
+///
+/// A failure opens by default — the whole reason to look at a tool result is
+/// usually that it went wrong — but the reader can still close it, which is why
+/// this takes an override rather than a plain "expanded" flag.
+fn output_is_clamped(line_count: usize, is_error: bool, override_open: Option<bool>) -> bool {
+    if line_count <= CLAMP_LINES {
+        return false;
+    }
+    !override_open.unwrap_or(is_error)
+}
+
+fn render_tool_result_output(
+    block_id: super::document::BlockId,
+    content: &str,
+    is_error: bool,
+    override_open: Option<bool>,
+    font_size: f32,
+    cx: &mut Context<RichView>,
+) -> Div {
     let code_size = font_size - 2.0;
     let cleaned = strip_ansi(content);
     let lines: Vec<&str> = cleaned.lines().collect();
-    let truncated = lines.len() > MAX_RESULT_LINES;
-    let visible = if truncated {
-        &lines[..MAX_RESULT_LINES]
+    let clamped = output_is_clamped(lines.len(), is_error, override_open);
+    let visible: &[&str] = if clamped {
+        &lines[..CLAMP_LINES]
     } else {
         &lines
     };
+    let hidden = lines.len() - visible.len();
+
+    let surface = with_alpha(theme().bg_hover, 0.3);
+    let mut body = div()
+        .w_full()
+        .min_w_0()
+        .px(px(8.0))
+        .py(px(6.0))
+        .text_color(if is_error {
+            theme().danger
+        } else {
+            theme().text_secondary
+        })
+        .text_size(px(code_size))
+        .font_family(crate::theme::FONT_MONO);
+    for line in visible {
+        body = body.child(div().w_full().min_w_0().child(line.to_string()));
+    }
 
     let mut block = div()
         .w_full()
         .min_w_0()
         .mt(px(8.0))
-        .px(px(8.0))
-        .py(px(6.0))
         .rounded(px(6.0))
-        .bg(with_alpha(theme().bg_hover, 0.3))
-        .text_color(theme().text_secondary)
-        .text_size(px(code_size))
-        .font_family(crate::theme::FONT_MONO);
+        .overflow_hidden()
+        .bg(surface)
+        // `relative` so the fade can sit over the last lines. The clamp shows
+        // fewer lines rather than scrolling: a scroll region nested inside the
+        // scrolling feed costs the reader their place in the outer scroll.
+        .relative()
+        .child(body);
 
-    for line in visible {
-        block = block.child(div().w_full().min_w_0().child(line.to_string()));
-    }
-
-    if truncated {
-        let remaining = lines.len() - MAX_RESULT_LINES;
+    if clamped {
         block = block.child(
             div()
-                .mt(px(4.0))
-                .text_color(with_alpha(theme().text_faint, 0.7))
+                .absolute()
+                .bottom(px(0.0))
+                .left(px(0.0))
+                .right(px(0.0))
+                .h(px(code_size * 2.5))
+                // Purely decorative. A plain div registers no mouse handlers,
+                // so it does not intercept the click on the control below it.
+                .bg(linear_gradient(
+                    180.0,
+                    linear_color_stop(with_alpha(surface, 0.0), 0.0),
+                    linear_color_stop(surface, 1.0),
+                )),
+        );
+    }
+
+    if lines.len() > CLAMP_LINES {
+        let label = if clamped {
+            format!("Show {hidden} more lines")
+        } else {
+            "Show less".to_string()
+        };
+        let now_open = !clamped;
+        block = block.child(
+            div()
+                .id(ElementId::Name(format!("output-toggle-{block_id}").into()))
+                .w_full()
+                .px(px(8.0))
+                .py(px(3.0))
+                .cursor(gpui::CursorStyle::PointingHand)
+                .text_color(theme().accent)
                 .text_size(px(code_size))
-                .child(format!("…{remaining} more lines")),
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _event, _window, cx| {
+                        this.output_open.insert(block_id, !now_open);
+                        cx.notify();
+                    }),
+                ),
         );
     }
 
@@ -1550,6 +1804,36 @@ fn render_diff(
         .map(|c| (c.tag(), c.value().trim_end_matches('\n').to_string()))
         .collect();
 
+    // DEV-577: the lines collect into a body that scrolls sideways as one.
+    // One scroller for the whole diff, not one per line — per-line scrollers
+    // would drift out of step with each other and make the diff unreadable.
+    //
+    // Three properties, each load-bearing:
+    //   * `whitespace_nowrap` stops the wrap. GPUI measures text against the
+    //     width it is offered, so without it a line re-wraps to the scroller's
+    //     width however the flex item is sized.
+    //   * an explicit `w` from the longest line gives the scroller a real
+    //     content size. Nowrap text paints past its bounds without reporting a
+    //     wider measured size, so without this the scroller sees content the
+    //     size of its own viewport and clips instead of scrolling — which
+    //     hides the end of a line with no way to reach it.
+    //   * `items_start` lets each line size to itself; `min_w` on the lines
+    //     then brings the short ones back up so the +/- backgrounds line up.
+    const DIFF_LINE_CHROME: f32 = 10.0 + 10.0 + 10.0 + 6.0;
+    let widest = changes
+        .iter()
+        .map(|(_, line)| line.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    let mut body = div()
+        .w(mono_width(widest, code_size) + px(DIFF_LINE_CHROME))
+        .min_w(relative(1.0))
+        .flex()
+        .flex_col()
+        .items_start()
+        .whitespace_nowrap();
+
     let mut i = 0;
     while i < changes.len() {
         // Try to pair consecutive Delete+Insert runs for intraline highlighting.
@@ -1584,7 +1868,7 @@ fn render_diff(
             if hunk_ratio < 0.4 {
                 // Structural replacement — group reds then greens.
                 for change in &changes[del_start..del_end] {
-                    diff = diff.child(render_diff_line_plain(
+                    body = body.child(render_diff_line_plain(
                         "-",
                         &change.1,
                         code_size,
@@ -1593,7 +1877,7 @@ fn render_diff(
                     ));
                 }
                 for change in &changes[ins_start..ins_end] {
-                    diff = diff.child(render_diff_line_plain(
+                    body = body.child(render_diff_line_plain(
                         "+",
                         &change.1,
                         code_size,
@@ -1609,21 +1893,21 @@ fn render_diff(
                     let ins_line = &changes[ins_start + j].1;
                     let ratio = strsim_ratio(del_line, ins_line);
                     if ratio > 0.4 {
-                        diff = diff.child(render_diff_line_intraline(
+                        body = body.child(render_diff_line_intraline(
                             "-", del_line, ins_line, true, code_size,
                         ));
-                        diff = diff.child(render_diff_line_intraline(
+                        body = body.child(render_diff_line_intraline(
                             "+", ins_line, del_line, false, code_size,
                         ));
                     } else {
-                        diff = diff.child(render_diff_line_plain(
+                        body = body.child(render_diff_line_plain(
                             "-",
                             del_line,
                             code_size,
                             with_alpha(theme().danger, 0.8),
                             with_alpha(theme().danger, 0.1),
                         ));
-                        diff = diff.child(render_diff_line_plain(
+                        body = body.child(render_diff_line_plain(
                             "+",
                             ins_line,
                             code_size,
@@ -1633,7 +1917,7 @@ fn render_diff(
                     }
                 }
                 for j in paired..del_count {
-                    diff = diff.child(render_diff_line_plain(
+                    body = body.child(render_diff_line_plain(
                         "-",
                         &changes[del_start + j].1,
                         code_size,
@@ -1642,7 +1926,7 @@ fn render_diff(
                     ));
                 }
                 for j in paired..ins_count {
-                    diff = diff.child(render_diff_line_plain(
+                    body = body.child(render_diff_line_plain(
                         "+",
                         &changes[ins_start + j].1,
                         code_size,
@@ -1656,7 +1940,7 @@ fn render_diff(
 
         // Equal line.
         if i < changes.len() && changes[i].0 == ChangeTag::Equal {
-            diff = diff.child(render_diff_line_plain(
+            body = body.child(render_diff_line_plain(
                 " ",
                 &changes[i].1,
                 code_size,
@@ -1667,7 +1951,10 @@ fn render_diff(
         }
     }
 
-    diff
+    diff.child(scroll_x(
+        ElementId::Name(format!("diff-body-{block_id}").into()),
+        body,
+    ))
 }
 
 fn strsim_ratio(a: &str, b: &str) -> f64 {
@@ -1691,9 +1978,17 @@ fn render_diff_line_plain(
     text_color: Hsla,
     bg_color: Hsla,
 ) -> Div {
+    // No `w_full().min_w_0()` and no `flex_1` on the text: those are what made
+    // a long line wrap, and a wrapped diff line renders its continuation
+    // without the +/- that says which side it came from (DEV-577). The line
+    // keeps its natural width; the body around it scrolls.
     div()
-        .w_full()
-        .min_w_0()
+        .flex_shrink_0()
+        // At least as wide as the body, so a short line's background reaches
+        // the same right edge as a long one instead of stopping where its text
+        // happens to end. Wider than the body when the line is longer — that is
+        // what there is to scroll.
+        .min_w(relative(1.0))
         .px(px(10.0))
         .py(px(1.0))
         .bg(bg_color)
@@ -1710,8 +2005,7 @@ fn render_diff_line_plain(
         )
         .child(
             div()
-                .flex_1()
-                .min_w_0()
+                .flex_shrink_0()
                 .text_color(text_color)
                 .text_size(px(code_size))
                 .font_family(crate::theme::FONT_MONO)
@@ -1797,9 +2091,11 @@ fn render_diff_line_intraline(
 
     let styled = StyledText::new(SharedString::from(full_text)).with_runs(merged);
 
+    // Sized to its content for the same reason as the plain line: the body
+    // scrolls, the line does not wrap (DEV-577).
     div()
-        .w_full()
-        .min_w_0()
+        .flex_shrink_0()
+        .min_w(relative(1.0))
         .px(px(10.0))
         .py(px(1.0))
         .bg(bg_color)
@@ -1814,13 +2110,7 @@ fn render_diff_line_intraline(
                 .font_family(crate::theme::FONT_MONO)
                 .child(prefix),
         )
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .text_size(px(code_size))
-                .child(styled),
-        )
+        .child(div().flex_shrink_0().text_size(px(code_size)).child(styled))
 }
 
 // ── Session end ───────────────────────────────────────────────────
@@ -1923,9 +2213,9 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
         .px(px(10.0))
         .py(px(6.0))
         .rounded(px(6.0))
-        .bg(with_alpha(theme().accent, 0.08))
+        .bg(with_alpha(theme().accent, 0.12))
         .border_l_2()
-        .border_color(with_alpha(theme().accent, 0.5))
+        .border_color(with_alpha(theme().accent, 0.75))
         .child(
             div()
                 .w_full()
@@ -1945,6 +2235,7 @@ fn render_user_prompt(content: &str, font_size: f32) -> Div {
                     div()
                         .flex_1()
                         .min_w_0()
+                        .max_w(prose_width(font_size))
                         .text_color(theme().text_primary)
                         .text_size(px(font_size))
                         .child(content.to_string()),
@@ -2346,5 +2637,55 @@ mod unread_tests {
             unread.mark_viewed(h);
         }
         assert_eq!(count(&doc, &unread), 0, "acknowledging clears unread");
+    }
+}
+
+#[cfg(test)]
+mod clamp_tests {
+    // Imported by name rather than with a glob: this module's `use gpui::*`
+    // brings in gpui's own `test` attribute macro, which shadows the built-in
+    // one and sends `#[test]` into infinite expansion.
+    use super::{output_is_clamped, CLAMP_LINES};
+
+    #[test]
+    fn short_output_never_clamps() {
+        for lines in 0..=CLAMP_LINES {
+            assert!(
+                !output_is_clamped(lines, false, None),
+                "{lines} lines fit and must gain no fade or control"
+            );
+        }
+    }
+
+    #[test]
+    fn long_output_clamps_by_default() {
+        assert!(output_is_clamped(CLAMP_LINES + 1, false, None));
+        assert!(output_is_clamped(5_000, false, None));
+    }
+
+    #[test]
+    fn a_failed_call_opens_by_default() {
+        // The usual reason to read a tool result at all is that it went wrong.
+        assert!(!output_is_clamped(5_000, true, None));
+    }
+
+    #[test]
+    fn a_failed_call_can_still_be_collapsed() {
+        // Which is why this takes an override rather than a plain flag: the
+        // default is not uniform, and both directions must be reversible.
+        assert!(output_is_clamped(5_000, true, Some(false)));
+    }
+
+    #[test]
+    fn the_reader_can_open_a_long_successful_result() {
+        assert!(!output_is_clamped(5_000, false, Some(true)));
+    }
+
+    #[test]
+    fn an_override_cannot_clamp_output_that_already_fits() {
+        // Nothing is hidden, so there is nothing to reveal — a control here
+        // would promise something it cannot deliver.
+        assert!(!output_is_clamped(3, false, Some(false)));
+        assert!(!output_is_clamped(3, true, Some(false)));
     }
 }

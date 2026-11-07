@@ -42,10 +42,12 @@ The core primitives:
   in its own pseudoterminal, rendered inside a GPUI terminal widget.
 - **Git archive refs** — when a session closes, its branch is archived
   under `refs/allele/archive/<id>` on canonical so work is never lost
-  and can be merged back.
+  and can be restored into a new session.
 - **Hook events** — Claude Code's hook system writes JSONL files to
-  `~/.allele/events/`. Allele polls them to update session status
-  (Running / AwaitingInput / ResponseReady / Done).
+  `<root>/.allele/events/`. Allele polls them to update session status
+  (Running / AwaitingInput / ResponseReady / Done). The directory is
+  substituted into the receiver script at install time, so a redirected
+  instance's sessions report to *that* instance (DEV-951).
 
 Everything else in the codebase exists to make those four things
 ergonomic.
@@ -68,7 +70,7 @@ src/
 │   ├── server.rs           # ~/.allele/control.sock, 0600
 │   ├── handler.rs          # read-only ops, non-interactive by contract
 │   ├── create.rs           # sessions.create — the only async operation
-│   ├── admission.rs        # dispatched-session cap + depth limit
+│   ├── admission.rs        # dispatched-session cap + depth limit (§4.8)
 │   ├── address.rs          # durable session addresses (never name-derived)
 │   └── mcp.rs              # `Allele --mcp-serve` stdio MCP server
 ├── repositories.rs         # SettingsRepository + StateRepository traits
@@ -81,6 +83,11 @@ src/
 ├── pending_actions.rs      # dispatch_pending_action + 8 family handlers
 ├── session_ops.rs          # add/resume/close/remove/navigate session + config
 ├── hook_events.rs          # apply_hook_event + trigger_auto_naming
+├── remote/                 # multi-machine transport (DEV-1159)
+│   ├── identity.rs         # per-data-root secret key (Keychain) + machine name
+│   ├── transport.rs        # PeerTransport / PeerConnection seam, PeerId, config
+│   ├── link.rs             # PeerLink: heartbeat-driven close-stale-then-redial
+│   └── iroh_transport.rs   # the iroh adapter — the only file naming `iroh`
 ├── reader.rs               # Reader tab (read-only file tree, preview, context menu)
 ├── sidebar/render.rs       # build_sidebar_items (project tree + archives)
 ├── drawer/mod.rs           # render_drawer + drawer tab helpers
@@ -89,7 +96,7 @@ src/
 ├── browser/                # macOS-only Chrome AppleScript driver
 ├── clone/                  # Workspace clone + trash + orphan sweep
 ├── config/                 # allele.json (per-project config) parser
-├── git/                    # git subprocess wrapper (pull, merge, archive)
+├── git/                    # git subprocess wrapper (pull, branch, archive)
 ├── hooks/                  # Hook receiver install + event watcher + dialogs
 ├── project/                # Project struct (source path, sessions, archives)
 ├── scratch_pad/            # Compose overlay entity + clipboard image helper
@@ -160,7 +167,7 @@ for Chrome, `open(1)`, `afplay`, Cocoa dialogs). Scattering
 `#[cfg(target_os = "macos")]` through business logic made porting
 infeasible.
 
-**Solution**: three traits in `platform/mod.rs` carve the OS boundary:
+**Solution**: four traits in `platform/mod.rs` carve the OS boundary:
 
 - **`CloneBackend`** — copy-on-write cloning. `clone(src, dst)`,
   `supports_cow()`, `name()`. macOS uses `libc::clonefile`; non-macOS
@@ -170,11 +177,14 @@ infeasible.
   drives Chrome via AppleScript. Non-macOS returns `false` / `None`
   everywhere — callers fall back to `SystemShell::open_url`.
 - **`SystemShell`** — miscellaneous OS primitives: `open_url`,
-  `reveal_in_files`, `play_sound`, `show_fatal_dialog`. macOS wraps
-  `open`, `afplay`, `NSAlert`. Non-macOS uses `xdg-open`/`explorer`
-  with logged stubs for sound/dialog.
+  `reveal_in_files`, `play_sound`, `show_fatal_dialog`, `computer_name`.
+  macOS wraps `open`, `afplay`, `NSAlert`, `scutil`. Non-macOS uses
+  `xdg-open`/`explorer` with logged stubs for sound/dialog.
+- **`SecretStore`** — small secrets by `(service, account)`: `load`,
+  `store`. macOS is the login Keychain. Non-macOS **refuses** with
+  `PlatformUnsupported` — it never falls back to a file (DEV-1159).
 
-**Bundle**: `Platform` holds all three behind `Arc<dyn Trait>` so
+**Bundle**: `Platform` holds all four behind `Arc<dyn Trait>` so
 background tasks get cheap clones.
 
 **Selection**: `Platform::detect()` picks per `#[cfg(target_os)]` at
@@ -221,8 +231,10 @@ to the existing inherent `Settings::{load,save}` methods so the seed
 logic + atomic-write semantics stay in one place.
 
 **Tests**: `InMemorySettingsRepository` / `InMemoryStateRepository`
-(gated `#[cfg(test)]`) provide deterministic fakes — tests set
-initial state, run handlers, assert on the saved state.
+in `repositories::fakes` (gated `#[cfg(test)]`, crate-visible so any
+module can reach them) provide deterministic fakes — tests set initial
+state, run handlers, assert on the saved state. `app_state::fixture`
+bundles them into a drivable `AppState`; see §5.6.
 
 **Injection**: `Repositories` bundle lives on `AppState.repos`,
 Arc-cloned into background tasks. `AppState::save_state` /
@@ -312,12 +324,10 @@ with variants for the real failure categories: `Io`, `Json`, `Git`,
 - ✅ `clone::*` — all 7 public fns (`create_session_clone`, `create_clone`,
   `delete_clone`, `trash_base`, `trash_clone`, `purge_trash_older_than_days`,
   `sweep_orphans`)
-- ✅ `git::*` public fns — 15 of them (`pull`,
-  `fetch_and_rebase_onto_remote_branch`, `git_init`, `create_session_branch`,
+- ✅ `git::*` public fns — 11 of them (`pull`, `git_init`, `create_session_branch`,
   `fetch_session_branch`, `auto_commit_if_dirty`, `archive_session`,
-  `delete_ref`, `prune_archive_refs`, `list_archive_refs`, `merge_archive`,
-  `squash_merge_archive`, `rebase_merge_archive`, `rename_session_branch`,
-  `rename_current_branch`)
+  `delete_ref`, `prune_archive_refs`, `list_archive_refs`,
+  `rename_session_branch`, `rename_current_branch`)
 - ⏳ `git::run_git` / `run_git_stdout` internal helpers remain on
   `anyhow::Result` — bridged at each public call site via
   `.map_err(|e| AlleleError::Git(e.to_string()))`. These stay on anyhow by
@@ -392,6 +402,67 @@ rename (e.g. auto-naming updates labels but never IDs).
 astronomically rare; when detected, a `-alt` suffix is appended.
 Never treat clone paths as stable outside this layout.
 
+### 4.8 Dispatch admission: depth before capacity, both from settings
+
+`dispatch::admission::admit` is the only gate on `sessions.create`, and it
+checks two independent limits (DEV-415):
+
+- **Depth** — how deep dispatch may nest. A human's session is depth 0,
+  what it dispatches is depth 1, and so on. Default **1**: a human's
+  session may dispatch, its workers may not.
+- **Cap** — dispatched sessions that exist at once, counted globally across
+  every dispatcher and depth. Default **20**. Human-started sessions are
+  never counted.
+
+Both are configurable in `settings.json` (DEV-600), for machines whose owner
+runs orchestrators that need workers to dispatch a helper of their own:
+
+```json
+"dispatch": { "max_depth": 2, "max_sessions": 30 }
+```
+
+Either key may be omitted and keeps its default; `max_depth: 0` turns
+dispatch off. Settings are read at startup, so a change needs a relaunch —
+and since allele rewrites the whole file on save, edit it while allele is
+quit. There is deliberately no settings-window control.
+
+What must stay true whatever the configuration:
+
+- **A child's depth is derived from allele's record of its creator,** never
+  from the request. `CreateRequest` carries no depth and no limit fields.
+- **Depth is checked before capacity,** so a recursion attempt is reported as
+  recursion rather than as "capacity", which would invite a retry that can
+  never succeed.
+- **Depth arithmetic cannot wrap or saturate** (`checked_add`), so even
+  `max_depth: 255` ends.
+- **The defaults stay 1 and 20.** Raising depth is an opt-in, never a
+  default: every dispatched session runs the same "dispatch when
+  parallelisable" rule, so each allowed level multiplies the fleet.
+
+These bound *dispatch* recursion by an agent following its own rules. They
+are not a security control — a session with a shell can reach processes and
+files allele cannot see; see DEV-419.
+### 4.9 `cx.notify()` can flush the dirty flags before you read them
+
+A handler that calls `cx.notify()` schedules a redraw, and `Render::render`
+ends in `checkpoint_persistence()`. So the sequence is:
+
+```
+handler mutates + mark_settings_dirty()  →  cx.notify()
+   →  next frame renders  →  checkpoint_persistence()  →  flags drained, file written
+```
+
+The consequence, and the reason this is written down: **by the time control
+returns to whatever called the handler, the flags may already be `false` and
+the write already done.** A handler that does *not* notify leaves them set
+until the next render.
+
+This is the coordinator working as designed — not a bug — but it makes
+"did this handler mark dirty?" unanswerable after the fact. Tests must
+capture the flags in the same update block as the dispatch;
+`fixture::Fixture::dispatch` returns them for exactly this reason (§5.6).
+It cost an afternoon once (DEV-518); it should not cost a second one.
+
 ---
 
 ## 5. Extension recipes
@@ -454,6 +525,60 @@ family? If yes:
 4. Add `handle_foo_action` to `pending_actions.rs` and a delegator
    arm in `dispatch_pending_action`
 
+### 5.6 Write a handler-level test
+
+Handlers take `&mut Window` and `&mut Context<AppState>`, so testing one
+means standing a real `AppState` up inside a headless GPUI window. That is
+what `app_state::fixture::Fixture` is for (`#[cfg(test)]`): it builds the
+struct literal with the `InMemory*Repository` fakes from
+`repositories::fakes` in `AppState.repos`, so nothing the test does can
+reach `~/.config/allele` or `~/.allele`.
+
+```rust
+#[gpui::test]
+fn toggling_the_sidebar_is_persisted(cx: &mut TestAppContext) {
+    let fx = Fixture::new(cx);
+
+    let dirty = fx.dispatch(SidebarAction::ToggleSidebar, cx);
+    assert_eq!(dirty, (/* state */ false, /* settings */ true));
+
+    fx.checkpoint(cx);
+    assert!(!fx.settings.snapshot().sidebar_visible);
+}
+```
+
+1. Build the fixture: `Fixture::new(cx)` for an empty app,
+   `Fixture::with_projects(..)`, or `Fixture::build(FixtureSpec { .. }, cx)`
+   to seed projects, settings, persisted state and the active cursor
+2. Drive the action with `fx.dispatch(SomeAction::Variant, cx)` — it goes
+   through `dispatch_pending_action`, so the stale-confirmation guard and
+   the refocus epilogue run exactly as they do in production
+3. Assert **persistence intent**, not a write: `dispatch` returns
+   `(state_dirty, settings_dirty)` as the handler left them. Asserting on
+   `repos` before a checkpoint would be asserting the wrong contract —
+   §7.2 says handlers mark, the coordinator writes
+4. Call `fx.checkpoint(cx)` to run `checkpoint_persistence()`, then assert
+   on `fx.settings.snapshot()` / `fx.state.snapshot()`, and on
+   `save_count()` where write coalescing is the thing under test
+5. Reach the live struct with `fx.update(cx, |state, window, cx| ..)` for
+   anything the helpers don't cover
+
+Two things to know before extending it:
+
+- **A handler that calls `cx.notify()` schedules a redraw, and the real
+  `Render::render` ends in `checkpoint_persistence()`.** The flags can
+  therefore already be drained by the time the *next* `update` runs. That
+  is the coordinator working, not a fixture artefact — it is why intent is
+  captured in-band by `dispatch` rather than read back afterwards.
+- **The fixture is not a full replica of the production window.** Its text
+  inputs are created bare, without the `cx.subscribe` wiring `main.rs`
+  attaches, and no terminals are spawned. Handlers that spawn a PTY, open a
+  native dialog, or shell out to git are out of scope; the state-transition
+  half of the dispatcher is what this covers.
+
+See `pending_actions.rs`'s test module for worked examples across the
+sidebar, project, settings and archive families.
+
 ---
 
 ## 6. The macOS coupling status
@@ -494,6 +619,24 @@ env filter depends on consistent tracing usage.
 Use `mark_state_dirty()` / `mark_settings_dirty()`. The coordinator
 at the render tick coalesces writes.
 
+The same rule bans a handler building its own `Settings` value and
+calling the data type's inherent `save()` on it — that is the same
+bypass wearing a different hat. Two things go wrong, and neither is
+visible:
+
+1. **No coalescing.** Dragging the font-size slider wrote settings.json
+   on every step (DEV-520).
+2. **It escapes `AppState.repos`.** An inherent `save()` goes straight
+   to `~/.config/allele/settings.json` — *including under `cargo test`*,
+   where it writes the developer's real config and no fixture can
+   intercept it.
+
+Enforced by `only_the_coordinator_saves_directly` in
+`tests/architecture.rs`, which flags any argument-less `.save()` inside
+an `impl AppState` block outside `checkpoint_persistence`. The arity is
+the tell: the sanctioned call passes the value
+(`self.repos.settings.save(&settings)`), every bypass takes none.
+
 ### 7.3 Don't reach for `platform::global()` from `AppState` methods
 
 Use `self.platform` instead. The global is a concession for leaf
@@ -533,13 +676,28 @@ written there desynchronises the client's parser, and the symptom points
 at the wrong layer entirely — it presents as a malformed server, so the
 next person debugs the protocol code rather than the logging.
 
-`dispatch::mcp::exit_if_serving()` runs before anything else in `main`
-and installs `errors::init_tracing_stderr()`. Keep it first, and keep any
-new MCP-mode diagnostics on stderr. This applies to anything built over
-stdio, not just this server.
+`dispatch::mcp::exit_if_serving()` installs `errors::init_tracing_stderr()`
+as its first side effect, and nothing above it in `main` may write to
+stdout or log. Keep any new MCP-mode diagnostics on stderr. This applies to
+anything built over stdio, not just this server.
 
-Every unit test passed with the bug present. It was found by driving the
-server by hand.
+Exactly two things precede it, both deliberately: `cli::classify` and
+`paths::launch_root`. Both are pure — they return a value, a refusal goes
+to stderr, and neither touches the filesystem. They have to come first for
+the opposite reason: the server resolves its control socket through
+`paths`, so before DEV-943 — when the hand-off really was the first line
+of `main` — an MCP client launched with `--sandbox` or `ALLELE_HOME`
+silently served the **live** app. The ordering is therefore a pair of
+constraints, not one: decide the root above the hand-off, claim stdout
+inside it, and put nothing else in between.
+
+Every unit test passed with the stdout bug present, and every unit test
+passed with the wrong-root bug present too. Both were found by driving the
+server by hand — a test that rebuilds an expected value cannot see a
+defect that lives in the order two correct functions run. `cargo test`
+covers which socket each launch picks
+(`dispatch::mcp::tests::the_socket_follows_the_launch_root`); it cannot
+cover `exit_if_serving` itself, which ends in `process::exit`.
 
 ### 7.9 Don't let the control socket raise UI
 
@@ -551,6 +709,13 @@ than proceeded with. A prompt nobody can answer is a hang, and a hang is
 the failure this whole surface exists to avoid — see
 `ErrorCode::AlleleNotRunning`, which allele can never send because a
 refused `connect()` is what makes "not running" legible.
+
+The same holds for **paired machines** (DEV-1161). `remote::control` hands a
+peer's request to the very drain `control.sock` feeds, so it meets the same
+non-interactive handler — and it must not bring the window forward either: a
+person at the other Mac is not at this one. `tests/architecture.rs` allows a
+window-raising call (`activate`, `activate_window`) only in `src/main.rs` and
+`src/startup/actions.rs`, which act for the person at this machine.
 
 ### 7.10 A session address is never derived from its name
 
@@ -587,6 +752,119 @@ display string.
 
 ---
 
+### 7.11 Don't make two feature modules depend on each other
+
+`reader` renders Markdown through `rich::markdown`. That is the dependency
+pointing the way it should — a reading surface using the shared renderer.
+
+When `rich::markdown` needed syntax highlighting it reached back into
+`reader::highlight`, and the two feature modules then depended on each other's
+implementation modules, with `reader` exposing its own purely so `rich` could
+borrow them. Rust permits the cycle, nothing failed, and no test noticed — which
+is exactly why it would have quietly got worse.
+
+Shared capability belongs in a neutral module both consume. The highlighter was
+never reader-specific: it maps an extension to a grammar and produces styled
+runs. It now lives in `src/syntax/`, and `tests/architecture.rs` fails if
+anything under `src/rich/` names `crate::reader` again.
+
+The rule is deliberately directional. Banning every cross-feature reference
+would ban the legitimate one too.
+
+One trap worth knowing: there are **two** modules called `reader`. `crate::reader`
+is the Project Reader; `crate::rich::reader` is DEV-31's transcript navigation,
+which `rich_view` uses via `super::reader`. The rule matches `crate::reader`
+only, because matching the bare name flags the wrong one.
+
+### 7.12 Don't leave anything Allele spawns to guess the data root
+
+An agent Allele spawns re-derives Allele's root from scratch, and nothing
+in its situation tells it which instance started it. `--mcp-serve`
+resolves the control socket through `paths::launch_root`, and the
+registration Claude Code launches that server from — one global entry in
+`~/.claude.json`, shared by every session on the machine — passes it no
+flags. So the root has to arrive **per session**, on the spawned
+process's environment, or not at all.
+
+`paths::child_home_env()` is that value. `agents::build_command`
+resolves it once and hands it to `AgentAdapter::event_integration`;
+adapters take it as a parameter and never read `paths` themselves. Two
+reasons, and the second is the one that bites: a second resolution chain
+is how §7.8 happened, and `paths::init` fixes a process-global `OnceLock`
+that one test in this binary already sets — an adapter reading it would
+be racing that test, untestable in one branch and flaky in the other.
+
+**The rule is every child, not every agent.** DEV-947 wired the agent and
+left three doors open, and each reproduced its symptom by a different
+route — the worst of them a drawer terminal, where no adapter runs at
+all, so a `claude` typed in the drawer of a sandbox window drove the live
+app (DEV-950, reproduced before it was fixed). There are now three places
+the root is applied, all reading the one function:
+
+| What | Where | Covers |
+| -- | -- | -- |
+| agent PTY | `AgentAdapter::event_integration`, via `build_command` | every adapter — the trait **default exports it**, so an adapter that overrides nothing still carries it |
+| any terminal | `terminal::pty_terminal::pty_env` | drawer shells, the agent PTY, anything added later |
+| `startup` / `shutdown` | `paths::overlay_child_home` at both call sites | project scripts, which are arbitrary shell |
+
+An exception list is what went wrong the first time, so there isn't one.
+A binary that ignores `ALLELE_HOME` loses nothing by being handed it,
+which is why a `Generic` agent gets it too (decided 12 Oct 2026).
+
+**Ordering is a real choice.** The root goes on *after* the project's
+declared environment (§DEV-485) in both the PTY and the script paths, so
+a project that declares `ALLELE_HOME` cannot point a drawer shell at an
+instance this app is not. That follows the precedence those sites already
+had — project config loses to wiring the app needs to be right — and it
+only bites when there is an instance root to win with: on an ordinary
+launch the value is `None` and a declared one stands.
+
+It has three answers, and the third is the one nobody predicts:
+
+| this instance | the child is told |
+| -- | -- |
+| redirected | the root |
+| the real home, nothing inherited | nothing — `launch_root` still owns that decision |
+| the real home, but it inherited an `ALLELE_HOME` | a **blank** |
+
+The blank exists because a child inherits the environment but not the
+precedence. `--home` and `--sandbox` beat `ALLELE_HOME` for the process
+that reads the flag; a child only sees the variable. So an instance
+launched `--home $HOME` from a terminal inside a sandbox session would
+run against the real home and hand its agent the sandbox — DEV-947
+inverted. `launch_root_from` already reads a blank as no answer, which is
+what makes stating one the way to say "the real home" out loud.
+
+This is the spawn half of §7.8; neither half is sufficient alone, and
+before DEV-947 only the flag half existed. The naming calls
+(`naming::call_claude`, `call_opencode`) are the weakest case for the
+rule and follow it anyway: one shot, no session, and `claude` runs
+`--tools none`. But `opencode run` carries no such restriction and is
+safe only while nothing registers an `allele` MCP server with opencode —
+which is the same temporary accident this section says the opencode
+adapter should not rely on. The external editor command is the one
+genuine exclusion: it opens a file, and spawns nothing that resolves a
+root.
+
+### 7.13 Don't name `iroh` outside its adapter
+
+Multi-machine (DEV-1159) talks to other Macs over iroh, but only
+`src/remote/iroh_transport.rs` may name the crate. Everything else — pairing,
+the remote listener, the UI — speaks `remote::PeerTransport` /
+`remote::PeerConnection` and `remote::PeerId`. iroh types are translated into
+crate types at that one file's edge.
+
+Two reasons. A later adapter (Tailscale, plain LAN) stays a new file rather
+than a rewrite (`Plans/MULTI-MACHINE-PROPOSAL.md` §3.1). And the code above the
+seam stays testable without a network: `remote::link`'s reconnect logic is
+tested against an in-memory transport. `tests/architecture.rs` enforces it,
+matching `iroh` as a path's first segment so `remote::iroh_transport` itself is
+not a false positive.
+
+Related: the machine's secret key goes through `platform::SecretStore` (the
+Keychain), never a file. A platform without a secure store refuses rather than
+falling back to disk.
+
 ## 8. Open follow-ups
 
 Known work not yet landed, in rough priority order:
@@ -597,8 +875,8 @@ Known work not yet landed, in rough priority order:
   it worth doing before someone loses an afternoon to it. Candidates: the
   `Render` impl, the macOS app menu, and the startup task wiring.
 - Adopt `AlleleError` in the remaining `git::*` functions
-  (`fetch_and_rebase_onto_remote_branch`, `auto_commit_if_dirty`,
-  `delete_ref`, `list_archive_refs`, `prune_archive_refs`, etc.)
+  (`auto_commit_if_dirty`, `delete_ref`, `list_archive_refs`,
+  `prune_archive_refs`, etc.)
 - Extend repositories: `ScratchPadRepository`, `ArchivesRepository`
 - `unwrap()` audit in `session_ops.rs` + `pending_actions.rs`
   (started; see `docs/unwrap-audit.md` if present)
@@ -607,8 +885,11 @@ Known work not yet landed, in rough priority order:
   add it.
 - Windows port: rustix-openpty is Unix-only; needs a Windows PTY
   backend (ConPTY) gated behind `cfg(windows)`.
-- Tests using `InMemory*Repository` fakes — the scaffolding exists
-  but no handler-level tests have been written yet.
+- Broaden handler-level test coverage. `app_state::fixture::Fixture`
+  (§5.6) landed with tests across four of the eight `PendingAction`
+  families — sidebar, project, settings, archive. The session and drawer
+  families are the gap, and they are the hard ones: their handlers spawn
+  PTYs and shell out to git, which the fixture deliberately does not fake.
 
 ---
 

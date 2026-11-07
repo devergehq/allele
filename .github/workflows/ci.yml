@@ -3,10 +3,42 @@ name: CI
 # Fast, per-PR checks. Kept separate from release.yml (which only runs on
 # `v*` tags).
 #
+# Runs only on a pull request that is *ready*: a push to a draft starts a run
+# whose jobs all skip, marking a pull request ready runs everything, and a
+# merge to `master` runs nothing because the ready pull request's run already
+# covered that tree (DEV-961). `workflow_dispatch` starts the lot by hand
+# against a branch's current head. Every job carries the gate, because `on:`
+# alone cannot express "not while it is a draft".
+#
+# `converted_to_draft` is in the list so that sending a pull request back to a
+# draft *stops* it: the event starts a run whose jobs all skip, and because
+# that run shares this workflow's concurrency group with whatever is already
+# running for the same pull request, `cancel-in-progress` cancels the in-flight
+# one. Without the type the event fires nothing at all and a run that nobody
+# wants any more carries on to the end.
+#
+# Note the difference between that and GitHub's "Re-run jobs" button: a re-run
+# replays the same commit. So if `master` has moved under a pull request, a
+# re-run of its checks re-validates nothing — only a push, or a rebase onto
+# `master`, tests the tree that would actually be merged.
+#
+# One accepted cost of dropping the `master` push: nothing refreshes the
+# `refs/heads/master`-scoped `Swatinem/rust-cache` entries any more, and a run
+# may restore only caches saved on its own branch or on the default branch. So
+# once those entries age out, or `Cargo.lock` changes their key, each ready
+# pull request pays one cold GPUI/alacritty build instead of sharing a warm
+# one. Free on a public repository, but slower per pull request — and the
+# reason to re-read this trade before copying the rule to a private one.
+#
+# The gate is `github.event_name != 'pull_request' || ... .draft == false`
+# rather than the bare `.draft == false`: on a non-pull-request event the
+# property is missing, and a missing property and `false` both coerce to 0, so
+# the bare form would be accidentally true rather than correct.
+#
 # `rustfmt`, `test`, `architecture`, and `clippy` are all green on the current
-# tree — mark all four as required status checks in the branch-protection rule
-# for `master` (see CONTRIBUTING.md). Without that rule none of this blocks a
-# merge.
+# tree. No branch-protection rule is configured on `master`, so none of these
+# blocks a merge on its own; marking all four as required status checks is what
+# would make them blocking.
 #
 # `clippy` ran advisory-only until DEV-349 cleared its 47 warnings and the
 # deny-level error. It is now blocking, which is the only state in which a
@@ -15,8 +47,8 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches: [master]
+    types: [opened, reopened, synchronize, ready_for_review, converted_to_draft]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -28,6 +60,7 @@ concurrency:
 jobs:
   rustfmt:
     name: rustfmt
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -44,6 +77,7 @@ jobs:
     name: test
     # Must be macOS: the crate pulls in cocoa/objc/core-text/security-framework
     # for the target_os = "macos" paths, which don't build on Linux runners.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -65,6 +99,7 @@ jobs:
     name: architecture
     # Split out from `test` so a violated ARCHITECTURE.md invariant is obvious
     # in the status list rather than buried in the full test output.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: macos-14
     steps:
       - name: Checkout
@@ -83,6 +118,7 @@ jobs:
 
   clippy:
     name: clippy
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: macos-14
     steps:
       - name: Checkout

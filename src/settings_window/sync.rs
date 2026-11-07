@@ -67,14 +67,14 @@ fn non_empty(s: &str) -> Option<String> {
     (!t.is_empty()).then(|| t.to_string())
 }
 
-// --- background key operations (run off the UI thread via `sync::rt`) --------
+// --- background key operations (run off the UI thread via `rt`) --------
 
 fn check_key(config: &S3Config) -> anyhow::Result<EncState> {
     if crypto::keychain::load()?.is_some() {
         return Ok(EncState::Ready);
     }
     let store = S3Store::new(config)?;
-    let exists = crate::sync::rt::block_on(store.get(KEYRING_OBJECT_KEY))?.is_some();
+    let exists = crate::rt::block_on(store.get(KEYRING_OBJECT_KEY))?.is_some();
     Ok(if exists {
         EncState::NeedsUnlock
     } else {
@@ -89,13 +89,13 @@ fn create_key(config: &S3Config, passphrase: &str) -> anyhow::Result<()> {
     crypto::keychain::store(&key)?;
     let wrapped = key.wrap_with_passphrase(passphrase)?;
     let store = S3Store::new(config)?;
-    crate::sync::rt::block_on(store.put(KEYRING_OBJECT_KEY, wrapped))?;
+    crate::rt::block_on(store.put(KEYRING_OBJECT_KEY, wrapped))?;
     Ok(())
 }
 
 fn unlock_key(config: &S3Config, passphrase: &str) -> anyhow::Result<()> {
     let store = S3Store::new(config)?;
-    let blob = crate::sync::rt::block_on(store.get(KEYRING_OBJECT_KEY))?
+    let blob = crate::rt::block_on(store.get(KEYRING_OBJECT_KEY))?
         .ok_or_else(|| anyhow::anyhow!("no keyring found in the bucket"))?;
     let key = DataKey::unwrap_with_passphrase(&blob, passphrase)?;
     crypto::keychain::store(&key)?;
@@ -211,7 +211,7 @@ impl SyncSection {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    crate::sync::rt::block_on(crate::sync::connect::validate_bucket(&config))
+                    crate::rt::block_on(crate::sync::connect::validate_bucket(&config))
                 })
                 .await;
             let _ = this.update(cx, |this, cx| {
