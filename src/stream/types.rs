@@ -434,6 +434,15 @@ pub enum RichEvent {
         hook_name: String,
     },
 
+    /// A producer's status frame, carried as an `agent.status` key in a hook
+    /// response (DEV-514). This is the *typed* replacement for reading Locus
+    /// phase names out of assistant prose; the outcome distinguishes a frame
+    /// Allele implements from one whose contract version it does not, so a
+    /// mismatch can degrade visibly instead of rendering nothing.
+    AgentStatus {
+        outcome: crate::rich::locus_status::FrameOutcome,
+    },
+
     /// A compact one-line annotation for a session event that carries real
     /// narrative signal but isn't conversation — a PR opened, an artifact
     /// published, a file edited outside Claude (DEV-321).
@@ -476,6 +485,12 @@ pub enum NoticeKind {
     Queued,
     /// A hook reported an error.
     HookError,
+    /// A producer sent a status frame Allele cannot read — an unsupported
+    /// contract version, or a malformed frame (DEV-514). This exists so a
+    /// version mismatch is *visible*: rendering nothing would be
+    /// indistinguishable from "no producer running", which is the silent
+    /// cross-repository break the contract was introduced to prevent.
+    StatusUnsupported,
 }
 
 impl NoticeKind {
@@ -489,11 +504,12 @@ impl NoticeKind {
             NoticeKind::PlanAccepted => "✓",
             NoticeKind::Queued => "⋯",
             NoticeKind::HookError => "⚠",
+            NoticeKind::StatusUnsupported => "⚠",
         }
     }
 
     /// True when this notice reports a failure and should be coloured as one.
     pub fn is_error(self) -> bool {
-        matches!(self, NoticeKind::HookError)
+        matches!(self, NoticeKind::HookError | NoticeKind::StatusUnsupported)
     }
 }

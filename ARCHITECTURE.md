@@ -83,6 +83,11 @@ src/
 ├── pending_actions.rs      # dispatch_pending_action + 8 family handlers
 ├── session_ops.rs          # add/resume/close/remove/navigate session + config
 ├── hook_events.rs          # apply_hook_event + trigger_auto_naming
+├── remote/                 # multi-machine transport (DEV-1159)
+│   ├── identity.rs         # per-data-root secret key (Keychain) + machine name
+│   ├── transport.rs        # PeerTransport / PeerConnection seam, PeerId, config
+│   ├── link.rs             # PeerLink: heartbeat-driven close-stale-then-redial
+│   └── iroh_transport.rs   # the iroh adapter — the only file naming `iroh`
 ├── reader.rs               # Reader tab (read-only file tree, preview, context menu)
 ├── sidebar/render.rs       # build_sidebar_items (project tree + archives)
 ├── drawer/mod.rs           # render_drawer + drawer tab helpers
@@ -162,7 +167,7 @@ for Chrome, `open(1)`, `afplay`, Cocoa dialogs). Scattering
 `#[cfg(target_os = "macos")]` through business logic made porting
 infeasible.
 
-**Solution**: three traits in `platform/mod.rs` carve the OS boundary:
+**Solution**: four traits in `platform/mod.rs` carve the OS boundary:
 
 - **`CloneBackend`** — copy-on-write cloning. `clone(src, dst)`,
   `supports_cow()`, `name()`. macOS uses `libc::clonefile`; non-macOS
@@ -172,11 +177,14 @@ infeasible.
   drives Chrome via AppleScript. Non-macOS returns `false` / `None`
   everywhere — callers fall back to `SystemShell::open_url`.
 - **`SystemShell`** — miscellaneous OS primitives: `open_url`,
-  `reveal_in_files`, `play_sound`, `show_fatal_dialog`. macOS wraps
-  `open`, `afplay`, `NSAlert`. Non-macOS uses `xdg-open`/`explorer`
-  with logged stubs for sound/dialog.
+  `reveal_in_files`, `play_sound`, `show_fatal_dialog`, `computer_name`.
+  macOS wraps `open`, `afplay`, `NSAlert`, `scutil`. Non-macOS uses
+  `xdg-open`/`explorer` with logged stubs for sound/dialog.
+- **`SecretStore`** — small secrets by `(service, account)`: `load`,
+  `store`. macOS is the login Keychain. Non-macOS **refuses** with
+  `PlatformUnsupported` — it never falls back to a file (DEV-1159).
 
-**Bundle**: `Platform` holds all three behind `Arc<dyn Trait>` so
+**Bundle**: `Platform` holds all four behind `Arc<dyn Trait>` so
 background tasks get cheap clones.
 
 **Selection**: `Platform::detect()` picks per `#[cfg(target_os)]` at
@@ -434,6 +442,26 @@ What must stay true whatever the configuration:
 These bound *dispatch* recursion by an agent following its own rules. They
 are not a security control — a session with a shell can reach processes and
 files allele cannot see; see DEV-419.
+### 4.9 `cx.notify()` can flush the dirty flags before you read them
+
+A handler that calls `cx.notify()` schedules a redraw, and `Render::render`
+ends in `checkpoint_persistence()`. So the sequence is:
+
+```
+handler mutates + mark_settings_dirty()  →  cx.notify()
+   →  next frame renders  →  checkpoint_persistence()  →  flags drained, file written
+```
+
+The consequence, and the reason this is written down: **by the time control
+returns to whatever called the handler, the flags may already be `false` and
+the write already done.** A handler that does *not* notify leaves them set
+until the next render.
+
+This is the coordinator working as designed — not a bug — but it makes
+"did this handler mark dirty?" unanswerable after the fact. Tests must
+capture the flags in the same update block as the dispatch;
+`fixture::Fixture::dispatch` returns them for exactly this reason (§5.6).
+It cost an afternoon once (DEV-518); it should not cost a second one.
 
 ---
 
@@ -591,6 +619,24 @@ env filter depends on consistent tracing usage.
 Use `mark_state_dirty()` / `mark_settings_dirty()`. The coordinator
 at the render tick coalesces writes.
 
+The same rule bans a handler building its own `Settings` value and
+calling the data type's inherent `save()` on it — that is the same
+bypass wearing a different hat. Two things go wrong, and neither is
+visible:
+
+1. **No coalescing.** Dragging the font-size slider wrote settings.json
+   on every step (DEV-520).
+2. **It escapes `AppState.repos`.** An inherent `save()` goes straight
+   to `~/.config/allele/settings.json` — *including under `cargo test`*,
+   where it writes the developer's real config and no fixture can
+   intercept it.
+
+Enforced by `only_the_coordinator_saves_directly` in
+`tests/architecture.rs`, which flags any argument-less `.save()` inside
+an `impl AppState` block outside `checkpoint_persistence`. The arity is
+the tell: the sanctioned call passes the value
+(`self.repos.settings.save(&settings)`), every bypass takes none.
+
 ### 7.3 Don't reach for `platform::global()` from `AppState` methods
 
 Use `self.platform` instead. The global is a concession for leaf
@@ -663,6 +709,13 @@ than proceeded with. A prompt nobody can answer is a hang, and a hang is
 the failure this whole surface exists to avoid — see
 `ErrorCode::AlleleNotRunning`, which allele can never send because a
 refused `connect()` is what makes "not running" legible.
+
+The same holds for **paired machines** (DEV-1161). `remote::control` hands a
+peer's request to the very drain `control.sock` feeds, so it meets the same
+non-interactive handler — and it must not bring the window forward either: a
+person at the other Mac is not at this one. `tests/architecture.rs` allows a
+window-raising call (`activate`, `activate_window`) only in `src/main.rs` and
+`src/startup/actions.rs`, which act for the person at this machine.
 
 ### 7.10 A session address is never derived from its name
 
@@ -792,6 +845,25 @@ which is the same temporary accident this section says the opencode
 adapter should not rely on. The external editor command is the one
 genuine exclusion: it opens a file, and spawns nothing that resolves a
 root.
+
+### 7.13 Don't name `iroh` outside its adapter
+
+Multi-machine (DEV-1159) talks to other Macs over iroh, but only
+`src/remote/iroh_transport.rs` may name the crate. Everything else — pairing,
+the remote listener, the UI — speaks `remote::PeerTransport` /
+`remote::PeerConnection` and `remote::PeerId`. iroh types are translated into
+crate types at that one file's edge.
+
+Two reasons. A later adapter (Tailscale, plain LAN) stays a new file rather
+than a rewrite (`Plans/MULTI-MACHINE-PROPOSAL.md` §3.1). And the code above the
+seam stays testable without a network: `remote::link`'s reconnect logic is
+tested against an in-memory transport. `tests/architecture.rs` enforces it,
+matching `iroh` as a path's first segment so `remote::iroh_transport` itself is
+not a false positive.
+
+Related: the machine's secret key goes through `platform::SecretStore` (the
+Keychain), never a file. A platform without a secure store refuses rather than
+falling back to disk.
 
 ## 8. Open follow-ups
 

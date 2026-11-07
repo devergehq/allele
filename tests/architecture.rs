@@ -101,6 +101,16 @@ const ANYHOW_ALLOWLIST: &[&str] = &[
     "src/trust/mod.rs",
 ];
 
+/// §7.2 — argument-less `save()` calls inside `impl AppState` that are *not*
+/// the coordinator. Each one persists something the render tick can't coalesce
+/// and no test fixture can intercept, because it goes to the data type's
+/// inherent `save()` rather than through `AppState.repos`.
+///
+/// DEV-520 emptied this list of its seven `handle_settings_action` entries. The
+/// sync ledger is what's left: it has no repository yet (§8's "extend
+/// repositories" item). Give it one and this list goes to zero.
+const DIRECT_SAVE_ALLOWLIST: &[&str] = &["src/session_ops.rs::apply_pulled_session"];
+
 /// Panic-inducing call sites (`unwrap`/`expect`) in non-test code (DEV-109).
 ///
 /// A grep for `.unwrap()` reports a far larger number, but the overwhelming
@@ -338,6 +348,83 @@ impl<'ast> Visit<'ast> for AnyhowFinder {
             }
         }
         syn::visit::visit_item_use(self, item);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// §7.13 / DEV-1159 — iroh stays behind the PeerTransport seam
+// ---------------------------------------------------------------------------
+
+/// The one file allowed to name the `iroh` crate. Everything else speaks
+/// `remote::PeerTransport`, so the transport can be swapped or faked.
+const IROH_ALLOWLIST: &[&str] = &["src/remote/iroh_transport.rs"];
+
+#[test]
+fn iroh_is_named_only_by_its_adapter() {
+    let observed: BTreeSet<String> = source_files()
+        .into_iter()
+        .filter(|(_, path)| {
+            let src = read(path);
+            let file = parse(path, &src);
+            let mut finder = CrateFinder {
+                krate: "iroh",
+                found: false,
+            };
+            finder.visit_file(&file);
+            finder.found
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+
+    assert_matches_allowlist(
+        &observed,
+        IROH_ALLOWLIST,
+        "ARCHITECTURE.md §7.13 — only the iroh adapter may name `iroh`. Go through \
+         `crate::remote::PeerTransport` / `PeerConnection` instead, or translate the \
+         iroh type into a crate type inside `src/remote/iroh_transport.rs`.",
+    );
+}
+
+/// Detects a crate used as the *first* segment of a path (`iroh::Endpoint`,
+/// `::iroh::X`) or a `use` root. First-segment only, so a module that merely
+/// shares the prefix (`remote::iroh_transport`) is not a match.
+struct CrateFinder {
+    krate: &'static str,
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for CrateFinder {
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if path.segments.len() > 1 && path.segments[0].ident == self.krate {
+            self.found = true;
+        }
+        syn::visit::visit_path(self, path);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
+        if use_tree_roots_at(&item.tree, self.krate) {
+            self.found = true;
+        }
+        syn::visit::visit_item_use(self, item);
+    }
+
+    fn visit_item_extern_crate(&mut self, item: &'ast syn::ItemExternCrate) {
+        if item.ident == self.krate {
+            self.found = true;
+        }
+        syn::visit::visit_item_extern_crate(self, item);
+    }
+}
+
+/// Whether a `use` tree starts at `krate` in any of its shapes: `use k::x`,
+/// `use k;`, `use k as y;`, or inside a group, `use {k::x, std::y};`.
+fn use_tree_roots_at(tree: &syn::UseTree, krate: &str) -> bool {
+    match tree {
+        syn::UseTree::Path(p) => p.ident == krate,
+        syn::UseTree::Name(n) => n.ident == krate,
+        syn::UseTree::Rename(r) => r.ident == krate,
+        syn::UseTree::Group(g) => g.items.iter().any(|t| use_tree_roots_at(t, krate)),
+        syn::UseTree::Glob(_) => false,
     }
 }
 
@@ -584,6 +671,19 @@ struct PanicSiteFinder {
 }
 
 impl<'ast> Visit<'ast> for PanicSiteFinder {
+    /// A file that gates itself with an inner `#![cfg(test)]` is test code
+    /// throughout — test doubles that live in their own file, like
+    /// `src/remote/testing.rs`, are declared `#[cfg(test)] mod testing;` in
+    /// the parent, which this per-file walk cannot see.
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        let was = self.in_test;
+        if is_test_gated(&file.attrs) {
+            self.in_test = true;
+        }
+        syn::visit::visit_file(self, file);
+        self.in_test = was;
+    }
+
     fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
         let was = self.in_test;
         if is_test_gated(&item.attrs) {
@@ -611,6 +711,223 @@ impl<'ast> Visit<'ast> for PanicSiteFinder {
 }
 
 // ---------------------------------------------------------------------------
+// §7.9 — requests from outside the process never raise the window
+// ---------------------------------------------------------------------------
+
+/// The only files that may bring Allele's window forward. Both are a person
+/// acting on the app — the dock icon, a menu item — never a request.
+const WINDOW_RAISE_ALLOWLIST: &[&str] = &["src/main.rs", "src/startup/actions.rs"];
+
+/// §7.9: neither `control.sock` nor a paired machine (DEV-1161) may bring the
+/// window forward. Both reach the app through `dispatch`, so the rule is
+/// enforced where it can be: a call that raises the window (`activate`,
+/// `activate_window`) may appear only in the allowlisted files, so no request
+/// path can contain one.
+#[test]
+fn window_raising_stays_out_of_request_paths() {
+    struct Raise(bool);
+    impl<'ast> Visit<'ast> for Raise {
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            if call.method == "activate" || call.method == "activate_window" {
+                self.0 = true;
+            }
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let observed: BTreeSet<String> = source_files()
+        .into_iter()
+        .filter(|(_, path)| {
+            let src = read(path);
+            let mut finder = Raise(false);
+            finder.visit_file(&parse(path, &src));
+            finder.0
+        })
+        .map(|(rel, _)| rel)
+        .collect();
+    assert_matches_allowlist(
+        &observed,
+        WINDOW_RAISE_ALLOWLIST,
+        "ARCHITECTURE.md §7.9 — only a person's own action may raise Allele's window. \
+         Dispatch requests, local or remote, must never bring it forward.",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// DEV-1168 / DEV-1187 — agents cannot act on another Mac
+// ---------------------------------------------------------------------------
+
+/// Names that reach a paired Mac's dispatch API, in any position — a path
+/// (`crate::remote::…`, `RemoteService`), a field (`state.remote`), a method
+/// (`state.handle_remote_session_action(…)`) or a variant reached through
+/// its enum (`SessionAction::Remote`, checked separately below).
+const REMOTE_CALL_NAMES: &[&str] = &[
+    "remote",
+    "remote_sessions",
+    "remote_ui",
+    "RemoteService",
+    "RemoteSessionAction",
+    "RemoteCreate",
+    "handle_remote_session_action",
+    "machine_choices",
+];
+
+/// Remote creates, interrupts and discards are human-initiated only
+/// (DEV-1168, DEV-1187): they start from a click in this Mac's window. Agents
+/// reach Allele through `src/dispatch/` (`control.sock` and the MCP server),
+/// so nothing there may name the remote modules, the service's field on
+/// `AppState`, or the pending action that drives them — a dispatched session
+/// that could create on another Mac would restart its depth count at 0 there.
+#[test]
+fn dispatch_cannot_reach_another_mac() {
+    struct Names(Vec<String>);
+    impl Names {
+        fn check(&mut self, name: String) {
+            if REMOTE_CALL_NAMES.contains(&name.as_str()) {
+                self.0.push(name);
+            }
+        }
+    }
+    impl<'ast> Visit<'ast> for Names {
+        fn visit_path(&mut self, path: &'ast syn::Path) {
+            let segs: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+            if segs
+                .windows(2)
+                .any(|w| w[0] == "SessionAction" && w[1] == "Remote")
+            {
+                self.0.push("SessionAction::Remote".into());
+            }
+            for seg in segs {
+                self.check(seg);
+            }
+            syn::visit::visit_path(self, path);
+        }
+        fn visit_use_tree(&mut self, tree: &'ast syn::UseTree) {
+            match tree {
+                syn::UseTree::Path(p) => self.check(p.ident.to_string()),
+                syn::UseTree::Name(n) => self.check(n.ident.to_string()),
+                syn::UseTree::Rename(r) => self.check(r.ident.to_string()),
+                _ => {}
+            }
+            syn::visit::visit_use_tree(self, tree);
+        }
+        fn visit_expr_field(&mut self, field: &'ast syn::ExprField) {
+            if let syn::Member::Named(name) = &field.member {
+                self.check(name.to_string());
+            }
+            syn::visit::visit_expr_field(self, field);
+        }
+        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+            self.check(call.method.to_string());
+            syn::visit::visit_expr_method_call(self, call);
+        }
+    }
+    let offenders: Vec<String> = source_files()
+        .into_iter()
+        .filter(|(rel, _)| rel.starts_with("src/dispatch/"))
+        .filter_map(|(rel, path)| {
+            let src = read(&path);
+            let mut names = Names(Vec::new());
+            names.visit_file(&parse(&path, &src));
+            (!names.0.is_empty()).then(|| format!("{rel}: {}", names.0.join(", ")))
+        })
+        .collect();
+    assert!(
+        offenders.is_empty(),
+        "src/dispatch/ must not reach the remote modules — remote creates, \
+         interrupts and discards are human-initiated only (DEV-1168, DEV-1187):\n{}",
+        offenders.join("\n")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// §7.2 — handlers mark dirty; the coordinator writes
+// ---------------------------------------------------------------------------
+
+/// §7.2: "Don't call `save_state()` / `save_settings()` from handlers." Until
+/// DEV-106 makes those methods module-private the compiler cannot enforce it,
+/// and `clippy.toml` says as much — its `disallowed-methods` entry "can only be
+/// advisory until DEV-106". This test is the enforcement in the meantime.
+///
+/// It flags any zero-argument `.save()` inside an `impl AppState` block. The
+/// arity is the discriminator, and it is exact: every bypassing route takes no
+/// arguments (`self.save_settings()`, `snapshot.save()`,
+/// `PersistedState::save()`), while the sanctioned one takes the value
+/// (`self.repos.settings.save(&settings)`). `checkpoint_persistence` is the one
+/// method allowed to write, because it *is* the coordinator.
+///
+/// Why this rule needs a test rather than review: the failure is silent. Seven
+/// `handle_settings_action` arms bypassed the coordinator for months (DEV-520)
+/// and nothing looked broken — the value still persisted, just immediately,
+/// un-coalesced, and into the developer's real `~/.config/allele/settings.json`
+/// even under `cargo test`.
+#[test]
+fn only_the_coordinator_saves_directly() {
+    let mut observed = BTreeSet::new();
+
+    for (rel, path) in source_files() {
+        let src = read(&path);
+        let file = parse(&path, &src);
+
+        for item in &file.items {
+            let syn::Item::Impl(item_impl) = item else {
+                continue;
+            };
+            let syn::Type::Path(ty) = &*item_impl.self_ty else {
+                continue;
+            };
+            if ty
+                .path
+                .segments
+                .last()
+                .is_none_or(|s| s.ident != "AppState")
+            {
+                continue;
+            }
+
+            for impl_item in &item_impl.items {
+                let syn::ImplItem::Fn(method) = impl_item else {
+                    continue;
+                };
+                // The coordinator is the sanctioned writer; test code may do
+                // whatever it likes, since the fakes catch it.
+                if method.sig.ident == "checkpoint_persistence" || is_test_gated(&method.attrs) {
+                    continue;
+                }
+
+                let mut finder = DirectSaveFinder { found: false };
+                finder.visit_block(&method.block);
+                if finder.found {
+                    observed.insert(format!("{rel}::{}", method.sig.ident));
+                }
+            }
+        }
+    }
+
+    assert_matches_allowlist(
+        &observed,
+        DIRECT_SAVE_ALLOWLIST,
+        "ARCHITECTURE.md §7.2 — an AppState method persisted directly instead of \
+         calling mark_state_dirty() / mark_settings_dirty() and letting \
+         checkpoint_persistence() coalesce the write",
+    );
+}
+
+/// Any `.save()` taking no arguments — see `only_the_coordinator_saves_directly`
+/// for why arity is the right discriminator.
+struct DirectSaveFinder {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for DirectSaveFinder {
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        if call.method == "save" && call.args.is_empty() {
+            self.found = true;
+        }
+        syn::visit::visit_expr_method_call(self, call);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Meta — the docs and the tests must agree
 // ---------------------------------------------------------------------------
 
@@ -622,11 +939,14 @@ fn architecture_doc_still_documents_the_enforced_rules() {
     let doc = read(&repo_root().join("ARCHITECTURE.md"));
     for anchor in [
         "### 7.1 Don't call `eprintln!`",
+        "### 7.2 Don't call `save_state()` / `save_settings()` from handlers",
         "### 7.3 Don't reach for `platform::global()` from `AppState` methods",
         "### 7.4 Don't sprinkle `#[cfg(target_os = \"macos\")]` in business logic",
         "### 7.6 Don't use `anyhow::Result<T>` for new public functions",
         "### 7.7 Don't introduce a new god-object",
+        "### 7.9 Don't let the control socket raise UI",
         "### 7.11 Don't make two feature modules depend on each other",
+        "### 7.13 Don't name `iroh` outside its adapter",
     ] {
         assert!(
             doc.contains(anchor),
@@ -634,4 +954,57 @@ fn architecture_doc_still_documents_the_enforced_rules() {
              it. Update both together.",
         );
     }
+}
+
+/// Allele must never reach into a Locus-owned path (DEV-514).
+///
+/// The status contract exists so Allele learns a producer's state from a frame
+/// it is *sent*, not by reading another tool's on-disk layout. Scanning
+/// `~/.locus/data` was explicitly rejected as the wrong seam: it couples this
+/// UI to a directory structure no one has promised to keep, and needs
+/// filesystem access Allele should not want. This is a `0` baseline — the rule
+/// is fully enforced and must stay that way.
+///
+/// Only string literals outside attributes are examined — a literal is the one
+/// way a path could actually be opened, and skipping attributes keeps the
+/// module's own prose about *not* reading `~/.locus` from tripping the rule.
+#[test]
+fn allele_never_reads_a_locus_owned_path() {
+    struct LocusPathVisitor {
+        hits: Vec<String>,
+    }
+
+    impl<'ast> Visit<'ast> for LocusPathVisitor {
+        /// Skip attributes entirely. `syn` models a `///` or `//!` doc comment
+        /// as `#[doc = "…"]`, so without this the module's own prose about
+        /// *not* reading `~/.locus` would trip its own rule.
+        fn visit_attribute(&mut self, _attr: &'ast syn::Attribute) {}
+
+        fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
+            let value = lit.value();
+            let lowered = value.to_ascii_lowercase();
+            if lowered.contains(".locus") || lowered.contains("locus/data") {
+                self.hits.push(value);
+            }
+        }
+    }
+
+    let mut offenders = BTreeSet::new();
+    for (name, path) in source_files() {
+        let src = read(&path);
+        let file = parse(&path, &src);
+        let mut visitor = LocusPathVisitor { hits: Vec::new() };
+        visitor.visit_file(&file);
+        for hit in visitor.hits {
+            offenders.insert(format!("{name}: {hit:?}"));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "Allele must not reference a Locus-owned path — status arrives via the \
+         agent.status contract (docs/locus-status-contract.md), not the \
+         filesystem. Found:\n  {}",
+        offenders.into_iter().collect::<Vec<_>>().join("\n  ")
+    );
 }

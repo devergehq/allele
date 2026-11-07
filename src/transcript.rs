@@ -256,8 +256,12 @@ fn stamp_parent_agent(event: &mut RichEvent, agent: String) {
         } => {
             *parent_agent_id = a;
         }
-        RichEvent::Init { .. } | RichEvent::SessionResult { .. } | RichEvent::HookStatus { .. } => {
-        }
+        // A status frame describes the stream it arrived on, so it is never
+        // re-attributed to a parent agent (DEV-514, contract "Attribution").
+        RichEvent::Init { .. }
+        | RichEvent::SessionResult { .. }
+        | RichEvent::HookStatus { .. }
+        | RichEvent::AgentStatus { .. } => {}
     }
 }
 

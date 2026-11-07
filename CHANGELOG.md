@@ -13,6 +13,15 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+### Added
+- A versioned **agent status contract** (`agent.status/1`, specified in
+  [docs/locus-status-contract.md](docs/locus-status-contract.md)) replaces reading Locus
+  Algorithm phase names out of assistant prose. Locus emits a typed frame as a key in the
+  JSON object its hooks already write to stdout; Allele consumes it through
+  `src/rich/locus_status.rs` and renders generic fields — session, parent session, backend,
+  status, stage, token usage, context usage and cost. Stage labels are free-form data rather
+  than a Rust enum, so Locus can rename, add or drop phases without breaking this view.
+
 ### Changed
 - The control socket answers a session id it has no record of with its own
   error code, **`session_not_found`**, on `sessions.status`, `sessions.discard`
@@ -21,6 +30,32 @@ Changes on `master` awaiting the next tagged release.
   by matching the message. The message is unchanged (`no session with id …`),
   so a caller still matching it keeps working. Review Desk's session strip and
   the Locus dispatcher both read this answer and already accept either form.
+- Prose phase-header parsing is demoted to a **fallback** for producers that have not adopted
+  the contract, and is now attributed: a stage inferred from prose renders dimmed so a guess
+  never looks like a reported fact.
+- A status frame declaring a contract version Allele does not implement now degrades
+  **visibly** — a transcript notice, with the last good stage left on screen — instead of
+  silently rendering nothing.
+
+### Fixed
+- Tools installed outside the system directories are reachable again from sessions
+  started by an Allele you launched from Finder, the Dock, or Spotlight. Allele already
+  adopted the login shell's PATH when it detected launchd's stripped GUI environment,
+  but the detector counted `/usr/local/bin` as proof of a terminal launch — and that
+  directory is line 1 of stock `/etc/paths`, so launchd supplies it to every app. The
+  probe was therefore skipped in exactly the case it was written for, and only a
+  terminal launch (`cargo run`) appeared to work. Allele now treats a PATH as stripped
+  when every entry on it is one macOS supplies itself, so anything from Homebrew,
+  cargo, nvm, or `~/.local/bin` marks a genuine terminal launch. Agent hooks that
+  shell out to user-installed binaries no longer fail with "command not found".
+- Settings changes made from the Settings window (font size, cleanup paths, browser
+  integration, git-pull-before-new-session, attention promotion, external editor,
+  naming config) went straight to disk instead of through the render-tick
+  coordinator, so a burst of changes — dragging the font-size slider, say — wrote
+  `settings.json` once per step rather than once per frame.
+- Agent configuration changed in the Settings window was never marked for
+  persistence, so it could be lost on quit unless some unrelated change happened to
+  write `settings.json` first.
 
 ## [0.7.2] - 2026-10-13
 
