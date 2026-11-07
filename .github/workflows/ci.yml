@@ -78,7 +78,7 @@ jobs:
     # Must be macOS: the crate pulls in cocoa/objc/core-text/security-framework
     # for the target_os = "macos" paths, which don't build on Linux runners.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -100,7 +100,7 @@ jobs:
     # Split out from `test` so a violated ARCHITECTURE.md invariant is obvious
     # in the status list rather than buried in the full test output.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -119,7 +119,7 @@ jobs:
   clippy:
     name: clippy
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
