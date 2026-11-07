@@ -27,6 +27,10 @@ pub struct SpawnCtx<'a> {
     /// and the caller wants a resume. Ignored by adapters that don't
     /// distinguish between fresh and resumed sessions.
     pub has_history: bool,
+    /// The first prompt this session should start with, when the caller has
+    /// one *and* the adapter can take it as an argument. `None` for a resume,
+    /// and for sessions created without a brief (DEV-604).
+    pub initial_prompt: Option<&'a str>,
 }
 
 // ── Canonical event vocabulary ───────────────────────────────────────────
@@ -107,6 +111,29 @@ pub struct EventIntegration {
     pub env: Vec<(String, String)>,
 }
 
+impl EventIntegration {
+    /// Export this instance's data root to the agent, when there is one to
+    /// export.
+    ///
+    /// Every adapter makes this exact push, so it lives here rather than three
+    /// times over: the agent launches the `allele` MCP server from a global
+    /// registration whose args are a bare `--mcp-serve`, so this variable is
+    /// the only thing telling that server which instance asked. `None` is an
+    /// ordinary launch and must export nothing — see
+    /// [`crate::paths::child_home_env`] for all three answers.
+    ///
+    /// `pub(crate)` because [`AgentAdapter`] is public and its doc tells an
+    /// overriding implementor to call this. An adapter in a submodule could not,
+    /// and the compiler would say nothing — it would just silently drop the
+    /// root, which is the DEV-950 bug exactly.
+    pub(crate) fn push_root(&mut self, allele_home: Option<&str>) {
+        if let Some(root) = allele_home {
+            self.env
+                .push((crate::paths::HOME_ENV.to_string(), root.to_string()));
+        }
+    }
+}
+
 /// Per-kind command-building behaviour.
 #[allow(dead_code)]
 pub trait AgentAdapter: Send + Sync {
@@ -128,6 +155,17 @@ pub trait AgentAdapter: Send + Sync {
         false
     }
 
+    /// Whether a first prompt can be handed over as a positional argument at
+    /// spawn, arriving already submitted.
+    ///
+    /// False by default. An adapter that cannot do this keeps the typed
+    /// delivery path, which is universal but lossy: it races the agent's TUI
+    /// boot, and losing that race is what left dispatched sessions sitting
+    /// with an unsent prompt (DEV-604).
+    fn consumes_initial_prompt(&self) -> bool {
+        false
+    }
+
     // ── Event integration ────────────────────────────────────────────────
 
     /// One-time, idempotent install of any on-disk assets this agent needs
@@ -139,9 +177,26 @@ pub trait AgentAdapter: Send + Sync {
     }
 
     /// Spawn-time wiring that activates event emission: extra CLI args
-    /// and/or env vars applied to the session's PTY. Default: none.
-    fn event_integration(&self, _ctx: &SpawnCtx) -> EventIntegration {
-        EventIntegration::default()
+    /// and/or env vars applied to the session's PTY. Default: the data root
+    /// and nothing else.
+    ///
+    /// `allele_home` is what this instance's root says to a child — the root
+    /// when redirected, a blank when an inherited one has to be cleared, and
+    /// `None` when there is nothing to say ([`crate::paths::child_home_env`]).
+    /// It is passed in rather than read from `paths` so the adapter has no
+    /// opinion about which instance it belongs to, and so every branch is
+    /// testable: `paths::init` fixes a process-global root that one test in
+    /// this binary already sets, and tests run in parallel threads (DEV-947).
+    ///
+    /// The default **exports it** rather than dropping it, which is the whole
+    /// of DEV-950 for [`GenericAdapter`]: this method used to take the root and
+    /// throw it away, so an adapter that had no events to wire up also had no
+    /// idea which instance it belonged to, silently. An adapter that overrides
+    /// this is responsible for its own [`EventIntegration::push_root`] call.
+    fn event_integration(&self, _ctx: &SpawnCtx, allele_home: Option<&str>) -> EventIntegration {
+        let mut integ = EventIntegration::default();
+        integ.push_root(allele_home);
+        integ
     }
 
     /// Translate one native event `kind` string (as written to the shared
@@ -198,6 +253,13 @@ impl AgentAdapter for ClaudeAdapter {
         args
     }
 
+    /// `claude [options] [prompt]` — the positional prompt starts an
+    /// interactive session with that prompt already submitted, so allele
+    /// never has to type it in.
+    fn consumes_initial_prompt(&self) -> bool {
+        true
+    }
+
     /// Claude's hook receiver + `hooks.json` are installed by
     /// [`crate::hooks::install_if_missing`], driven from the startup path
     /// (it also returns the settings path the caller threads into
@@ -209,11 +271,20 @@ impl AgentAdapter for ClaudeAdapter {
     /// Event emission is activated by pointing `claude --settings` at the
     /// installed hooks file. The path is threaded in via `SpawnCtx` so tests
     /// (and callers) stay in control of it.
-    fn event_integration(&self, ctx: &SpawnCtx) -> EventIntegration {
+    ///
+    /// A redirected instance also exports its root. Claude Code hands its own
+    /// environment to every stdio MCP server it launches, and the `allele`
+    /// server is registered globally as a bare `--mcp-serve` with no root in
+    /// it — so without this the agent in a `--sandbox` window resolved the real
+    /// home and drove the **live** app, creating sessions there (DEV-947).
+    /// Nothing is exported on an ordinary launch: see
+    /// [`crate::paths::exported_root`].
+    fn event_integration(&self, ctx: &SpawnCtx, allele_home: Option<&str>) -> EventIntegration {
         let mut integ = EventIntegration::default();
         if let Some(hooks) = ctx.hooks_settings_path {
             integ.args = vec!["--settings".into(), hooks.into()];
         }
+        integ.push_root(allele_home);
         integ
     }
 
@@ -286,7 +357,13 @@ impl AgentAdapter for OpencodeAdapter {
     /// inside the opencode process and reads these env vars to know which
     /// allele session it belongs to and where to write events. Each session
     /// runs in its own clone/process, so the id is unambiguous per PTY.
-    fn event_integration(&self, ctx: &SpawnCtx) -> EventIntegration {
+    ///
+    /// The root travels too. The events directory it gets below is an absolute
+    /// path already derived from the root, so opencode's *own* wiring was never
+    /// the exposure — a tool opencode launches is. Nothing registers an
+    /// `allele` MCP server with opencode today, so this costs nothing now and
+    /// stops costing something the day one does (DEV-950).
+    fn event_integration(&self, ctx: &SpawnCtx, allele_home: Option<&str>) -> EventIntegration {
         let mut env = vec![("ALLELE_SESSION_ID".to_string(), ctx.session_id.to_string())];
         if let Some(dir) = crate::hooks::events_dir() {
             env.push((
@@ -294,10 +371,12 @@ impl AgentAdapter for OpencodeAdapter {
                 dir.to_string_lossy().to_string(),
             ));
         }
-        EventIntegration {
+        let mut integ = EventIntegration {
             args: Vec::new(),
             env,
-        }
+        };
+        integ.push_root(allele_home);
+        integ
     }
 
     /// Map the canonical `kind` strings the allele opencode plugin writes
@@ -335,6 +414,22 @@ impl AgentAdapter for GenericAdapter {
     fn build_new_session_args(&self, _ctx: &SpawnCtx, extra: &[String]) -> Vec<String> {
         extra.to_vec()
     }
+
+    // No `event_integration` override: a generic agent has no events to wire
+    // up, and the trait default now exports the data root. That it *should* be
+    // exported was the open question on DEV-950, decided 12 Oct 2026 — yes, the
+    // same as Claude. The agent is an arbitrary binary, so the variable may mean
+    // nothing to it; the case that settles it is a generic entry pointing at a
+    // `claude` wrapper, which without the root keeps exactly the behaviour
+    // DEV-947 fixed. A binary that ignores it loses nothing by being handed it.
+}
+
+/// Whether this agent takes a first prompt as a command-line argument.
+///
+/// Callers use this to decide whether to hand the brief over at spawn or fall
+/// back to typing it into the TUI — see `build_command` (DEV-604).
+pub fn consumes_initial_prompt(agent: &AgentConfig) -> bool {
+    adapter_for(agent.kind).consumes_initial_prompt()
 }
 
 pub fn adapter_for(kind: AgentKind) -> Box<dyn AgentAdapter> {
@@ -406,8 +501,25 @@ pub fn build_command(agent: &AgentConfig, ctx: &SpawnCtx, resume: bool) -> Optio
     };
     // Layer in the adapter's event-integration wiring (Claude's --settings,
     // opencode's ALLELE_SESSION_ID env, …) so status reporting works.
-    let integration = adapter.event_integration(ctx);
+    //
+    // The root is resolved here and nowhere else. Every caller of this function
+    // would otherwise have to resolve it too, and DEV-943 was a second
+    // resolution chain disagreeing with the first.
+    let integration = adapter.event_integration(ctx, crate::paths::child_home_env().as_deref());
     args.extend(integration.args);
+
+    // The prompt goes last, after every flag, because it is positional — and
+    // only here rather than inside `build_new_session_args`, so the event
+    // integration's own flags cannot end up behind it.
+    //
+    // Never on a resume: the conversation being resumed already has its first
+    // turn, and handing it another would start it over (DEV-604).
+    if !resume && adapter.consumes_initial_prompt() {
+        if let Some(prompt) = ctx.initial_prompt.filter(|p| !p.trim().is_empty()) {
+            args.push(prompt.to_string());
+        }
+    }
+
     Some(ShellCommand::with_args_env(path, args, integration.env))
 }
 
@@ -471,6 +583,118 @@ mod tests {
         }
     }
 
+    /// DEV-604: the brief rides the command line, so nothing is typed into a
+    /// TUI that may not be listening yet. This is what replaced the paste-then
+    /// -Enter race that left dispatched sessions with unsent prompts.
+    #[test]
+    fn claude_takes_the_initial_prompt_as_a_trailing_positional() {
+        let agent = cfg("claude", AgentKind::Claude, Some("/bin/true"), true);
+        let ctx = SpawnCtx {
+            session_id: "abc",
+            label: "Claude 1",
+            hooks_settings_path: Some("/tmp/hooks.json"),
+            has_history: false,
+            initial_prompt: Some("review the auth module"),
+        };
+        let cmd = build_command(&agent, &ctx, false).expect("agent has path");
+        assert_eq!(
+            cmd.args.last().map(String::as_str),
+            Some("review the auth module")
+        );
+    }
+
+    /// The prompt is positional, so every flag has to precede it — including
+    /// the event-integration flags, which are appended after the adapter's own
+    /// args. Building the prompt into `build_new_session_args` would have put
+    /// `--settings` behind it.
+    #[test]
+    fn the_initial_prompt_comes_after_every_flag() {
+        let agent = cfg("claude", AgentKind::Claude, Some("/bin/true"), true);
+        let ctx = SpawnCtx {
+            session_id: "abc",
+            label: "Claude 1",
+            hooks_settings_path: Some("/tmp/hooks.json"),
+            has_history: false,
+            initial_prompt: Some("do the thing"),
+        };
+        let cmd = build_command(&agent, &ctx, false).expect("agent has path");
+
+        let prompt_at = cmd
+            .args
+            .iter()
+            .position(|a| a == "do the thing")
+            .expect("prompt present");
+        assert_eq!(prompt_at, cmd.args.len() - 1, "{:?}", cmd.args);
+
+        let settings_at = cmd
+            .args
+            .iter()
+            .position(|a| a == "--settings")
+            .expect("hooks wired");
+        assert!(settings_at < prompt_at, "{:?}", cmd.args);
+    }
+
+    /// A resumed conversation already has its first turn. Handing it the brief
+    /// again would start the work over.
+    #[test]
+    fn a_resume_never_carries_the_initial_prompt() {
+        let agent = cfg("claude", AgentKind::Claude, Some("/bin/true"), true);
+        let ctx = SpawnCtx {
+            session_id: "abc",
+            label: "Claude 1",
+            hooks_settings_path: None,
+            has_history: true,
+            initial_prompt: Some("do the thing"),
+        };
+        let cmd = build_command(&agent, &ctx, true).expect("agent has path");
+        assert!(
+            !cmd.args.iter().any(|a| a == "do the thing"),
+            "{:?}",
+            cmd.args
+        );
+    }
+
+    /// An empty brief would otherwise arrive as an empty argument, which reads
+    /// as a submitted blank turn rather than as no prompt at all.
+    #[test]
+    fn a_blank_initial_prompt_is_not_passed() {
+        let agent = cfg("claude", AgentKind::Claude, Some("/bin/true"), true);
+        let ctx = SpawnCtx {
+            session_id: "abc",
+            label: "Claude 1",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: Some("   "),
+        };
+        let cmd = build_command(&agent, &ctx, false).expect("agent has path");
+        assert_eq!(cmd.args, vec!["--session-id", "abc", "--name", "Claude 1"]);
+    }
+
+    /// Only adapters that actually support it. Everything else keeps the typed
+    /// delivery path, which is lossier but universal — and for a bare shell
+    /// there is no TUI boot to race anyway.
+    #[test]
+    fn only_claude_consumes_the_initial_prompt() {
+        assert!(consumes_initial_prompt(&cfg(
+            "claude",
+            AgentKind::Claude,
+            Some("/bin/true"),
+            true
+        )));
+        assert!(!consumes_initial_prompt(&cfg(
+            "opencode",
+            AgentKind::Opencode,
+            Some("/bin/true"),
+            true
+        )));
+        assert!(!consumes_initial_prompt(&cfg(
+            "custom",
+            AgentKind::Generic,
+            Some("/bin/bash"),
+            true
+        )));
+    }
+
     #[test]
     fn claude_new_session_builds_session_id_args() {
         let agent = cfg("claude", AgentKind::Claude, Some("/bin/true"), true);
@@ -479,6 +703,7 @@ mod tests {
             label: "Claude 1",
             hooks_settings_path: Some("/tmp/hooks.json"),
             has_history: false,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, false).expect("agent has path");
         assert_eq!(cmd.program, "/bin/true");
@@ -503,6 +728,7 @@ mod tests {
             label: "Claude 1",
             hooks_settings_path: None,
             has_history: true,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, true).expect("agent has path");
         assert_eq!(cmd.args, vec!["--resume", "abc", "--name", "Claude 1"]);
@@ -516,6 +742,7 @@ mod tests {
             label: "Claude 1",
             hooks_settings_path: None,
             has_history: false,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, true).expect("agent has path");
         assert_eq!(cmd.args, vec!["--session-id", "abc", "--name", "Claude 1"]);
@@ -530,6 +757,7 @@ mod tests {
             label: "C",
             hooks_settings_path: None,
             has_history: false,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, false).expect("agent has path");
         assert_eq!(
@@ -547,6 +775,7 @@ mod tests {
             label: "Custom",
             hooks_settings_path: Some("/ignored"),
             has_history: false,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, false).expect("agent has path");
         assert_eq!(cmd.program, "/bin/bash");
@@ -561,6 +790,7 @@ mod tests {
             label: "l",
             hooks_settings_path: None,
             has_history: false,
+            initial_prompt: None,
         };
         assert!(build_command(&disabled, &ctx, false).is_none());
         let no_path = cfg("claude", AgentKind::Claude, None, true);
@@ -642,8 +872,9 @@ mod tests {
             label: "opencode 1",
             hooks_settings_path: None,
             has_history: false,
+            initial_prompt: None,
         };
-        let integ = a.event_integration(&ctx);
+        let integ = a.event_integration(&ctx, None);
         assert!(integ.args.is_empty(), "opencode needs no extra CLI args");
         let sid = integ
             .env
@@ -651,6 +882,106 @@ mod tests {
             .find(|(k, _)| k == "ALLELE_SESSION_ID")
             .map(|(_, v)| v.as_str());
         assert_eq!(sid, Some("sid-123"));
+    }
+
+    /// A session spawned by a **redirected** instance has to be told which
+    /// instance that is. Claude Code passes its environment to the stdio MCP
+    /// servers it launches, and the `allele` server is registered globally as a
+    /// bare `--mcp-serve`, so the root in this env is the only thing standing
+    /// between an agent in a `--sandbox` window and the live app (DEV-947).
+    #[test]
+    fn claude_event_integration_exports_a_redirected_root() {
+        let a = ClaudeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "Claude 1",
+            hooks_settings_path: Some("/tmp/hooks.json"),
+            has_history: false,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, Some("/tmp/allele-sandbox-root"));
+        assert_eq!(
+            integ
+                .env
+                .iter()
+                .find(|(k, _)| k == crate::paths::HOME_ENV)
+                .map(|(_, v)| v.as_str()),
+            Some("/tmp/allele-sandbox-root"),
+        );
+        // The hooks flag is what the env was added beside, not instead of.
+        assert_eq!(
+            integ.args,
+            vec!["--settings".to_string(), "/tmp/hooks.json".to_string()],
+        );
+    }
+
+    /// The other half, and the deliberate one: an ordinary launch exports no
+    /// root at all. Exporting the real home would pin a root `paths` is still
+    /// entitled to decide, and would make every live session carry an answer
+    /// to a question nobody asked.
+    #[test]
+    fn claude_event_integration_exports_no_root_on_an_ordinary_launch() {
+        let a = ClaudeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "Claude 1",
+            hooks_settings_path: Some("/tmp/hooks.json"),
+            has_history: false,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, None);
+        assert!(
+            integ.env.is_empty(),
+            "an ordinary launch must export nothing: {:?}",
+            integ.env
+        );
+        assert_eq!(
+            integ.args,
+            vec!["--settings".to_string(), "/tmp/hooks.json".to_string()],
+        );
+    }
+
+    /// A blank is not an absence: it is this instance saying "the real home"
+    /// out loud, so a child cannot resolve an `ALLELE_HOME` the parent itself
+    /// inherited and then overrode with `--home` (DEV-947, self-review).
+    #[test]
+    fn claude_event_integration_passes_a_blank_root_through() {
+        let a = ClaudeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "Claude 1",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, Some(""));
+        assert_eq!(
+            integ.env,
+            vec![(crate::paths::HOME_ENV.to_string(), String::new())],
+        );
+    }
+
+    /// A **resumed** session re-spawns the agent, so it needs the root for the
+    /// same reason a fresh one does: `build_command` layers the integration in
+    /// on both paths, and this is what pins that.
+    #[test]
+    fn claude_resume_integration_carries_the_root_too() {
+        let a = ClaudeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "Claude 1",
+            hooks_settings_path: None,
+            has_history: true,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, Some("/tmp/alt-root"));
+        assert_eq!(
+            integ.env,
+            vec![(
+                crate::paths::HOME_ENV.to_string(),
+                "/tmp/alt-root".to_string()
+            )],
+        );
     }
 
     #[test]
@@ -661,6 +992,7 @@ mod tests {
             label: "opencode 1",
             hooks_settings_path: None,
             has_history: false,
+            initial_prompt: None,
         };
         let cmd = build_command(&agent, &ctx, false).expect("agent has path");
         assert!(cmd
@@ -669,23 +1001,128 @@ mod tests {
             .any(|(k, v)| k == "ALLELE_SESSION_ID" && v == "sid-xyz"));
     }
 
+    /// A generic agent emits no events and needs no spawn wiring — and still
+    /// has to be told which instance spawned it. The `None` arm is an ordinary
+    /// launch, which must stay empty; the root arm is DEV-950, decided 12 Oct
+    /// 2026: yes, a `Generic` agent is handed the root, the same as Claude,
+    /// because the case that matters is a generic entry wrapping `claude`.
     #[test]
-    fn generic_adapter_ignores_all_events() {
+    fn generic_adapter_ignores_all_events_but_still_carries_the_root() {
         let a = GenericAdapter;
         assert_eq!(a.interpret_event("stop").lifecycle, Lifecycle::Ignore);
         assert_eq!(
             a.interpret_event("session_start").lifecycle,
             Lifecycle::Ignore
         );
-        assert!(a
-            .event_integration(&SpawnCtx {
-                session_id: "x",
-                label: "y",
-                hooks_settings_path: None,
-                has_history: false,
-            })
-            .env
-            .is_empty());
+        let ctx = SpawnCtx {
+            session_id: "x",
+            label: "y",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: None,
+        };
+        assert!(
+            a.event_integration(&ctx, None).env.is_empty(),
+            "an ordinary launch exports nothing",
+        );
+        let integ = a.event_integration(&ctx, Some("/tmp/dev950-root"));
+        assert_eq!(
+            integ.env,
+            vec![(
+                crate::paths::HOME_ENV.to_string(),
+                "/tmp/dev950-root".to_string()
+            )],
+        );
+        assert!(
+            integ.args.is_empty(),
+            "a generic agent still takes no extra flags: {:?}",
+            integ.args
+        );
+    }
+
+    /// The root arrives beside opencode's own wiring, not instead of it. Its
+    /// plugin needs the session id and events dir to report status at all, so a
+    /// regression that swapped one for the other would be silent (DEV-950).
+    #[test]
+    fn opencode_event_integration_exports_a_redirected_root() {
+        let a = OpencodeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "opencode 1",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, Some("/tmp/dev950-root"));
+        assert_eq!(
+            integ
+                .env
+                .iter()
+                .find(|(k, _)| k == crate::paths::HOME_ENV)
+                .map(|(_, v)| v.as_str()),
+            Some("/tmp/dev950-root"),
+        );
+        assert_eq!(
+            integ
+                .env
+                .iter()
+                .find(|(k, _)| k == "ALLELE_SESSION_ID")
+                .map(|(_, v)| v.as_str()),
+            Some("sid-123"),
+        );
+    }
+
+    /// And the deliberate half, for opencode as for Claude: an ordinary launch
+    /// exports no root, so a live session carries no answer to a question
+    /// nobody asked.
+    #[test]
+    fn opencode_event_integration_exports_no_root_on_an_ordinary_launch() {
+        let a = OpencodeAdapter;
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "opencode 1",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: None,
+        };
+        let integ = a.event_integration(&ctx, None);
+        assert!(
+            !integ.env.iter().any(|(k, _)| k == crate::paths::HOME_ENV),
+            "no root on an ordinary launch: {:?}",
+            integ.env
+        );
+    }
+
+    /// A blank is this instance saying "the real home" out loud, and it has to
+    /// survive for the doors DEV-950 opened as well as Claude's: an adapter that
+    /// treated a blank as nothing would let a child resolve an `ALLELE_HOME`
+    /// this process inherited and then overrode with `--home`.
+    #[test]
+    fn the_new_doors_pass_a_blank_root_through() {
+        let ctx = SpawnCtx {
+            session_id: "sid-123",
+            label: "probe",
+            hooks_settings_path: None,
+            has_history: false,
+            initial_prompt: None,
+        };
+        for (what, integ) in [
+            ("generic", GenericAdapter.event_integration(&ctx, Some(""))),
+            (
+                "opencode",
+                OpencodeAdapter.event_integration(&ctx, Some("")),
+            ),
+        ] {
+            assert_eq!(
+                integ
+                    .env
+                    .iter()
+                    .find(|(k, _)| k == crate::paths::HOME_ENV)
+                    .map(|(_, v)| v.as_str()),
+                Some(""),
+                "{what} dropped the blank root",
+            );
+        }
     }
 
     #[test]

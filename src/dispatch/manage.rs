@@ -11,7 +11,9 @@ use std::time::Duration;
 use gpui::{AsyncApp, WeakEntity};
 
 use crate::app_state::AppState;
-use crate::dispatch::protocol::{ErrorCode, InterruptedSession, Response, SessionState};
+use crate::dispatch::protocol::{
+    no_such_session, ErrorCode, InterruptedSession, Response, SessionState,
+};
 use crate::dispatch::{pty, update_in_main_window};
 use crate::session::SessionStatus;
 
@@ -33,10 +35,7 @@ fn claim(state: &AppState, session_id: &str) -> Result<(String, SessionStatus), 
         .flat_map(|p| p.sessions.iter())
         .find(|s| s.id == session_id)
     else {
-        return Err(Response::Error {
-            code: ErrorCode::BadRequest,
-            message: format!("no session with id {session_id}"),
-        });
+        return Err(no_such_session(session_id));
     };
     if !session.origin.is_dispatched() {
         return Err(Response::Error {

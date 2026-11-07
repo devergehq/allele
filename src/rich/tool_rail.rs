@@ -67,8 +67,6 @@ pub fn default_collapsed(class: ToolClass, is_error: bool) -> bool {
 /// Running summary of a contiguous run of routine tool calls, for the rail
 /// header (e.g. "12 reads, 3 searches · parser.rs, ledger.rs, …").
 ///
-/// Consumed by the reader rail UI (DEV-31); allow dead_code until then.
-#[allow(dead_code)]
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RoutineRailSummary {
     pub reads: u32,
@@ -79,7 +77,6 @@ pub struct RoutineRailSummary {
     targets: Vec<String>,
 }
 
-#[allow(dead_code)]
 impl RoutineRailSummary {
     pub fn new() -> Self {
         Self::default()
@@ -94,19 +91,15 @@ impl RoutineRailSummary {
             _ => self.other_routine += 1,
         }
         if let Some(t) = target {
-            let t = t.trim();
-            if !t.is_empty() && !self.targets.iter().any(|x| x == t) {
-                self.targets.push(t.to_string());
+            let t = condense_target(t);
+            if !t.is_empty() && !self.targets.iter().any(|x| x == &t) {
+                self.targets.push(t);
             }
         }
     }
 
     pub fn total(&self) -> u32 {
         self.reads + self.searches + self.shell + self.other_routine
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.total() == 0
     }
 
     /// One-line rail header. `max_targets` caps how many targets are named
@@ -143,7 +136,26 @@ impl RoutineRailSummary {
     }
 }
 
-#[allow(dead_code)]
+/// Reduce a call's target to something that fits on one line.
+///
+/// The point of the rail is a *single* line standing in for a run of calls.
+/// A tool's input summary does not respect that on its own: a `Bash` target is
+/// the whole command, heredoc and all, so an unprocessed target turned the
+/// summary into a three-line block and gave back the space the aggregation had
+/// just saved.
+///
+/// First line only, and short.
+fn condense_target(target: &str) -> String {
+    /// Budget in bytes, which is what the shared truncation helper takes.
+    const MAX: usize = 28;
+    let first = target.lines().next().unwrap_or("").trim();
+    if first.len() <= MAX {
+        return first.to_string();
+    }
+    let cut = crate::rich::truncate_to_char_boundary(first, MAX);
+    format!("{}…", cut.trim_end())
+}
+
 fn plural(n: u32) -> &'static str {
     if n == 1 {
         ""
@@ -220,6 +232,46 @@ mod tests {
         let head = s.headline(2);
         assert!(head.starts_with("4 reads"));
         assert!(head.contains("a.rs, b.rs, …"), "got: {head}");
+    }
+
+    #[test]
+    fn a_multiline_target_is_reduced_to_one_line() {
+        // A Bash target is the whole command. Left alone it turned the rail's
+        // single line into a three-line block.
+        let mut s = RoutineRailSummary::new();
+        s.record(
+            "Bash",
+            Some("python3 - <<'PY'\nimport pathlib\np = pathlib.Path(\"x\")"),
+        );
+        let head = s.headline(3);
+        assert!(!head.contains('\n'), "the rail is one line: {head:?}");
+    }
+
+    #[test]
+    fn a_long_target_is_elided_not_wrapped() {
+        let mut s = RoutineRailSummary::new();
+        s.record(
+            "Bash",
+            Some("cargo clippy --all-targets --message-format short 2>&1 | grep -E x"),
+        );
+        let head = s.headline(1);
+        assert!(head.contains('…'), "a long target should elide: {head:?}");
+        assert!(head.chars().count() < 60, "still short: {head:?}");
+    }
+
+    #[test]
+    fn targets_differing_only_past_the_cut_dedupe() {
+        // Two heredocs whose first line is identical are the same target as
+        // far as a one-line summary is concerned.
+        let mut s = RoutineRailSummary::new();
+        s.record("Bash", Some("python3 - <<'PY'\nfirst script"));
+        s.record("Bash", Some("python3 - <<'PY'\nsecond script"));
+        assert_eq!(s.shell, 2, "both calls still counted");
+        assert_eq!(
+            s.headline(5).matches("python3").count(),
+            1,
+            "but named once"
+        );
     }
 
     #[test]

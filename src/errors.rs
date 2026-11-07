@@ -42,6 +42,13 @@ pub enum AlleleError {
     #[error("dispatch error: {0}")]
     Dispatch(String),
 
+    /// Multi-machine transport and identity (`crate::remote`, DEV-1159).
+    #[error("remote error: {0}")]
+    Remote(String),
+
+    #[error("screen mirror error: {0}")]
+    Mirror(String),
+
     #[error("{0}")]
     Other(String),
 }

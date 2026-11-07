@@ -26,6 +26,7 @@ pub enum PendingAction {
     Settings(SettingsAction),
     Browser(BrowserAction),
     Overlay(OverlayAction),
+    RemoteTab(crate::remote_tab::RemoteTabAction),
 }
 
 impl PendingAction {
@@ -40,9 +41,7 @@ impl PendingAction {
         matches!(
             self,
             PendingAction::Session(
-                SessionAction::DiscardSession { .. }
-                    | SessionAction::ProceedDirtyMerge { .. }
-                    | SessionAction::ProceedDirtySession(_)
+                SessionAction::DiscardSession { .. } | SessionAction::ProceedDirtySession(_)
             ) | PendingAction::Archive(
                 ArchiveAction::DeleteArchive { .. } | ArchiveAction::DeleteAllArchives { .. }
             ) | PendingAction::Project(ProjectAction::RemoveProject(_))
@@ -59,6 +58,9 @@ pub enum SessionAction {
     AddSessionToProject(usize), // project index
     /// Open the "New session with details" modal for a project.
     OpenNewSessionModal(usize),
+    /// Create, interrupt, discard or select a session on a paired Mac
+    /// (DEV-1168). Human clicks only — see `crate::remote_sessions`.
+    Remote(crate::remote_sessions::RemoteSessionAction),
     /// Create a session with custom details from the modal.
     AddSessionWithDetails {
         project_idx: usize,
@@ -69,6 +71,10 @@ pub enum SessionAction {
         /// Skip the project's startup command, drawer terminals, preview URL,
         /// and shutdown command for this session. See DEV-400.
         orchestration: crate::session::Orchestration,
+        /// Sidebar group for the new session, trimmed; `None` for ungrouped
+        /// (DEV-853). Not yet interned — the handler resolves it against the
+        /// project so the first spelling the project saw is the one stored.
+        group: Option<String>,
     },
     /// Kill the PTY, keep the clone, mark Suspended. Next click cold-resumes.
     CloseSessionKeepClone {
@@ -82,24 +88,15 @@ pub enum SessionAction {
     },
     /// Cancel an in-flight discard confirmation.
     CancelDiscard,
+    /// Away: request Claude Code's remote control from every live Claude
+    /// session, queueing those it is not yet safe to type into (DEV-1157).
+    RequestRemoteControlAll,
     /// Permanently delete the clone and remove the session from state.
     DiscardSession {
         project_idx: usize,
         session_idx: usize,
     },
     SelectSession {
-        project_idx: usize,
-        session_idx: usize,
-    },
-    /// Merge session work into canonical and close (archive + merge + delete clone).
-    MergeAndClose {
-        project_idx: usize,
-        session_idx: usize,
-    },
-    /// Cancel an in-flight dirty-merge confirmation.
-    CancelDirtyMerge,
-    /// Proceed with merge despite uncommitted changes — discards them first.
-    ProceedDirtyMerge {
         project_idx: usize,
         session_idx: usize,
     },
@@ -144,10 +141,25 @@ pub enum SessionAction {
         session_idx: usize,
     },
     /// Move a session within its project (drag-and-drop reorder).
+    ///
+    /// Since DEV-937 a drop on a row in a *different* group also retags the
+    /// session to that row's group, so the gesture means "put it here" in full
+    /// rather than only within one group.
     ReorderSession {
         project_idx: usize,
         from: usize,
         to: usize,
+    },
+    /// Put a session in a group, or take it out of one (DEV-937).
+    ///
+    /// Emitted by dropping a session row on a group header — a header has no
+    /// position among the rows, so this changes the group and nothing else. The
+    /// name is interned by the handler, as every other assignment is.
+    RegroupSession {
+        project_idx: usize,
+        session_idx: usize,
+        /// `None` returns the session to the ungrouped block.
+        group: Option<String>,
     },
     /// Toggle the pinned state of a session.
     TogglePinSession {
@@ -163,10 +175,13 @@ pub enum SessionAction {
         comment: Option<String>,
         pinned: bool,
         orchestration: crate::session::Orchestration,
+        /// Sidebar group, trimmed; `None` clears it and returns the session to
+        /// the ungrouped block (DEV-853). Interned by the handler.
+        group: Option<String>,
     },
 }
 
-/// Archive refs — merge / delete / restore a session that has been archived.
+/// Archive refs — delete / restore a session that has been archived.
 #[derive(Debug)]
 pub enum ArchiveAction {
     /// Arm the inline confirmation gate before permanently deleting a ref.
@@ -181,14 +196,9 @@ pub enum ArchiveAction {
     RequestDeleteAllArchives { project_idx: usize },
     /// Cancel the bulk archive deletion confirmation.
     CancelDeleteAllArchives,
-    /// Delete every archive ref for a project without merging any of them.
+    /// Delete every archive ref for a project.
     DeleteAllArchives { project_idx: usize },
-    /// Merge an archived session ref into canonical's working tree.
-    MergeArchive {
-        project_idx: usize,
-        archive_idx: usize,
-    },
-    /// Delete an archive ref without merging.
+    /// Delete an archive ref.
     DeleteArchive {
         project_idx: usize,
         archive_idx: usize,
@@ -234,6 +244,10 @@ pub enum SidebarAction {
     /// Turn the active-only view mode off unconditionally — the "Show all"
     /// escape hatch in the hint row, so an empty sidebar is never a dead end.
     ShowAllSessions,
+    /// Collapse or expand the attention bar above the main tab strip. Emitted
+    /// by clicking the bar's own summary header — the only affordance, by
+    /// design (DEV-525).
+    ToggleAttentionBar,
     /// Re-run `git status` for the changes panel (manual refresh button,
     /// hook-event triggers).
     RefreshChanges,
@@ -241,6 +255,35 @@ pub enum SidebarAction {
     SelectChangedFile { path: String, staged: bool },
     /// Close the changes panel's diff pane (deselect the file row).
     ClearChangesSelection,
+    /// Move a group to another slot in its project's order — the drop half of
+    /// dragging one group header onto another (DEV-937).
+    ///
+    /// Slots, not group indices: the ungrouped block occupies one, so a group
+    /// dropped on the slot above it lands above it. Names rather than indices
+    /// because a context menu or a drag can outlive the list it was opened
+    /// against; a name that is gone is a no-op.
+    ReorderGroup {
+        project_idx: usize,
+        from: String,
+        to: String,
+    },
+    /// Move a group one slot up or down — the header menu's two entries.
+    MoveGroup {
+        project_idx: usize,
+        name: String,
+        direction: crate::sidebar::groups::MoveDirection,
+    },
+    /// Fold a group's rows away, or unfold them. Emitted by clicking the header
+    /// and by its menu entry.
+    ToggleGroupCollapsed { project_idx: usize, name: String },
+    /// Begin renaming a group from its header: arms the inline field and focuses
+    /// it.
+    StartGroupRename { project_idx: usize, name: String },
+    /// Commit the inline rename buffer. Renames the group for every session in
+    /// it; a refusal is shown beside the field and the field stays open.
+    CommitGroupRename,
+    /// Abandon the inline rename, leaving the group as it was.
+    CancelGroupRename,
 }
 
 /// Project lifecycle — add, remove, relocate.
@@ -292,6 +335,10 @@ pub enum SettingsAction {
     /// Toggle "promote attention-needed sessions to top of list".
     /// Emitted by the Settings window; persisted immediately.
     UpdatePromoteAttentionSessions(bool),
+    /// Toggle "keep this Mac awake while sessions are working" (DEV-1156).
+    /// Reconciles the power assertion immediately, so turning it off
+    /// releases a held assertion without waiting for the poller.
+    UpdateKeepAwake(bool),
     /// Replace the global terminal font size and persist. Emitted by the
     /// Settings window, by Cmd+=/Cmd+- (as a clamped new value), and by
     /// Cmd+0 (reset to DEFAULT_FONT_SIZE). The handler clamps again,
@@ -311,6 +358,40 @@ pub enum SettingsAction {
     /// When enabled, brings it up; when disabled, tears it down. Both run
     /// on a background task. Emitted by the Settings window.
     UpdateBaseInfra(bool),
+    /// Replace this machine's name as peers see it (DEV-1159). Blank means
+    /// "use the computer name". Emitted by *Settings → Machines* on every edit.
+    UpdateMachineName(String),
+    /// Replace the relay URL (DEV-1159). Blank means n0's public relays. Only
+    /// a valid URL is ever emitted; the Machines section validates first.
+    UpdateRelayUrl(String),
+    /// *Allow remote connections* (DEV-1160). Off closes every remote
+    /// connection and, once no pairing needs it, the endpoint.
+    SetAllowRemoteConnections(bool),
+    /// *Pair a new machine*: show a one-time code and QR. Carries this
+    /// machine's resolved name, which the client is told on approval.
+    StartPairing { machine_name: String },
+    /// Stop showing the code; a pending request is declined.
+    CancelPairing,
+    /// Clear a finished pairing from the Machines pane.
+    DismissPairing,
+    /// The host user's Approve / Decline on a pairing request.
+    AnswerPairing {
+        request: crate::remote::pairing::RequestId,
+        approve: bool,
+    },
+    /// *Add machine*: pair with the host whose code was entered.
+    AddMachine { code: String, machine_name: String },
+    /// This Mac's Confirm / Cancel on *Add machine*'s confirmation number.
+    ConfirmAddMachine { confirmed: bool },
+    /// Clear the result of *Add machine*.
+    DismissAddMachine,
+    /// Grant or withdraw a paired machine's `control` permission.
+    SetPeerControl {
+        peer: crate::remote::PeerId,
+        allowed: bool,
+    },
+    /// *Remove*: revoke a paired machine and close its connections now.
+    RemovePeer(crate::remote::PeerId),
 }
 
 /// Chrome browser integration — sync / close linked tabs.
@@ -403,6 +484,11 @@ pub struct SessionCursor {
 }
 
 /// Drag payload for a session row (sidebar drag-and-drop reorder).
+///
+/// `Copy` again as of DEV-937. DEV-853 added the dragged session's group so a
+/// row could decline to light up for a cross-group drop it would then discard.
+/// Such a drop now retags the session, so every row in the same project is a
+/// landing target and the payload has nothing left to decide.
 #[derive(Clone, Copy)]
 pub(crate) struct DraggedSession {
     pub project_idx: usize,
@@ -412,3 +498,17 @@ pub(crate) struct DraggedSession {
 /// Drag payload for a project header.
 #[derive(Clone, Copy)]
 pub(crate) struct DraggedProject(pub usize);
+
+/// Drag payload for a group header (DEV-937).
+///
+/// Carries the project so a group cannot be dropped into another project's
+/// order — groups are per-project by definition, and the same name in two
+/// projects is two groups.
+///
+/// There is no payload for the ungrouped block: it draws no header, so there is
+/// nothing to pick up. It is moved by moving named groups past it.
+#[derive(Clone)]
+pub(crate) struct DraggedGroup {
+    pub project_idx: usize,
+    pub name: String,
+}

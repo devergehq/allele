@@ -63,10 +63,6 @@ pub struct PersistedSession {
     /// since their historical active runtime is unrecoverable.
     #[serde(default)]
     pub active_runtime_secs: u64,
-    /// True if this session's work was already merged into canonical via
-    /// merge-and-close. When set, discard skips creating an archive entry.
-    #[serde(default)]
-    pub merged: bool,
     /// Drawer terminal tab names at save time.
     ///
     /// Superseded by `drawer_tabs`, which also carries each tab's command.
@@ -102,13 +98,19 @@ pub struct PersistedSession {
     /// Optional user comment displayed as a subtitle on the session row.
     #[serde(default)]
     pub comment: Option<String>,
+    /// Sidebar group name, in the owning project's spelling (DEV-853).
+    ///
+    /// `serde(default)` so a `state.json` written before groups existed loads
+    /// with every session ungrouped — and therefore with a sidebar that looks
+    /// exactly as it did, since an ungrouped session is drawn without a header.
+    /// Skipped when absent so a project that uses no groups does not grow the
+    /// file by a null per session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
     /// Current git branch name (e.g. "fix-auth-5dc47535"). Used for orphan
     /// cleanup identification now that branches don't carry the allele/session/ prefix.
     #[serde(default)]
     pub branch_name: Option<String>,
-    /// Per-session merge strategy override. `None` = project setting.
-    #[serde(default)]
-    pub merge_strategy_override: Option<crate::settings::MergeStrategy>,
     /// True when the user chose the session's branch explicitly; auto-naming
     /// must not rename it. Persisted so a placeholder-labelled session can't
     /// re-fire the rename after a restart.
@@ -211,7 +213,6 @@ impl PersistedSession {
             // Snapshot banked + in-flight runtime so a live session's progress
             // survives a save/quit (it rehydrates Suspended with this banked).
             active_runtime_secs: session.active_runtime().as_secs(),
-            merged: session.merged,
             // A session's tabs live in exactly one of these two places — live
             // in `drawer_tabs`, or parked (rehydrated-but-unopened, or killed
             // by the idle reaper) in `parked_drawer_tabs`. Read whichever holds
@@ -233,8 +234,8 @@ impl PersistedSession {
             agent_id: session.agent_id.clone(),
             pinned: session.pinned,
             comment: session.comment.clone(),
+            group: session.group.clone(),
             branch_name: session.branch_name.clone(),
-            merge_strategy_override: session.merge_strategy_override,
             branch_locked: session.branch_locked,
             // Derived, for older Allele versions reading this file.
             skip_orchestration: !session.orchestration.runs_startup(),
@@ -257,9 +258,6 @@ pub struct ArchivedSession {
     pub label: String,
     /// Unix timestamp when the session was archived (seconds since epoch).
     pub archived_at: u64,
-    /// Transient merge failure, shown beside this archive with a retry action.
-    #[serde(skip)]
-    pub merge_error: Option<String>,
 }
 
 /// One saved Scratch Pad entry. Persisted so users can recall past
@@ -275,6 +273,56 @@ pub struct ScratchPadEntry {
     pub text: String,
     /// When the entry was submitted.
     pub created_at: SystemTime,
+}
+
+/// One project's sidebar group names, in the order it first saw them (DEV-853).
+///
+/// Stored apart from the sessions on purpose. Deriving the order from whichever
+/// groups currently have members would make a `review` group that empties and
+/// refills reappear at the end of the list, and the whole point of a stored
+/// order is that a group holds its place — so a dispatcher's group stays at the
+/// top across the whole day rather than only while it has a worker running.
+///
+/// The name list stays append-only — a name is never dropped, so a group that
+/// empties keeps its slot. DEV-937 added the three things that *can* change: the
+/// list can be permuted, a name can be respelt in place, and the ungrouped block
+/// has a position in the list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectGroupOrder {
+    /// Owning project ID (links to `ProjectSave.id` in settings.json).
+    pub project_id: String,
+    /// Group names, in the order the sidebar draws them. The spelling here is
+    /// the canonical one: it is what the sidebar header displays and what
+    /// sessions store.
+    ///
+    /// Still a plain `Vec<String>` after DEV-937, deliberately. The ungrouped
+    /// block's slot could have been expressed by making this a list of
+    /// nullable names — but a `null` in here would make an older Allele fail to
+    /// *parse* the file, and `PersistedState::load` answers a parse failure with
+    /// an empty state, so one new key would have silently discarded a user's
+    /// whole session list on a downgrade. `ungrouped_at` keeps that
+    /// impossible.
+    pub groups: Vec<String>,
+    /// How many of `groups` are drawn above the ungrouped block (DEV-937).
+    ///
+    /// `serde(default)` → `0`, which is what every file written before DEV-937
+    /// restores to and is exactly DEV-853's behaviour: ungrouped first. Clamped
+    /// to `groups.len()` on load, since the file is hand-editable.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub ungrouped_at: usize,
+    /// Groups whose rows are folded away (DEV-937). `serde(default)` → nothing
+    /// collapsed, so an older file opens with every group expanded.
+    ///
+    /// Written only when non-empty, like every other optional key here, so the
+    /// common case adds nothing to a file a person reads by hand.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collapsed: Vec<String>,
+}
+
+/// `skip_serializing_if` for a default slot index, so the common case —
+/// ungrouped first, as it has always been — writes no key at all.
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 /// Per-project entry cap for scratch pad history. Prevents state.json
@@ -296,6 +344,17 @@ pub struct PersistedState {
     /// Consumers filter by `project_id` to show per-project history.
     #[serde(default)]
     pub scratch_pad_history: Vec<ScratchPadEntry>,
+    /// Sidebar group order per project (DEV-853). A `Vec` rather than a map, to
+    /// match the three collections above and keep the pretty-printed file
+    /// diffable.
+    ///
+    /// `serde(default)` for the same reason as `PersistedSession::group`: a file
+    /// written before groups existed has no order to restore, and an absent key
+    /// must load rather than fail. An older Allele reading a newer file ignores
+    /// this key and shows the flat list it already showed — the same
+    /// degrade-forwards contract as `skip_orchestration` and `drawer_tab_names`.
+    #[serde(default)]
+    pub project_group_order: Vec<ProjectGroupOrder>,
 }
 
 impl PersistedState {
@@ -579,6 +638,207 @@ mod tests {
         }"#;
         let session: PersistedSession = serde_json::from_str(json).expect("parses");
         assert_eq!(session.orchestration(), crate::session::Orchestration::Full);
+    }
+
+    // ── DEV-853: session groups ────────────────────────────────────────
+
+    /// The acceptance criterion: a `state.json` written before this change
+    /// loads with every session ungrouped, and the sidebar looks as it did.
+    /// `LEGACY_TABS` predates groups by several features, which is the point.
+    #[test]
+    fn a_pre_group_state_file_loads_every_session_ungrouped() {
+        let session: PersistedSession = serde_json::from_str(LEGACY_TABS)
+            .expect("a file written before groups existed must still load");
+        assert_eq!(session.group, None);
+
+        let state: PersistedState = serde_json::from_str("{}").expect("an empty state loads");
+        assert!(
+            state.project_group_order.is_empty(),
+            "no stored order means no groups, not a parse failure"
+        );
+    }
+
+    /// A session's group survives the file format, so a restart puts it back in
+    /// its group rather than in the ungrouped block.
+    #[test]
+    fn a_session_group_survives_a_round_trip() {
+        let json = r#"{
+            "id": "4989c913-0000-0000-0000-000000000000",
+            "project_id": "proj-1",
+            "label": "Review #9586",
+            "clone_path": null,
+            "last_known_status": "Suspended",
+            "started_at": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "last_active": { "secs_since_epoch": 0, "nanos_since_epoch": 0 },
+            "drawer_tab_names": [],
+            "drawer_active_tab": 0,
+            "group": "review"
+        }"#;
+        let session: PersistedSession = serde_json::from_str(json).expect("parses");
+        assert_eq!(session.group.as_deref(), Some("review"));
+
+        let back: PersistedSession =
+            serde_json::from_str(&serde_json::to_string(&session).expect("serialises"))
+                .expect("re-parses");
+        assert_eq!(back.group.as_deref(), Some("review"));
+    }
+
+    /// An ungrouped session must not write a `group` key at all. Most sessions
+    /// are ungrouped, and at 56 per project a null each is noise in a file a
+    /// person reads by hand.
+    #[test]
+    fn an_ungrouped_session_writes_no_group_key() {
+        let session: PersistedSession = serde_json::from_str(LEGACY_TABS).expect("parses");
+        let encoded = serde_json::to_value(&session).expect("serialises");
+        assert!(
+            encoded.get("group").is_none(),
+            "an absent group is absent from the file"
+        );
+    }
+
+    /// Groups and their order survive a restart.
+    #[test]
+    fn the_per_project_group_order_survives_a_round_trip() {
+        let json = r#"{
+            "sessions": [],
+            "project_group_order": [
+                { "project_id": "proj-1", "groups": ["dispatcher", "review", "linear"] },
+                { "project_id": "proj-2", "groups": ["review"] }
+            ]
+        }"#;
+        let state: PersistedState = serde_json::from_str(json).expect("parses");
+        assert_eq!(state.project_group_order.len(), 2);
+        assert_eq!(
+            state.project_group_order[0].groups,
+            ["dispatcher", "review", "linear"],
+            "order is the order the project first saw them, not alphabetical"
+        );
+
+        let back: PersistedState =
+            serde_json::from_str(&serde_json::to_string(&state).expect("serialises"))
+                .expect("re-parses");
+        assert_eq!(
+            back.project_group_order[0].groups,
+            ["dispatcher", "review", "linear"]
+        );
+        assert_eq!(back.project_group_order[1].project_id, "proj-2");
+    }
+
+    /// The persisted half of "a group that empties and refills reappears in its
+    /// earlier position, including after a restart": the stored order keeps a
+    /// name no live session carries. If the order were derived from the sessions
+    /// on save, `review` would be dropped here and would come back last.
+    #[test]
+    fn an_emptied_group_keeps_its_place_in_the_stored_order() {
+        let json = r#"{
+            "sessions": [],
+            "project_group_order": [
+                { "project_id": "proj-1", "groups": ["review", "linear"] }
+            ]
+        }"#;
+        let state: PersistedState = serde_json::from_str(json).expect("parses");
+        let order = &state.project_group_order[0].groups;
+        assert_eq!(
+            order.iter().position(|g| g == "review"),
+            Some(0),
+            "no session carries review, and it still holds the first slot"
+        );
+    }
+
+    // ── DEV-937: the slot and the collapsed set ────────────────────────
+
+    /// The acceptance criterion's persisted half: a reordered sidebar, with the
+    /// ungrouped block among the groups and one of them folded, comes back as it
+    /// was left.
+    #[test]
+    fn the_ungrouped_slot_and_the_collapsed_set_survive_a_round_trip() {
+        let json = r#"{
+            "sessions": [],
+            "project_group_order": [
+                {
+                    "project_id": "proj-1",
+                    "groups": ["dispatcher", "review", "linear"],
+                    "ungrouped_at": 2,
+                    "collapsed": ["review"]
+                }
+            ]
+        }"#;
+        let state: PersistedState = serde_json::from_str(json).expect("parses");
+        let stored = &state.project_group_order[0];
+        assert_eq!(stored.ungrouped_at, 2, "ungrouped sits below the first two");
+        assert_eq!(stored.collapsed, ["review"]);
+
+        let back: PersistedState =
+            serde_json::from_str(&serde_json::to_string(&state).expect("serialises"))
+                .expect("re-parses");
+        let back = &back.project_group_order[0];
+        assert_eq!(back.groups, ["dispatcher", "review", "linear"]);
+        assert_eq!(back.ungrouped_at, 2);
+        assert_eq!(back.collapsed, ["review"]);
+    }
+
+    /// The compatibility invariant: a `state.json` written by DEV-853 — groups
+    /// and nothing else — loads unchanged. Absent keys mean "as it was before":
+    /// ungrouped first, nothing folded.
+    #[test]
+    fn a_pre_dev937_group_order_loads_with_the_old_behaviour() {
+        let json = r#"{
+            "sessions": [],
+            "project_group_order": [
+                { "project_id": "proj-1", "groups": ["dispatcher", "review"] }
+            ]
+        }"#;
+        let state: PersistedState = serde_json::from_str(json)
+            .expect("a file written before the slot and the collapsed set must still load");
+        let stored = &state.project_group_order[0];
+        assert_eq!(stored.groups, ["dispatcher", "review"]);
+        assert_eq!(
+            stored.ungrouped_at, 0,
+            "ungrouped first, as DEV-853 drew it"
+        );
+        assert!(stored.collapsed.is_empty(), "and every group expanded");
+    }
+
+    /// Neither new key is written while it holds its default, so the file a
+    /// person reads by hand is the one DEV-853 wrote until something is actually
+    /// reordered or folded.
+    #[test]
+    fn a_default_slot_and_an_empty_collapsed_set_write_no_keys() {
+        let order = ProjectGroupOrder {
+            project_id: "proj-1".to_string(),
+            groups: vec!["review".to_string()],
+            ungrouped_at: 0,
+            collapsed: Vec::new(),
+        };
+        let encoded = serde_json::to_value(&order).expect("serialises");
+        assert!(encoded.get("ungrouped_at").is_none());
+        assert!(encoded.get("collapsed").is_none());
+        assert!(encoded.get("groups").is_some(), "the order itself is there");
+    }
+
+    /// The order stays a `Vec<String>`, so an older Allele still *parses* the
+    /// file and simply ignores what it does not know. Had the slot been
+    /// expressed as a `null` in `groups`, an older build would have failed to
+    /// parse — and `PersistedState::load` answers a parse failure with an empty
+    /// state, which would have discarded the user's whole session list.
+    #[test]
+    fn an_older_allele_can_still_read_a_reordered_file() {
+        #[derive(serde::Deserialize)]
+        struct OldProjectGroupOrder {
+            project_id: String,
+            groups: Vec<String>,
+        }
+
+        let json = r#"{
+            "project_id": "proj-1",
+            "groups": ["review", "linear"],
+            "ungrouped_at": 1,
+            "collapsed": ["review"]
+        }"#;
+        let old: OldProjectGroupOrder =
+            serde_json::from_str(json).expect("the keys it does not know are ignored");
+        assert_eq!(old.project_id, "proj-1");
+        assert_eq!(old.groups, ["review", "linear"]);
     }
 
     /// And a session that opted out round-trips through the file format.

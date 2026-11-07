@@ -89,26 +89,26 @@ pub(crate) struct AppleShell;
 
 impl super::SystemShell for AppleShell {
     fn open_url(&self, url: &str) {
-        if let Err(e) = Command::new("open")
+        let mut command = Command::new("open");
+        command
             .arg(url)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
+            .stderr(Stdio::null());
+        if let Err(e) = crate::proc::spawn_and_reap(command) {
             tracing::warn!("AppleShell::open_url({url}): spawn failed: {e}");
         }
     }
 
     fn reveal_in_files(&self, path: &Path) {
-        if let Err(e) = Command::new("open")
+        let mut command = Command::new("open");
+        command
             .arg("-R")
             .arg(path)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
+            .stderr(Stdio::null());
+        if let Err(e) = crate::proc::spawn_and_reap(command) {
             tracing::warn!(
                 "AppleShell::reveal_in_files({}): spawn failed: {e}",
                 path.display()
@@ -122,5 +122,48 @@ impl super::SystemShell for AppleShell {
 
     fn show_fatal_dialog(&self, title: &str, body: &str) {
         crate::hooks::show_fatal_dialog(title, body);
+    }
+
+    fn computer_name(&self) -> Option<String> {
+        let out = Command::new("scutil")
+            .args(["--get", "ComputerName"])
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        (!name.is_empty()).then_some(name)
+    }
+}
+
+/// The login Keychain, as generic-password items. The trait impl is macOS-only;
+/// off macOS `Platform::detect` picks `unsupported::NoSecretStore` instead.
+pub(crate) struct AppleKeychain;
+
+/// `errSecItemNotFound` — the Keychain's answer when no item matches.
+#[cfg(target_os = "macos")]
+const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+
+#[cfg(target_os = "macos")]
+impl super::SecretStore for AppleKeychain {
+    fn load(&self, service: &str, account: &str) -> Result<Option<Vec<u8>>> {
+        match security_framework::passwords::get_generic_password(service, account) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(None),
+            Err(e) => Err(AlleleError::Other(format!(
+                "failed to read {service}/{account} from the Keychain: {e}"
+            ))),
+        }
+    }
+
+    fn store(&self, service: &str, account: &str, secret: &[u8]) -> Result<()> {
+        security_framework::passwords::set_generic_password(service, account, secret).map_err(|e| {
+            AlleleError::Other(format!(
+                "failed to store {service}/{account} in the Keychain: {e}"
+            ))
+        })
     }
 }

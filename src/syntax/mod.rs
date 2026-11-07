@@ -6,6 +6,15 @@
 //! needs "readable and navigable", not semantic accuracy (DEV-37), so a fast
 //! heuristic tokenizer that never panics is the right trade-off.
 
+// Neutral by design (DEV-578). This used to live under `reader`, and when the
+// Markdown renderer needed it too, `rich` reached into `reader` while `reader`
+// already rendered Markdown through `rich` — a cycle between two feature
+// modules, with one of them exposing internals purely so the other could
+// borrow them. Highlighting is not a reader concern: it maps an extension to a
+// grammar and produces styled runs, and it now has two consumers.
+
+pub(crate) mod tree_sitter;
+
 use gpui::{Font, FontFeatures, FontStyle, FontWeight, Hsla, SharedString, TextRun};
 
 /// Theme colors a token class maps onto. Filled from `theme()` by the caller
@@ -190,6 +199,34 @@ fn syntax_for(ext: &str) -> Syntax {
     }
 }
 
+/// The theme's token palette. Shared so every syntax-highlighted surface —
+/// the source Reader and Markdown code fences (DEV-573) — colours the same
+/// token class the same way.
+///
+/// Comments use `text_muted`, not `text_faint`: against the Markdown fence
+/// surface (`bg_raised` at 0.6 over `bg_base`, blending to #292a3b) faint
+/// measures 2.89:1, well under the 4.5:1 needed for body text, and only 3.36:1
+/// against the Reader's own background. Muted clears it at 5.0:1. Comments
+/// routinely carry the constraint that explains the code — they cannot recede
+/// into the background.
+pub(crate) fn theme_colors() -> TokenColors {
+    use crate::theme::theme;
+    TokenColors {
+        text: theme().text_primary,
+        comment: theme().text_muted,
+        string: theme().success,
+        keyword: theme().lavender,
+        number: theme().warning,
+        function: theme().info,
+        type_: theme().accent,
+        constant: theme().warning,
+        property: theme().text_body,
+        operator: theme().text_secondary,
+        punctuation: theme().text_muted,
+        variable: theme().text_primary,
+    }
+}
+
 pub(crate) fn mono_font() -> Font {
     Font {
         family: crate::theme::FONT_MONO.into(),
@@ -205,6 +242,7 @@ fn is_word(c: char) -> bool {
 }
 
 /// A rendered line: the raw text plus the styled runs to hand to `StyledText`.
+#[derive(Clone)]
 pub(crate) struct HlLine {
     pub text: SharedString,
     pub runs: Vec<TextRun>,
@@ -217,7 +255,7 @@ pub(crate) struct HlLine {
 /// is bundled for `ext`, and falls back to the built-in lexer otherwise — so
 /// unsupported languages still get reasonable coloring, never flat text.
 pub(crate) fn highlight(contents: &str, ext: &str, colors: TokenColors) -> Vec<HlLine> {
-    if let Some(lines) = super::ts_highlight::highlight(contents, ext, &colors) {
+    if let Some(lines) = tree_sitter::highlight(contents, ext, &colors) {
         return lines;
     }
     lexer_highlight(contents, ext, colors)

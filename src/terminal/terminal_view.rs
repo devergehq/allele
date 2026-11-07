@@ -21,6 +21,9 @@ pub fn clamp_font_size(size: f32) -> f32 {
 }
 const MIN_COLS: u16 = 20;
 const MIN_ROWS: u16 = 4;
+/// The largest size a paired machine may fit a session to (DEV-1167).
+const MAX_REMOTE_COLS: u16 = 500;
+const MAX_REMOTE_ROWS: u16 = 200;
 /// Milliseconds the desired terminal size must be stable before we commit
 /// the resize to the PTY (sends SIGWINCH). Prevents rapid size oscillation
 /// from cascading through CC's TUI re-render and duplicating scrollback.
@@ -93,6 +96,16 @@ pub struct TerminalView {
     element_origin_x: std::sync::Arc<std::sync::atomic::AtomicI32>,
     element_origin_y: std::sync::Arc<std::sync::atomic::AtomicI32>,
     scrollbar_dragging: bool,
+    /// True while the left button is down *and* its press was reported to the
+    /// PTY. Mouse reports have to reach the TUI in matched press/release pairs,
+    /// so `on_mouse_up_out` is ungated by design: a drag that starts in the grid
+    /// and ends over the sidebar must still deliver its release, or the TUI goes
+    /// on believing the button is held. Ungated, it also fired for clicks that
+    /// never touched the terminal — and since `pixel_to_cell` clamps out-of-grid
+    /// coordinates, that stray release landed on the grid row level with the
+    /// cursor, so clicking the sidebar expanded whatever the TUI had on that row
+    /// (DEV-648). This flag is what tells the two apart.
+    left_press_forwarded: bool,
     /// Set the first time a keystroke reaches this terminal, and never
     /// cleared. Shared with the owning `DrawerTab` so the DEV-445 idle
     /// reaper can tell a tab still running exactly what we launched from
@@ -146,6 +159,10 @@ pub struct TerminalView {
     // Resize debounce — record desired size + timestamp, only commit
     // the resize to the PTY once the size has been stable for RESIZE_DEBOUNCE_MS.
     pending_resize: Option<(TermSize, Instant)>,
+    /// The PTY is at a paired machine's size ("Fit to this window",
+    /// DEV-1167), not this view's. The next local keystroke or click, or a
+    /// local resize, puts this view's size back.
+    remote_fit: bool,
     // Bell flash state
     bell_flash_start: Option<Instant>,
     // FPS tracking
@@ -221,6 +238,7 @@ impl TerminalView {
                             -1,
                         )),
                         scrollbar_dragging: false,
+                        left_press_forwarded: false,
                         user_typed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                         cursor_visible: true,
                         last_keypress: Instant::now(),
@@ -243,6 +261,7 @@ impl TerminalView {
                         bottom_inset: 0.0,
                         right_inset: 0.0,
                         pending_resize: None,
+                        remote_fit: false,
                         bell_flash_start: None,
                         frame_count: 0,
                         last_fps_time: Instant::now(),
@@ -341,22 +360,10 @@ impl TerminalView {
                                         .map(|d| d.as_millis())
                                         .unwrap_or(0),
                                 );
-                                if let Some(ref terminal) = this.terminal {
-                                    let mut term = terminal.term.lock();
-                                    let in_alt_screen = term.mode()
-                                        .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
-                                    if in_alt_screen {
-                                        term.grid_mut().reset::<alacritty_terminal::vte::ansi::Color>();
-                                        info!("[RESIZE-DIAG] RESET grid (alt-screen, pre-SIGWINCH)");
-                                    } else {
-                                        info!("[RESIZE-DIAG] SKIP reset (primary screen — fork CSI 2J preserves history)");
-                                    }
-                                }
                                 this.last_cols = pending_size.cols;
                                 this.last_rows = pending_size.rows;
-                                if let Some(ref mut terminal) = this.terminal {
-                                    terminal.resize(pending_size);
-                                }
+                                this.apply_size(pending_size);
+                                this.remote_fit = false;
                                 this.pending_resize = None;
                                 resize_committed = true;
                             }
@@ -431,6 +438,7 @@ impl TerminalView {
             element_origin_x: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             element_origin_y: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(-1)),
             scrollbar_dragging: false,
+            left_press_forwarded: false,
             user_typed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cursor_visible: true,
             last_keypress: Instant::now(),
@@ -453,6 +461,7 @@ impl TerminalView {
             bottom_inset: 0.0,
             right_inset: 0.0,
             pending_resize: None,
+            remote_fit: false,
             bell_flash_start: None,
             frame_count: 0,
             last_fps_time: Instant::now(),
@@ -1377,6 +1386,67 @@ impl TerminalView {
     }
 
     /// Compute terminal grid size from pixel dimensions
+    /// Resize the PTY. In the alternate screen the grid is cleared first, so
+    /// the full-screen app redraws into a blank grid after its SIGWINCH.
+    fn apply_size(&mut self, size: TermSize) {
+        let Some(ref mut terminal) = self.terminal else {
+            return;
+        };
+        {
+            let mut term = terminal.term.lock();
+            let in_alt_screen = term
+                .mode()
+                .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
+            if in_alt_screen {
+                term.grid_mut()
+                    .reset::<alacritty_terminal::vte::ansi::Color>();
+                info!("[RESIZE-DIAG] RESET grid (alt-screen, pre-SIGWINCH)");
+            } else {
+                info!("[RESIZE-DIAG] SKIP reset (primary screen — fork CSI 2J preserves history)");
+            }
+        }
+        terminal.resize(size);
+    }
+
+    /// Resize the PTY to a paired machine's window (DEV-1167). This view
+    /// keeps its own size in `last_cols`/`last_rows` and restores it on the
+    /// next local interaction. `false` while there is no terminal.
+    pub fn fit_to_remote(&mut self, columns: u16, lines: u16, cx: &mut Context<Self>) -> bool {
+        if self.terminal.is_none() {
+            return false;
+        }
+        let size = TermSize {
+            cols: columns.clamp(MIN_COLS, MAX_REMOTE_COLS),
+            rows: lines.clamp(MIN_ROWS, MAX_REMOTE_ROWS),
+            cell_width: self.cell_width as u16,
+            cell_height: self.cell_height as u16,
+        };
+        info!(
+            "[RESIZE-DIAG] REMOTE FIT: {}x{} (local {}x{})",
+            size.cols, size.rows, self.last_cols, self.last_rows
+        );
+        self.apply_size(size);
+        self.remote_fit = true;
+        cx.notify();
+        true
+    }
+
+    /// A local keystroke or click on a session a paired machine had fitted
+    /// to its window: this Mac is using it again, so its size comes back.
+    fn restore_local_size(&mut self) {
+        if !std::mem::take(&mut self.remote_fit) {
+            return;
+        }
+        let size = TermSize {
+            cols: self.last_cols,
+            rows: self.last_rows,
+            cell_width: self.cell_width as u16,
+            cell_height: self.cell_height as u16,
+        };
+        info!("[RESIZE-DIAG] LOCAL RESTORE: {}x{}", size.cols, size.rows);
+        self.apply_size(size);
+    }
+
     fn compute_size(width_px: f32, height_px: f32, cell_w: f32, cell_h: f32) -> TermSize {
         let cols = (width_px / cell_w).floor() as u16;
         let rows = (height_px / cell_h).floor() as u16;
@@ -1460,10 +1530,11 @@ impl TerminalView {
                 "Reveal in Finder".to_string(),
                 Box::new(
                     move |_this: &mut TerminalView, _cx: &mut Context<TerminalView>| {
-                        let _ = std::process::Command::new("open")
-                            .arg("-R")
-                            .arg(&path_for_reveal)
-                            .spawn();
+                        let mut command = std::process::Command::new("open");
+                        command.arg("-R").arg(&path_for_reveal);
+                        if let Err(e) = crate::proc::spawn_and_reap(command) {
+                            tracing::warn!("reveal in Finder: spawn failed: {e}");
+                        }
                     },
                 ),
             ));
@@ -1631,6 +1702,7 @@ impl Render for TerminalView {
         terminal
             .on_key_down(
                 cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
+                    this.restore_local_size();
                     this.last_keypress = Instant::now();
                     this.user_typed
                         .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1825,6 +1897,10 @@ impl Render for TerminalView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, event: &MouseDownEvent, window, cx| {
+                    this.restore_local_size();
+                    // A press that reaches the grid supersedes any earlier one,
+                    // whether or not this one ends up being reported.
+                    this.left_press_forwarded = false;
                     // Any left-click dismisses an open terminal context menu.
                     if this.terminal_context_menu.is_some() {
                         this.terminal_context_menu = None;
@@ -1845,7 +1921,11 @@ impl Render for TerminalView {
                     if event.modifiers.platform {
                         if let Some(cell) = this.pixel_to_cell(click_x, click_y) {
                             if let Some((_, _, _, url)) = this.url_at(cell) {
-                                let _ = std::process::Command::new("open").arg(&url).spawn();
+                                let mut command = std::process::Command::new("open");
+                                command.arg(&url);
+                                if let Err(e) = crate::proc::spawn_and_reap(command) {
+                                    tracing::warn!("open url: spawn failed: {e}");
+                                }
                                 return;
                             }
                             if let Some((_, _, _, path, line_col)) = this.path_at(cell) {
@@ -1861,6 +1941,7 @@ impl Render for TerminalView {
                         event.position,
                         event.modifiers,
                     ) {
+                        this.left_press_forwarded = true;
                         return;
                     }
 
@@ -2083,7 +2164,11 @@ impl Render for TerminalView {
 
                     // URL: open immediately in default browser, no menu.
                     if let Some((_, _, _, url)) = this.url_at(cell) {
-                        let _ = std::process::Command::new("open").arg(&url).spawn();
+                        let mut command = std::process::Command::new("open");
+                        command.arg(&url);
+                        if let Err(e) = crate::proc::spawn_and_reap(command) {
+                            tracing::warn!("open url: spawn failed: {e}");
+                        }
                         return;
                     }
 
@@ -2104,12 +2189,16 @@ impl Render for TerminalView {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, event: &MouseUpEvent, _window, cx| {
-                    if this.forward_mouse_button(
-                        MouseButton::Left,
-                        false,
-                        event.position,
-                        event.modifiers,
-                    ) {
+                    // Only the release half of a press this terminal reported is
+                    // owed to the TUI; see `left_press_forwarded` (DEV-648).
+                    if std::mem::take(&mut this.left_press_forwarded)
+                        && this.forward_mouse_button(
+                            MouseButton::Left,
+                            false,
+                            event.position,
+                            event.modifiers,
+                        )
+                    {
                         this.scrollbar_dragging = false;
                         this.selecting = false;
                         return;
@@ -2158,12 +2247,16 @@ impl Render for TerminalView {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this: &mut Self, event: &MouseUpEvent, _window, cx| {
-                    if this.forward_mouse_button(
-                        MouseButton::Left,
-                        false,
-                        event.position,
-                        event.modifiers,
-                    ) {
+                    // Only the release half of a press this terminal reported is
+                    // owed to the TUI; see `left_press_forwarded` (DEV-648).
+                    if std::mem::take(&mut this.left_press_forwarded)
+                        && this.forward_mouse_button(
+                            MouseButton::Left,
+                            false,
+                            event.position,
+                            event.modifiers,
+                        )
+                    {
                         this.scrollbar_dragging = false;
                         this.selecting = false;
                         return;
@@ -2195,6 +2288,14 @@ impl Render for TerminalView {
                     }
                 }),
             )
+            // A press outside the grid can never be ours, so it retires any
+            // unmatched press — otherwise a release swallowed by an overlay
+            // would leave the flag set and leak into the next click.
+            .on_mouse_down_out(cx.listener(
+                |this: &mut Self, _event: &MouseDownEvent, _window, _cx| {
+                    this.left_press_forwarded = false;
+                },
+            ))
             .on_scroll_wheel(cx.listener(
                 |this: &mut Self, event: &ScrollWheelEvent, _window, _cx| {
                     let lines = this.scroll_lines_from_event(event);

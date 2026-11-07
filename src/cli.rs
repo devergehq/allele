@@ -147,6 +147,13 @@ mod tests {
     #[test]
     fn unknown_flags_are_refused() {
         assert_eq!(classify(&["--serve"]), Launch::Usage { code: 2 });
+        // Load-bearing for `--mcp-serve` since DEV-943: classification runs
+        // before the hand-off, so a malformed serve invocation exits with usage
+        // on stderr instead of serving against a root nobody asked for.
+        assert_eq!(
+            classify(&["--mcp-serve", "--bogus"]),
+            Launch::Usage { code: 2 }
+        );
     }
 
     #[test]
