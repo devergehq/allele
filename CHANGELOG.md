@@ -33,6 +33,14 @@ Changes on `master` awaiting the next tagged release.
   when every entry on it is one macOS supplies itself, so anything from Homebrew,
   cargo, nvm, or `~/.local/bin` marks a genuine terminal launch. Agent hooks that
   shell out to user-installed binaries no longer fail with "command not found".
+- Settings changes made from the Settings window (font size, cleanup paths, browser
+  integration, git-pull-before-new-session, attention promotion, external editor,
+  naming config) went straight to disk instead of through the render-tick
+  coordinator, so a burst of changes — dragging the font-size slider, say — wrote
+  `settings.json` once per step rather than once per frame.
+- Agent configuration changed in the Settings window was never marked for
+  persistence, so it could be lost on quit unless some unrelated change happened to
+  write `settings.json` first.
 
 ## [0.7.2] - 2026-10-13
 
