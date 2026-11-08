@@ -14,6 +14,10 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- **Collapsible sidebar.** Click a project header to fold its sessions and archives away;
+  click a machine row, or a project heading under it, to fold that too. The MACHINES
+  section can be moved above the local projects from its header. Folds and position
+  survive a restart.
 - A versioned **agent status contract** (`agent.status/1`, specified in
   [docs/locus-status-contract.md](docs/locus-status-contract.md)) replaces reading Locus
   Algorithm phase names out of assistant prose. Locus emits a typed frame as a key in the

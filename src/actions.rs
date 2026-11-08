@@ -248,6 +248,18 @@ pub enum SidebarAction {
     /// by clicking the bar's own summary header — the only affordance, by
     /// design (DEV-525).
     ToggleAttentionBar,
+    /// Fold a local project's rows under its header, or unfold them
+    /// (DEV-1235). Keyed by project id so it survives a reorder.
+    ToggleProjectCollapsed(String),
+    /// Fold a paired host's sessions under its MACHINES row (DEV-1235).
+    /// Carries the peer id as text.
+    ToggleMachineCollapsed(String),
+    /// Fold one remote project's sessions under its heading (DEV-1235).
+    /// Carries `machines::remote_project_key`.
+    ToggleRemoteProjectCollapsed(String),
+    /// Move the MACHINES section above the local projects, or back below
+    /// them (DEV-1235).
+    ToggleMachinesPosition,
     /// Re-run `git status` for the changes panel (manual refresh button,
     /// hook-event triggers).
     RefreshChanges,

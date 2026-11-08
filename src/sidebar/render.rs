@@ -615,9 +615,19 @@ pub(crate) fn build_sidebar_items(
         }
 
         let is_confirming_remove = state.confirming.remove_project == Some(p_idx);
+        // Folded under its header (DEV-1235). A text filter unfolds every
+        // project for as long as it is typed: a search that found a session
+        // and then hid it behind a fold would look like it found nothing.
+        let collapsed = !filtering
+            && state
+                .user_settings
+                .sidebar_collapsed_projects
+                .contains(&project.id);
+        let session_count = project.sessions.len();
 
         // Project header
         let header_drag_label = project_name.clone();
+        let project_id = project.id.clone();
         let mut header = div()
             .id(SharedString::from(format!("project-{p_idx}")))
             .group(format!("proj-{p_idx}"))
@@ -649,6 +659,18 @@ pub(crate) fn build_sidebar_items(
                     },
                 ),
             )
+            .when(!is_confirming_remove, |el| {
+                // The whole header is the fold control, as a group header is.
+                // The hover buttons stop the mouse-down, so clicking one of
+                // them never folds the project as well.
+                el.cursor_pointer().on_click(cx.listener(
+                    move |this: &mut AppState, _event, _window, cx| {
+                        this.pending_action =
+                            Some(SidebarAction::ToggleProjectCollapsed(project_id.clone()).into());
+                        cx.notify();
+                    },
+                ))
+            })
             .px(px(12.0))
             .py(px(6.0))
             .bg(if is_confirming_remove {
@@ -670,14 +692,31 @@ pub(crate) fn build_sidebar_items(
                     .flex_row()
                     .gap(px(6.0))
                     .items_center()
-                    .child(icon(icons::CHEVRON_DOWN, 12.0, theme().text_faint))
+                    .child(icon(
+                        if collapsed {
+                            icons::CHEVRON_RIGHT
+                        } else {
+                            icons::CHEVRON_DOWN
+                        },
+                        12.0,
+                        theme().text_faint,
+                    ))
                     .child(
                         div()
                             .text_size(px(12.0))
                             .font_weight(FontWeight::BOLD)
                             .text_color(theme().text_primary)
                             .child(project_name),
-                    ),
+                    )
+                    // A folded project still says how much is under it.
+                    .when(collapsed && session_count > 0, |el| {
+                        el.child(
+                            div()
+                                .text_size(px(11.0))
+                                .text_color(theme().text_dim)
+                                .child(session_count.to_string()),
+                        )
+                    }),
             );
 
         if is_confirming_remove {
@@ -1001,7 +1040,7 @@ pub(crate) fn build_sidebar_items(
 
         // Loading placeholders (sessions mid-clone)
         for loading in &project.loading_sessions {
-            if filtering {
+            if filtering || collapsed {
                 continue;
             }
             sidebar_items.push(
@@ -1094,6 +1133,11 @@ pub(crate) fn build_sidebar_items(
                         session_idx: s_idx,
                     });
                 if active_only && !session_survives_active_only(session.status, is_active) {
+                    return false;
+                }
+                // A folded project keeps only the session on screen, as a
+                // folded group does: the row the user is in never vanishes.
+                if collapsed && !is_active {
                     return false;
                 }
                 !filtering
@@ -1579,7 +1623,7 @@ pub(crate) fn build_sidebar_items(
 
         // Archived sessions for this project. Hidden while text-filtering, and
         // hidden under active-only — an archive is inactive by definition.
-        if !project.archives.is_empty() && !filtering && !active_only {
+        if !project.archives.is_empty() && !filtering && !active_only && !collapsed {
             let archive_count = project.archives.len();
             let is_confirming_delete_all = state.confirming.delete_all_archives == Some(p_idx);
 
@@ -1830,7 +1874,12 @@ pub(crate) fn build_sidebar_items(
         }
     }
 
-    sidebar_items.extend(build_machines_section(state, cx));
+    let machines = build_machines_section(state, cx);
+    if state.user_settings.sidebar_machines_on_top {
+        sidebar_items.splice(0..0, machines);
+    } else {
+        sidebar_items.extend(machines);
+    }
     sidebar_items
 }
 
@@ -1850,6 +1899,9 @@ fn build_machines_section(state: &AppState, cx: &mut Context<AppState>) -> Vec<A
 
     let filter = state.sidebar_filter.as_str();
     let active_only = state.user_settings.sidebar_active_only;
+    let settings = &state.user_settings;
+    // As for local projects, a text filter unfolds everything it searches.
+    let folds_apply = filter.is_empty();
     let now = std::time::SystemTime::now();
     let mut items: Vec<AnyElement> = Vec::new();
 
@@ -1875,7 +1927,19 @@ fn build_machines_section(state: &AppState, cx: &mut Context<AppState>) -> Vec<A
         if !host_matches && projects.is_empty() {
             continue;
         }
-        items.push(render_machine_row(machine, now));
+        let peer_key = machine.id.to_string();
+        let machine_collapsed =
+            folds_apply && settings.sidebar_collapsed_machines.contains(&peer_key);
+        items.push(render_machine_row(
+            machine,
+            now,
+            machine_collapsed,
+            peer_key,
+            cx,
+        ));
+        if machine_collapsed {
+            continue;
+        }
         // Creates sent from the picker and not yet answered (DEV-1168).
         for starting in state.remote_ui.starting_on(machine.id) {
             items.push(render_starting_remote_row(&starting.label));
@@ -1885,23 +1949,21 @@ fn build_machines_section(state: &AppState, cx: &mut Context<AppState>) -> Vec<A
             remote.hosts().grant(machine.id),
         );
         for (project_name, rows) in projects {
-            items.push(
-                div()
-                    .pl(px(24.0))
-                    .pr(px(12.0))
-                    .pt(px(4.0))
-                    .pb(px(2.0))
-                    .bg(theme().bg_surface)
-                    .min_w(px(0.0))
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .text_size(px(11.0))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme().text_dim)
-                    .child(project_name.to_string())
-                    .into_any_element(),
-            );
+            let fold_key = machines::remote_project_key(machine.id, project_name);
+            let project_collapsed = folds_apply
+                && settings
+                    .sidebar_collapsed_remote_projects
+                    .contains(&fold_key);
+            items.push(render_remote_project_heading(
+                project_name,
+                rows.len(),
+                project_collapsed,
+                fold_key,
+                cx,
+            ));
+            if project_collapsed {
+                continue;
+            }
             for session in rows {
                 let key = crate::remote_sessions::RemoteSessionKey {
                     peer: machine.id,
@@ -1922,26 +1984,138 @@ fn build_machines_section(state: &AppState, cx: &mut Context<AppState>) -> Vec<A
     if items.is_empty() {
         return items;
     }
-    let header = div()
+    items.insert(
+        0,
+        render_machines_header(settings.sidebar_machines_on_top, cx),
+    );
+    items
+}
+
+/// The MACHINES section header, with a hover-revealed control that moves the
+/// whole section above or below the local projects (DEV-1235).
+fn render_machines_header(on_top: bool, cx: &mut Context<AppState>) -> AnyElement {
+    let move_label = if on_top {
+        "Move to bottom"
+    } else {
+        "Move to top"
+    };
+    div()
+        .id("machines-header")
+        .group("machines-hdr")
         .px(px(12.0))
         .py(px(6.0))
         .bg(theme().bg_sunken)
         .border_t_1()
         .border_b_1()
         .border_color(theme().border_subtle)
-        .text_size(px(10.0))
-        .font_weight(FontWeight::SEMIBOLD)
-        .text_color(theme().text_faint)
-        .child("MACHINES")
-        .into_any_element();
-    items.insert(0, header);
-    items
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .child(
+            div()
+                .text_size(px(10.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme().text_faint)
+                .child("MACHINES"),
+        )
+        .child(
+            div()
+                .id("machines-move")
+                .invisible()
+                .group_hover("machines-hdr", |s| s.visible())
+                .cursor_pointer()
+                .px(px(6.0))
+                .rounded(px(6.0))
+                .text_size(px(10.0))
+                .text_color(theme().text_muted)
+                .hover(|s| s.bg(theme().bg_raised).text_color(theme().text_primary))
+                .child(move_label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this: &mut AppState, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.pending_action = Some(SidebarAction::ToggleMachinesPosition.into());
+                        cx.notify();
+                    }),
+                ),
+        )
+        .into_any_element()
+}
+
+/// A project heading under a host, clickable to fold its sessions away
+/// (DEV-1235). Folded, it shows how many rows it is hiding.
+fn render_remote_project_heading(
+    name: &str,
+    rows: usize,
+    collapsed: bool,
+    fold_key: String,
+    cx: &mut Context<AppState>,
+) -> AnyElement {
+    div()
+        .id(SharedString::from(format!("remote-project-{fold_key}")))
+        .pl(px(24.0))
+        .pr(px(12.0))
+        .pt(px(4.0))
+        .pb(px(2.0))
+        .bg(theme().bg_surface)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme().bg_raised))
+        .flex()
+        .flex_row()
+        .gap(px(4.0))
+        .items_center()
+        .min_w(px(0.0))
+        .child(icon(
+            if collapsed {
+                icons::CHEVRON_RIGHT
+            } else {
+                icons::CHEVRON_DOWN
+            },
+            10.0,
+            theme().text_faint,
+        ))
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(11.0))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(theme().text_dim)
+                .child(name.to_string()),
+        )
+        .when(collapsed, |el| {
+            el.child(
+                div()
+                    .flex_shrink_0()
+                    .text_size(px(10.0))
+                    .text_color(theme().text_dim)
+                    .child(rows.to_string()),
+            )
+        })
+        .on_click(
+            cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                this.pending_action =
+                    Some(SidebarAction::ToggleRemoteProjectCollapsed(fold_key.clone()).into());
+                cx.notify();
+            }),
+        )
+        .into_any_element()
 }
 
 /// A host row: name and how many of its sessions need the user, then a dot
 /// and the link state ("connected", "unreachable · last seen 4m ago") on a
 /// second line so a narrow sidebar never truncates the part that matters.
-fn render_machine_row(machine: &machines::MachineView, now: std::time::SystemTime) -> AnyElement {
+fn render_machine_row(
+    machine: &machines::MachineView,
+    now: std::time::SystemTime,
+    collapsed: bool,
+    peer_key: String,
+    cx: &mut Context<AppState>,
+) -> AnyElement {
     let (dot_color, text_color) = match machine.link {
         machines::MachineLink::Connected => (theme().success, theme().text_dim),
         machines::MachineLink::Connecting => (theme().warning, theme().text_dim),
@@ -1952,6 +2126,15 @@ fn render_machine_row(machine: &machines::MachineView, now: std::time::SystemTim
         .flex_row()
         .gap(px(6.0))
         .items_center()
+        .child(icon(
+            if collapsed {
+                icons::CHEVRON_RIGHT
+            } else {
+                icons::CHEVRON_DOWN
+            },
+            10.0,
+            theme().text_faint,
+        ))
         .child(icon(icons::MONITOR, 12.0, theme().text_muted))
         .child(
             div()
@@ -1982,16 +2165,26 @@ fn render_machine_row(machine: &machines::MachineView, now: std::time::SystemTim
         );
     }
     div()
+        .id(SharedString::from(format!("machine-{peer_key}")))
         .px(px(12.0))
         .py(px(5.0))
         .bg(theme().bg_surface)
+        .cursor_pointer()
+        .hover(|s| s.bg(theme().bg_raised))
+        .on_click(
+            cx.listener(move |this: &mut AppState, _event, _window, cx| {
+                this.pending_action =
+                    Some(SidebarAction::ToggleMachineCollapsed(peer_key.clone()).into());
+                cx.notify();
+            }),
+        )
         .flex()
         .flex_col()
         .gap(px(1.0))
         .child(name_row)
         .child(
             div()
-                .pl(px(18.0))
+                .pl(px(34.0))
                 .flex()
                 .flex_row()
                 .gap(px(5.0))

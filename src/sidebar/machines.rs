@@ -67,6 +67,12 @@ pub(crate) fn ago_text(ago: Duration) -> String {
     }
 }
 
+/// The fold key for one project on one host (DEV-1235). The same project
+/// name on two hosts is two headings, so the peer is part of the key.
+pub(crate) fn remote_project_key(peer: PeerId, project: &str) -> String {
+    format!("{peer}/{project}")
+}
+
 /// One remote session row.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RemoteSessionView {
