@@ -227,7 +227,7 @@ impl UsageTracker {
         self.totals.version = FORMAT_VERSION;
         match write_atomic(&path, &self.totals) {
             Ok(()) => self.dirty = false,
-            Err(e) => eprintln!("tab usage: could not write {}: {e}", path.display()),
+            Err(e) => tracing::warn!("tab usage: could not write {}: {e}", path.display()),
         }
     }
 }
