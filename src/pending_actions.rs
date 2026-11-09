@@ -1348,6 +1348,12 @@ impl AppState {
                 self.mark_settings_dirty();
                 self.reconcile_keep_awake();
             }
+            SettingsAction::UpdateUsageCounting(enabled) => {
+                *skip_refocus = true;
+                self.user_settings.usage_counting_enabled = enabled;
+                self.mark_settings_dirty();
+                self.sample_usage();
+            }
             SettingsAction::UpdateFontSize(size) => {
                 *skip_refocus = true;
                 let new_size = clamp_font_size(size);

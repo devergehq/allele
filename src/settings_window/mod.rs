@@ -261,6 +261,7 @@ impl SettingsWindowState {
                 settings.git_pull_before_new_session,
                 settings.promote_attention_sessions,
                 settings.keep_awake_while_working,
+                settings.usage_counting_enabled,
             ),
             editor: EditorSection::new(
                 cx,

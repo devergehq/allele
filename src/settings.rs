@@ -258,6 +258,13 @@ pub struct Settings {
     #[serde(default = "default_true")]
     pub keep_awake_while_working: bool,
 
+    /// When true, Allele counts locally how long each main tab, the Changes
+    /// panel and the Scratch Pad are visible while its window is focused, in
+    /// `~/.allele/tab-usage.json`. Nothing leaves the machine. Default: ON —
+    /// the counts exist to inform a week-long look at tab use (DEV-1265).
+    #[serde(default = "default_true")]
+    pub usage_counting_enabled: bool,
+
     /// When true, the sidebar shows only sessions with a live agent attached
     /// (see `SessionStatus::is_active`) and hides any project left with
     /// nothing to show. Suspended/Done sessions are hidden, not deleted —
@@ -519,6 +526,7 @@ impl Default for Settings {
             git_pull_before_new_session: false,
             promote_attention_sessions: true,
             keep_awake_while_working: true,
+            usage_counting_enabled: true,
             sidebar_active_only: false,
             attention_bar_collapsed: false,
             sidebar_collapsed_projects: BTreeSet::new(),

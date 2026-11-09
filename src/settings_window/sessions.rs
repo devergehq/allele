@@ -1,5 +1,5 @@
 //! Sessions settings section — clone cleanup paths, session-creation toggles,
-//! and keep-awake (DEV-1156).
+//! keep-awake (DEV-1156), and the local tab-usage counters (DEV-1265).
 
 use gpui::*;
 
@@ -17,6 +17,7 @@ pub(super) struct SessionsSection {
     git_pull_before_new_session: bool,
     promote_attention_sessions: bool,
     keep_awake_while_working: bool,
+    usage_counting_enabled: bool,
 }
 
 impl SessionsSection {
@@ -26,6 +27,7 @@ impl SessionsSection {
         git_pull_before_new_session: bool,
         promote_attention_sessions: bool,
         keep_awake_while_working: bool,
+        usage_counting_enabled: bool,
     ) -> Self {
         let draft_input =
             cx.new(|cx| TextInput::new(cx, "", "Add a path (e.g. tmp/pids/server.pid)"));
@@ -44,6 +46,7 @@ impl SessionsSection {
             git_pull_before_new_session,
             promote_attention_sessions,
             keep_awake_while_working,
+            usage_counting_enabled,
         }
     }
 
@@ -114,6 +117,19 @@ impl SessionsSection {
         let value = self.keep_awake_while_working;
         app.update(cx, |state: &mut AppState, cx| {
             state.pending_action = Some(crate::SettingsAction::UpdateKeepAwake(value).into());
+            cx.notify();
+        })
+        .ok();
+    }
+
+    fn push_usage_counting(
+        &self,
+        app: &WeakEntity<AppState>,
+        cx: &mut Context<SettingsWindowState>,
+    ) {
+        let value = self.usage_counting_enabled;
+        app.update(cx, |state: &mut AppState, cx| {
+            state.pending_action = Some(crate::SettingsAction::UpdateUsageCounting(value).into());
             cx.notify();
         })
         .ok();
@@ -238,6 +254,30 @@ impl SessionsSection {
                     .child("Keep this Mac awake while sessions are working"),
             );
 
+        let usage_enabled = self.usage_counting_enabled;
+        let usage_toggle = div()
+            .id("usage-counting-toggle")
+            .cursor_pointer()
+            .flex()
+            .flex_row()
+            .items_center()
+            .gap(px(8.0))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _event, _window, cx| {
+                    this.sessions.usage_counting_enabled = !this.sessions.usage_counting_enabled;
+                    this.sessions.push_usage_counting(&this.app, cx);
+                    cx.notify();
+                }),
+            )
+            .child(toggle_switch("usage-counting-knob", usage_enabled))
+            .child(
+                div()
+                    .text_size(px(12.0))
+                    .text_color(theme().text_primary)
+                    .child("Count time spent on each tab (stays on this Mac)"),
+            );
+
         let add_button = div()
             .id("cleanup-add")
             .cursor_pointer()
@@ -285,11 +325,17 @@ impl SessionsSection {
                 card()
                     .child(pull_toggle)
                     .child(promote_toggle)
-                    .child(keep_awake_toggle),
+                    .child(keep_awake_toggle)
+                    .child(usage_toggle),
             )
             .child(section_note(
                 "Keep awake stops the Mac idling into sleep while any session \
                      is running or waiting for input. The display still sleeps.",
+            ))
+            .child(section_note(
+                "Tab usage counts seconds each tab, the Changes panel and the \
+                     Scratch Pad are visible while Allele is focused. Totals are \
+                     in ~/.allele/tab-usage.json and are never sent anywhere.",
             ))
             .child(section_note(
                 "Cleanup paths — deleted from each new session clone. \

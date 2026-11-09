@@ -1207,6 +1207,10 @@ impl Render for AppState {
             self.main_tab = MainTab::Claude;
         }
 
+        // Tab-usage counters (DEV-1265): a state change renders, so sampling
+        // here credits the time up to a tab switch to the tab it left.
+        self.sample_usage();
+
         // Update session statuses from PTY state.
         // Any attached session (Running, Idle, AwaitingInput, ResponseReady)
         // can transition to Done when its PTY actually exits. Done and
