@@ -14,6 +14,13 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- **Paths in Claude's output show what this session changed.** A file path the session
+  changed gets a dim `+N −M` chip beside it, matching the Changes panel, whose rows now
+  show the same counts. ⌥-hover a path for a one-hunk diff peek (an unchanged file shows
+  its first lines); Esc closes it. The path right-click menu adds **Show diff** (opens the
+  file in the Changes panel) and **Open at this line in editor**. All of it is drawn over
+  the terminal and never typed into it; a path Claude truncated (`src/…/foo.rs`) gets
+  nothing.
 - **Collapsible sidebar.** Click a project header to fold its sessions and archives away;
   click a machine row, or a project heading under it, to fold that too. The MACHINES
   section can be moved above the local projects from its header. Folds and position

@@ -74,6 +74,13 @@ pub(crate) struct ChangesPanelState {
     /// Changed files from `git status`, staged and unstaged entries mixed
     /// (each entry knows its side). Rebuilt wholesale on every refresh.
     pub(crate) files: Vec<crate::git::ChangedFile>,
+    /// `+N −M` per row of `files`, loaded with it (DEV-1262).
+    pub(crate) stats: crate::git::LineStats,
+    /// `files` + `stats` keyed for lookup from terminal text, so the Claude
+    /// terminal can decorate the paths it prints with this session's
+    /// changes. Rebuilt with `files`; `None` whenever `files` is not a
+    /// loaded observation of `repo_dir`. Shared, not copied, per render.
+    pub(crate) index: Option<std::sync::Arc<crate::terminal::path_decor::SessionChangeIndex>>,
     /// Selected file row: (repo-relative path, staged side).
     pub(crate) selected: Option<(String, bool)>,
     /// Diff text for the selected file, once loaded.

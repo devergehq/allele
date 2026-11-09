@@ -383,6 +383,16 @@ impl AppState {
                                     .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
                                 settings::spawn_external_editor(cmd, path, *line_col);
                             }
+                            TerminalEvent::ShowDiff { rel_path, staged } => {
+                                this.pending_action = Some(
+                                    SidebarAction::ShowChangedFileDiff {
+                                        path: rel_path.clone(),
+                                        staged: *staged,
+                                    }
+                                    .into(),
+                                );
+                                cx.notify();
+                            }
                             TerminalEvent::EnterPressed => {
                                 this.handle_terminal_enter(&_tv, cx);
                             }
@@ -800,6 +810,16 @@ impl AppState {
                                     .as_deref()
                                     .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
                                 settings::spawn_external_editor(cmd, path, *line_col);
+                            }
+                            TerminalEvent::ShowDiff { rel_path, staged } => {
+                                this.pending_action = Some(
+                                    SidebarAction::ShowChangedFileDiff {
+                                        path: rel_path.clone(),
+                                        staged: *staged,
+                                    }
+                                    .into(),
+                                );
+                                cx.notify();
                             }
                             TerminalEvent::EnterPressed => {
                                 this.handle_terminal_enter(&_tv, cx);
@@ -1405,6 +1425,16 @@ impl AppState {
                             .as_deref()
                             .unwrap_or(settings::DEFAULT_EXTERNAL_EDITOR);
                         settings::spawn_external_editor(cmd, path, *line_col);
+                    }
+                    TerminalEvent::ShowDiff { rel_path, staged } => {
+                        this.pending_action = Some(
+                            SidebarAction::ShowChangedFileDiff {
+                                path: rel_path.clone(),
+                                staged: *staged,
+                            }
+                            .into(),
+                        );
+                        cx.notify();
                     }
                     TerminalEvent::EnterPressed => {
                         this.handle_terminal_enter(&_tv, cx);

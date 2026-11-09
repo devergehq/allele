@@ -1810,6 +1810,116 @@ pub fn diff_file(
     })
 }
 
+/// Lines added / removed for one changes-panel row (one path, one side).
+/// `binary` means git reported no line counts for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LineStat {
+    pub added: u32,
+    pub removed: u32,
+    pub binary: bool,
+}
+
+/// Per-row line counts keyed by `(repo-relative path, staged side)` —
+/// exactly the key a `ChangedFile` row has, so the panel and anything
+/// else reading these counts (the terminal's path chips, DEV-1262) agree.
+pub type LineStats = std::collections::HashMap<(String, bool), LineStat>;
+
+/// Parse `git diff --numstat -z` output.
+///
+/// Each record is `added\tremoved\tpath\0`. A rename or copy leaves the
+/// path field empty and follows it with two NUL-terminated fields, the old
+/// path and then the new one; the panel lists the new path, so that is the
+/// key. Binary files report `-` for both counts.
+fn parse_numstat_z(raw: &str, staged: bool, out: &mut LineStats) {
+    let mut fields = raw.split('\0');
+    while let Some(record) = fields.next() {
+        let mut parts = record.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            let _old = fields.next();
+            match fields.next() {
+                Some(new) if !new.is_empty() => new,
+                _ => continue,
+            }
+        } else {
+            path
+        };
+        let stat = match (added.parse::<u32>(), removed.parse::<u32>()) {
+            (Ok(added), Ok(removed)) => LineStat {
+                added,
+                removed,
+                binary: false,
+            },
+            _ => LineStat {
+                binary: true,
+                ..LineStat::default()
+            },
+        };
+        out.insert((path.to_string(), staged), stat);
+    }
+}
+
+/// Largest untracked file whose lines are counted for its `+N` stat.
+/// Anything bigger is reported as binary rather than read on every refresh.
+const UNTRACKED_COUNT_CAP: u64 = 1024 * 1024;
+
+/// Line counts for every row `status_changes` lists: `git diff --numstat`
+/// for each side, plus a newline count for untracked files (which git
+/// diffs against nothing, so every line is an addition).
+pub fn line_stats(repo: &Path, files: &[ChangedFile]) -> LineStats {
+    let mut out = LineStats::new();
+    for staged in [false, true] {
+        let mut cmd = git_cmd(Some(repo));
+        cmd.arg("diff").arg("--numstat").arg("-z").arg("--no-color");
+        if staged {
+            cmd.arg("--cached");
+        }
+        match run_git(cmd, "diff --numstat -z") {
+            Ok(output) => {
+                parse_numstat_z(&String::from_utf8_lossy(&output.stdout), staged, &mut out)
+            }
+            Err(e) => tracing::warn!("line stats: {e}"),
+        }
+    }
+    for file in files.iter().filter(|f| f.kind == ChangeKind::Untracked) {
+        out.insert(
+            (file.path.clone(), false),
+            count_untracked(&repo.join(&file.path)),
+        );
+    }
+    out
+}
+
+fn count_untracked(path: &Path) -> LineStat {
+    let binary = LineStat {
+        binary: true,
+        ..LineStat::default()
+    };
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() <= UNTRACKED_COUNT_CAP => {}
+        _ => return binary,
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return binary;
+    };
+    // git's own heuristic: a NUL in the first 8000 bytes means binary.
+    if bytes.iter().take(8000).any(|&b| b == 0) {
+        return binary;
+    }
+    let mut added = bytes.iter().filter(|&&b| b == b'\n').count() as u32;
+    if bytes.last().is_some_and(|&b| b != b'\n') {
+        added += 1; // a final line without a newline is still a line
+    }
+    LineStat {
+        added,
+        removed: 0,
+        binary: false,
+    }
+}
+
 // --- Tests --------------------------------------------------------------
 
 #[cfg(test)]
@@ -3101,6 +3211,68 @@ mod tests {
                 "raw was {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn numstat_parse_plain_rename_and_binary() {
+        let mut out = LineStats::new();
+        parse_numstat_z(
+            "12\t3\tsrc/a.rs\0-\t-\timg.png\0\
+             4\t1\t\0old/name.rs\0new/name.rs\0",
+            true,
+            &mut out,
+        );
+        assert_eq!(
+            out.get(&("src/a.rs".into(), true)),
+            Some(&LineStat {
+                added: 12,
+                removed: 3,
+                binary: false
+            })
+        );
+        assert!(out[&("img.png".to_string(), true)].binary);
+        assert_eq!(out[&("new/name.rs".to_string(), true)].added, 4);
+        assert!(!out.contains_key(&("old/name.rs".to_string(), true)));
+        assert!(!out.contains_key(&("src/a.rs".to_string(), false)));
+    }
+
+    #[test]
+    fn line_stats_match_every_status_row() {
+        let (_dir, repo) = make_canonical("one\ntwo\nthree\n");
+        // Unstaged: one line changed, one added.
+        fs::write(repo.join("file.txt"), "one\nTWO\nthree\nfour\n").unwrap();
+        // Untracked: two lines, the last with no trailing newline.
+        fs::write(repo.join("new.txt"), "a\nb").unwrap();
+        // Staged: a new file of three lines.
+        fs::write(repo.join("staged.txt"), "x\ny\nz\n").unwrap();
+        let mut add = git_cmd(Some(&repo));
+        add.arg("add").arg("staged.txt");
+        run_git(add, "add (test)").unwrap();
+
+        let files = status_changes(&repo).unwrap();
+        let stats = line_stats(&repo, &files);
+        for file in &files {
+            assert!(
+                stats.contains_key(&(file.path.clone(), file.staged)),
+                "no stat for panel row {file:?}"
+            );
+        }
+        let get = |p: &str, s: bool| stats[&(p.to_string(), s)];
+        assert_eq!(
+            (get("file.txt", false).added, get("file.txt", false).removed),
+            (2, 1)
+        );
+        assert_eq!(
+            (get("new.txt", false).added, get("new.txt", false).removed),
+            (2, 0)
+        );
+        assert_eq!(
+            (
+                get("staged.txt", true).added,
+                get("staged.txt", true).removed
+            ),
+            (3, 0)
+        );
     }
 
     #[test]

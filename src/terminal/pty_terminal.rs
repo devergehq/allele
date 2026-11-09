@@ -116,6 +116,9 @@ pub struct PtyTerminal {
     pub exited: bool,
     /// Set to true when Bell event is received, cleared by consumer.
     pub bell_pending: bool,
+    /// Bytes sent through `write`; see `bytes_written`.
+    #[cfg_attr(not(test), allow(dead_code))]
+    bytes_written: std::sync::atomic::AtomicUsize,
     /// Title set by terminal apps via OSC sequences.
     pub title: Option<String>,
     /// Pid of the process alacritty forked, captured at spawn. `None` on
@@ -287,6 +290,7 @@ impl PtyTerminal {
             size,
             exited: false,
             bell_pending: false,
+            bytes_written: std::sync::atomic::AtomicUsize::new(0),
             title: None,
             child_pid,
             master,
@@ -330,7 +334,17 @@ impl PtyTerminal {
 
     /// Write input bytes to the PTY
     pub fn write(&self, input: &[u8]) {
+        self.bytes_written
+            .fetch_add(input.len(), std::sync::atomic::Ordering::Relaxed);
         let _ = self.pty_tx.0.send(Msg::Input(input.to_vec().into()));
+    }
+
+    /// Total bytes this view has sent through `write`. Lets tests prove an
+    /// overlay feature typed nothing into the session (DEV-1262).
+    #[cfg(test)]
+    pub fn bytes_written(&self) -> usize {
+        self.bytes_written
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Resize the terminal

@@ -267,6 +267,9 @@ pub enum SidebarAction {
     SelectChangedFile { path: String, staged: bool },
     /// Close the changes panel's diff pane (deselect the file row).
     ClearChangesSelection,
+    /// "Show diff" on a path in the Claude terminal (DEV-1262): open the
+    /// changes panel if it is hidden and select that file's row.
+    ShowChangedFileDiff { path: String, staged: bool },
     /// Move a group to another slot in its project's order — the drop half of
     /// dragging one group header onto another (DEV-937).
     ///
