@@ -1,5 +1,6 @@
 mod accessibility;
 mod actions;
+mod agent_guide;
 mod agents;
 mod app_state;
 mod assets;
@@ -1672,6 +1673,10 @@ fn main() {
         }
         return;
     }
+
+    // Write `~/.allele/AGENTS.md` for agents asked to configure Allele
+    // (DEV-1263). Generated from code; rewritten only when it changed.
+    agent_guide::install();
 
     // OS-abstraction layer. Detected once and installed into the
     // process-wide OnceLock so call sites without an AppState handle

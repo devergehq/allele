@@ -109,16 +109,364 @@ fn strip_line_comments(src: &str) -> String {
     out
 }
 
-// ── Action dispatch ───────────────────────────────────────────────
+// ── Action table ──────────────────────────────────────────────────
 //
-// Maps the dotted snake_case action name from JSON to a concrete
-// `KeyBinding::new(...)` call with the typed action struct. Every
-// action name referenced by any keymap file must appear here. Unknown
-// names panic with a descriptive message so config typos fail loudly at
-// startup, not silently at keystroke time.
+// Every action a keymap file may name, with what it does. This table is
+// the only way to make an action bindable, and every entry must carry a
+// description, so an action cannot exist without being documented: the
+// agent guide (`crate::agent_guide`) lists every row.
 //
 // Module aliases (`cb`, `ti`) disambiguate between `compose_bar` and
 // `text_input` which share several struct names (SelectLeft, Paste, …).
+
+/// One bindable action: its dotted name, a one-line description, and how
+/// to build a GPUI binding for it.
+pub(crate) struct KeymapAction {
+    pub name: &'static str,
+    pub description: &'static str,
+    bind: fn(&str, Option<&str>) -> KeyBinding,
+}
+
+macro_rules! action {
+    ($name:literal, $action:expr, $desc:literal) => {
+        KeymapAction {
+            name: $name,
+            description: $desc,
+            bind: |keystroke, ctx| KeyBinding::new(keystroke, $action, ctx),
+        }
+    };
+}
+
+/// Every bindable action, in the order the agent guide lists them.
+pub(crate) const ACTIONS: &[KeymapAction] = &[
+    action!(
+        "compose.cursor_left",
+        cb::CursorLeft,
+        "Move the cursor one character left."
+    ),
+    action!(
+        "compose.cursor_right",
+        cb::CursorRight,
+        "Move the cursor one character right."
+    ),
+    action!(
+        "compose.cursor_up",
+        cb::CursorUp,
+        "Move the cursor up one line."
+    ),
+    action!(
+        "compose.cursor_down",
+        cb::CursorDown,
+        "Move the cursor down one line."
+    ),
+    action!(
+        "compose.cursor_word_left",
+        cb::CursorWordLeft,
+        "Move the cursor to the start of the previous word."
+    ),
+    action!(
+        "compose.cursor_word_right",
+        cb::CursorWordRight,
+        "Move the cursor to the end of the next word."
+    ),
+    action!(
+        "compose.cursor_line_start",
+        cb::CursorLineStart,
+        "Move the cursor to the start of the line."
+    ),
+    action!(
+        "compose.cursor_line_end",
+        cb::CursorLineEnd,
+        "Move the cursor to the end of the line."
+    ),
+    action!(
+        "compose.select_left",
+        cb::SelectLeft,
+        "Extend the selection one character left."
+    ),
+    action!(
+        "compose.select_right",
+        cb::SelectRight,
+        "Extend the selection one character right."
+    ),
+    action!(
+        "compose.select_up",
+        cb::SelectUp,
+        "Extend the selection up one line."
+    ),
+    action!(
+        "compose.select_down",
+        cb::SelectDown,
+        "Extend the selection down one line."
+    ),
+    action!(
+        "compose.select_word_left",
+        cb::SelectWordLeft,
+        "Extend the selection to the start of the previous word."
+    ),
+    action!(
+        "compose.select_word_right",
+        cb::SelectWordRight,
+        "Extend the selection to the end of the next word."
+    ),
+    action!(
+        "compose.select_line_start",
+        cb::SelectLineStart,
+        "Extend the selection to the start of the line."
+    ),
+    action!(
+        "compose.select_line_end",
+        cb::SelectLineEnd,
+        "Extend the selection to the end of the line."
+    ),
+    action!(
+        "compose.select_all",
+        cb::SelectAll,
+        "Select all text in the compose bar."
+    ),
+    action!(
+        "compose.delete_left",
+        cb::DeleteLeft,
+        "Delete the character before the cursor (or the selection)."
+    ),
+    action!(
+        "compose.delete_right",
+        cb::DeleteRight,
+        "Delete the character after the cursor (or the selection)."
+    ),
+    action!(
+        "compose.delete_word_left",
+        cb::DeleteWordLeft,
+        "Delete back to the start of the previous word."
+    ),
+    action!(
+        "compose.delete_word_right",
+        cb::DeleteWordRight,
+        "Delete forward to the end of the next word."
+    ),
+    action!(
+        "compose.delete_line_left",
+        cb::DeleteLineLeft,
+        "Delete back to the start of the line."
+    ),
+    action!(
+        "compose.copy",
+        cb::Copy,
+        "Copy the selection to the clipboard."
+    ),
+    action!(
+        "compose.cut",
+        cb::Cut,
+        "Cut the selection to the clipboard."
+    ),
+    action!(
+        "compose.paste",
+        cb::Paste,
+        "Paste from the clipboard (images become attachments)."
+    ),
+    action!(
+        "compose.insert_newline",
+        cb::InsertNewline,
+        "Insert a newline without sending."
+    ),
+    action!(
+        "compose.submit",
+        cb::Submit,
+        "Send the composed message to the agent."
+    ),
+    action!(
+        "compose.show_character_palette",
+        cb::ShowCharacterPalette,
+        "Open the macOS emoji & symbols palette."
+    ),
+    action!(
+        "compose.attach_files",
+        cb::AttachFiles,
+        "Open a file picker and attach the chosen files."
+    ),
+    action!(
+        "text_input.backspace",
+        ti::Backspace,
+        "Delete the character before the cursor (or the selection)."
+    ),
+    action!(
+        "text_input.delete",
+        ti::Delete,
+        "Delete the character after the cursor (or the selection)."
+    ),
+    action!(
+        "text_input.delete_word_left",
+        ti::DeleteWordLeft,
+        "Delete back to the start of the previous word."
+    ),
+    action!(
+        "text_input.delete_word_right",
+        ti::DeleteWordRight,
+        "Delete forward to the end of the next word."
+    ),
+    action!(
+        "text_input.delete_to_home",
+        ti::DeleteToHome,
+        "Delete back to the start of the field."
+    ),
+    action!(
+        "text_input.left",
+        ti::Left,
+        "Move the cursor one character left."
+    ),
+    action!(
+        "text_input.right",
+        ti::Right,
+        "Move the cursor one character right."
+    ),
+    action!(
+        "text_input.word_left",
+        ti::WordLeft,
+        "Move the cursor to the start of the previous word."
+    ),
+    action!(
+        "text_input.word_right",
+        ti::WordRight,
+        "Move the cursor to the end of the next word."
+    ),
+    action!(
+        "text_input.select_left",
+        ti::SelectLeft,
+        "Extend the selection one character left."
+    ),
+    action!(
+        "text_input.select_right",
+        ti::SelectRight,
+        "Extend the selection one character right."
+    ),
+    action!(
+        "text_input.select_word_left",
+        ti::SelectWordLeft,
+        "Extend the selection to the start of the previous word."
+    ),
+    action!(
+        "text_input.select_word_right",
+        ti::SelectWordRight,
+        "Extend the selection to the end of the next word."
+    ),
+    action!(
+        "text_input.select_to_home",
+        ti::SelectToHome,
+        "Extend the selection to the start of the field."
+    ),
+    action!(
+        "text_input.select_to_end",
+        ti::SelectToEnd,
+        "Extend the selection to the end of the field."
+    ),
+    action!(
+        "text_input.select_all",
+        ti::SelectAll,
+        "Select all text in the field."
+    ),
+    action!("text_input.paste", ti::Paste, "Paste from the clipboard."),
+    action!(
+        "text_input.copy",
+        ti::Copy,
+        "Copy the selection to the clipboard."
+    ),
+    action!(
+        "text_input.cut",
+        ti::Cut,
+        "Cut the selection to the clipboard."
+    ),
+    action!(
+        "text_input.home",
+        ti::Home,
+        "Move the cursor to the start of the field."
+    ),
+    action!(
+        "text_input.end",
+        ti::End,
+        "Move the cursor to the end of the field."
+    ),
+    action!(
+        "text_input.show_character_palette",
+        ti::ShowCharacterPalette,
+        "Open the macOS emoji & symbols palette."
+    ),
+    action!(
+        "text_input.submit",
+        ti::Submit,
+        "Confirm the field (the same as pressing its form's primary button)."
+    ),
+    action!(
+        "allele.quit",
+        Quit,
+        "Quit Allele (asks first when sessions are running)."
+    ),
+    action!(
+        "allele.toggle_sidebar",
+        ToggleSidebarAction,
+        "Show or hide the left sidebar."
+    ),
+    action!(
+        "allele.toggle_active_only",
+        ToggleActiveOnlyAction,
+        "Show only sessions with a live agent in the sidebar, or show all."
+    ),
+    action!(
+        "allele.toggle_drawer",
+        ToggleDrawerAction,
+        "Show or hide the bottom drawer terminals."
+    ),
+    action!(
+        "allele.toggle_transcript_tab",
+        ToggleTranscriptTabAction,
+        "Switch the active session between its terminal and transcript tabs."
+    ),
+    action!(
+        "allele.open_settings",
+        OpenSettings,
+        "Open the Settings window."
+    ),
+    action!(
+        "allele.open_scratch_pad",
+        OpenScratchPadAction,
+        "Open the scratch pad for drafting a prompt."
+    ),
+    action!(
+        "allele.open_file_palette",
+        OpenFilePaletteAction,
+        "Open the file palette for the active session's workspace."
+    ),
+    action!(
+        "allele.open_search",
+        OpenSearchAction,
+        "Open search across the active session's workspace."
+    ),
+    action!(
+        "allele.open_command_palette",
+        OpenCommandPaletteAction,
+        "Open the command palette."
+    ),
+    action!(
+        "allele.cycle_attention",
+        CycleAttentionSession,
+        "Jump to the next session that needs your attention."
+    ),
+];
+
+/// The table row for `name`, after resolving deprecation aliases.
+pub(crate) fn find_action(name: &str) -> Option<&'static KeymapAction> {
+    let resolved = resolve_alias(name);
+    ACTIONS.iter().find(|a| a.name == resolved)
+}
+
+/// Every deprecated name still accepted, with the name it now means.
+pub(crate) fn deprecated_aliases() -> &'static [(&'static str, &'static str)] {
+    DEPRECATED_ALIASES
+}
+
+// ── Action dispatch ───────────────────────────────────────────────
+//
+// Unknown names panic with a descriptive message so config typos fail
+// loudly at startup, not silently at keystroke time.
 
 fn build_binding(
     action_name: &str,
@@ -126,91 +474,10 @@ fn build_binding(
     context: Option<&str>,
     source: &KeymapSource,
 ) -> KeyBinding {
-    let resolved = resolve_alias(action_name);
-    let ctx = context;
-    match resolved {
-        // ── compose.* (ComposeBar / Rich Mode) ───────────────────
-        // Cursor movement
-        "compose.cursor_left" => KeyBinding::new(keystroke, cb::CursorLeft, ctx),
-        "compose.cursor_right" => KeyBinding::new(keystroke, cb::CursorRight, ctx),
-        "compose.cursor_up" => KeyBinding::new(keystroke, cb::CursorUp, ctx),
-        "compose.cursor_down" => KeyBinding::new(keystroke, cb::CursorDown, ctx),
-        "compose.cursor_word_left" => KeyBinding::new(keystroke, cb::CursorWordLeft, ctx),
-        "compose.cursor_word_right" => KeyBinding::new(keystroke, cb::CursorWordRight, ctx),
-        "compose.cursor_line_start" => KeyBinding::new(keystroke, cb::CursorLineStart, ctx),
-        "compose.cursor_line_end" => KeyBinding::new(keystroke, cb::CursorLineEnd, ctx),
-        // Selection
-        "compose.select_left" => KeyBinding::new(keystroke, cb::SelectLeft, ctx),
-        "compose.select_right" => KeyBinding::new(keystroke, cb::SelectRight, ctx),
-        "compose.select_up" => KeyBinding::new(keystroke, cb::SelectUp, ctx),
-        "compose.select_down" => KeyBinding::new(keystroke, cb::SelectDown, ctx),
-        "compose.select_word_left" => KeyBinding::new(keystroke, cb::SelectWordLeft, ctx),
-        "compose.select_word_right" => KeyBinding::new(keystroke, cb::SelectWordRight, ctx),
-        "compose.select_line_start" => KeyBinding::new(keystroke, cb::SelectLineStart, ctx),
-        "compose.select_line_end" => KeyBinding::new(keystroke, cb::SelectLineEnd, ctx),
-        "compose.select_all" => KeyBinding::new(keystroke, cb::SelectAll, ctx),
-        // Deletion
-        "compose.delete_left" => KeyBinding::new(keystroke, cb::DeleteLeft, ctx),
-        "compose.delete_right" => KeyBinding::new(keystroke, cb::DeleteRight, ctx),
-        "compose.delete_word_left" => KeyBinding::new(keystroke, cb::DeleteWordLeft, ctx),
-        "compose.delete_word_right" => KeyBinding::new(keystroke, cb::DeleteWordRight, ctx),
-        "compose.delete_line_left" => KeyBinding::new(keystroke, cb::DeleteLineLeft, ctx),
-        // Clipboard
-        "compose.copy" => KeyBinding::new(keystroke, cb::Copy, ctx),
-        "compose.cut" => KeyBinding::new(keystroke, cb::Cut, ctx),
-        "compose.paste" => KeyBinding::new(keystroke, cb::Paste, ctx),
-        // Newline / submit / palette
-        "compose.insert_newline" => KeyBinding::new(keystroke, cb::InsertNewline, ctx),
-        "compose.submit" => KeyBinding::new(keystroke, cb::Submit, ctx),
-        "compose.show_character_palette" => {
-            KeyBinding::new(keystroke, cb::ShowCharacterPalette, ctx)
-        }
-        "compose.attach_files" => KeyBinding::new(keystroke, cb::AttachFiles, ctx),
-
-        // ── text_input.* (Settings single-line input) ────────────
-        "text_input.backspace" => KeyBinding::new(keystroke, ti::Backspace, ctx),
-        "text_input.delete" => KeyBinding::new(keystroke, ti::Delete, ctx),
-        "text_input.delete_word_left" => KeyBinding::new(keystroke, ti::DeleteWordLeft, ctx),
-        "text_input.delete_word_right" => KeyBinding::new(keystroke, ti::DeleteWordRight, ctx),
-        "text_input.delete_to_home" => KeyBinding::new(keystroke, ti::DeleteToHome, ctx),
-        "text_input.left" => KeyBinding::new(keystroke, ti::Left, ctx),
-        "text_input.right" => KeyBinding::new(keystroke, ti::Right, ctx),
-        "text_input.word_left" => KeyBinding::new(keystroke, ti::WordLeft, ctx),
-        "text_input.word_right" => KeyBinding::new(keystroke, ti::WordRight, ctx),
-        "text_input.select_left" => KeyBinding::new(keystroke, ti::SelectLeft, ctx),
-        "text_input.select_right" => KeyBinding::new(keystroke, ti::SelectRight, ctx),
-        "text_input.select_word_left" => KeyBinding::new(keystroke, ti::SelectWordLeft, ctx),
-        "text_input.select_word_right" => KeyBinding::new(keystroke, ti::SelectWordRight, ctx),
-        "text_input.select_to_home" => KeyBinding::new(keystroke, ti::SelectToHome, ctx),
-        "text_input.select_to_end" => KeyBinding::new(keystroke, ti::SelectToEnd, ctx),
-        "text_input.select_all" => KeyBinding::new(keystroke, ti::SelectAll, ctx),
-        "text_input.paste" => KeyBinding::new(keystroke, ti::Paste, ctx),
-        "text_input.copy" => KeyBinding::new(keystroke, ti::Copy, ctx),
-        "text_input.cut" => KeyBinding::new(keystroke, ti::Cut, ctx),
-        "text_input.home" => KeyBinding::new(keystroke, ti::Home, ctx),
-        "text_input.end" => KeyBinding::new(keystroke, ti::End, ctx),
-        "text_input.show_character_palette" => {
-            KeyBinding::new(keystroke, ti::ShowCharacterPalette, ctx)
-        }
-        "text_input.submit" => KeyBinding::new(keystroke, ti::Submit, ctx),
-
-        // ── allele.* (app-wide) ──────────────────────────────────
-        "allele.quit" => KeyBinding::new(keystroke, Quit, ctx),
-        "allele.toggle_sidebar" => KeyBinding::new(keystroke, ToggleSidebarAction, ctx),
-        "allele.toggle_active_only" => KeyBinding::new(keystroke, ToggleActiveOnlyAction, ctx),
-        "allele.toggle_drawer" => KeyBinding::new(keystroke, ToggleDrawerAction, ctx),
-        "allele.toggle_transcript_tab" => {
-            KeyBinding::new(keystroke, ToggleTranscriptTabAction, ctx)
-        }
-        "allele.open_settings" => KeyBinding::new(keystroke, OpenSettings, ctx),
-        "allele.open_scratch_pad" => KeyBinding::new(keystroke, OpenScratchPadAction, ctx),
-        "allele.open_file_palette" => KeyBinding::new(keystroke, OpenFilePaletteAction, ctx),
-        "allele.open_search" => KeyBinding::new(keystroke, OpenSearchAction, ctx),
-        "allele.open_command_palette" => KeyBinding::new(keystroke, OpenCommandPaletteAction, ctx),
-        "allele.cycle_attention" => KeyBinding::new(keystroke, CycleAttentionSession, ctx),
-
-        unknown => panic!(
-            "keymap: unknown action '{unknown}' in {} (keystroke='{keystroke}', context={context:?})",
+    match find_action(action_name) {
+        Some(action) => (action.bind)(keystroke, context),
+        None => panic!(
+            "keymap: unknown action '{action_name}' in {} (keystroke='{keystroke}', context={context:?})",
             source.label()
         ),
     }
@@ -257,6 +524,37 @@ fn load_user_overrides() -> Vec<KeymapEntry> {
 // ── Entry point ───────────────────────────────────────────────────
 
 const DEFAULT_KEYMAP_JSON: &str = include_str!("../assets/default-keymap.json");
+
+/// One shipped binding: its key context (`None` = app-wide), keystroke and
+/// action name.
+pub(crate) struct DefaultBinding {
+    pub context: Option<String>,
+    pub keystroke: String,
+    pub action: String,
+}
+
+/// Every binding in the embedded default keymap, in file order within each
+/// entry. Read by the agent guide.
+pub(crate) fn default_bindings() -> Vec<DefaultBinding> {
+    let stripped = strip_line_comments(DEFAULT_KEYMAP_JSON);
+    // `load` already panics on an unparseable default keymap (and a test
+    // pins that it parses), so an empty list here is unreachable in practice.
+    let entries: Vec<KeymapEntry> = serde_json::from_str(&stripped).unwrap_or_default();
+    entries
+        .into_iter()
+        .flat_map(|entry| {
+            let context = entry.context;
+            entry
+                .bindings
+                .into_iter()
+                .map(move |(keystroke, action)| DefaultBinding {
+                    context: context.clone(),
+                    keystroke,
+                    action,
+                })
+        })
+        .collect()
+}
 
 /// Parse the embedded default keymap, merge any user overrides from
 /// `~/.allele/keymap.json`, and register every binding with GPUI.
