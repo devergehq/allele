@@ -1693,6 +1693,79 @@ impl AppState {
         }
     }
 
+    /// The current loss verdict for the session at `cursor`, if it is idle
+    /// enough to be judged and its verdict is up to date (DEV-1260).
+    pub(crate) fn loss_verdict(
+        &self,
+        cursor: SessionCursor,
+    ) -> Option<&crate::session::rest::LossVerdict> {
+        let project = self.projects.get(cursor.project_idx)?;
+        let session = project.sessions.get(cursor.session_idx)?;
+        crate::session::rest::shown_verdict(
+            session,
+            project,
+            &self.loss_verdicts,
+            std::time::SystemTime::now(),
+            self.user_settings.rest_after(),
+        )
+    }
+
+    /// "Put N to rest" (DEV-1260): archive every idle session that holds
+    /// nothing unique, through the same `remove_session` path a confirmed
+    /// discard takes, so each one lands under an archive ref and can be
+    /// restored from the sidebar's ARCHIVES list.
+    ///
+    /// Resolved by id one at a time, because each removal shifts the indices
+    /// of the sessions after it.
+    pub(crate) fn put_to_rest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ids = crate::session::rest::rest_candidates(
+            &self.projects,
+            &self.loss_verdicts,
+            std::time::SystemTime::now(),
+            self.user_settings.rest_after(),
+        );
+        if ids.is_empty() {
+            return;
+        }
+        // Any armed discard prompt points at an index that is about to move.
+        self.confirming.discard = None;
+        info!(
+            "put to rest: archiving {} nothing-unique session(s)",
+            ids.len()
+        );
+        for id in ids {
+            let cursor = self.projects.iter().enumerate().find_map(|(p_idx, p)| {
+                p.sessions
+                    .iter()
+                    .position(|s| s.id == id)
+                    .map(|s_idx| SessionCursor {
+                        project_idx: p_idx,
+                        session_idx: s_idx,
+                    })
+            });
+            if let Some(cursor) = cursor {
+                self.remove_session(cursor, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Idle sessions owed a loss-verdict pass (DEV-1260), and a prune of
+    /// verdicts for sessions that are gone. Foreground, but touches no disk.
+    pub(crate) fn loss_verdict_jobs(&mut self) -> Vec<crate::session::rest::VerdictJob> {
+        self.loss_verdicts.retain_sessions(
+            self.projects
+                .iter()
+                .flat_map(|p| p.sessions.iter().map(|s| s.id.as_str())),
+        );
+        crate::session::rest::verdict_jobs(
+            &self.projects,
+            &self.loss_verdicts,
+            std::time::SystemTime::now(),
+            self.user_settings.rest_after(),
+        )
+    }
+
     /// Sessions whose resumability wants refreshing, as `(id, clone path)`.
     ///
     /// Collected on the foreground and answered off it: each answer costs a

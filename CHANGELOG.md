@@ -14,6 +14,12 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- **Rest by loss.** Once a session has been idle for a day (`rest_after_hours` in
+  settings.json, `0` turns it off), its row says what closing it would lose:
+  `nothing unique`, `N commits not on <base>`, `N changed files`, or `workspace missing`.
+  Commits are judged with `git cherry` against the project's configured base branch, so
+  squash-merged work counts as landed. Idle rows fade with age. **Put N to rest** archives
+  every `nothing unique` session in one click, and each can be restored from ARCHIVES.
 - **Collapsible sidebar.** Click a project header to fold its sessions and archives away;
   click a machine row, or a project heading under it, to fold that too. The MACHINES
   section can be moved above the local projects from its header. Folds and position

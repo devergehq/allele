@@ -184,6 +184,101 @@ pub fn unpushed_commit_count(repo: &Path) -> Option<usize> {
         .ok()
 }
 
+/// The branch a session's work is judged against when asking "would closing
+/// it lose anything?" (DEV-1260), as `(display name, full ref)`.
+///
+/// The project's configured `default_branch` wins, and is never second-guessed:
+/// if it is set but resolves to nothing, the answer is `None` rather than a
+/// guess. DAR-635 read 637 commits "not on `origin/main`" because that repo
+/// integrates on another branch, which is exactly the misreading a guess makes.
+/// Unset falls back to `<remote>/HEAD`, then `main`, then `master`.
+///
+/// The remote-tracking ref is preferred over the local branch because it is
+/// where merged work actually lands. Read-only: nothing is fetched.
+pub fn resolve_base_ref(
+    repo: &Path,
+    configured: Option<&str>,
+    remote: &str,
+) -> Option<(String, String)> {
+    if !is_git_repo(repo) {
+        return None;
+    }
+    let configured = configured
+        .map(|b| strip_remote_prefix(b.trim(), remote).to_string())
+        .filter(|b| !b.is_empty());
+    let candidates: Vec<String> = match configured {
+        Some(name) => vec![name],
+        None => {
+            let mut cmd = git_cmd(Some(repo));
+            cmd.arg("symbolic-ref")
+                .arg("--short")
+                .arg(format!("refs/remotes/{remote}/HEAD"));
+            let from_remote_head = run_git_stdout(cmd, "symbolic-ref remote HEAD")
+                .ok()
+                .map(|s| strip_remote_prefix(&s, remote).to_string())
+                .filter(|s| !s.is_empty());
+            from_remote_head
+                .into_iter()
+                .chain(["main".to_string(), "master".to_string()])
+                .collect()
+        }
+    };
+    candidates.into_iter().find_map(|name| {
+        [
+            format!("refs/remotes/{remote}/{name}"),
+            format!("refs/heads/{name}"),
+        ]
+        .into_iter()
+        .find(|r| ref_exists(repo, r))
+        .map(|r| (name, r))
+    })
+}
+
+/// Commits on `HEAD` with no patch-equivalent on `base_ref`, by `git cherry`.
+///
+/// Patch identity rather than ancestry, so a commit that landed on the base
+/// through a squash or a rebase counts as landed. A raw `rev-list --count`
+/// would report it as unique work and overstate what closing the session
+/// loses. `None` when git fails, so callers can say "can't tell" rather than
+/// "nothing".
+pub fn commits_not_on(repo: &Path, base_ref: &str) -> Option<usize> {
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("cherry").arg(base_ref).arg("HEAD");
+    let out = run_git(cmd, "cherry").ok()?;
+    let unique = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.starts_with('+'))
+        .count();
+    // Several commits squashed into one match no single patch id, so cherry
+    // still reports them. If merging HEAD into the base would change nothing,
+    // the work has landed regardless of how it was shaped on the way in.
+    if unique > 0 && merge_into_is_noop(repo, base_ref) {
+        return Some(0);
+    }
+    Some(unique)
+}
+
+/// True when merging `HEAD` into `base_ref` would leave the base's tree
+/// unchanged: everything `HEAD` changed is already there. Any failure,
+/// a conflict included, answers `false` (the conservative direction).
+fn merge_into_is_noop(repo: &Path, base_ref: &str) -> bool {
+    let mut merge = git_cmd(Some(repo));
+    merge
+        .arg("merge-tree")
+        .arg("--write-tree")
+        .arg(base_ref)
+        .arg("HEAD");
+    let Ok(merged) = run_git_stdout(merge, "merge-tree --write-tree") else {
+        return false;
+    };
+    let mut tree = git_cmd(Some(repo));
+    tree.arg("rev-parse").arg(format!("{base_ref}^{{tree}}"));
+    match run_git_stdout(tree, "rev-parse base tree") {
+        Ok(base_tree) => merged.lines().next().map(str::trim) == Some(base_tree.as_str()),
+        Err(_) => false,
+    }
+}
+
 /// Result of a best-effort source-root pull before a new session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PullOutcome {

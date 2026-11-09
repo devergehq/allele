@@ -8,6 +8,8 @@ use std::time::{Duration, Instant, SystemTime};
 use crate::terminal::TerminalView;
 
 pub(crate) mod keep_awake;
+/// What closing an idle session would lose, and "Put N to rest" (DEV-1260).
+pub(crate) mod rest;
 
 /// How much of the project's orchestration a session runs (DEV-415).
 ///
