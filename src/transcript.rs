@@ -195,6 +195,11 @@ impl TailedFile {
 
         let agent = self.agent_id();
         for mut event in events {
+            // A subagent file's calls fill the subagent's context, not the
+            // session's (DEV-1253).
+            if agent.is_some() && matches!(event, RichEvent::ContextUse { .. }) {
+                continue;
+            }
             if let Some(agent) = &agent {
                 stamp_parent_agent(&mut event, agent.clone());
             }
@@ -261,7 +266,11 @@ fn stamp_parent_agent(event: &mut RichEvent, agent: String) {
         RichEvent::Init { .. }
         | RichEvent::SessionResult { .. }
         | RichEvent::HookStatus { .. }
-        | RichEvent::AgentStatus { .. } => {}
+        | RichEvent::AgentStatus { .. }
+        // Budget readings are never re-attributed either: a quota belongs to
+        // the account, and a subagent's context use is dropped before here.
+        | RichEvent::Quota { .. }
+        | RichEvent::ContextUse { .. } => {}
     }
 }
 

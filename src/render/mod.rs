@@ -1657,6 +1657,25 @@ impl Render for AppState {
                             .children(sidebar_items),
                     )
                     // Status bar — attention summary lives here.
+                    // The account's quota (DEV-1253): one line for the whole
+                    // account, read from the one shared store, so no two
+                    // sessions can disagree about it. Absent until Claude
+                    // Code has reported a reading.
+                    .children(
+                        self.account_quota
+                            .line(crate::stream::now_unix())
+                            .map(|line| {
+                                div()
+                                    .px(px(12.0))
+                                    .pt(px(6.0))
+                                    .text_size(px(11.0))
+                                    .text_color(theme().text_faint)
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(line)
+                            }),
+                    )
                     .child({
                         let mut bar = div()
                             .px(px(12.0))

@@ -14,6 +14,11 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- **Context use and account quota in the sidebar.** Each session row shows how full its
+  context window was after the last turn (`ctx 62%`), read from the end of its transcript.
+  When Claude Code reports the account's rate-limit window, one line above the sidebar
+  footer shows it (`5h 71% · resets in 2h 14m`) — the same for every session, and marked
+  stale with no number once the window has reset.
 - **Collapsible sidebar.** Click a project header to fold its sessions and archives away;
   click a machine row, or a project heading under it, to fold that too. The MACHINES
   section can be moved above the local projects from its header. Folds and position

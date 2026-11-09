@@ -635,6 +635,10 @@ pub struct Session {
     /// can't find history and exits immediately. Cleared once the deadline
     /// passes without an exit.
     pub resuming_until: Option<Instant>,
+    /// How full this session's context window was after its latest model
+    /// call, read from the end of its transcript (DEV-1253). `None` until a
+    /// turn has completed. Not persisted: it is re-read from the transcript.
+    pub context_use: Option<crate::stream::ContextUse>,
     /// Integer id of the Chrome tab linked to this session. Assigned by
     /// Chrome when we `make new tab…` via AppleScript. Stable within a
     /// Chrome process; becomes stale on Chrome restart — reconciled by
@@ -787,6 +791,7 @@ impl Session {
             auto_naming_fired: false,
             allocated_port: None,
             resuming_until: None,
+            context_use: None,
             browser_tab_id: None,
             browser_last_url: None,
             agent_id: None,
@@ -849,6 +854,7 @@ impl Session {
             auto_naming_fired: false,
             allocated_port: None,
             resuming_until: None,
+            context_use: None,
             browser_tab_id: None,
             browser_last_url: None,
             agent_id: None,

@@ -9,6 +9,7 @@
 
 mod parser;
 mod types;
+mod usage;
 // The ledger and adapter model are foundational APIs consumed incrementally by
 // later work (narrative projection, transcript reader). Allow dead_code so each
 // stacked change builds clean before its consumer lands.
@@ -25,3 +26,4 @@ pub use adapter::*;
 pub use ledger::*;
 #[allow(unused_imports)]
 pub use parser::*;
+pub use usage::*;

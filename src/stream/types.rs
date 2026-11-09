@@ -338,14 +338,16 @@ pub struct ResultEvent {
     pub result: Option<String>,
     pub session_id: Option<String>,
     pub total_cost_usd: Option<f64>,
-    pub usage: Option<serde_json::Value>,
+    pub usage: Option<Usage>,
     pub stop_reason: Option<String>,
 }
 
 // ── Shared types ──────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
+/// Token counts for one model call (assistant line) or a whole run (result
+/// line). Kept rather than dropped since DEV-1253: it is where per-session
+/// context use comes from.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 pub struct Usage {
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
@@ -355,8 +357,9 @@ pub struct Usage {
 
 // ── Rate limit ────────────────────────────────────────────────────
 
+/// The account's rate-limit window status. Parsed into a
+/// [`QuotaReading`](super::usage::QuotaReading) by the parser (DEV-1253).
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)]
 pub struct RateLimitEvent {
     pub rate_limit_info: Option<serde_json::Value>,
 }
@@ -426,7 +429,18 @@ pub enum RichEvent {
         is_error: bool,
         /// Error/result text from the CLI (if any).
         result_text: Option<String>,
+        /// The run's token usage, when the result line carried it (DEV-1253).
+        usage: Option<Usage>,
     },
+
+    /// An account quota reading from a `rate_limit_event` (DEV-1253). Belongs
+    /// to the account, not the session that happened to carry it: consumers
+    /// fold it into the one shared [`AccountQuota`](super::usage::AccountQuota).
+    Quota { reading: super::usage::QuotaReading },
+
+    /// How full this session's context window was after a model call
+    /// (DEV-1253). Each one supersedes the last.
+    ContextUse { context: super::usage::ContextUse },
 
     /// Status change from hooks (awaiting input, response ready, etc.).
     HookStatus {

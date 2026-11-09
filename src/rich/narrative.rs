@@ -241,6 +241,8 @@ impl NarrativeProjector {
             RichEvent::Notice { .. } => NarrativeRole::Activity,
             RichEvent::Fallback { .. } => NarrativeRole::Unsupported,
             RichEvent::Init { .. } | RichEvent::HookStatus { .. } => NarrativeRole::Prose,
+            // Budget readings (DEV-1253) are sidebar facts, not narrative.
+            RichEvent::Quota { .. } | RichEvent::ContextUse { .. } => NarrativeRole::Activity,
             // The typed stage channel. Ingesting may promote the sticky
             // indicator from prose to contract, or raise a degraded badge.
             RichEvent::AgentStatus { outcome } => {
@@ -316,7 +318,9 @@ fn event_agent(event: &RichEvent) -> Option<String> {
         RichEvent::Init { .. }
         | RichEvent::SessionResult { .. }
         | RichEvent::HookStatus { .. }
-        | RichEvent::AgentStatus { .. } => None,
+        | RichEvent::AgentStatus { .. }
+        | RichEvent::Quota { .. }
+        | RichEvent::ContextUse { .. } => None,
     }
 }
 
@@ -576,6 +580,7 @@ mod tests {
             num_turns: 1,
             is_error: false,
             result_text: None,
+            usage: None,
         };
         assert_eq!(p.on_event(&end).role, NarrativeRole::Outcome);
         let fb = RichEvent::Fallback {

@@ -515,6 +515,11 @@ pub(crate) struct AppState {
     pub(crate) pairing_alert: crate::pairing_alert::PairingAlert,
     /// Set by the Debug menu or agent request-file watcher.
     pub(crate) capture_ui_requested: bool,
+    /// The account's quota windows (DEV-1253). One per app, not per session:
+    /// every session here runs as the same Claude Code account (one
+    /// `~/.claude`), so they must all show the same number, and they do
+    /// because there is only this one copy to read.
+    pub(crate) account_quota: crate::stream::AccountQuota,
 }
 
 /// How long to wait between `state.json` writes.
@@ -1130,6 +1135,7 @@ pub(crate) mod fixture {
                     remote: crate::remote::RemoteService::offline(&Default::default()),
                     remote_tabs: Default::default(),
                     capture_ui_requested: false,
+                    account_quota: crate::stream::AccountQuota::default(),
                     status_feed: Default::default(),
                 }
             });

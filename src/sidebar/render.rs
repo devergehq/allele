@@ -1362,6 +1362,8 @@ pub(crate) fn build_sidebar_items(
                         .dispatched_by()
                         .map(|by| SharedString::from(format!("dispatched by {by}")));
                     let session_startup_status = session.startup_status.clone();
+                    // Context use after the last completed turn (DEV-1253).
+                    let session_context = session.context_use.map(|c| c.label());
                     let session_operation_error = session.operation_error.clone();
                     // Read through the accessor, not the field — transient
                     // confirmations age out and must stop rendering.
@@ -1394,18 +1396,29 @@ pub(crate) fn build_sidebar_items(
                     if session_pinned {
                         label_row = label_row.child(icon(icons::PIN, 11.0, theme().warning));
                     }
-                    label_row = label_row
-                        .child(
+                    label_row = label_row.child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .text_size(px(12.0))
+                            .text_color(label_color)
+                            .child(label),
+                    );
+                    // Quiet by design: plain faint text, no badge (DEV-1253).
+                    if let Some(ctx) = session_context {
+                        label_row = label_row.child(
                             div()
-                                .flex_1()
-                                .min_w(px(0.0))
-                                .overflow_hidden()
-                                .text_ellipsis()
+                                .flex_shrink_0()
+                                .text_size(px(11.0))
+                                .text_color(theme().text_faint)
                                 .whitespace_nowrap()
-                                .text_size(px(12.0))
-                                .text_color(label_color)
-                                .child(label),
-                        )
+                                .child(ctx),
+                        );
+                    }
+                    label_row = label_row
                         .child(
                             div()
                                 .flex_shrink_0()

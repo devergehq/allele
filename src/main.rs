@@ -11,6 +11,7 @@ mod changes;
 mod cli;
 mod clone;
 mod config;
+mod context_watch;
 mod conversation_picker;
 mod conversations;
 mod debug_capture;
@@ -377,6 +378,19 @@ impl AppState {
         let events = tailer.poll();
         if events.is_empty() {
             return;
+        }
+        // Quota and context use ride the same lines; fold them into state
+        // before the view consumes the events (DEV-1253).
+        if let Some(session_id) = self.active_session().map(|s| s.id.clone()) {
+            let mut changed = false;
+            for ev in &events {
+                if let transcript::TranscriptEvent::Rich(event) = ev {
+                    changed |= self.apply_budget_event(&session_id, event);
+                }
+            }
+            if changed {
+                cx.notify();
+            }
         }
         let Some(view) = self.rich.view.as_ref().cloned() else {
             return;
@@ -2294,6 +2308,7 @@ fn main() {
                         ),
                         remote_tabs: Default::default(),
                         capture_ui_requested: false,
+                        account_quota: crate::stream::AccountQuota::default(),
                         status_feed,
                         // Captured on the first render (see `Render`).
                         main_window: None,

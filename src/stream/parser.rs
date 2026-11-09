@@ -5,6 +5,7 @@
 //! when using stream-json without `--include-partial-messages`.
 
 use super::types::*;
+use super::usage::{ContextUse, QuotaReading};
 
 /// How completely a single source line was normalised. Recorded per line so
 /// the ledger can report parser coverage without inspecting event contents.
@@ -15,7 +16,7 @@ pub enum Coverage {
     /// Line recognised, but one or more parts fell back to raw.
     Partial,
     /// Line recognised as a known type we intentionally emit nothing for
-    /// (e.g. rate-limit, pings). The raw line is still retained by the ledger.
+    /// (e.g. session metadata, pings). The raw line is still retained by the ledger.
     Ignored,
     /// Line's top-level `type` was unknown — emitted wholesale as `Fallback`.
     Fallback,
@@ -51,11 +52,18 @@ impl ParsedLine {
 pub struct StreamParser {
     /// Session ID extracted from the init event.
     session_id: Option<String>,
+    /// Context use from the latest main-chain model call. A result line's own
+    /// `usage` totals every call in the run, so it overstates context; this is
+    /// preferred over it when one has been seen (DEV-1253).
+    last_context: Option<ContextUse>,
 }
 
 impl StreamParser {
     pub fn new() -> Self {
-        Self { session_id: None }
+        Self {
+            session_id: None,
+            last_context: None,
+        }
     }
 
     /// Parse a single NDJSON line. Returns events to emit (may be empty).
@@ -96,7 +104,7 @@ impl StreamParser {
             StreamLine::User(msg) => self.handle_user(msg),
             StreamLine::StreamEvent(wrapper) => self.handle_stream_event(wrapper),
             StreamLine::Result(result) => self.handle_result(result),
-            StreamLine::RateLimit(_) => ParsedLine::new(Vec::new(), Coverage::Ignored),
+            StreamLine::RateLimit(rl) => self.handle_rate_limit(rl),
             StreamLine::SessionMetadata => ParsedLine::new(Vec::new(), Coverage::Ignored),
             StreamLine::PrLink(pr) => self.handle_pr_link(pr),
             StreamLine::FrameLink(frame) => self.handle_frame_link(frame),
@@ -114,6 +122,21 @@ impl StreamParser {
                 pl.diagnostics.push(reason);
                 pl
             }
+        }
+    }
+
+    /// A `rate_limit_event` is the account's quota window (DEV-1253). It used
+    /// to be counted `Ignored`; it now yields a [`RichEvent::Quota`]. A payload
+    /// with nothing usable in it stays `Ignored` — retained by the ledger, not
+    /// rendered.
+    fn handle_rate_limit(&self, rl: RateLimitEvent) -> ParsedLine {
+        match rl
+            .rate_limit_info
+            .as_ref()
+            .and_then(QuotaReading::from_info)
+        {
+            Some(reading) => ParsedLine::full(vec![RichEvent::Quota { reading }]),
+            None => ParsedLine::new(Vec::new(), Coverage::Ignored),
         }
     }
 
@@ -270,13 +293,13 @@ impl StreamParser {
         }
     }
 
-    fn handle_assistant(&mut self, msg: AssistantMessage) -> ParsedLine {
+    fn handle_assistant(&mut self, mut msg: AssistantMessage) -> ParsedLine {
         let parent = msg.parent_tool_use_id;
         let mut events = Vec::new();
         let mut diagnostics = Vec::new();
         let mut fell_back = false;
 
-        for block in msg.message.content {
+        for block in std::mem::take(&mut msg.message.content) {
             let block = match block {
                 MaybeBlock::Known(b) => b,
                 MaybeBlock::Raw(value) => {
@@ -330,6 +353,20 @@ impl StreamParser {
                         });
                     }
                 }
+            }
+        }
+
+        // Per-call usage is the session's context use. Subagent calls (which
+        // carry a parent) measure the subagent's context, not this session's.
+        if parent.is_none() {
+            if let Some(context) = msg
+                .message
+                .usage
+                .as_ref()
+                .and_then(|u| ContextUse::from_usage(u, msg.message.model.as_deref()))
+            {
+                self.last_context = Some(context);
+                events.push(RichEvent::ContextUse { context });
             }
         }
 
@@ -416,16 +453,28 @@ impl StreamParser {
     }
 
     fn handle_result(&self, result: ResultEvent) -> ParsedLine {
-        ParsedLine::new(
-            vec![RichEvent::SessionResult {
-                duration_ms: result.duration_ms.unwrap_or(0),
-                cost_usd: result.total_cost_usd.unwrap_or(0.0),
-                num_turns: result.num_turns.unwrap_or(0),
-                is_error: result.is_error.unwrap_or(false),
-                result_text: result.result,
-            }],
-            Coverage::Full,
-        )
+        // The result's usage is kept, and yields the session's context use.
+        // It sums every call in the run, so the latest call's own figure wins
+        // when the stream carried one; the result's is the fallback for a
+        // stream that did not (DEV-1253).
+        let context = self.last_context.or_else(|| {
+            result
+                .usage
+                .as_ref()
+                .and_then(|u| ContextUse::from_usage(u, None))
+        });
+        let mut events = vec![RichEvent::SessionResult {
+            duration_ms: result.duration_ms.unwrap_or(0),
+            cost_usd: result.total_cost_usd.unwrap_or(0.0),
+            num_turns: result.num_turns.unwrap_or(0),
+            is_error: result.is_error.unwrap_or(false),
+            result_text: result.result,
+            usage: result.usage,
+        }];
+        if let Some(context) = context {
+            events.push(RichEvent::ContextUse { context });
+        }
+        ParsedLine::new(events, Coverage::Full)
     }
 }
 
@@ -940,11 +989,76 @@ mod tests {
     }
 
     #[test]
-    fn rate_limit_is_ignored_not_dropped_silently() {
+    fn rate_limit_yields_a_quota_event() {
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1762790400,"rateLimitType":"five_hour","utilization":0.71},"session_id":"abc"}"#;
+        let mut parser = StreamParser::new();
+        let parsed = parser.feed_line_detailed(line);
+        assert_eq!(parsed.coverage, Coverage::Full);
+        match parsed.events.as_slice() {
+            [RichEvent::Quota { reading }] => {
+                assert_eq!(reading.window, "five_hour");
+                assert_eq!(reading.used_fraction, Some(0.71));
+                assert_eq!(reading.resets_at, Some(1_762_790_400));
+            }
+            other => panic!("expected one Quota event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn rate_limit_with_nothing_usable_is_ignored_not_dropped_silently() {
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"remaining":10}}"#;
         let mut parser = StreamParser::new();
         let parsed = parser.feed_line_detailed(line);
         assert_eq!(parsed.coverage, Coverage::Ignored);
         assert!(parsed.events.is_empty());
+    }
+
+    fn context_of(events: &[RichEvent]) -> Option<crate::stream::ContextUse> {
+        events.iter().find_map(|e| match e {
+            RichEvent::ContextUse { context } => Some(*context),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn result_usage_is_kept_and_yields_context_use() {
+        let line = r#"{"type":"result","subtype":"success","is_error":false,"duration_ms":10,"num_turns":1,"total_cost_usd":0.1,"usage":{"input_tokens":4,"cache_creation_input_tokens":996,"cache_read_input_tokens":99000,"output_tokens":20}}"#;
+        let mut parser = StreamParser::new();
+        let parsed = parser.feed_line_detailed(line);
+        assert_eq!(parsed.coverage, Coverage::Full);
+        match &parsed.events[0] {
+            RichEvent::SessionResult { usage, .. } => {
+                let usage = usage.as_ref().expect("usage kept on the result");
+                assert_eq!(usage.cache_read_input_tokens, Some(99_000));
+                assert_eq!(usage.output_tokens, Some(20));
+            }
+            other => panic!("expected SessionResult, got {other:?}"),
+        }
+        let ctx = context_of(&parsed.events).expect("a context-use figure");
+        assert_eq!(ctx.used_tokens, 100_000);
+        assert_eq!(ctx.label(), "ctx 50%");
+    }
+
+    #[test]
+    fn assistant_usage_yields_context_use_and_wins_over_the_result_total() {
+        let mut parser = StreamParser::new();
+        let assistant = r#"{"type":"assistant","message":{"model":"claude-opus-5-5","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":2,"cache_read_input_tokens":123998,"output_tokens":7}},"parent_tool_use_id":null}"#;
+        let parsed = parser.feed_line_detailed(assistant);
+        assert_eq!(parsed.coverage, Coverage::Full);
+        assert_eq!(context_of(&parsed.events).unwrap().label(), "ctx 62%");
+
+        // The run's summed usage would read 100%; the last call's figure is
+        // what the context actually holds.
+        let result =
+            r#"{"type":"result","usage":{"input_tokens":4,"cache_read_input_tokens":400000}}"#;
+        let parsed = parser.feed_line_detailed(result);
+        assert_eq!(context_of(&parsed.events).unwrap().label(), "ctx 62%");
+    }
+
+    #[test]
+    fn subagent_usage_is_not_the_sessions_context() {
+        let line = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":2,"cache_read_input_tokens":5000}},"parent_tool_use_id":"toolu_1"}"#;
+        let mut parser = StreamParser::new();
+        assert!(context_of(&parser.feed_line_detailed(line).events).is_none());
     }
 }

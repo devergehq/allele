@@ -684,6 +684,7 @@ impl RichDocument {
                 num_turns,
                 is_error,
                 result_text,
+                usage: _,
             } => {
                 self.close_text_stream();
                 let id = self.push_block(Block {
@@ -777,6 +778,9 @@ impl RichDocument {
                 }
             },
             RichEvent::Init { .. } | RichEvent::HookStatus { .. } => None,
+            // Budget readings render in the sidebar, not the transcript
+            // (DEV-1253).
+            RichEvent::Quota { .. } | RichEvent::ContextUse { .. } => None,
         };
 
         // Attach the narrative annotation to whatever block this event created.

@@ -24,6 +24,8 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
     crate::pairing_alert::spawn_watcher(cx);
     // Hold off idle sleep while any session is working (DEV-1156).
     crate::session::keep_awake::spawn(cx);
+    // Per-session context use and the account quota (DEV-1253).
+    crate::context_watch::spawn(cx);
 
     // Spawn the hook-event polling task. Runs for the life
     // of the app, reads ~/.allele/events/*.jsonl every
