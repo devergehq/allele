@@ -13,6 +13,10 @@ use tracing::warn;
 
 use crate::actions::{DrawerAction, OverlayAction, SessionAction, SessionCursor, SidebarAction};
 use crate::app_state::{AppState, MainTab};
+use crate::commands::{
+    DiscardSessionAction, GoToBrowserTab, GoToClaudeTab, GoToReaderTab, GoToTranscriptTab,
+    NewSessionAction, ToggleChangesPanel,
+};
 use crate::pairing_alert::OpenPairingApproval;
 use crate::session::{self, SessionStatus};
 use crate::{
@@ -158,6 +162,44 @@ pub(crate) fn register_all(cx: &mut Context<AppState>) {
                 .ok();
         }
     });
+    // Commands that were command-palette cases until DEV-1264.
+    on_state::<GoToClaudeTab>(cx, &toggle_handle, |this, _| {
+        this.main_tab = MainTab::Claude
+    });
+    on_state::<GoToReaderTab>(cx, &toggle_handle, |this, _| {
+        this.main_tab = MainTab::Reader
+    });
+    on_state::<GoToTranscriptTab>(cx, &toggle_handle, |this, _| {
+        this.main_tab = MainTab::Transcript
+    });
+    on_state::<GoToBrowserTab>(cx, &toggle_handle, |this, _| {
+        if this.browser_tab_available() {
+            this.main_tab = MainTab::Browser;
+        }
+    });
+    on_state::<ToggleChangesPanel>(cx, &toggle_handle, |this, _| {
+        this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
+    });
+    on_state::<NewSessionAction>(cx, &toggle_handle, |this, _| {
+        if let Some(cursor) = this.active {
+            this.pending_action =
+                Some(SessionAction::OpenNewSessionModal(cursor.project_idx).into());
+        }
+    });
+    on_state::<DiscardSessionAction>(cx, &toggle_handle, |this, _| {
+        // Arms the sidebar's confirm prompt; nothing is removed until the
+        // user confirms there.
+        if let Some(cursor) = this.active {
+            this.sidebar.visible = true;
+            this.pending_action = Some(
+                SessionAction::RequestDiscardSession {
+                    project_idx: cursor.project_idx,
+                    session_idx: cursor.session_idx,
+                }
+                .into(),
+            );
+        }
+    });
     App::on_action::<CycleAttentionSession>(cx, {
         let handle = toggle_handle.clone();
         move |_, cx| {
@@ -236,6 +278,24 @@ pub(crate) fn register_all(cx: &mut Context<AppState>) {
                 })
                 .ok();
         }
+    });
+}
+
+/// Register an App-scope handler for `A` that runs `apply` on `AppState` and
+/// re-renders.
+fn on_state<A: gpui::Action>(
+    cx: &mut Context<AppState>,
+    handle: &WeakEntity<AppState>,
+    apply: fn(&mut AppState, &mut Context<AppState>),
+) {
+    let handle = handle.clone();
+    App::on_action::<A>(cx, move |_, cx| {
+        handle
+            .update(cx, |this: &mut AppState, cx| {
+                apply(this, cx);
+                cx.notify();
+            })
+            .ok();
     });
 }
 

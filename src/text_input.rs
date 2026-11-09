@@ -8,9 +8,9 @@
 //!
 //! Consumers wrap the input in their own styling div and subscribe to
 //! `TextInputEvent` for change/submit notifications. Key bindings are
-//! declared in `assets/default-keymap.json` under the `"TextInput"`
-//! context and loaded by `src/keymap.rs` — this file only declares the
-//! action types and the `on_action` listener wiring.
+//! the `text_input.*` rows of the command table (`src/commands.rs`), bound
+//! in the `"TextInput"` context by `src/keymap.rs` — this file only declares
+//! the action types and the `on_action` listener wiring.
 
 use crate::theme::theme;
 use std::ops::Range;
@@ -53,11 +53,11 @@ actions!(
     ]
 );
 
-/// Key context gating text-input bindings. Must match the `"context"`
-/// value in `assets/default-keymap.json`. The render fn applies it via
+/// Key context gating text-input bindings; the command table binds the
+/// `text_input.*` rows in it. The render fn applies it via
 /// `div().key_context(KEY_CONTEXT)` so bindings fire only when a
 /// TextInput is focused.
-const KEY_CONTEXT: &str = "TextInput";
+pub(crate) const KEY_CONTEXT: &str = "TextInput";
 
 #[derive(Debug, Clone)]
 pub enum TextInputEvent {
