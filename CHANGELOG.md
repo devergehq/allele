@@ -42,6 +42,9 @@ Changes on `master` awaiting the next tagged release.
   silently rendering nothing.
 
 ### Fixed
+- Answering a permission prompt from the UI (Allow, Reject, or the attention bar's Allow)
+  now restarts the session's state age at the answer, instead of letting
+  `allele_sessions_status.state_age_secs` keep counting from when it became blocked.
 - Tools installed outside the system directories are reachable again from sessions
   started by an Allele you launched from Finder, the Dock, or Spotlight. Allele already
   adopted the login shell's PATH when it detected launchd's stripped GUI environment,

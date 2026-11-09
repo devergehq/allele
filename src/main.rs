@@ -466,8 +466,7 @@ impl AppState {
                             if let Some(ref tv) = session.terminal_view {
                                 tv.read(cx).send_input(b"\r");
                             }
-                            session.status = session::SessionStatus::Running;
-                            session.attention_context = None;
+                            session.resolve_permission_prompt();
                         }
                     }
                     cx.notify();
@@ -484,8 +483,7 @@ impl AppState {
                             if let Some(ref tv) = session.terminal_view {
                                 tv.read(cx).send_input(b"\x1b");
                             }
-                            session.status = session::SessionStatus::Running;
-                            session.attention_context = None;
+                            session.resolve_permission_prompt();
                         }
                     }
                     cx.notify();

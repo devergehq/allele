@@ -1005,6 +1005,16 @@ impl Session {
         self.status = new;
     }
 
+    /// The user answered a permission prompt from the UI (Allow or Reject):
+    /// the session goes back to work and the prompt's context is dropped.
+    ///
+    /// Routed through [`Session::set_status`] so the state timestamp restarts
+    /// at the answer and runtime accounting sees the transition (DEV-1244).
+    pub fn resolve_permission_prompt(&mut self) {
+        self.set_status(SessionStatus::Running);
+        self.attention_context = None;
+    }
+
     /// Total active runtime as a `Duration`: the banked accumulator plus the
     /// in-flight stretch if the session is currently in a counting status.
     /// Paused and completed sessions report exactly their banked runtime.
@@ -1391,6 +1401,45 @@ mod tests {
         // Both are counting states — the running stretch is untouched.
         assert_eq!(s.active_since, since);
         assert_eq!(s.active_accumulated, Duration::ZERO);
+    }
+
+    #[test]
+    fn resolving_permission_prompt_resets_state_timestamp() {
+        use super::SessionStatus;
+        use std::time::Duration;
+        let mut s = sample("s");
+        s.set_status(SessionStatus::AwaitingInput);
+        // Blocked for a minute before the user answered.
+        s.status_since = SystemTime::now() - Duration::from_secs(60);
+        let blocked_since = s.status_since;
+
+        let before = SystemTime::now();
+        s.resolve_permission_prompt();
+
+        assert_eq!(s.status, SessionStatus::Running);
+        assert!(s.attention_context.is_none());
+        assert!(
+            s.status_since >= before,
+            "state age must restart at the approval, not at {blocked_since:?}"
+        );
+    }
+
+    #[test]
+    fn resolving_permission_prompt_keeps_runtime_counting() {
+        use super::SessionStatus;
+        use std::time::Duration;
+        let mut s = sample("s");
+        s.set_status(SessionStatus::AwaitingInput);
+        s.active_since = Some(SystemTime::now() - Duration::from_secs(30));
+
+        s.resolve_permission_prompt();
+
+        assert!(
+            s.active_since.is_some(),
+            "runtime clock must be live after approve"
+        );
+        assert!(s.active_runtime() >= Duration::from_secs(30));
+        assert_eq!(s.active_accumulated, Duration::ZERO, "no spurious bank");
     }
 
     #[test]
