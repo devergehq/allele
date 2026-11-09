@@ -12,7 +12,7 @@
 //! work is what DEV-684 removed; this does not bring it back.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use gpui::Context;
@@ -50,6 +50,8 @@ pub(crate) struct ContextWatcher {
     seen: HashMap<PathBuf, (SystemTime, u64)>,
     /// Transcript each session pointed at last tick.
     paths: HashMap<String, PathBuf>,
+    /// (mtime, length) of the status-line payload at its last read.
+    status_line_seen: Option<(SystemTime, u64)>,
 }
 
 impl ContextWatcher {
@@ -95,6 +97,32 @@ impl ContextWatcher {
         self.paths
             .retain(|id, _| targets.iter().any(|t| &t.session_id == id));
         out
+    }
+}
+
+impl ContextWatcher {
+    /// The account's quota from the payload the status-line wrapper left
+    /// (DEV-1259) — how an *interactive* session reports it, since its
+    /// transcript carries no `rate_limit_event`. Empty when the payload has
+    /// not changed since the last call, or carries no `rate_limits`.
+    /// Blocking — run it on the background executor.
+    pub(crate) fn poll_status_line(&mut self, path: &Path) -> Vec<QuotaReading> {
+        let Ok(meta) = std::fs::metadata(path) else {
+            return Vec::new();
+        };
+        let key = (
+            meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            meta.len(),
+        );
+        if self.status_line_seen == Some(key) {
+            return Vec::new();
+        }
+        self.status_line_seen = Some(key);
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
+            .and_then(|v| v.get("rate_limits").map(QuotaReading::from_status_line))
+            .unwrap_or_default()
     }
 }
 
@@ -195,20 +223,28 @@ pub(crate) fn spawn(cx: &mut Context<AppState>) {
             let Ok(targets) = this.read_with(cx, |this, _cx| this.context_targets()) else {
                 break; // AppState dropped — app is exiting
             };
-            let (returned, found) = cx
+            let status_line = crate::hooks::status_line_payload_path();
+            let (returned, found, quota) = cx
                 .background_executor()
                 .spawn(async move {
                     let found = watcher.poll(&targets);
-                    (watcher, found)
+                    let quota = status_line
+                        .map(|p| watcher.poll_status_line(&p))
+                        .unwrap_or_default();
+                    (watcher, found, quota)
                 })
                 .await;
             watcher = returned;
-            if found.is_empty() {
+            if found.is_empty() && quota.is_empty() {
                 continue;
             }
             if this
                 .update(cx, |this: &mut AppState, cx| {
-                    if this.apply_context_found(found) {
+                    let mut changed = this.apply_context_found(found);
+                    for reading in quota {
+                        changed |= this.record_quota(reading);
+                    }
+                    if changed {
                         cx.notify();
                     }
                 })
@@ -279,6 +315,75 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert!(found[0].conversation_changed);
         assert!(found[0].summary.context.is_none());
+    }
+
+    #[test]
+    fn the_status_line_payload_yields_the_accounts_quota_once_per_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status-line.json");
+        let mut w = ContextWatcher::default();
+        assert!(w.poll_status_line(&path).is_empty(), "no payload yet");
+
+        std::fs::write(
+            &path,
+            r#"{"session_id":"s","rate_limits":{"five_hour":{"used_percentage":71,"resets_at":2000}}}"#,
+        )
+        .unwrap();
+        let readings = w.poll_status_line(&path);
+        assert_eq!(readings.len(), 1);
+        assert_eq!(readings[0].window, "five_hour");
+        assert!(w.poll_status_line(&path).is_empty(), "unchanged payload");
+
+        // A payload before the first turn has no rate_limits: nothing to fold.
+        std::fs::write(&path, r#"{"session_id":"s","model":{"id":"x"}}"#).unwrap();
+        assert!(w.poll_status_line(&path).is_empty());
+    }
+
+    /// DEV-1259: an interactive session reports through its status line, a
+    /// stream-driven one through `rate_limit_event`. Both land in the one
+    /// account store, so both sessions show one line — and once the window
+    /// resets, both show it stale.
+    #[test]
+    fn a_typed_and_a_stream_session_show_the_same_quota() {
+        use crate::stream::{AccountQuota, StreamParser};
+
+        let now = 1_000_000;
+        let reset = now + 3600;
+        let mut account = AccountQuota::default();
+
+        // The typed session's status-line payload, older and lower.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("status-line.json");
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{"rate_limits":{{"five_hour":{{"used_percentage":40,"resets_at":{reset}}}}}}}"#
+            ),
+        )
+        .unwrap();
+        for r in ContextWatcher::default().poll_status_line(&path) {
+            account.record(r);
+        }
+        let typed_only = account.line(now);
+        assert_eq!(typed_only.as_deref(), Some("5h 40% · resets in 1h"));
+
+        // The stream session's newer reading for the same window.
+        let line = format!(
+            r#"{{"type":"rate_limit_event","rate_limit_info":{{"rateLimitType":"five_hour","utilization":0.55,"resetsAt":{reset}}}}}"#
+        );
+        for event in StreamParser::new().feed_line(&line) {
+            if let RichEvent::Quota { reading } = event {
+                account.record(reading);
+            }
+        }
+        let shown_for_typed = account.line(now);
+        let shown_for_stream = account.line(now);
+        assert_eq!(shown_for_typed, shown_for_stream);
+        assert_eq!(shown_for_typed.as_deref(), Some("5h 55% · resets in 1h"));
+
+        // Past the reset, the status-line-fed reading is stale for both.
+        let later = account.line(reset + 60).unwrap();
+        assert_eq!(later, "5h quota stale · reset 1m ago");
     }
 
     /// The account-level guarantee: two sessions on one account, each

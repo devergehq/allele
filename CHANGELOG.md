@@ -16,9 +16,11 @@ Changes on `master` awaiting the next tagged release.
 ### Added
 - **Context use and account quota in the sidebar.** Each session row shows how full its
   context window was after the last turn (`ctx 62%`), read from the end of its transcript.
-  When Claude Code reports the account's rate-limit window, one line above the sidebar
-  footer shows it (`5h 71% · resets in 2h 14m`) — the same for every session, and marked
-  stale with no number once the window has reset.
+  One line above the sidebar footer shows the account's rate-limit window
+  (`5h 71% · resets in 2h 14m`) — the same for every session, and marked stale with no
+  number once the window has reset. Typed sessions report it through Claude Code's status
+  line: Allele's status-line wrapper records the reading, then runs your own status line
+  on the same input, so what you see there is unchanged.
 - **Collapsible sidebar.** Click a project header to fold its sessions and archives away;
   click a machine row, or a project heading under it, to fold that too. The MACHINES
   section can be moved above the local projects from its header. Folds and position

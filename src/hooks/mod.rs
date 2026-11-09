@@ -54,6 +54,20 @@ fn events_dir_in(base: &Path) -> PathBuf {
     base.join("events")
 }
 
+fn status_line_script_path_in(base: &Path) -> PathBuf {
+    base.join("bin").join("status-line.sh")
+}
+
+fn status_line_payload_path_in(base: &Path) -> PathBuf {
+    base.join("status-line.json")
+}
+
+/// Where the status-line wrapper leaves the latest payload Claude Code handed
+/// it (DEV-1259). Read by `context_watch` for the account's `rate_limits`.
+pub fn status_line_payload_path() -> Option<PathBuf> {
+    Some(status_line_payload_path_in(&base_dir()?))
+}
+
 /// Restrict the events directory and everything already in it to the owner,
 /// returning how many files were tightened.
 ///
@@ -198,6 +212,109 @@ fi
 exit 0
 "#;
 
+/// Placeholders [`STATUS_LINE_SCRIPT_TEMPLATE`] substitutes, for the file the
+/// payload is written to and the script's own path.
+const STATUS_LINE_FILE_PLACEHOLDER: &str = "@@ALLELE_STATUS_LINE_FILE@@";
+const STATUS_LINE_SELF_PLACEHOLDER: &str = "@@ALLELE_STATUS_LINE_SELF@@";
+
+/// Shell body for the status-line wrapper (DEV-1259).
+///
+/// Claude Code hands its status-line command a JSON payload that, for an
+/// interactive session, carries the account's `rate_limits` — the only place
+/// an interactive session reports them, since its on-disk transcript has no
+/// `rate_limit_event`. Allele's `--settings` therefore names this wrapper as
+/// the status line, and the wrapper does two things:
+///
+/// 1. leaves the payload where Allele reads it, replacing the previous one
+///    atomically (temp file, then rename), and
+/// 2. hands the *same* stdin to the status line the user configured, so what
+///    the user sees is exactly what their own command prints.
+///
+/// `--settings` outranks the user's and the project's settings, so without
+/// step 2 Allele would silently replace a user's status line. The user's
+/// command is looked up at run time, in Claude Code's own precedence order
+/// (project local, project shared, user), so editing it needs no relaunch.
+/// JSON is read with `plutil`, which every Mac has, and `jq` when it does not.
+/// Every failure exits 0 with no output: a broken wrapper must never cost the
+/// user their status line's slot or block Claude.
+const STATUS_LINE_SCRIPT_TEMPLATE: &str = r#"#!/bin/bash
+# allele status-line wrapper — records Claude Code's status-line payload for
+# Allele, then runs the user's own status line on the same input.
+# Managed by the Allele app. Do not edit by hand — it will be
+# regenerated on next launch.
+
+set -u
+umask 077
+out=@@ALLELE_STATUS_LINE_FILE@@
+self=@@ALLELE_STATUS_LINE_SELF@@
+
+payload=$(cat)
+
+tmp="$out.$$"
+if printf '%s' "$payload" > "$tmp" 2>/dev/null; then
+    mv -f "$tmp" "$out" 2>/dev/null || rm -f "$tmp"
+fi
+
+# json_get KEY.PATH FILE — a string at KEY.PATH, or nothing. FILE `-` is stdin.
+json_get() {
+    if command -v plutil >/dev/null 2>&1; then
+        v=$(plutil -extract "$1" raw -o - "$2" 2>/dev/null) && printf '%s' "$v"
+    elif command -v jq >/dev/null 2>&1; then
+        if [ "$2" = "-" ]; then
+            jq -r ".$1 // empty" 2>/dev/null
+        else
+            jq -r ".$1 // empty" "$2" 2>/dev/null
+        fi
+    fi
+}
+
+project_dir=$(printf '%s' "$payload" | json_get workspace.project_dir -)
+[ -n "$project_dir" ] || project_dir=$(printf '%s' "$payload" | json_get cwd -)
+config_dir="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+
+cmd=""
+for f in \
+    "$project_dir/.claude/settings.local.json" \
+    "$project_dir/.claude/settings.json" \
+    "$config_dir/settings.json"; do
+    [ -n "$project_dir" ] || [ "$f" = "$config_dir/settings.json" ] || continue
+    [ -f "$f" ] || continue
+    c=$(json_get statusLine.command "$f")
+    [ -n "$c" ] || continue
+    t=$(json_get statusLine.type "$f")
+    [ -z "$t" ] || [ "$t" = "command" ] || continue
+    cmd="$c"
+    break
+done
+
+[ -n "$cmd" ] || exit 0
+# Never run ourselves: a settings file naming this wrapper would recurse.
+case "$cmd" in *"$self"*) exit 0 ;; esac
+
+printf '%s' "$payload" | /bin/bash -c "$cmd"
+exit 0
+"#;
+
+/// Render the status-line wrapper for one instance's root.
+fn build_status_line_script(payload_file: &Path, script: &Path) -> String {
+    STATUS_LINE_SCRIPT_TEMPLATE
+        .replace(STATUS_LINE_FILE_PLACEHOLDER, &shell_quote(payload_file))
+        .replace(STATUS_LINE_SELF_PLACEHOLDER, &shell_quote(script))
+}
+
+/// The user's own `statusLine` object, from Claude Code's user settings.
+/// Its display options (padding and the like) are carried onto the wrapper's
+/// entry so the user's line renders as it did; the command itself is looked
+/// up by the wrapper at run time.
+fn user_status_line() -> Option<serde_json::Value> {
+    let config_dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".claude")))?;
+    let text = fs::read_to_string(config_dir.join("settings.json")).ok()?;
+    let settings: serde_json::Value = serde_json::from_str(&text).ok()?;
+    settings.get("statusLine").cloned()
+}
+
 /// Quote a path for interpolation into a POSIX shell script.
 ///
 /// The root arrives from `--home` or `ALLELE_HOME`, so it is arbitrary user
@@ -226,7 +343,11 @@ fn build_receiver_script(events_dir: &Path) -> String {
 /// `--home "/Users/me/My Roots/alpha"` word-splits into a path that does not
 /// exist, no hook ever runs, and the symptom is indistinguishable from DEV-951
 /// itself: no status transitions, and every create burning its 120s budget.
-fn build_hooks_json(receiver: &Path) -> serde_json::Value {
+fn build_hooks_json(
+    receiver: &Path,
+    status_line: &Path,
+    user_status_line: Option<&serde_json::Value>,
+) -> serde_json::Value {
     let receiver = shell_quote(receiver);
     let make_hook = |arg: &str| {
         serde_json::json!({
@@ -254,8 +375,24 @@ fn build_hooks_json(receiver: &Path) -> serde_json::Value {
             // permission prompt leaves the ⚠ icon stuck on the sidebar.
             "PreToolUse":          [make_hook("pre_tool_use")],
             "PostToolUse":         [make_hook("post_tool_use")],
-        }
+        },
+        "statusLine": status_line_entry(status_line, user_status_line),
     })
+}
+
+/// The `statusLine` entry naming the wrapper (DEV-1259): the user's own entry
+/// with its display options intact and only the command swapped, or a bare
+/// command entry when the user has none.
+fn status_line_entry(
+    status_line: &Path,
+    user_status_line: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let mut entry = user_status_line
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    entry.insert("type".into(), "command".into());
+    entry.insert("command".into(), shell_quote(status_line).into());
+    serde_json::Value::Object(entry)
 }
 
 /// Install the receiver script and hooks.json on disk if they're missing
@@ -304,10 +441,27 @@ fn install_in(base: &Path) -> crate::errors::Result<PathBuf> {
         fs::set_permissions(&receiver_path, perms)?;
     }
 
+    // The status-line wrapper (DEV-1259), rewritten every launch for the
+    // same reason as the receiver.
+    let status_line_path = status_line_script_path_in(base);
+    fs::write(
+        &status_line_path,
+        build_status_line_script(&status_line_payload_path_in(base), &status_line_path),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&status_line_path, fs::Permissions::from_mode(0o755))?;
+    }
+
     // Write (or rewrite) hooks.json. We always rewrite so the receiver path
     // is current and the version marker is up-to-date.
     let hooks_path = hooks_settings_path_in(base);
-    let hooks_json = build_hooks_json(&receiver_path);
+    let hooks_json = build_hooks_json(
+        &receiver_path,
+        &status_line_path,
+        user_status_line().as_ref(),
+    );
     fs::write(&hooks_path, serde_json::to_string_pretty(&hooks_json)?)?;
 
     Ok(hooks_path)
@@ -1136,5 +1290,146 @@ mod tests {
         let line = r#"{"ts":1751000000,"kind":"stop"}"#;
         let parsed: HookEventLine = serde_json::from_str(line).unwrap();
         assert_eq!(parsed.cwd, None);
+    }
+
+    // ── Status-line wrapper (DEV-1259) ─────────────────────────────
+
+    /// A scratch layout: an Allele root, a Claude config dir and a project.
+    struct StatusLineRig {
+        _dir: tempfile::TempDir,
+        base: PathBuf,
+        config: PathBuf,
+        project: PathBuf,
+    }
+
+    impl StatusLineRig {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("temp dir");
+            // A space in every path, as a real `--home` root may have.
+            let base = dir.path().join("root dir").join(".allele");
+            let config = dir.path().join("claude config");
+            let project = dir.path().join("my project");
+            fs::create_dir_all(&config).unwrap();
+            fs::create_dir_all(project.join(".claude")).unwrap();
+            install_in(&base).expect("install should succeed");
+            Self {
+                _dir: dir,
+                base,
+                config,
+                project,
+            }
+        }
+
+        fn payload(&self) -> String {
+            format!(
+                r#"{{"session_id":"s1","workspace":{{"project_dir":{}}},"rate_limits":{{"five_hour":{{"used_percentage":71,"resets_at":2000}}}}}}"#,
+                serde_json::to_string(&self.project.to_string_lossy()).unwrap()
+            )
+        }
+
+        fn set_status_line(&self, settings: &Path, command: &str) {
+            let v = serde_json::json!({"statusLine": {"type": "command", "command": command}});
+            fs::write(settings, v.to_string()).unwrap();
+        }
+
+        /// Run the installed wrapper on `payload`; (stdout, success).
+        fn run(&self, payload: &str) -> (String, bool) {
+            use std::io::Write;
+            let mut child = std::process::Command::new(status_line_script_path_in(&self.base))
+                .env("CLAUDE_CONFIG_DIR", &self.config)
+                .env("HOME", self._dir.path())
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn the wrapper");
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(payload.as_bytes())
+                .unwrap();
+            let out = child.wait_with_output().unwrap();
+            (
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                out.status.success(),
+            )
+        }
+    }
+
+    #[test]
+    fn the_wrapper_records_the_payload_for_allele() {
+        let rig = StatusLineRig::new();
+        let payload = rig.payload();
+        let (_, ok) = rig.run(&payload);
+        assert!(ok);
+        let written = fs::read_to_string(status_line_payload_path_in(&rig.base)).unwrap();
+        assert_eq!(written, payload);
+    }
+
+    #[test]
+    fn a_user_status_line_renders_unchanged_through_the_wrapper() {
+        let rig = StatusLineRig::new();
+        // The user's command sees the exact payload on stdin, and its output
+        // is passed through byte for byte — colours, newlines and all.
+        rig.set_status_line(
+            &rig.config.join("settings.json"),
+            r#"printf '\033[32muser\033[0m %s\n' "$(cat | wc -c | tr -d ' ')""#,
+        );
+        let payload = rig.payload();
+        let (out, ok) = rig.run(&payload);
+        assert!(ok);
+        assert_eq!(out, format!("\x1b[32muser\x1b[0m {}\n", payload.len()));
+    }
+
+    #[test]
+    fn the_wrapper_follows_claude_codes_settings_precedence() {
+        let rig = StatusLineRig::new();
+        let claude = rig.project.join(".claude");
+        rig.set_status_line(&rig.config.join("settings.json"), "printf user");
+        assert_eq!(rig.run(&rig.payload()).0, "user");
+        rig.set_status_line(&claude.join("settings.json"), "printf project");
+        assert_eq!(rig.run(&rig.payload()).0, "project");
+        rig.set_status_line(&claude.join("settings.local.json"), "printf local");
+        assert_eq!(rig.run(&rig.payload()).0, "local");
+    }
+
+    #[test]
+    fn with_no_user_status_line_the_wrapper_prints_nothing() {
+        let rig = StatusLineRig::new();
+        let (out, ok) = rig.run(&rig.payload());
+        assert!(ok);
+        assert_eq!(out, "");
+        // Garbage in is still a clean, silent exit.
+        let (out, ok) = rig.run("not json");
+        assert!(ok);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn the_wrapper_never_runs_itself() {
+        let rig = StatusLineRig::new();
+        let me = shell_quote(&status_line_script_path_in(&rig.base));
+        rig.set_status_line(&rig.config.join("settings.json"), &me);
+        let (out, ok) = rig.run(&rig.payload());
+        assert!(ok);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn the_status_line_entry_keeps_the_users_display_options() {
+        let wrapper = Path::new("/r d/.allele/bin/status-line.sh");
+        let user = serde_json::json!({"type": "command", "command": "mine.sh", "padding": 2});
+        let hooks = build_hooks_json(Path::new("/r d/recv.sh"), wrapper, Some(&user));
+        let entry = &hooks["statusLine"];
+        assert_eq!(entry["command"], "'/r d/.allele/bin/status-line.sh'");
+        assert_eq!(entry["type"], "command");
+        assert_eq!(entry["padding"], 2);
+
+        let bare = build_hooks_json(Path::new("/r/recv.sh"), wrapper, None);
+        assert_eq!(
+            bare["statusLine"],
+            serde_json::json!({"type": "command", "command": "'/r d/.allele/bin/status-line.sh'"})
+        );
     }
 }

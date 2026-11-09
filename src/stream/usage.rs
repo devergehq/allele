@@ -113,15 +113,18 @@ impl QuotaReading {
             .unwrap_or("five_hour")
             .to_string();
 
-        let used_fraction = field(&[
-            "utilization",
-            "usedPercentage",
-            "used_percentage",
-            "used_fraction",
-        ])
-        .and_then(|v| v.as_f64())
-        .map(|v| if v > 1.0 { v / 100.0 } else { v })
-        .map(|v| v.clamp(0.0, 1.0));
+        // A field named as a percentage is always one — `used_percentage: 1`
+        // is 1%, not 100%. A fraction field above 1 can only be a percentage
+        // sent under the wrong name.
+        let percent = field(&["usedPercentage", "used_percentage"])
+            .and_then(|v| v.as_f64())
+            .map(|v| v / 100.0);
+        let fraction = || {
+            field(&["utilization", "used_fraction"])
+                .and_then(|v| v.as_f64())
+                .map(|v| if v > 1.0 { v / 100.0 } else { v })
+        };
+        let used_fraction = percent.or_else(fraction).map(|v| v.clamp(0.0, 1.0));
 
         let status = field(&["status"])
             .and_then(|v| v.as_str())
@@ -145,6 +148,25 @@ impl QuotaReading {
             status,
             resets_at,
         })
+    }
+
+    /// Read the `rate_limits` object Claude Code hands its status-line command
+    /// (DEV-1259): one entry per window, keyed by the window's name, e.g.
+    /// `{"five_hour":{"used_percentage":71,"resets_at":1762790400}}`. Each
+    /// entry goes through [`from_info`](Self::from_info), so it is held to
+    /// the same lenient field rules as a `rate_limit_event`.
+    pub fn from_status_line(rate_limits: &serde_json::Value) -> Vec<Self> {
+        let Some(windows) = rate_limits.as_object() else {
+            return Vec::new();
+        };
+        windows
+            .iter()
+            .filter_map(|(window, info)| {
+                let mut r = Self::from_info(info)?;
+                r.window = window.clone();
+                Some(r)
+            })
+            .collect()
     }
 
     /// True once the window this reading describes has reset.
@@ -392,6 +414,29 @@ mod tests {
     #[test]
     fn quota_reading_with_nothing_usable_is_none() {
         assert!(QuotaReading::from_info(&serde_json::json!({"remaining": 10})).is_none());
+    }
+
+    #[test]
+    fn status_line_rate_limits_yield_one_reading_per_window() {
+        let rl = serde_json::json!({
+            "five_hour": {"used_percentage": 71.0, "resets_at": 1_762_790_400u64},
+            "seven_day": {"used_percentage": 12, "resets_at": 1_763_200_000u64},
+            "junk": {"nothing": true}
+        });
+        let mut readings = QuotaReading::from_status_line(&rl);
+        readings.sort_by(|a, b| a.window.cmp(&b.window));
+        assert_eq!(readings.len(), 2);
+        assert_eq!(readings[0].window, "five_hour");
+        assert_eq!(readings[0].used_fraction, Some(0.71));
+        assert_eq!(readings[0].resets_at, Some(1_762_790_400));
+        assert_eq!(readings[1].window, "seven_day");
+        assert_eq!(readings[1].used_fraction, Some(0.12));
+        assert!(QuotaReading::from_status_line(&serde_json::json!(null)).is_empty());
+        // A low percentage is a percentage, not a fraction.
+        let low = QuotaReading::from_status_line(&serde_json::json!({
+            "five_hour": {"used_percentage": 1, "resets_at": 5}
+        }));
+        assert_eq!(low[0].used_fraction, Some(0.01));
     }
 
     #[test]
