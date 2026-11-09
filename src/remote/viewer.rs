@@ -65,6 +65,8 @@ struct Shared {
 pub struct RemoteScreen {
     shared: Arc<Mutex<Shared>>,
     ticks: watch::Receiver<u64>,
+    /// The host's current link, read for the path indicator (DEV-1243).
+    links: watch::Receiver<Option<Arc<ScreenLink>>>,
     _task: AbortOnDrop,
 }
 
@@ -82,6 +84,7 @@ impl RemoteScreen {
             attachment: None,
         }));
         let (tick_tx, ticks) = watch::channel(0u64);
+        let current = links.clone();
         let task = rt.spawn(run(
             links,
             session_id.to_string(),
@@ -91,6 +94,7 @@ impl RemoteScreen {
         Self {
             shared,
             ticks,
+            links: current,
             _task: AbortOnDrop(task),
         }
     }
@@ -107,6 +111,13 @@ impl RemoteScreen {
     /// first frame arrives.
     pub fn grid(&self) -> Option<Arc<FairMutex<MirroredGrid>>> {
         self.lock().grid.clone()
+    }
+
+    /// How the link to the host runs right now — direct or relayed, and its
+    /// RTT. `None` while there is no link, or the transport cannot tell.
+    /// Read live: it changes without a tick, so poll it.
+    pub fn path(&self) -> Option<super::transport::PathInfo> {
+        self.links.borrow().as_ref().and_then(|link| link.path())
     }
 
     /// Ticks on every applied frame and every phase change: redraw.

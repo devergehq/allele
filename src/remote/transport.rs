@@ -92,6 +92,39 @@ pub struct PeerStream {
     pub recv: Box<dyn AsyncRead + Send + Unpin>,
 }
 
+/// How a connection's packets currently reach the peer (DEV-1243).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PathKind {
+    /// Straight to the peer's address: a LAN hop or a hole-punched route.
+    Direct,
+    /// Through a relay server. Measured at ~0.8–1.3 s RTT against ~1 ms
+    /// direct on the same LAN, so it is worth showing.
+    Relay,
+}
+
+/// The path a connection is using now, and its round-trip time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PathInfo {
+    pub kind: PathKind,
+    pub rtt: Duration,
+}
+
+impl fmt::Display for PathInfo {
+    /// `direct · 4 ms`, `via relay · 912 ms`, `direct · <1 ms`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let kind = match self.kind {
+            PathKind::Direct => "direct",
+            PathKind::Relay => "via relay",
+        };
+        let ms = self.rtt.as_millis();
+        if ms == 0 {
+            write!(f, "{kind} · <1 ms")
+        } else {
+            write!(f, "{kind} · {ms} ms")
+        }
+    }
+}
+
 /// An authenticated, encrypted connection to one peer.
 #[async_trait]
 pub trait PeerConnection: Send + Sync {
@@ -113,6 +146,13 @@ pub trait PeerConnection: Send + Sync {
 
     /// Close the connection now. Idempotent.
     fn close(&self, reason: &str);
+
+    /// The path the connection is sending on now, with its current RTT.
+    /// `None` when the transport cannot tell (test doubles) or no path is
+    /// selected yet.
+    fn path(&self) -> Option<PathInfo> {
+        None
+    }
 }
 
 /// A bound local endpoint that can dial and accept peers.
@@ -276,6 +316,29 @@ mod tests {
             RelayChoice::Custom("https://relay.example.com".into())
         );
         assert_eq!(cfg.heartbeat, Heartbeat::default());
+    }
+
+    #[test]
+    fn path_reads_as_kind_then_round_trip() {
+        let direct = PathInfo {
+            kind: PathKind::Direct,
+            rtt: Duration::from_micros(4_400),
+        };
+        assert_eq!(direct.to_string(), "direct · 4 ms");
+        let relay = PathInfo {
+            kind: PathKind::Relay,
+            rtt: Duration::from_millis(912),
+        };
+        assert_eq!(relay.to_string(), "via relay · 912 ms");
+    }
+
+    #[test]
+    fn a_sub_millisecond_path_does_not_read_as_zero() {
+        let lan = PathInfo {
+            kind: PathKind::Direct,
+            rtt: Duration::from_micros(420),
+        };
+        assert_eq!(lan.to_string(), "direct · <1 ms");
     }
 
     #[test]

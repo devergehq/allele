@@ -24,6 +24,7 @@ mod hooks;
 mod icon;
 mod interrupted;
 mod keymap;
+mod log_file;
 mod mac_menu;
 mod memory_watchdog;
 mod naming;
