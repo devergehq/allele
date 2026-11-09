@@ -41,6 +41,14 @@ Changes on `master` awaiting the next tagged release.
   **visibly** — a transcript notice, with the last good stage left on screen — instead of
   silently rendering nothing.
 
+### Security
+- **Agent-written links are confined to the session's clone.** Links in rich-mode assistant
+  text are now clickable. A file or diff link the agent wrote opens only if it resolves
+  (symlinks included, checked at click time) inside that session's clone; anything else is
+  refused with the reason in the notice banner. Hovering a link shows its full destination,
+  so link text cannot disguise where it goes. `file://`, `vscode://` and other custom
+  schemes are inert. Links you open yourself are unchanged.
+
 ### Fixed
 - Tools installed outside the system directories are reachable again from sessions
   started by an Allele you launched from Finder, the Dock, or Spotlight. Allele already

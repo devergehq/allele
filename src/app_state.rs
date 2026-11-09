@@ -401,8 +401,9 @@ pub(crate) struct AppState {
     /// before session creation. Auto-dismissed after a few seconds.
     pub(crate) pull_warning: Option<String>,
     /// Transient status/result banner for session-sync actions (sync-up /
-    /// pull) and Away's summary (DEV-1157). Dismissed by the user or replaced
-    /// by the next message.
+    /// pull), Away's summary (DEV-1157), and the reason an agent-written link
+    /// was refused (DEV-1252). Dismissed by the user or replaced by the next
+    /// message.
     pub(crate) sync_notice: Option<String>,
     /// Which view the center column is currently showing.
     pub(crate) main_tab: MainTab,

@@ -53,6 +53,10 @@ pub enum RichViewEvent {
     /// User clicked "Open in terminal". The parent should switch to the
     /// terminal tab so the user can resolve the prompt manually (DEV-78).
     OpenTerminal,
+    /// User clicked a link in the agent's prose. `url` is the raw markdown
+    /// destination. The parent routes it as an agent-origin deep link, which
+    /// confines file targets to this session's clone (DEV-1252).
+    OpenLink { url: String },
 }
 
 // ── View ──────────────────────────────────────────────────────────
@@ -672,8 +676,15 @@ fn render_block(
     match &block.kind {
         BlockKind::Text { content, streaming } => {
             let content = merged.as_deref().unwrap_or(content);
+            // Links in agent prose are clickable but routed as agent-origin:
+            // the parent confines file targets to this session's clone.
+            let view = cx.entity().downgrade();
+            let sink: super::markdown::LinkSink = std::rc::Rc::new(move |url, _window, cx| {
+                let url = url.to_string();
+                let _ = view.update(cx, |_, cx| cx.emit(RichViewEvent::OpenLink { url }));
+            });
             wrapper = wrapper.child(render_text_block(
-                content, *streaming, font_size, block_id, speaker,
+                content, *streaming, font_size, block_id, speaker, sink,
             ));
         }
         BlockKind::Thinking { content } => {
@@ -1180,6 +1191,7 @@ fn render_text_block(
     font_size: f32,
     block_id: super::document::BlockId,
     speaker: Option<SharedString>,
+    links: super::markdown::LinkSink,
 ) -> Div {
     // Claude's prose IS the main content of the transcript — tool calls and
     // thinking are supporting context — so it carries no speaker chrome of its
@@ -1214,6 +1226,7 @@ fn render_text_block(
             streaming,
             font_size,
             block_id as u64,
+            Some(links),
         )))
 }
 
