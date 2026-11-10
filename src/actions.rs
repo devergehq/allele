@@ -355,6 +355,9 @@ pub enum SettingsAction {
     /// Reconciles the power assertion immediately, so turning it off
     /// releases a held assertion without waiting for the poller.
     UpdateKeepAwake(bool),
+    /// Toggle the local tab-usage counters (DEV-1265). Takes effect at once:
+    /// the handler samples, so no time after the toggle is credited.
+    UpdateUsageCounting(bool),
     /// Replace the global terminal font size and persist. Emitted by the
     /// Settings window, by Cmd+=/Cmd+- (as a clamped new value), and by
     /// Cmd+0 (reset to DEFAULT_FONT_SIZE). The handler clamps again,

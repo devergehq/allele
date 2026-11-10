@@ -64,6 +64,7 @@ mod text_input;
 mod theme;
 mod transcript;
 mod trust;
+mod usage;
 
 use crate::theme::theme;
 use actions::{ProjectAction, SessionAction, SessionCursor, SettingsAction};
@@ -1889,6 +1890,15 @@ fn main() {
                     })
                     .detach();
 
+                    // Tab-usage counters only count while this window is key
+                    // (DEV-1265). Sample at the edge so the interval up to the
+                    // change is credited exactly, then record the new state.
+                    cx.observe_window_activation(window, |this: &mut AppState, window, _cx| {
+                        this.window_focused = window.is_window_active();
+                        this.sample_usage();
+                    })
+                    .detach();
+
                     // Rehydrate projects from settings.
                     let mut projects: Vec<Project> = settings_for_window
                         .projects
@@ -2256,6 +2266,8 @@ fn main() {
                         sync_notice: None,
                         pairing_alert: Default::default(),
                         main_tab: MainTab::Claude,
+                        usage: crate::usage::UsageTracker::load(crate::usage::usage_file()),
+                        window_focused: window.is_window_active(),
                         browser_status: String::new(),
                         scratch_pad: None,
                         scratch_pad_history: loaded_state.scratch_pad_history.clone(),

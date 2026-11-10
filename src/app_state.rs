@@ -410,6 +410,11 @@ pub(crate) struct AppState {
     pub(crate) sync_notice: Option<String>,
     /// Which view the center column is currently showing.
     pub(crate) main_tab: MainTab,
+    /// Local per-tab focused-time counters (DEV-1265). Observes only.
+    pub(crate) usage: crate::usage::UsageTracker,
+    /// Whether the main window is the key window, kept current by the
+    /// activation observer in `main.rs`. Gates the usage counters.
+    pub(crate) window_focused: bool,
     /// Status text for the Browser tab panel (e.g. "Chrome is not
     /// running", "Linked to tab #…"). Updated by SyncBrowserToActiveSession
     /// and rendered by render_browser_placeholder.
@@ -698,6 +703,7 @@ impl AppState {
     /// may not have reached disk, and the process is about to stop existing —
     /// so an orderly exit pays the write rather than losing the state.
     pub(crate) fn flush_persistence_blocking(&mut self) {
+        self.usage.flush();
         if self.state_dirty {
             self.save_state();
             self.state_dirty = false;
@@ -1094,6 +1100,8 @@ pub(crate) mod fixture {
                     sync_notice: None,
                     pairing_alert: Default::default(),
                     main_tab: MainTab::Claude,
+                    usage: crate::usage::UsageTracker::load(None),
+                    window_focused: true,
                     browser_status: String::new(),
                     scratch_pad: None,
                     new_session_modal: None,

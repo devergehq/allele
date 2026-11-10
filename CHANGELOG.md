@@ -26,6 +26,10 @@ Changes on `master` awaiting the next tagged release.
   Commits are judged with `git cherry` against the project's configured base branch, so
   squash-merged work counts as landed. Idle rows fade with age. **Put N to rest** archives
   every `nothing unique` session in one click, and each can be restored from ARCHIVES.
+- **Local tab-usage counters.** Allele counts how many seconds each main tab (Claude,
+  Reader, Browser, Transcript), the Changes panel and the Scratch Pad are visible while its
+  window is focused, in `~/.allele/tab-usage.json`. Nothing is sent anywhere. Turn it off
+  in Settings → Sessions.
 - **Collapsible sidebar.** Click a project header to fold its sessions and archives away;
   click a machine row, or a project heading under it, to fold that too. The MACHINES
   section can be moved above the local projects from its header. Folds and position
