@@ -75,6 +75,8 @@ src/
 │   ├── create.rs           # sessions.create — the only async operation
 │   ├── admission.rs        # dispatched-session cap + depth limit (§4.8)
 │   ├── address.rs          # durable session addresses (never name-derived)
+│   ├── ext.rs              # allele.ext/1: hello, capabilities, subscribe (§4.10)
+│   ├── hub.rs              # ext/1 stream fan-out: diff, seq, bounded queues
 │   └── mcp.rs              # `Allele --mcp-serve` stdio MCP server
 ├── repositories.rs         # SettingsRepository + StateRepository traits
 │
@@ -467,6 +469,31 @@ capture the flags in the same update block as the dispatch;
 It cost an afternoon once (DEV-518); it should not cost a second one.
 
 ---
+
+### 4.10 `allele.ext/1`: the contract is a crate, and the legacy tier is frozen
+
+The wire types an extension may rely on live in `crates/allele-contract`, with
+golden JSON fixtures that must round-trip (DEV-1254). `state.json` and
+`events/*.jsonl` are private; nothing outside Allele should read them.
+
+- **A connection is legacy until it says `hello`.** `server::serve` parses
+  every other first line exactly as before, so a client with no `hello` gets
+  byte-identical replies, parse errors included
+  (`a_client_without_hello_gets_the_legacy_bytes` pins them). This is why the
+  ext ops are not variants of `protocol::Request`: one more variant changes the
+  "expected one of" text in every legacy parse error.
+- **The stream diffs, it is not told.** The foreground hands `dispatch::hub` a
+  complete view, and the hub diffs it against the last one, so no status path
+  has to remember to announce itself. A view is only built while someone is
+  subscribed (at most every 200 ms) or waiting on a query. `turn` is counted in
+  `Session::set_status`, because a diff cannot see a turn that started and
+  finished between two looks.
+- **The foreground never waits on a client.** Each subscriber has a bounded
+  queue fed with `try_send`. A full queue drops the subscriber with `lagged`.
+  Socket writes happen on the connection's own thread, under a write timeout.
+- **Capabilities contain accidents and are not security.** Until manifests
+  exist, every client is granted `observe` at most, and `allele-mcp` is also
+  granted `dispatch`.
 
 ## 5. Extension recipes
 

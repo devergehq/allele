@@ -1,0 +1,15 @@
+{
+  "result": "hello",
+  "contract_versions": [
+    "allele.ext/1"
+  ],
+  "epoch": "0b6f1d2e-5c1a-4f7e-9a51-3d2c1b0a9f88",
+  "granted": [
+    "observe"
+  ],
+  "dispatch_limits": {
+    "max_depth": 1,
+    "max_sessions": 20,
+    "live_dispatched": 1
+  }
+}

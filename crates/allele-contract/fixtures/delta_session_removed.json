@@ -1,0 +1,7 @@
+{
+  "frame": "delta",
+  "seq": 3,
+  "event": "session.removed",
+  "session_id": "7f3c2a10-0000-4000-8000-000000000002",
+  "reason": "discarded"
+}

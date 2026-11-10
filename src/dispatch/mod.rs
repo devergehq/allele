@@ -24,7 +24,9 @@
 pub(crate) mod address;
 pub(crate) mod admission;
 pub(crate) mod create;
+pub(crate) mod ext;
 pub(crate) mod handler;
+pub(crate) mod hub;
 pub(crate) mod manage;
 pub(crate) mod mcp;
 pub(crate) mod protocol;
@@ -170,6 +172,19 @@ fn spawn_control_loop(
                     })
                     .unwrap_or(false);
                 let _ = reply.send(done);
+            }
+
+            // The `allele.ext/1` stream (DEV-1254). Builds a view only while
+            // someone is subscribed or waiting on one, and only ever queues
+            // onto bounded channels, so a slow client cannot stall the UI.
+            let hub = hub::Hub::global();
+            if let Some(with_archives) = hub.wants_view(std::time::Instant::now()) {
+                let _ = this.update(cx, |state, cx| {
+                    hub.publish(
+                        ext::view(state, cx, with_archives),
+                        std::time::Instant::now(),
+                    )
+                });
             }
 
             if this.upgrade().is_none() {

@@ -1,0 +1,12 @@
+{
+  "op": "hello",
+  "contract": "allele.ext/1",
+  "client": {
+    "id": "review-desk",
+    "version": "0.3.0"
+  },
+  "capabilities": [
+    "observe",
+    "activity"
+  ]
+}

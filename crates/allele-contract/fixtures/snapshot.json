@@ -1,0 +1,38 @@
+{
+  "frame": "snapshot",
+  "seq": 0,
+  "sessions": [
+    {
+      "session_id": "7f3c2a10-0000-4000-8000-000000000001",
+      "name": "Lead",
+      "project": "tc-portal",
+      "group": null,
+      "state": "running",
+      "input": "deliverable_at_next_boundary",
+      "state_age_secs": 5,
+      "turn": 12,
+      "dispatched": false,
+      "depth": 0,
+      "parent": null,
+      "dispatched_by": null,
+      "reply_to": null,
+      "started_at": 1794265200
+    },
+    {
+      "session_id": "7f3c2a10-0000-4000-8000-000000000002",
+      "name": "Review #9586",
+      "project": "tc-portal",
+      "group": "review",
+      "state": "awaiting_input",
+      "input": "blocked_on_prompt",
+      "state_age_secs": 42,
+      "turn": 3,
+      "dispatched": true,
+      "depth": 1,
+      "parent": "7f3c2a10-0000-4000-8000-000000000001",
+      "dispatched_by": "Lead",
+      "reply_to": "uds:/tmp/cc-socks/65452.sock",
+      "started_at": 1794268800
+    }
+  ]
+}

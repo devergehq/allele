@@ -734,6 +734,14 @@ pub struct Session {
     /// [`SessionStatus::counts_toward_runtime`]). Persisted. Paused and idle
     /// spans are never added here, so this is true active runtime, not age.
     pub active_accumulated: Duration,
+    /// Turns this session has started in this run of Allele (DEV-1254).
+    ///
+    /// Counted in [`Session::set_status`], the one place a transition can be
+    /// seen as it happens: incremented on entering `Running` from any state
+    /// except `AwaitingInput`. Not persisted — `allele.ext/1` scopes it to an
+    /// epoch, and a restart is a new epoch. It does not prove a message was
+    /// read: text delivered mid-turn lands inside the current turn.
+    pub turn: u64,
     /// When `Some(t)`, the session is currently in a runtime-counting status
     /// and the live stretch began at `t`. `None` while frozen (Suspended/Done).
     /// Transient — rehydrated sessions come back Suspended, so this resets to
@@ -809,6 +817,7 @@ impl Session {
             startup_status: None,
             operation_error: None,
             operation_result: None,
+            turn: 0,
         }
     }
 
@@ -871,6 +880,7 @@ impl Session {
             startup_status: None,
             operation_error: None,
             operation_result: None,
+            turn: 0,
         }
     }
 
@@ -990,6 +1000,16 @@ impl Session {
     /// stretch. Transitions that stay on the same side of the boundary (e.g.
     /// Running↔AwaitingInput) leave the running clock untouched.
     pub fn set_status(&mut self, new: SessionStatus) {
+        // A new turn starts on entering Running — except from AwaitingInput,
+        // where answering the prompt continues the turn that raised it.
+        if new == SessionStatus::Running
+            && !matches!(
+                self.status,
+                SessionStatus::Running | SessionStatus::AwaitingInput
+            )
+        {
+            self.turn += 1;
+        }
         let was_counting = self.status.counts_toward_runtime();
         let now_counting = new.counts_toward_runtime();
         if was_counting && !now_counting {
@@ -1363,6 +1383,32 @@ mod tests {
         s.active_accumulated = Duration::from_secs(5 * 3600);
         assert_eq!(s.active_runtime(), Duration::from_secs(5 * 3600));
         assert_eq!(s.elapsed_display(), "5h 0m");
+    }
+
+    /// AC (DEV-1254): `turn` increments on entering Running from any state
+    /// except AwaitingInput.
+    #[test]
+    fn turn_counts_entries_into_running_except_from_awaiting_input() {
+        use super::SessionStatus as S;
+        for from in [S::Idle, S::ResponseReady, S::Suspended, S::Done] {
+            let mut s = sample("s");
+            s.set_status(from);
+            let before = s.turn;
+            s.set_status(S::Running);
+            assert_eq!(s.turn, before + 1, "from {from:?}");
+        }
+
+        let mut s = sample("s");
+        s.set_status(S::Running);
+        let turn = s.turn;
+        s.set_status(S::AwaitingInput);
+        s.set_status(S::Running);
+        assert_eq!(s.turn, turn, "answering a prompt continues the turn");
+        s.set_status(S::Running);
+        assert_eq!(s.turn, turn, "Running to Running is not a new turn");
+        s.set_status(S::ResponseReady);
+        s.set_status(S::Running);
+        assert_eq!(s.turn, turn + 1);
     }
 
     #[test]

@@ -298,7 +298,7 @@ fn call_tool(params: &Value) -> Result<Value, String> {
     };
 
     let response = round_trip(&request)?;
-    let is_error = matches!(response, Response::Error { .. });
+    let is_error = response.get("result").and_then(Value::as_str) == Some("error");
     let text = serde_json::to_string_pretty(&response).map_err(|e| e.to_string())?;
     Ok(json!({
         "content": [{ "type": "text", "text": text }],
@@ -306,42 +306,66 @@ fn call_tool(params: &Value) -> Result<Value, String> {
     }))
 }
 
-/// One request over the control socket, one response back.
+/// The `hello` this server opens every connection with (DEV-1254).
+///
+/// Saying it is what puts `parent`, `dispatched_by`, `started_at`, `turn` and
+/// `input` into `allele_sessions_status` and `allele_sessions_list`: the
+/// legacy tier's replies are frozen byte for byte, and only an `allele.ext/1`
+/// connection gets the widened session entry.
+fn hello_line() -> Value {
+    json!({
+        "op": "hello",
+        "contract": allele_contract::CONTRACT,
+        "client": { "id": allele_contract::BUILTIN_MCP_CLIENT_ID, "version": env!("CARGO_PKG_VERSION") },
+        "capabilities": ["observe", "dispatch"],
+    })
+}
+
+/// One request over the control socket, one response back, as raw JSON so the
+/// widened `ext/1` fields reach the caller rather than being dropped by a
+/// legacy type.
 ///
 /// A fresh connection per call: calls are infrequent, and a dead connection to
 /// an Allele that has since quit is a worse failure than the cost of
 /// reconnecting.
-fn round_trip(request: &Value) -> Result<Response, String> {
+fn round_trip(request: &Value) -> Result<Value, String> {
     let path = socket_path().ok_or("no home directory")?;
     let stream = match UnixStream::connect(&path) {
         Ok(s) => s,
         Err(_) => {
             // The failure the socket exists to make legible. A spool write
             // would have "succeeded" here and left the caller to time out.
-            return Ok(Response::Error {
+            let response = Response::Error {
                 code: ErrorCode::AlleleNotRunning,
                 message: format!(
                     "Allele is not running, or is not serving {}",
                     path.display()
                 ),
-            });
+            };
+            return serde_json::to_value(response).map_err(|e| e.to_string());
         }
     };
 
     let mut out = stream.try_clone().map_err(|e| e.to_string())?;
-    let mut line = serde_json::to_string(request).map_err(|e| e.to_string())?;
-    line.push('\n');
-    out.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
-    out.flush().map_err(|e| e.to_string())?;
+    let mut reader = BufReader::new(stream);
+    let mut send = |value: &Value| -> Result<Value, String> {
+        let mut line = serde_json::to_string(value).map_err(|e| e.to_string())?;
+        line.push('\n');
+        out.write_all(line.as_bytes()).map_err(|e| e.to_string())?;
+        out.flush().map_err(|e| e.to_string())?;
+        let mut reply = String::new();
+        reader.read_line(&mut reply).map_err(|e| e.to_string())?;
+        if reply.trim().is_empty() {
+            return Err("Allele closed the connection without replying".to_string());
+        }
+        serde_json::from_str(&reply).map_err(|e| format!("could not parse reply: {e}"))
+    };
 
-    let mut reply = String::new();
-    BufReader::new(stream)
-        .read_line(&mut reply)
-        .map_err(|e| e.to_string())?;
-    if reply.trim().is_empty() {
-        return Err("Allele closed the connection without replying".to_string());
-    }
-    serde_json::from_str(&reply).map_err(|e| format!("could not parse reply: {e}"))
+    // An Allele from before ext/1 answers `hello` with `bad_request` and
+    // leaves the connection in the legacy tier, where the op still works
+    // with the narrower entry. So the answer is deliberately not checked.
+    send(&hello_line())?;
+    send(request)
 }
 
 #[cfg(test)]
