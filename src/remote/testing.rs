@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, watch};
 
 use super::identity::LocalIdentity;
-use super::transport::{PeerConnection, PeerId, PeerStream, PeerTransport};
+use super::transport::{PathInfo, PeerConnection, PeerId, PeerStream, PeerTransport};
 use crate::errors::{AlleleError, Result};
 
 type Incoming = mpsc::UnboundedSender<Arc<MemConn>>;
@@ -24,11 +24,18 @@ type Incoming = mpsc::UnboundedSender<Arc<MemConn>>;
 #[derive(Default)]
 pub(crate) struct MemNet {
     endpoints: Mutex<HashMap<PeerId, Incoming>>,
+    /// What every connection on this net reports as its path, live.
+    path: Arc<Mutex<Option<PathInfo>>>,
 }
 
 impl MemNet {
     pub(crate) fn new() -> Arc<Self> {
         Arc::new(Self::default())
+    }
+
+    /// Every connection, open or future, now reports `path` (DEV-1243).
+    pub(crate) fn set_path(&self, path: Option<PathInfo>) {
+        *self.path.lock().unwrap() = path;
     }
 
     /// A new endpoint with a fresh identity, reachable at once.
@@ -93,7 +100,7 @@ impl PeerTransport for MemTransport {
             .get(&peer)
             .cloned()
             .ok_or_else(|| AlleleError::Remote(format!("{} unreachable", peer.short())))?;
-        let (ours, theirs) = MemConn::pair(self.id, peer);
+        let (ours, theirs) = MemConn::pair(self.id, peer, Arc::clone(&self.net.path));
         tx.send(theirs)
             .map_err(|_| AlleleError::Remote("peer shut down".into()))?;
         Ok(ours)
@@ -136,10 +143,11 @@ pub(crate) struct MemConn {
     /// Shared by both sides: `Some(reason)` once either closes.
     closed: Arc<watch::Sender<Option<String>>>,
     accept_stream_calls: AtomicUsize,
+    path: Arc<Mutex<Option<PathInfo>>>,
 }
 
 impl MemConn {
-    fn pair(a: PeerId, b: PeerId) -> (Arc<Self>, Arc<Self>) {
+    fn pair(a: PeerId, b: PeerId, path: Arc<Mutex<Option<PathInfo>>>) -> (Arc<Self>, Arc<Self>) {
         let (a_tx, b_rx) = mpsc::unbounded_channel();
         let (b_tx, a_rx) = mpsc::unbounded_channel();
         let closed = Arc::new(watch::channel(None).0);
@@ -150,6 +158,7 @@ impl MemConn {
                 from_peer: tokio::sync::Mutex::new(from_peer),
                 closed: Arc::clone(&closed),
                 accept_stream_calls: AtomicUsize::new(0),
+                path: Arc::clone(&path),
             })
         };
         (side(b, a_tx, a_rx), side(a, b_tx, b_rx))
@@ -209,6 +218,10 @@ impl PeerConnection for MemConn {
 
     fn is_closed(&self) -> bool {
         self.closed.borrow().is_some()
+    }
+
+    fn path(&self) -> Option<PathInfo> {
+        *self.path.lock().unwrap()
     }
 
     fn close(&self, reason: &str) {

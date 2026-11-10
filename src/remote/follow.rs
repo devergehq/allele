@@ -43,7 +43,7 @@ use super::link::{LinkState, PeerLink, ReconnectPolicy};
 use super::pairing::host::HELLO_TIMEOUT;
 use super::peers::PeerPermissions;
 use super::screen::{PendingAttach, ScreenClient};
-use super::transport::{PeerConnection, PeerId, PeerStream, PeerTransport};
+use super::transport::{PathInfo, PeerConnection, PeerId, PeerStream, PeerTransport};
 use super::wire::{read_frame_within, write_frame, Frame, MAX_PEER_FRAME, PROTOCOL_VERSION};
 use crate::dispatch::protocol::{Request, Response};
 use crate::status_feed::client::Reachability;
@@ -79,6 +79,8 @@ const SCREEN_QUEUE: usize = 16;
 pub struct ScreenLink {
     client: ScreenClient,
     outbox: mpsc::Sender<Frame>,
+    /// The connection both ride, read for its network path (DEV-1243).
+    conn: Arc<dyn PeerConnection>,
 }
 
 impl ScreenLink {
@@ -94,6 +96,11 @@ impl ScreenLink {
     /// queue is full.
     pub fn try_send(&self, frame: Frame) -> bool {
         self.outbox.try_send(frame).is_ok()
+    }
+
+    /// Direct or relayed, and the RTT, right now.
+    pub fn path(&self) -> Option<PathInfo> {
+        self.conn.path()
     }
 }
 
@@ -479,6 +486,7 @@ async fn session(
     let screen = Arc::new(ScreenLink {
         client: ScreenClient::new(Arc::clone(conn)),
         outbox: screen_out,
+        conn: Arc::clone(conn),
     });
     feeds.set_link(peer, Some(Arc::clone(&screen)));
     let _unpublish = Unpublish { feeds, peer };

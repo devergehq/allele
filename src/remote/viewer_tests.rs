@@ -12,6 +12,7 @@
 //! | two tabs on one host share its control stream | `two_sessions_on_one_host_mirror_at_once` |
 //! | typing in a tab reaches the host session (with control) | `typing_reaches_the_host_session_with_control` |
 //! | without control, typing is refused and said so | `typing_without_control_is_refused_with_a_reason` |
+//! | the tab reads the link's path live, relay → direct (DEV-1243) | `the_screen_reports_the_links_path_as_it_changes` |
 
 #![cfg(test)]
 
@@ -27,7 +28,7 @@ use tokio::time::timeout;
 
 use super::follow_tests::{desk_and_laptop, Mac};
 use super::testing::MemNet;
-use super::transport::PeerConnection;
+use super::transport::{PathInfo, PathKind, PeerConnection};
 use super::viewer::{RemoteScreen, ScreenPhase};
 use crate::status_feed::client::Reachability;
 use crate::terminal::grid_source::GridView;
@@ -110,6 +111,33 @@ async fn opening_a_remote_session_mirrors_it() {
 
     feed(&term, b"\r\nsecond line");
     until("a later change", || line_text(&screen, 1) == "second line").await;
+}
+
+#[tokio::test]
+async fn the_screen_reports_the_links_path_as_it_changes() {
+    let net = MemNet::new();
+    let relayed = PathInfo {
+        kind: PathKind::Relay,
+        rtt: Duration::from_millis(900),
+    };
+    net.set_path(Some(relayed));
+    let (desk, laptop) = desk_and_laptop(&net).await;
+    let term = term();
+    serve(&desk, "s-1", &term);
+
+    let screen = laptop.svc.open_screen(desk.id, "s-1");
+    until("a live screen", || screen.phase() == ScreenPhase::Live).await;
+    assert_eq!(screen.path(), Some(relayed), "every connect starts relayed");
+
+    // Hole-punching succeeds: same connection, new path. No reconnect, no
+    // frame, no tick — the indicator must read it anyway.
+    let direct = PathInfo {
+        kind: PathKind::Direct,
+        rtt: Duration::from_millis(4),
+    };
+    net.set_path(Some(direct));
+    assert_eq!(screen.path(), Some(direct));
+    assert_eq!(screen.path().unwrap().to_string(), "direct · 4 ms");
 }
 
 #[tokio::test]

@@ -14,6 +14,12 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- **Remote tabs show how they are connected.** Beside "Live", the header reads
+  `direct · 4 ms` or `via relay · 900 ms` and follows iroh's path switches live; a relayed
+  link is in the warning colour. Every path change is logged with the peer, path kind and RTT.
+- **A log file that survives a normal launch.** `tracing` output now also goes to
+  `~/.allele/logs/allele.log` (owner-only, rotated at 5 MiB, four old files kept), so
+  logs from an app started with `open` or from Finder are no longer lost.
 - **Collapsible sidebar.** Click a project header to fold its sessions and archives away;
   click a machine row, or a project heading under it, to fold that too. The MACHINES
   section can be moved above the local projects from its header. Folds and position

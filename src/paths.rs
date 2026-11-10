@@ -232,6 +232,11 @@ pub fn settings_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("settings.json"))
 }
 
+/// `<root>/.allele/logs` — the rotating `tracing` log (DEV-1243).
+pub fn logs_dir() -> Option<PathBuf> {
+    allele_dir().map(|d| d.join("logs"))
+}
+
 pub fn crash_log_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("crash.log"))
 }

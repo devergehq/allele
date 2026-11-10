@@ -2,7 +2,7 @@
 //! then the host's grid at the host's size.
 //!
 //! ```text
-//!   ┌ ▭ fix the build · on Desk ·  Live            [Fit to this window] [×] ┐
+//!   ┌ ▭ fix the build · on Desk ·  Live · direct · 4 ms  [Fit to this window] [×] ┐
 //!   │ ┌───────── host grid, host columns × host rows ─────────┐            │
 //!   │ │                                                       │ letterbox  │
 //!   │ └───────────────────────────────────────────────────────┘            │
@@ -20,6 +20,7 @@ use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 
 use crate::icon::{icon, name as icons};
+use crate::remote::transport::{PathInfo, PathKind};
 use crate::remote::{RemoteScreen, ScreenPhase};
 use crate::terminal::grid_source::{GridSource, GridView as _};
 use crate::terminal::keymap::{self, AppAction, KeymapConfig};
@@ -28,6 +29,11 @@ use crate::theme::{theme, with_alpha};
 
 /// How long an input notice stays up.
 const NOTICE_FOR: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// How often the path indicator re-reads the link. A path switch sends no
+/// frame, so nothing else would redraw it; at this rate the indicator follows
+/// iroh's relay → direct switch within the 1 s DEV-1243 asks for.
+const PATH_POLL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// What the tab asks its owner to do.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -58,7 +64,10 @@ pub struct RemoteSessionView {
     /// "View only" and other input problems, shown under the header until
     /// the next accepted keystroke or the notice times out.
     notice: Option<(SharedString, std::time::Instant)>,
+    /// The link's path as last read: `direct · 4 ms`, `via relay · 900 ms`.
+    path: Option<PathInfo>,
     _redraw: Task<()>,
+    _path_poll: Task<()>,
 }
 
 impl EventEmitter<RemoteTabEvent> for RemoteSessionView {}
@@ -99,6 +108,18 @@ impl RemoteSessionView {
                 }
             })
         };
+        // Same reason as above for skipping it under test: a forever timer.
+        let path_poll = if cfg!(test) {
+            Task::ready(())
+        } else {
+            cx.spawn(async move |this, cx| loop {
+                cx.background_executor().timer(PATH_POLL).await;
+                if this.update(cx, |v, cx| v.refresh_path(cx)).is_err() {
+                    break;
+                }
+            })
+        };
+        let path = screen.path();
         Self {
             screen,
             host_name: host_name.into(),
@@ -112,8 +133,19 @@ impl RemoteSessionView {
             can_fit: false,
             keymap: KeymapConfig::default(),
             notice: None,
+            path,
             _redraw: redraw,
+            _path_poll: path_poll,
         }
+    }
+
+    /// Re-read the link's path; redraw only if what it says changed.
+    fn refresh_path(&mut self, cx: &mut Context<Self>) {
+        let now = self.screen.path();
+        if path_text(now) != path_text(self.path) {
+            cx.notify();
+        }
+        self.path = now;
     }
 
     /// Keep the header in step with the host's feed (a rename, a re-pair
@@ -342,9 +374,41 @@ impl RemoteSessionView {
                     .text_color(phase_color)
                     .child(phase_text),
             )
+            .children(self.render_path())
             .child(div().flex_1())
             .child(fit)
             .child(close)
+    }
+
+    /// `direct · 4 ms` or `via relay · 900 ms`, beside the phase. Relayed is
+    /// in the warning colour: it is ~1 s a keystroke, and the usual answer to
+    /// "why is typing slow".
+    fn render_path(&self) -> Option<impl IntoElement> {
+        let path = self.path?;
+        let (color, tip): (_, SharedString) = match path.kind {
+            PathKind::Direct => (
+                theme().text_faint,
+                "Connected straight to the other Mac. The time is one round trip.".into(),
+            ),
+            PathKind::Relay => (
+                theme().warning,
+                "Going through a relay server, so every keystroke makes a long round trip. \
+                 New connections start here and usually switch to direct within a few seconds."
+                    .into(),
+            ),
+        };
+        Some(
+            div()
+                .id("remote-path")
+                .flex_shrink_0()
+                .text_size(px(11.0))
+                .text_color(color)
+                .tooltip(move |_window, cx| {
+                    cx.new(|_| crate::SimpleTooltip { text: tip.clone() })
+                        .into()
+                })
+                .child(path.to_string()),
+        )
     }
 
     /// Over the last frame: why it is not live. Nothing while live.
@@ -395,6 +459,11 @@ impl RemoteSessionView {
                 .into_any_element(),
         )
     }
+}
+
+/// What the indicator would say, to tell whether a re-read changed it.
+fn path_text(path: Option<PathInfo>) -> Option<String> {
+    path.map(|p| p.to_string())
 }
 
 impl Focusable for RemoteSessionView {
