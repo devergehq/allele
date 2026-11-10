@@ -32,6 +32,14 @@
 //! | an oversized input frame is refused, not written | `an_oversized_input_frame_is_refused_and_not_written` |
 //! | the client refuses an oversized paste itself | `the_client_refuses_an_oversized_paste_before_sending` |
 //! | the host lists the attached machine until it detaches | `the_host_lists_an_attached_machine_until_it_detaches` |
+//!
+//! Echo latency (DEV-1242):
+//!
+//! | criterion | test |
+//! | -- | -- |
+//! | input adds at most one frame per key to the 30/s cap | `input_adds_at_most_one_frame_per_key_to_the_frame_rate_cap` |
+//! | refused input adds no frames | `refused_input_adds_no_frames` |
+//! | A/B echo latency (manual, `--ignored`) | `measure_keystroke_echo_latency` |
 
 #![cfg(test)]
 
@@ -63,7 +71,9 @@ use crate::dispatch::protocol::{ErrorCode, Request, Response};
 use crate::errors::{AlleleError, Result};
 use crate::repositories::fakes::InMemoryPeersRepository;
 use crate::terminal::keymap::KeymapConfig;
-use crate::terminal::mirror::{capture, capture_history, MirrorTerm, ScreenFrame, SharedTerm};
+use crate::terminal::mirror::{
+    capture, capture_history, MirrorTerm, ScreenFrame, SharedTerm, MIN_FRAME_INTERVAL,
+};
 
 const COLUMNS: usize = 40;
 const LINES: usize = 8;
@@ -968,5 +978,164 @@ async fn fit_to_window_ignores_a_session_not_attached_on_this_stream() {
     assert!(
         host.screens.resized.lock().unwrap().is_empty(),
         "a peer may only resize what it is looking at"
+    );
+}
+
+// ── echo latency (DEV-1242) ──────────────────────────────────────────────
+
+/// Screen frames a raw screen stream receives while the host screen changes
+/// every 2 ms (so every 33 ms tick has a frame to send) and `keys` inputs are
+/// typed evenly through `window`. Returns the count and how long it took.
+async fn frames_while_the_screen_is_busy(
+    permissions: PeerPermissions,
+    keys: u32,
+    window: Duration,
+) -> (usize, Duration) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, permissions).await;
+    attach(&mut control, 100, "s-1").await;
+    let mut screen = timeout(WAIT, conn.accept_stream()).await.unwrap().unwrap();
+    assert!(matches!(read(&mut screen).await, Frame::ScreenOpen { .. }));
+    assert!(matches!(
+        read(&mut screen).await,
+        Frame::Screen {
+            frame: ScreenFrame::Snapshot(_)
+        }
+    ));
+
+    let busy = host.term.clone();
+    let spinner = tokio::spawn(async move {
+        for n in 0u64.. {
+            feed(&busy, format!("\x1b[{LINES};1H{n}").as_bytes());
+            sleep(Duration::from_millis(2)).await;
+        }
+    });
+    let PeerStream { mut send, mut recv } = screen;
+    let frames = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&frames);
+    let reader = tokio::spawn(async move {
+        while let Ok(frame) = read_frame_within(&mut recv, MAX_PEER_FRAME).await {
+            if matches!(frame, Frame::Screen { .. }) {
+                counted.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+
+    let start = std::time::Instant::now();
+    for _ in 0..keys {
+        sleep(window / keys).await;
+        let key = Frame::Input {
+            text: "x".into(),
+            paste: false,
+        };
+        write_frame(&mut send, &key).await.unwrap();
+    }
+    let elapsed = start.elapsed();
+    let count = frames.load(Ordering::SeqCst);
+    spinner.abort();
+    reader.abort();
+    (count, elapsed)
+}
+
+/// What the 33 ms tick alone may send in `elapsed`: its first tick fires at
+/// once, then one per interval.
+fn ticks_in(elapsed: Duration) -> usize {
+    (elapsed.as_millis() / MIN_FRAME_INTERVAL.as_millis()) as usize + 1
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn input_adds_at_most_one_frame_per_key_to_the_frame_rate_cap() {
+    let keys = 10;
+    let (frames, elapsed) =
+        frames_while_the_screen_is_busy(CONTROL, keys, Duration::from_millis(600)).await;
+    let ticks = ticks_in(elapsed);
+    assert!(
+        frames <= ticks + keys as usize,
+        "{frames} frames in {elapsed:?}: over {ticks} ticks + {keys} echoes"
+    );
+    // And the screen really was busy, so the cap was under test.
+    assert!(frames >= ticks / 2, "{frames} frames for {ticks} ticks");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn refused_input_adds_no_frames() {
+    // A `view` peer's keys are dropped: nothing was written, so no echo.
+    let (frames, elapsed) =
+        frames_while_the_screen_is_busy(VIEW, 10, Duration::from_millis(600)).await;
+    let ticks = ticks_in(elapsed);
+    assert!(
+        frames <= ticks,
+        "{frames} frames in {elapsed:?}: over {ticks} ticks"
+    );
+}
+
+/// The DEV-1242 A/B harness: keystroke → echo visible in the client's
+/// mirrored grid, over MemNet with an instantly-echoing PTY, so the number is
+/// Allele's own pipeline (input reader → PTY → frame loop → encode → wire →
+/// apply), with no network or program time in it. Keys are spaced by a
+/// pseudo-random 0–40 ms so they land at random phases of the host's tick.
+///
+/// A measurement, not a check: timing depends on the machine. Run with
+/// `cargo test --release --bin Allele measure_keystroke_echo_latency -- --ignored --nocapture`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "measurement; run with --ignored --nocapture"]
+async fn measure_keystroke_echo_latency() {
+    let net = MemNet::new();
+    let host = Host::start(&net);
+    let (_laptop, conn, mut control) = host.peer(&net, CONTROL).await;
+    let client = ScreenClient::new(conn);
+    let attached = client.attach(&mut control.send, "s-1").await.unwrap();
+    let grid = attached.grid();
+    let text = |g: &crate::terminal::mirror::MirroredGrid| -> String {
+        (0..LINES as i32)
+            .filter_map(|r| {
+                g.row(r)
+                    .map(|row| row.iter().map(|c| c.c).collect::<String>())
+            })
+            .collect::<Vec<_>>()
+            .join("")
+            .replace(' ', "")
+    };
+    let mut seed: u64 = 0x9e3779b97f4a7c15;
+    let mut samples = Vec::new();
+    for i in 0..120usize {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        sleep(Duration::from_millis(seed % 41)).await;
+        let before = text(&grid.lock()).len();
+        let start = std::time::Instant::now();
+        attached.send_input(b"x").unwrap();
+        loop {
+            if text(&grid.lock()).len() > before {
+                break;
+            }
+            tokio::task::yield_now().await;
+            if start.elapsed() > WAIT {
+                panic!("no echo for key {i}");
+            }
+        }
+        samples.push(start.elapsed());
+        if i % 30 == 29 {
+            // Keep the line from wrapping off an 8-row screen.
+            attached.send_input(b"\r\n").unwrap();
+            sleep(Duration::from_millis(80)).await;
+        }
+    }
+    samples.sort();
+    let pct = |p: usize| samples[samples.len() * p / 100];
+    let mean = samples.iter().sum::<Duration>() / samples.len() as u32;
+    println!(
+        "keystroke echo n={} min {:?} p50 {:?} mean {:?} p90 {:?} p99 {:?} max {:?}",
+        samples.len(),
+        samples[0],
+        pct(50),
+        mean,
+        pct(90),
+        pct(99),
+        samples[samples.len() - 1]
     );
 }

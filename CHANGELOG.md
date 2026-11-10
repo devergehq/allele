@@ -40,6 +40,10 @@ Changes on `master` awaiting the next tagged release.
 - A status frame declaring a contract version Allele does not implement now degrades
   **visibly** — a transcript notice, with the last good stage left on screen — instead of
   silently rendering nothing.
+- **Typing into a remote session echoes sooner.** The host sends a screen frame as soon
+  as typed input changes the screen, instead of holding it for the next 33 ms frame tick.
+  Allele's own echo latency drops from ~21 ms mean (p99 35 ms) to under 0.3 ms. Each
+  keystroke adds at most one frame; the 30 frames/s cap is otherwise unchanged.
 
 ### Fixed
 - Answering a permission prompt from the UI (Allow, Reject, or the attention bar's Allow)
