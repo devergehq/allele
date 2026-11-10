@@ -62,6 +62,16 @@ pub(crate) const SETTINGS: &[SettingDoc] = &[
         "integer",
         "Minutes a session must sit unfocused before its drawer terminals are killed to reclaim memory. `0` disables parking. Parking kills real processes (dev servers, workers).",
     ),
+    doc(
+        "rest_after_hours",
+        "integer",
+        "Hours without activity before a session's row shows what closing it would lose and starts to fade. `0` turns that off.",
+    ),
+    doc(
+        "usage_counting_enabled",
+        "bool",
+        "Count locally how long each main tab, the Changes panel and the Scratch Pad are visible while the window is focused, in `~/.allele/tab-usage.json`. Nothing leaves the machine.",
+    ),
     doc("right_sidebar_visible", "bool", "Whether the right sidebar is shown."),
     doc("right_sidebar_width", "number", "Right sidebar width in points."),
     // Attention
