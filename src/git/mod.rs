@@ -184,6 +184,101 @@ pub fn unpushed_commit_count(repo: &Path) -> Option<usize> {
         .ok()
 }
 
+/// The branch a session's work is judged against when asking "would closing
+/// it lose anything?" (DEV-1260), as `(display name, full ref)`.
+///
+/// The project's configured `default_branch` wins, and is never second-guessed:
+/// if it is set but resolves to nothing, the answer is `None` rather than a
+/// guess. DAR-635 read 637 commits "not on `origin/main`" because that repo
+/// integrates on another branch, which is exactly the misreading a guess makes.
+/// Unset falls back to `<remote>/HEAD`, then `main`, then `master`.
+///
+/// The remote-tracking ref is preferred over the local branch because it is
+/// where merged work actually lands. Read-only: nothing is fetched.
+pub fn resolve_base_ref(
+    repo: &Path,
+    configured: Option<&str>,
+    remote: &str,
+) -> Option<(String, String)> {
+    if !is_git_repo(repo) {
+        return None;
+    }
+    let configured = configured
+        .map(|b| strip_remote_prefix(b.trim(), remote).to_string())
+        .filter(|b| !b.is_empty());
+    let candidates: Vec<String> = match configured {
+        Some(name) => vec![name],
+        None => {
+            let mut cmd = git_cmd(Some(repo));
+            cmd.arg("symbolic-ref")
+                .arg("--short")
+                .arg(format!("refs/remotes/{remote}/HEAD"));
+            let from_remote_head = run_git_stdout(cmd, "symbolic-ref remote HEAD")
+                .ok()
+                .map(|s| strip_remote_prefix(&s, remote).to_string())
+                .filter(|s| !s.is_empty());
+            from_remote_head
+                .into_iter()
+                .chain(["main".to_string(), "master".to_string()])
+                .collect()
+        }
+    };
+    candidates.into_iter().find_map(|name| {
+        [
+            format!("refs/remotes/{remote}/{name}"),
+            format!("refs/heads/{name}"),
+        ]
+        .into_iter()
+        .find(|r| ref_exists(repo, r))
+        .map(|r| (name, r))
+    })
+}
+
+/// Commits on `HEAD` with no patch-equivalent on `base_ref`, by `git cherry`.
+///
+/// Patch identity rather than ancestry, so a commit that landed on the base
+/// through a squash or a rebase counts as landed. A raw `rev-list --count`
+/// would report it as unique work and overstate what closing the session
+/// loses. `None` when git fails, so callers can say "can't tell" rather than
+/// "nothing".
+pub fn commits_not_on(repo: &Path, base_ref: &str) -> Option<usize> {
+    let mut cmd = git_cmd(Some(repo));
+    cmd.arg("cherry").arg(base_ref).arg("HEAD");
+    let out = run_git(cmd, "cherry").ok()?;
+    let unique = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter(|l| l.starts_with('+'))
+        .count();
+    // Several commits squashed into one match no single patch id, so cherry
+    // still reports them. If merging HEAD into the base would change nothing,
+    // the work has landed regardless of how it was shaped on the way in.
+    if unique > 0 && merge_into_is_noop(repo, base_ref) {
+        return Some(0);
+    }
+    Some(unique)
+}
+
+/// True when merging `HEAD` into `base_ref` would leave the base's tree
+/// unchanged: everything `HEAD` changed is already there. Any failure,
+/// a conflict included, answers `false` (the conservative direction).
+fn merge_into_is_noop(repo: &Path, base_ref: &str) -> bool {
+    let mut merge = git_cmd(Some(repo));
+    merge
+        .arg("merge-tree")
+        .arg("--write-tree")
+        .arg(base_ref)
+        .arg("HEAD");
+    let Ok(merged) = run_git_stdout(merge, "merge-tree --write-tree") else {
+        return false;
+    };
+    let mut tree = git_cmd(Some(repo));
+    tree.arg("rev-parse").arg(format!("{base_ref}^{{tree}}"));
+    match run_git_stdout(tree, "rev-parse base tree") {
+        Ok(base_tree) => merged.lines().next().map(str::trim) == Some(base_tree.as_str()),
+        Err(_) => false,
+    }
+}
+
 /// Result of a best-effort source-root pull before a new session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PullOutcome {
@@ -1810,6 +1905,116 @@ pub fn diff_file(
     })
 }
 
+/// Lines added / removed for one changes-panel row (one path, one side).
+/// `binary` means git reported no line counts for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LineStat {
+    pub added: u32,
+    pub removed: u32,
+    pub binary: bool,
+}
+
+/// Per-row line counts keyed by `(repo-relative path, staged side)` —
+/// exactly the key a `ChangedFile` row has, so the panel and anything
+/// else reading these counts (the terminal's path chips, DEV-1262) agree.
+pub type LineStats = std::collections::HashMap<(String, bool), LineStat>;
+
+/// Parse `git diff --numstat -z` output.
+///
+/// Each record is `added\tremoved\tpath\0`. A rename or copy leaves the
+/// path field empty and follows it with two NUL-terminated fields, the old
+/// path and then the new one; the panel lists the new path, so that is the
+/// key. Binary files report `-` for both counts.
+fn parse_numstat_z(raw: &str, staged: bool, out: &mut LineStats) {
+    let mut fields = raw.split('\0');
+    while let Some(record) = fields.next() {
+        let mut parts = record.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let path = if path.is_empty() {
+            let _old = fields.next();
+            match fields.next() {
+                Some(new) if !new.is_empty() => new,
+                _ => continue,
+            }
+        } else {
+            path
+        };
+        let stat = match (added.parse::<u32>(), removed.parse::<u32>()) {
+            (Ok(added), Ok(removed)) => LineStat {
+                added,
+                removed,
+                binary: false,
+            },
+            _ => LineStat {
+                binary: true,
+                ..LineStat::default()
+            },
+        };
+        out.insert((path.to_string(), staged), stat);
+    }
+}
+
+/// Largest untracked file whose lines are counted for its `+N` stat.
+/// Anything bigger is reported as binary rather than read on every refresh.
+const UNTRACKED_COUNT_CAP: u64 = 1024 * 1024;
+
+/// Line counts for every row `status_changes` lists: `git diff --numstat`
+/// for each side, plus a newline count for untracked files (which git
+/// diffs against nothing, so every line is an addition).
+pub fn line_stats(repo: &Path, files: &[ChangedFile]) -> LineStats {
+    let mut out = LineStats::new();
+    for staged in [false, true] {
+        let mut cmd = git_cmd(Some(repo));
+        cmd.arg("diff").arg("--numstat").arg("-z").arg("--no-color");
+        if staged {
+            cmd.arg("--cached");
+        }
+        match run_git(cmd, "diff --numstat -z") {
+            Ok(output) => {
+                parse_numstat_z(&String::from_utf8_lossy(&output.stdout), staged, &mut out)
+            }
+            Err(e) => tracing::warn!("line stats: {e}"),
+        }
+    }
+    for file in files.iter().filter(|f| f.kind == ChangeKind::Untracked) {
+        out.insert(
+            (file.path.clone(), false),
+            count_untracked(&repo.join(&file.path)),
+        );
+    }
+    out
+}
+
+fn count_untracked(path: &Path) -> LineStat {
+    let binary = LineStat {
+        binary: true,
+        ..LineStat::default()
+    };
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_file() && meta.len() <= UNTRACKED_COUNT_CAP => {}
+        _ => return binary,
+    }
+    let Ok(bytes) = std::fs::read(path) else {
+        return binary;
+    };
+    // git's own heuristic: a NUL in the first 8000 bytes means binary.
+    if bytes.iter().take(8000).any(|&b| b == 0) {
+        return binary;
+    }
+    let mut added = bytes.iter().filter(|&&b| b == b'\n').count() as u32;
+    if bytes.last().is_some_and(|&b| b != b'\n') {
+        added += 1; // a final line without a newline is still a line
+    }
+    LineStat {
+        added,
+        removed: 0,
+        binary: false,
+    }
+}
+
 // --- Tests --------------------------------------------------------------
 
 #[cfg(test)]
@@ -3101,6 +3306,68 @@ mod tests {
                 "raw was {raw:?}"
             );
         }
+    }
+
+    #[test]
+    fn numstat_parse_plain_rename_and_binary() {
+        let mut out = LineStats::new();
+        parse_numstat_z(
+            "12\t3\tsrc/a.rs\0-\t-\timg.png\0\
+             4\t1\t\0old/name.rs\0new/name.rs\0",
+            true,
+            &mut out,
+        );
+        assert_eq!(
+            out.get(&("src/a.rs".into(), true)),
+            Some(&LineStat {
+                added: 12,
+                removed: 3,
+                binary: false
+            })
+        );
+        assert!(out[&("img.png".to_string(), true)].binary);
+        assert_eq!(out[&("new/name.rs".to_string(), true)].added, 4);
+        assert!(!out.contains_key(&("old/name.rs".to_string(), true)));
+        assert!(!out.contains_key(&("src/a.rs".to_string(), false)));
+    }
+
+    #[test]
+    fn line_stats_match_every_status_row() {
+        let (_dir, repo) = make_canonical("one\ntwo\nthree\n");
+        // Unstaged: one line changed, one added.
+        fs::write(repo.join("file.txt"), "one\nTWO\nthree\nfour\n").unwrap();
+        // Untracked: two lines, the last with no trailing newline.
+        fs::write(repo.join("new.txt"), "a\nb").unwrap();
+        // Staged: a new file of three lines.
+        fs::write(repo.join("staged.txt"), "x\ny\nz\n").unwrap();
+        let mut add = git_cmd(Some(&repo));
+        add.arg("add").arg("staged.txt");
+        run_git(add, "add (test)").unwrap();
+
+        let files = status_changes(&repo).unwrap();
+        let stats = line_stats(&repo, &files);
+        for file in &files {
+            assert!(
+                stats.contains_key(&(file.path.clone(), file.staged)),
+                "no stat for panel row {file:?}"
+            );
+        }
+        let get = |p: &str, s: bool| stats[&(p.to_string(), s)];
+        assert_eq!(
+            (get("file.txt", false).added, get("file.txt", false).removed),
+            (2, 1)
+        );
+        assert_eq!(
+            (get("new.txt", false).added, get("new.txt", false).removed),
+            (2, 0)
+        );
+        assert_eq!(
+            (
+                get("staged.txt", true).added,
+                get("staged.txt", true).removed
+            ),
+            (3, 0)
+        );
     }
 
     #[test]

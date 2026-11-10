@@ -14,6 +14,40 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- **Remote tabs show how they are connected.** Beside "Live", the header reads
+  `direct · 4 ms` or `via relay · 900 ms` and follows iroh's path switches live; a relayed
+  link is in the warning colour. Every path change is logged with the peer, path kind and RTT.
+- **A log file that survives a normal launch.** `tracing` output now also goes to
+  `~/.allele/logs/allele.log` (owner-only, rotated at 5 MiB, four old files kept), so
+  logs from an app started with `open` or from Finder are no longer lost.
+- **Rest by loss.** Once a session has been idle for a day (`rest_after_hours` in
+  settings.json, `0` turns it off), its row says what closing it would lose:
+  `nothing unique`, `N commits not on <base>`, `N changed files`, or `workspace missing`.
+  Commits are judged with `git cherry` against the project's configured base branch, so
+  squash-merged work counts as landed. Idle rows fade with age. **Put N to rest** archives
+  every `nothing unique` session in one click, and each can be restored from ARCHIVES.
+- **Local tab-usage counters.** Allele counts how many seconds each main tab (Claude,
+  Reader, Browser, Transcript), the Changes panel and the Scratch Pad are visible while its
+  window is focused, in `~/.allele/tab-usage.json`. Nothing is sent anywhere. Turn it off
+  in Settings → Sessions.
+- **Paths in Claude's output show what this session changed.** A file path the session
+  changed gets a dim `+N −M` chip beside it, matching the Changes panel, whose rows now
+  show the same counts. ⌥-hover a path for a one-hunk diff peek (an unchanged file shows
+  its first lines); Esc closes it. The path right-click menu adds **Show diff** (opens the
+  file in the Changes panel) and **Open at this line in editor**. All of it is drawn over
+  the terminal and never typed into it; a path Claude truncated (`src/…/foo.rs`) gets
+  nothing.
+- **A guide for agents, `~/.allele/AGENTS.md`**, written on every launch and generated from
+  the code: every setting with its type and default, the keymap file and every bindable
+  action, the MCP tools, and which files an agent may edit versus Allele's private
+  `state.json`. It is rewritten only when its content changes. Tests fail when a setting or
+  keymap action is missing from it.
+- **One named command table.** Every action the keymap, the menus and the command palette
+  reach now has one stable name (`allele.toggle_sidebar`, `allele.discard_session`, …) in
+  `src/commands.rs`, with its description and default keys. The palette, the built-in key
+  bindings and the menus are all read from it, and the agent guide lists every command. The
+  palette-only commands (Go to Claude/Reader/Transcript/Browser, the changes panel, New
+  Session, Discard Session) can now be bound in `keymap.json` too.
 - **Collapsible sidebar.** Click a project header to fold its sessions and archives away;
   click a machine row, or a project heading under it, to fold that too. The MACHINES
   section can be moved above the local projects from its header. Folds and position
@@ -27,6 +61,9 @@ Changes on `master` awaiting the next tagged release.
   than a Rust enum, so Locus can rename, add or drop phases without breaking this view.
 
 ### Changed
+- A `keymap.json` binding to an unknown command no longer stops Allele from launching. The
+  binding is skipped and reported in a banner and in the log; the rest of the file applies.
+- `assets/default-keymap.json` is gone: the built-in bindings live in the command table.
 - The control socket answers a session id it has no record of with its own
   error code, **`session_not_found`**, on `sessions.status`, `sessions.discard`
   and `sessions.interrupt`. It was `bad_request`, the same code as a request
@@ -40,8 +77,23 @@ Changes on `master` awaiting the next tagged release.
 - A status frame declaring a contract version Allele does not implement now degrades
   **visibly** — a transcript notice, with the last good stage left on screen — instead of
   silently rendering nothing.
+- **Typing into a remote session echoes sooner.** The host sends a screen frame as soon
+  as typed input changes the screen, instead of holding it for the next 33 ms frame tick.
+  Allele's own echo latency drops from ~21 ms mean (p99 35 ms) to under 0.3 ms. Each
+  keystroke adds at most one frame; the 30 frames/s cap is otherwise unchanged.
+
+### Security
+- **Agent-written links are confined to the session's clone.** Links in rich-mode assistant
+  text are now clickable. A file or diff link the agent wrote opens only if it resolves
+  (symlinks included, checked at click time) inside that session's clone; anything else is
+  refused with the reason in the notice banner. Hovering a link shows its full destination,
+  so link text cannot disguise where it goes. `file://`, `vscode://` and other custom
+  schemes are inert. Links you open yourself are unchanged.
 
 ### Fixed
+- Answering a permission prompt from the UI (Allow, Reject, or the attention bar's Allow)
+  now restarts the session's state age at the answer, instead of letting
+  `allele_sessions_status.state_age_secs` keep counting from when it became blocked.
 - Tools installed outside the system directories are reachable again from sessions
   started by an Allele you launched from Finder, the Dock, or Spotlight. Allele already
   adopted the login shell's PATH when it detected launchd's stripped GUI environment,

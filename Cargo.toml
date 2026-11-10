@@ -33,6 +33,9 @@ libc = "0.2"
 
 # Path utilities
 dirs = "6"
+# Fast non-cryptographic hashing for the per-render terminal path index (DEV-1262).
+# Already in the tree via gpui; pinned to the locked 2.x.
+rustc-hash = "2.1"
 which = "7"
 
 # Grapheme-aware text segmentation for the Settings text input
@@ -68,6 +71,9 @@ rust-s3 = "0.37.2"
 # Only `src/remote/iroh_transport.rs` may name this crate (tests/architecture.rs).
 # Default features minus `metrics` and `portmapper` (~1.1 MB, DEV-1158 spike).
 iroh = { version = "=1.4.1", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+# The `Stream` trait, to consume iroh's `paths_stream()` (DEV-1243). Already in
+# the tree through tokio and iroh; named so it is ours to rely on.
+futures-core = "0.3"
 
 # Pairing (DEV-1160): the pairing secret's randomness, the code's base32 text,
 # the confirmation number's hash, and the QR shown beside the code.

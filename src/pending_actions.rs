@@ -217,19 +217,31 @@ impl AppState {
                 project_idx,
                 session_idx,
             } => {
-                // Arm the inline confirmation gate. The sidebar row will
-                // render Confirm/Cancel buttons on the next frame.
-                self.arm_confirmation(|c| {
-                    c.discard = Some(SessionCursor {
-                        project_idx,
-                        session_idx,
-                    })
-                });
-                cx.notify();
+                let cursor = SessionCursor {
+                    project_idx,
+                    session_idx,
+                };
+                // Nothing to lose, nothing to confirm (DEV-1260): the work is
+                // all on the base branch, and the archive ref keeps it anyway.
+                if self
+                    .loss_verdict(cursor)
+                    .is_some_and(|v| v.is_nothing_unique())
+                {
+                    self.confirming.discard = None;
+                    self.remove_session(cursor, window, cx);
+                } else {
+                    // Arm the inline confirmation gate. The sidebar row will
+                    // render Confirm/Cancel buttons on the next frame.
+                    self.arm_confirmation(|c| c.discard = Some(cursor));
+                    cx.notify();
+                }
             }
             SessionAction::CancelDiscard => {
                 self.confirming.discard = None;
                 cx.notify();
+            }
+            SessionAction::PutToRest => {
+                self.put_to_rest(window, cx);
             }
             SessionAction::DiscardSession {
                 project_idx,
@@ -1191,6 +1203,14 @@ impl AppState {
                 self.changes.selected = Some((path.clone(), staged));
                 self.load_changes_diff(path, staged, cx);
             }
+            SidebarAction::ShowChangedFileDiff { path, staged } => {
+                if !self.right_panel.visible {
+                    self.right_panel.visible = true;
+                    self.mark_settings_dirty();
+                }
+                self.changes.selected = Some((path.clone(), staged));
+                self.load_changes_diff(path, staged, cx);
+            }
             SidebarAction::ClearChangesSelection => {
                 self.changes.selected = None;
                 self.changes.diff = None;
@@ -1347,6 +1367,12 @@ impl AppState {
                 self.user_settings.keep_awake_while_working = enabled;
                 self.mark_settings_dirty();
                 self.reconcile_keep_awake();
+            }
+            SettingsAction::UpdateUsageCounting(enabled) => {
+                *skip_refocus = true;
+                self.user_settings.usage_counting_enabled = enabled;
+                self.mark_settings_dirty();
+                self.sample_usage();
             }
             SettingsAction::UpdateFontSize(size) => {
                 *skip_refocus = true;

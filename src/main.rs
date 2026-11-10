@@ -1,5 +1,6 @@
 mod accessibility;
 mod actions;
+mod agent_guide;
 mod agents;
 mod app_state;
 mod assets;
@@ -10,6 +11,7 @@ mod browser;
 mod changes;
 mod cli;
 mod clone;
+mod commands;
 mod config;
 mod conversation_picker;
 mod conversations;
@@ -24,6 +26,7 @@ mod hooks;
 mod icon;
 mod interrupted;
 mod keymap;
+mod log_file;
 mod mac_menu;
 mod memory_watchdog;
 mod naming;
@@ -63,6 +66,7 @@ mod text_input;
 mod theme;
 mod transcript;
 mod trust;
+mod usage;
 
 use crate::theme::theme;
 use actions::{ProjectAction, SessionAction, SessionCursor, SettingsAction};
@@ -445,13 +449,14 @@ impl AppState {
             )
         });
 
+        let link_session_id = allele_session_id.clone();
         // ComposeBar submits bubble up as RichViewEvent::Submit. Route
         // them into the active PTY via the same bracketed-paste path
         // the Scratch Pad uses. Nothing here spawns or talks to the
         // `claude` binary directly.
         cx.subscribe(
             &view,
-            |this: &mut Self, _v, event: &rich::RichViewEvent, cx| match event {
+            move |this: &mut Self, _v, event: &rich::RichViewEvent, cx| match event {
                 rich::RichViewEvent::Submit { text, attachments } => {
                     let paths: Vec<PathBuf> = attachments.iter().map(|a| a.path.clone()).collect();
                     this.scratch_pad_send(text.clone(), paths, cx);
@@ -466,8 +471,7 @@ impl AppState {
                             if let Some(ref tv) = session.terminal_view {
                                 tv.read(cx).send_input(b"\r");
                             }
-                            session.status = session::SessionStatus::Running;
-                            session.attention_context = None;
+                            session.resolve_permission_prompt();
                         }
                     }
                     cx.notify();
@@ -484,8 +488,7 @@ impl AppState {
                             if let Some(ref tv) = session.terminal_view {
                                 tv.read(cx).send_input(b"\x1b");
                             }
-                            session.status = session::SessionStatus::Running;
-                            session.attention_context = None;
+                            session.resolve_permission_prompt();
                         }
                     }
                     cx.notify();
@@ -496,6 +499,18 @@ impl AppState {
                     // resolving the prompt ourselves (DEV-78).
                     this.main_tab = MainTab::Claude;
                     cx.notify();
+                }
+                rich::RichViewEvent::OpenLink { url } => {
+                    // The agent wrote this link, so it is confined to the clone
+                    // of the session the view belongs to — not whichever
+                    // session happens to be active (DEV-1252).
+                    this.open_deep_link(
+                        url,
+                        reader::deeplink::LinkOrigin::Agent {
+                            session: link_session_id.clone(),
+                        },
+                        cx,
+                    );
                 }
             },
         )
@@ -1673,6 +1688,10 @@ fn main() {
         return;
     }
 
+    // Write `~/.allele/AGENTS.md` for agents asked to configure Allele
+    // (DEV-1263). Generated from code; rewritten only when it changed.
+    agent_guide::install();
+
     // OS-abstraction layer. Detected once and installed into the
     // process-wide OnceLock so call sites without an AppState handle
     // (panic hooks, early-error paths) can still reach the platform
@@ -1874,6 +1893,15 @@ fn main() {
                         if let Err(e) = this.repos.settings.save(&settings) {
                             warn!("Failed to save settings.json on window-bounds change: {e}");
                         }
+                    })
+                    .detach();
+
+                    // Tab-usage counters only count while this window is key
+                    // (DEV-1265). Sample at the edge so the interval up to the
+                    // change is credited exactly, then record the new state.
+                    cx.observe_window_activation(window, |this: &mut AppState, window, _cx| {
+                        this.window_focused = window.is_window_active();
+                        this.sample_usage();
                     })
                     .detach();
 
@@ -2230,6 +2258,7 @@ fn main() {
                             delete_all_archives: None,
                             armed_at: None,
                         },
+                        loss_verdicts: Default::default(),
                         rich: RichState {
                             view: None,
                             transcript_tailer: None,
@@ -2240,9 +2269,12 @@ fn main() {
                         user_settings: settings_for_window.clone(),
                         settings_window: None,
                         pull_warning: None,
-                        sync_notice: None,
+                        // An unknown keymap command is reported here, at load (DEV-1264).
+                        sync_notice: keymap::load_report(),
                         pairing_alert: Default::default(),
                         main_tab: MainTab::Claude,
+                        usage: crate::usage::UsageTracker::load(crate::usage::usage_file()),
+                        window_focused: window.is_window_active(),
                         browser_status: String::new(),
                         scratch_pad: None,
                         scratch_pad_history: loaded_state.scratch_pad_history.clone(),

@@ -24,8 +24,8 @@ use crate::errors::{AlleleError, Result};
 
 use super::identity::LocalIdentity;
 use super::transport::{
-    Heartbeat, PeerConnection, PeerId, PeerStream, PeerTransport, RelayChoice, TransportConfig,
-    ALPN,
+    Heartbeat, PathInfo, PathKind, PeerConnection, PeerId, PeerStream, PeerTransport, RelayChoice,
+    TransportConfig, ALPN,
 };
 
 fn remote_err(context: &str, e: impl std::fmt::Display) -> AlleleError {
@@ -252,12 +252,87 @@ fn spawn_accept_loop(endpoint: Endpoint) -> mpsc::Receiver<Connection> {
 struct IrohConnection {
     conn: Connection,
     remote: PeerId,
+    /// Logs every change of selected path. It holds a clone of `conn`, which
+    /// would keep the connection open on its own, so dropping this wrapper
+    /// aborts it.
+    path_log: tokio::task::JoinHandle<()>,
+    /// Path changes logged so far, for tests.
+    #[cfg(test)]
+    path_changes: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl IrohConnection {
+    /// Wrap a finished handshake. Must run inside a tokio runtime: it starts
+    /// the path observer there.
     fn new(conn: Connection) -> Self {
         let remote = peer_id(conn.remote_id());
-        Self { conn, remote }
+        let changes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let path_log = tokio::spawn(log_path_changes(conn.clone(), Arc::clone(&changes)));
+        #[cfg(not(test))]
+        drop(changes);
+        Self {
+            conn,
+            remote,
+            path_log,
+            #[cfg(test)]
+            path_changes: changes,
+        }
+    }
+}
+
+impl Drop for IrohConnection {
+    fn drop(&mut self) {
+        self.path_log.abort();
+    }
+}
+
+/// The selected path in `paths`, as crate types: its id (to tell one direct
+/// path from another), what kind it is, its RTT, and its address for the log.
+fn selected<'a>(
+    paths: &'a iroh::endpoint::PathList<'a>,
+) -> Option<(iroh::endpoint::PathId, PathInfo, String)> {
+    let path = paths.iter().find(|p| p.is_selected())?;
+    let kind = if path.is_relay() {
+        PathKind::Relay
+    } else {
+        PathKind::Direct
+    };
+    let info = PathInfo {
+        kind,
+        rtt: path.rtt(),
+    };
+    Some((path.id(), info, format!("{:?}", path.remote_addr())))
+}
+
+/// Follow iroh's path snapshots for `conn` until it closes, and log one line
+/// each time the selected path changes: every connection starts on the relay
+/// (~1 s RTT) and is expected to move to a direct path within ~2 s
+/// (DEV-1243). Without this, "remote typing is slow" cannot be told apart
+/// from a relayed link after the fact.
+async fn log_path_changes(conn: Connection, changes: Arc<std::sync::atomic::AtomicUsize>) {
+    use futures_core::Stream;
+    let peer = peer_id(conn.remote_id()).short();
+    let mut stream = conn.paths_stream();
+    let mut last = None;
+    while let Some(paths) =
+        std::future::poll_fn(|cx| std::pin::Pin::new(&mut stream).poll_next(cx)).await
+    {
+        let now = selected(&paths);
+        let id = now.as_ref().map(|(id, _, _)| *id);
+        if id == last {
+            continue;
+        }
+        last = id;
+        changes.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        match now {
+            Some((_, info, addr)) => tracing::info!(
+                peer = %peer,
+                path = ?info.kind,
+                rtt_us = info.rtt.as_micros() as u64,
+                "remote: path to {peer} is now {info} ({addr})"
+            ),
+            None => tracing::info!(peer = %peer, "remote: no path selected to {peer}"),
+        }
     }
 }
 
@@ -301,6 +376,13 @@ impl PeerConnection for IrohConnection {
 
     fn close(&self, reason: &str) {
         self.conn.close(VarInt::from_u32(0), reason.as_bytes());
+    }
+
+    /// Read live, so the RTT is current rather than the one logged when the
+    /// path was selected.
+    fn path(&self) -> Option<PathInfo> {
+        let paths = self.conn.paths();
+        selected(&paths).map(|(_, info, _)| info)
     }
 }
 
@@ -467,6 +549,82 @@ mod tests {
 
             conn.close("done");
             assert!(conn.is_closed());
+            client.shutdown().await;
+            server.shutdown().await;
+        });
+    }
+
+    /// Loopback is a direct path, so the connection should report one, and
+    /// the observer should have logged at least the first selection.
+    #[test]
+    fn a_connection_reports_and_logs_its_selected_path() {
+        // Shows the logged lines under `--nocapture`.
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+        let rt = rt();
+        rt.block_on(async {
+            let (_map, relay_url, _relay) = iroh::test_utils::run_relay_server().await.unwrap();
+            let book = Arc::new(MemoryLookup::new());
+            let server = Arc::new(bind(&LocalIdentity::ephemeral(), &relay_url, &book).await);
+            let client = bind(&LocalIdentity::ephemeral(), &relay_url, &book).await;
+            serve_echo(Arc::clone(&server));
+
+            let raw = client
+                .endpoint
+                .connect(EndpointAddr::new(server.endpoint.id()), ALPN)
+                .await
+                .unwrap();
+            let conn = IrohConnection::new(raw);
+            assert_eq!(echo(&conn, b"hi").await, b"hi");
+
+            let direct = tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(p) = conn.path().filter(|p| p.kind == PathKind::Direct) {
+                        return p;
+                    }
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await
+            .expect("no direct path on loopback within 10 s");
+            assert!(direct.rtt < Duration::from_secs(1), "{direct:?}");
+            let logged = conn.path_changes.load(std::sync::atomic::Ordering::Relaxed);
+            assert!(logged >= 1, "no path change was logged");
+            eprintln!("loopback path: {direct} after {logged} logged change(s)");
+
+            conn.close("done");
+            client.shutdown().await;
+            server.shutdown().await;
+        });
+    }
+
+    /// The path observer holds its own handle on the connection. Dropping the
+    /// last `IrohConnection` must still let the connection go, as it did
+    /// before the observer existed — or a dropped link would stay open on
+    /// heartbeats forever.
+    #[test]
+    fn dropping_a_connection_still_closes_it() {
+        let rt = rt();
+        rt.block_on(async {
+            let (_map, relay_url, _relay) = iroh::test_utils::run_relay_server().await.unwrap();
+            let book = Arc::new(MemoryLookup::new());
+            let server = Arc::new(bind(&LocalIdentity::ephemeral(), &relay_url, &book).await);
+            let client = bind(&LocalIdentity::ephemeral(), &relay_url, &book).await;
+
+            let accepted = {
+                let server = Arc::clone(&server);
+                tokio::spawn(async move { server.accept().await.unwrap() })
+            };
+            let conn = client.dial(server.local_id()).await.unwrap();
+            // A stream the server sees, so the handshake is surely finished.
+            let mut s = conn.open_stream().await.unwrap();
+            s.send.write_all(b"x").await.unwrap();
+            let theirs = accepted.await.unwrap();
+            drop(s);
+            drop(conn);
+
+            tokio::time::timeout(Duration::from_secs(3), theirs.closed())
+                .await
+                .expect("the dropped connection was kept open");
             client.shutdown().await;
             server.shutdown().await;
         });

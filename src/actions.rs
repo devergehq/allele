@@ -88,6 +88,10 @@ pub enum SessionAction {
     },
     /// Cancel an in-flight discard confirmation.
     CancelDiscard,
+    /// Archive every idle session whose verdict is "nothing unique"
+    /// (DEV-1260). Not confirmation-gated: each one goes to an archive ref
+    /// it can be restored from, and none of them holds unique work.
+    PutToRest,
     /// Away: request Claude Code's remote control from every live Claude
     /// session, queueing those it is not yet safe to type into (DEV-1157).
     RequestRemoteControlAll,
@@ -267,6 +271,9 @@ pub enum SidebarAction {
     SelectChangedFile { path: String, staged: bool },
     /// Close the changes panel's diff pane (deselect the file row).
     ClearChangesSelection,
+    /// "Show diff" on a path in the Claude terminal (DEV-1262): open the
+    /// changes panel if it is hidden and select that file's row.
+    ShowChangedFileDiff { path: String, staged: bool },
     /// Move a group to another slot in its project's order — the drop half of
     /// dragging one group header onto another (DEV-937).
     ///
@@ -351,6 +358,9 @@ pub enum SettingsAction {
     /// Reconciles the power assertion immediately, so turning it off
     /// releases a held assertion without waiting for the poller.
     UpdateKeepAwake(bool),
+    /// Toggle the local tab-usage counters (DEV-1265). Takes effect at once:
+    /// the handler samples, so no time after the toggle is credited.
+    UpdateUsageCounting(bool),
     /// Replace the global terminal font size and persist. Emitted by the
     /// Settings window, by Cmd+=/Cmd+- (as a clamped new value), and by
     /// Cmd+0 (reset to DEFAULT_FONT_SIZE). The handler clamps again,

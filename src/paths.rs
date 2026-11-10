@@ -232,6 +232,11 @@ pub fn settings_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("settings.json"))
 }
 
+/// `<root>/.allele/logs` — the rotating `tracing` log (DEV-1243).
+pub fn logs_dir() -> Option<PathBuf> {
+    allele_dir().map(|d| d.join("logs"))
+}
+
 pub fn crash_log_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("crash.log"))
 }
@@ -257,6 +262,11 @@ pub fn trash_root() -> Option<PathBuf> {
 
 pub fn keymap_file() -> Option<PathBuf> {
     allele_dir().map(|d| d.join("keymap.json"))
+}
+
+/// The generated guide for agents (DEV-1263), rewritten on every launch.
+pub fn agents_guide_file() -> Option<PathBuf> {
+    allele_dir().map(|d| d.join("AGENTS.md"))
 }
 
 pub fn crash_dir() -> Option<PathBuf> {
@@ -339,6 +349,7 @@ mod tests {
             ("workspaces_root", workspaces_root()),
             ("trash_root", trash_root()),
             ("keymap_file", keymap_file()),
+            ("agents_guide_file", agents_guide_file()),
             ("crash_dir", crash_dir()),
             ("diagnostics_dir", diagnostics_dir()),
             ("debug_dir", debug_dir()),

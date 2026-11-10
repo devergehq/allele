@@ -608,8 +608,10 @@ impl AppState {
         for (ix, chunk) in sections.iter().enumerate() {
             // The seed keeps each chunk's code fences on their own scroll
             // offset (DEV-577); chunk index is stable for a given preview.
+            // No link sink: a previewed file's links stay inert (DEV-1252
+            // confines agent-written links in rich mode only).
             rendered = rendered.child(crate::rich::markdown::render(
-                chunk, false, font_size, ix as u64,
+                chunk, false, font_size, ix as u64, None,
             ));
         }
 

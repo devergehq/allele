@@ -1,5 +1,6 @@
 use super::grid_element::TerminalGridElement;
 use super::keymap::{self, AppAction, KeymapConfig};
+use super::path_decor::{self, ChangedPath, Chip, PeekBody, SessionChangeIndex};
 use super::pty_terminal::{PtyTerminal, ShellCommand, TermSize};
 use crate::theme::theme;
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -7,6 +8,7 @@ use alacritty_terminal::index::{Column, Line, Point as AlacPoint};
 use alacritty_terminal::term::TermMode;
 use gpui::*;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{info, warn};
 
@@ -60,6 +62,14 @@ pub enum TerminalEvent {
         path: PathBuf,
         line_col: Option<(u32, Option<u32>)>,
     },
+    /// Right-click on a path this session changed selected "Show diff"
+    /// (DEV-1262). Parent opens the Changes panel on that file's row.
+    ShowDiff {
+        /// Repo-relative path, as the Changes panel lists it.
+        rel_path: String,
+        /// Which side's row to select.
+        staged: bool,
+    },
     /// User pressed Enter in this terminal. Used to clear stale
     /// AwaitingInput status when the user approves a permission prompt
     /// directly in the terminal instead of clicking the attention bar.
@@ -74,6 +84,41 @@ pub struct TerminalCtxMenu {
     pub path: PathBuf,
     pub line_col: Option<(u32, Option<u32>)>,
     pub position: Point<Pixels>,
+    /// What this session changed in the file, when it changed it.
+    pub changed: Option<ChangedPath>,
+    /// First line this session changed, once its diff has loaded — the
+    /// target of "Open at this line in editor" when the path carried no
+    /// `:line` of its own.
+    pub change_line: Option<u32>,
+}
+
+impl TerminalCtxMenu {
+    /// "This line": the `:line` the path was printed with, else the first
+    /// line this session changed in the file.
+    pub fn this_line(&self) -> Option<u32> {
+        self.line_col.map(|(l, _)| l).or(self.change_line)
+    }
+}
+
+/// A path under the pointer, with what this session changed in it.
+pub(crate) struct PathHit {
+    pub row: usize,
+    pub col_start: usize,
+    pub col_end: usize,
+    pub path: PathBuf,
+    pub line_col: Option<(u32, Option<u32>)>,
+    pub changed: Option<ChangedPath>,
+}
+
+/// The ⌥-hover diff peek (DEV-1262): a floating card, drawn by Allele over
+/// the grid. Esc closes it.
+pub(crate) struct DiffPeek {
+    pub path: PathBuf,
+    pub changed: Option<ChangedPath>,
+    pub position: Point<Pixels>,
+    pub body: PeekBody,
+    /// Matches the load in flight; a stale result is dropped.
+    pub generation: u64,
 }
 
 /// GPUI View wrapping a PTY-backed terminal
@@ -148,6 +193,19 @@ pub struct TerminalView {
     visible_path_spans: Vec<(usize, usize, usize)>,
     /// Active right-click context menu state. `None` = no menu visible.
     terminal_context_menu: Option<TerminalCtxMenu>,
+    /// What this session changed, pushed by the parent each render
+    /// (DEV-1262). `None` for terminals that aren't a session's Claude tab.
+    change_index: Option<Arc<SessionChangeIndex>>,
+    /// `+N −M` chips for changed paths in the visible viewport; recomputed
+    /// with the path spans, so they move with the text when the TUI redraws.
+    visible_chips: Vec<Chip>,
+    /// Open ⌥-hover peek, if any.
+    peek: Option<DiffPeek>,
+    /// Bumped per peek / menu diff load; stale results are dropped.
+    peek_gen: u64,
+    /// Last pointer position over the grid, so pressing ⌥ without moving
+    /// can open a peek.
+    last_mouse: Option<Point<Pixels>>,
     /// Pixels reserved below this terminal (e.g. drawer panel + chrome).
     /// Set by the parent before render so the PTY resize computation
     /// accounts for space that isn't available to this view.
@@ -258,6 +316,11 @@ impl TerminalView {
                         visible_url_spans: Vec::new(),
                         visible_path_spans: Vec::new(),
                         terminal_context_menu: None,
+                        change_index: None,
+                        visible_chips: Vec::new(),
+                        peek: None,
+                        peek_gen: 0,
+                        last_mouse: None,
                         bottom_inset: 0.0,
                         right_inset: 0.0,
                         pending_resize: None,
@@ -458,6 +521,11 @@ impl TerminalView {
             visible_url_spans: Vec::new(),
             visible_path_spans: Vec::new(),
             terminal_context_menu: None,
+            change_index: None,
+            visible_chips: Vec::new(),
+            peek: None,
+            peek_gen: 0,
+            last_mouse: None,
             bottom_inset: 0.0,
             right_inset: 0.0,
             pending_resize: None,
@@ -1009,38 +1077,6 @@ impl TerminalView {
         }
     }
 
-    /// Cheap syntactic check used by the persistent viewport scan — no
-    /// filesystem stat. Returns true if the token *looks like* it could
-    /// be a path, based on shape only.
-    fn token_looks_like_path(token: &str) -> bool {
-        if token.len() < 2 {
-            return false;
-        }
-        let (path_part, _) = parse_line_col_suffix(token);
-        if path_part.is_empty() {
-            return false;
-        }
-        if path_part.starts_with('/') || path_part.starts_with("~/") || path_part == "~" {
-            return true;
-        }
-        if path_part.starts_with("./") || path_part.starts_with("../") {
-            return true;
-        }
-        // Bare relative: require at least one '/' or a file extension to
-        // avoid matching random words. e.g. `src/main.rs` or `foo.rs`.
-        if path_part.contains('/') {
-            return true;
-        }
-        if let Some(dot) = path_part.rfind('.') {
-            let ext = &path_part[dot + 1..];
-            // Extensions: 1-8 alphanumeric chars.
-            if (1..=8).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()) {
-                return true;
-            }
-        }
-        false
-    }
-
     /// Find a file path at the given grid cell, if any. Mirrors `url_at`:
     /// returns `(row, col_start, col_end, resolved_path, line_col)` so the
     /// caller can draw a highlight and resolve the click target.
@@ -1048,148 +1084,252 @@ impl TerminalView {
         &self,
         cell: (usize, usize),
     ) -> Option<(usize, usize, usize, PathBuf, Option<(u32, Option<u32>)>)> {
+        self.path_hit_at(cell)
+            .map(|h| (h.row, h.col_start, h.col_end, h.path, h.line_col))
+    }
+
+    /// The path under `cell`, joined against this session's changes.
+    ///
+    /// Tokenises exactly as the viewport scan does (`path_decor::row_tokens`),
+    /// so `Update(src/foo.rs)` resolves to `src/foo.rs`. A changed file is
+    /// recognised from the change index without touching the disk (it may
+    /// have been deleted); anything else must exist under `working_dir`. A
+    /// truncated path (`src/…/foo.rs`) is never resolved.
+    pub(crate) fn path_hit_at(&self, cell: (usize, usize)) -> Option<PathHit> {
         let (row, col) = cell;
         let (chars, cols) = self.line_chars_cols(row);
-        if chars.is_empty() {
-            return None;
-        }
-
-        // Locate the whitespace-delimited token at `col`, stripping common
-        // surrounding punctuation ([]()"'{}<>).
         let hovered_idx = cols.iter().position(|&c| c == col)?;
-
         if chars[hovered_idx].is_whitespace() {
             return None;
         }
-
-        // Walk left/right to find token bounds.
-        let mut tok_start = hovered_idx;
-        while tok_start > 0 && !chars[tok_start - 1].is_whitespace() {
-            tok_start -= 1;
-        }
-        let mut tok_end = hovered_idx;
-        while tok_end + 1 < chars.len() && !chars[tok_end + 1].is_whitespace() {
-            tok_end += 1;
-        }
-
-        // Trim matched brackets/quotes at edges.
-        while tok_start < tok_end
-            && matches!(chars[tok_start], '(' | '[' | '{' | '<' | '"' | '\'' | '`')
-        {
-            tok_start += 1;
-        }
-        while tok_end > tok_start
-            && matches!(
-                chars[tok_end],
-                ')' | ']' | '}' | '>' | '"' | '\'' | '`' | ',' | ';' | '.' | '!' | '?'
-            )
-        {
-            tok_end -= 1;
-        }
-
-        if tok_start > tok_end {
+        let token = path_decor::row_tokens(&chars)
+            .into_iter()
+            .find(|t| (t.raw_start..=t.raw_end).contains(&hovered_idx))?;
+        let text: String = chars[token.start..=token.end].iter().collect();
+        if path_decor::is_truncated(&text) {
             return None;
         }
-
-        let token: String = chars[tok_start..=tok_end].iter().collect();
-        let (path, line_col) = self.classify_path_token(&token)?;
-        let col_start = cols[tok_start];
-        let col_end = cols[tok_end];
-        Some((row, col_start, col_end, path, line_col))
+        let changed = self.change_index.as_deref().and_then(|index| {
+            path_decor::lookup(&text, index, self.working_dir.as_deref()).cloned()
+        });
+        let (path, line_col) = match &changed {
+            Some(c) => {
+                let repo = &self.change_index.as_deref()?.repo_dir;
+                (repo.join(&c.rel_path), parse_line_col_suffix(&text).1)
+            }
+            None => self.classify_path_token(&text)?,
+        };
+        Some(PathHit {
+            row,
+            col_start: cols[token.start],
+            col_end: cols[token.end],
+            path,
+            line_col,
+            changed,
+        })
     }
 
-    /// Scan the visible viewport for URL and path spans. Called when the
-    /// grid mutates; results are cached in `visible_url_spans` /
-    /// `visible_path_spans` for the renderer to consume.
+    /// Scan the visible viewport for URL and path spans and change chips.
+    /// Called on every render; results are cached in `visible_url_spans` /
+    /// `visible_path_spans` / `visible_chips` for the renderer to consume.
     ///
-    /// Path detection uses `token_looks_like_path` (no stat) to stay cheap
-    /// on large outputs; the exact `path_at` filesystem check only runs
-    /// on hover/right-click.
+    /// Path detection is a shape check plus, for chips, a lexical lookup in
+    /// the change index — no filesystem stat. The exact `path_at` check
+    /// only runs on hover/right-click.
     fn scan_visible_spans(&mut self) {
-        self.visible_url_spans.clear();
-        self.visible_path_spans.clear();
-
         let Some(terminal) = self.terminal.as_ref() else {
+            self.visible_url_spans.clear();
+            self.visible_path_spans.clear();
+            self.visible_chips.clear();
             return;
         };
-        let num_lines = {
+        let out = {
             let term = terminal.term.lock();
-            term.grid().screen_lines()
+            path_decor::scan_grid(
+                &term,
+                self.working_dir.as_deref(),
+                self.change_index.as_deref(),
+            )
         };
+        self.visible_url_spans = out.url_spans;
+        self.visible_path_spans = out.path_spans;
+        self.visible_chips = out.chips;
+    }
 
-        for row in 0..num_lines {
-            let (chars, cols) = self.line_chars_cols(row);
-            if chars.is_empty() {
-                continue;
-            }
-
-            // URLs: http(s):// scan (same as url_at).
-            let text: String = chars.iter().collect();
-            for (scheme_start, _) in text
-                .match_indices("http://")
-                .chain(text.match_indices("https://"))
-            {
-                // Convert byte offset → char offset in `chars`.
-                let prefix = &text[..scheme_start];
-                let char_start = prefix.chars().count();
-                let mut char_end = char_start;
-                while char_end < chars.len() {
-                    let c = chars[char_end];
-                    if c.is_whitespace() || matches!(c, ')' | ']' | '>' | '"' | '\'') {
-                        break;
-                    }
-                    char_end += 1;
-                }
-                while char_end > char_start
-                    && matches!(chars[char_end - 1], '.' | ',' | ';' | ':' | '!' | '?')
-                {
-                    char_end -= 1;
-                }
-                if char_end > char_start {
-                    let col_start = cols[char_start];
-                    let col_end = cols[char_end - 1];
-                    self.visible_url_spans.push((row, col_start, col_end));
-                }
-            }
-
-            // Paths: whitespace-delimited tokens that look like paths.
-            let mut i = 0;
-            while i < chars.len() {
-                if chars[i].is_whitespace() {
-                    i += 1;
-                    continue;
-                }
-                let tok_start = i;
-                while i < chars.len() && !chars[i].is_whitespace() {
-                    i += 1;
-                }
-                let mut tok_end = i - 1;
-
-                // Trim matched brackets/quotes.
-                let mut ts = tok_start;
-                while ts < tok_end && matches!(chars[ts], '(' | '[' | '{' | '<' | '"' | '\'' | '`')
-                {
-                    ts += 1;
-                }
-                while tok_end > ts
-                    && matches!(
-                        chars[tok_end],
-                        ')' | ']' | '}' | '>' | '"' | '\'' | '`' | ',' | ';' | '.' | '!' | '?'
-                    )
-                {
-                    tok_end -= 1;
-                }
-                if ts > tok_end {
-                    continue;
-                }
-                let token: String = chars[ts..=tok_end].iter().collect();
-                if Self::token_looks_like_path(&token) {
-                    let col_start = cols[ts];
-                    let col_end = cols[tok_end];
-                    self.visible_path_spans.push((row, col_start, col_end));
-                }
-            }
+    /// Receive this session's change index from the parent (each render).
+    /// Cheap when unchanged: a pointer comparison.
+    pub fn set_change_index(
+        &mut self,
+        index: Option<Arc<SessionChangeIndex>>,
+        cx: &mut Context<Self>,
+    ) {
+        let same = match (&self.change_index, &index) {
+            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if same {
+            return;
         }
+        self.change_index = index;
+        // An open peek is showing a diff the agent may just have extended.
+        if let Some(peek) = self.peek.as_ref() {
+            let (path, position) = (peek.path.clone(), peek.position);
+            let changed = self
+                .change_index
+                .as_deref()
+                .and_then(|i| i.get(&path).cloned());
+            self.open_peek(path, changed, None, position, cx);
+        }
+        cx.notify();
+    }
+
+    /// ⌥-hover: open (or keep) the peek for the path under `position`.
+    /// A position over no path leaves an open peek alone — only Esc, a
+    /// click, or another path replaces it.
+    pub(crate) fn alt_hover(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let x = f32::from(position.x);
+        let y = f32::from(position.y);
+        let Some(hit) = self.pixel_to_cell(x, y).and_then(|c| self.path_hit_at(c)) else {
+            return;
+        };
+        if self.peek.as_ref().is_some_and(|p| p.path == hit.path) {
+            return;
+        }
+        if hit.changed.is_none() && !hit.path.is_file() {
+            return; // a directory has no diff and no first lines
+        }
+        let line = hit.line_col.map(|(l, _)| l);
+        self.open_peek(hit.path, hit.changed, line, position, cx);
+    }
+
+    fn open_peek(
+        &mut self,
+        path: PathBuf,
+        changed: Option<ChangedPath>,
+        around: Option<u32>,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        self.peek_gen += 1;
+        let generation = self.peek_gen;
+        self.peek = Some(DiffPeek {
+            path: path.clone(),
+            changed: changed.clone(),
+            position,
+            body: PeekBody::Loading,
+            generation,
+        });
+        let repo = self
+            .change_index
+            .as_deref()
+            .map(|i| i.repo_dir.clone())
+            .unwrap_or_default();
+        cx.notify();
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let body = cx
+                .background_executor()
+                .spawn(async move { path_decor::load_peek(&repo, changed.as_ref(), &path, around) })
+                .await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                if let Some(peek) = this.peek.as_mut().filter(|p| p.generation == generation) {
+                    peek.body = body;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Context menu → "Show diff": hand the file to the Changes panel.
+    pub(crate) fn menu_show_diff(&mut self, cx: &mut Context<Self>) {
+        if let Some(changed) = self
+            .terminal_context_menu
+            .as_ref()
+            .and_then(|m| m.changed.as_ref())
+        {
+            cx.emit(TerminalEvent::ShowDiff {
+                rel_path: changed.rel_path.clone(),
+                staged: changed.preferred_side(),
+            });
+        }
+    }
+
+    /// Context menu → "Open at this line in editor".
+    pub(crate) fn menu_open_at_line(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.terminal_context_menu.as_ref() else {
+            return;
+        };
+        if let Some(line) = menu.this_line() {
+            cx.emit(TerminalEvent::OpenExternalEditor {
+                path: menu.path.clone(),
+                line_col: Some((line, None)),
+            });
+        }
+    }
+
+    /// Close the peek. True if one was open.
+    pub(crate) fn close_peek(&mut self) -> bool {
+        self.peek_gen += 1; // drop any load in flight
+        self.peek.take().is_some()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn peek(&self) -> Option<&DiffPeek> {
+        self.peek.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn context_menu(&self) -> Option<&TerminalCtxMenu> {
+        self.terminal_context_menu.as_ref()
+    }
+
+    /// Open the path context menu for `hit` at `position`. For a changed
+    /// file, load its diff in the background to learn the first changed
+    /// line for "Open at this line in editor".
+    pub(crate) fn open_path_menu(
+        &mut self,
+        hit: PathHit,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let needs_line = hit.changed.is_some() && hit.line_col.is_none();
+        self.terminal_context_menu = Some(TerminalCtxMenu {
+            path: hit.path.clone(),
+            line_col: hit.line_col,
+            position,
+            changed: hit.changed.clone(),
+            change_line: None,
+        });
+        cx.notify();
+        let (Some(changed), Some(repo), true) = (
+            hit.changed,
+            self.change_index.as_deref().map(|i| i.repo_dir.clone()),
+            needs_line,
+        ) else {
+            return;
+        };
+        self.peek_gen += 1;
+        let generation = self.peek_gen;
+        let path = hit.path;
+        cx.spawn(async move |this: WeakEntity<Self>, cx| {
+            let line = cx
+                .background_executor()
+                .spawn(async move {
+                    path_decor::load_peek(&repo, Some(&changed), &path, None).first_changed_line()
+                })
+                .await;
+            let _ = this.update(cx, |this: &mut Self, cx| {
+                if this.peek_gen != generation {
+                    return;
+                }
+                if let Some(menu) = this.terminal_context_menu.as_mut() {
+                    menu.change_line = line;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Update search matches by scanning visible grid for query string.
@@ -1501,6 +1641,47 @@ impl TerminalView {
 
         let path_for_open = path.clone();
         let path_for_reveal = path;
+        let changed = menu.changed.clone();
+        // "This line": the `:line` the path was printed with, else the first
+        // line this session changed in the file (loaded on open).
+        let this_line = menu.this_line();
+
+        let disabled = |id: &'static str, label: String| {
+            div()
+                .id(id)
+                .px(px(14.0))
+                .py(px(6.0))
+                .text_size(px(12.0))
+                .text_color(theme().text_ghost)
+                .child(label)
+        };
+
+        let show_diff = match changed {
+            Some(changed) => item(
+                "term-ctx-show-diff",
+                format!("Show diff ({})", changed.chip_label()),
+                Box::new(|this: &mut TerminalView, cx: &mut Context<TerminalView>| {
+                    this.menu_show_diff(cx);
+                }),
+            )
+            .into_any_element(),
+            None => {
+                disabled("term-ctx-show-diff", "Show diff (unchanged)".into()).into_any_element()
+            }
+        };
+
+        let open_line = match this_line {
+            Some(line) => item(
+                "term-ctx-open-line",
+                format!("Open at this line in editor ({line})"),
+                Box::new(|this: &mut TerminalView, cx: &mut Context<TerminalView>| {
+                    this.menu_open_at_line(cx);
+                }),
+            )
+            .into_any_element(),
+            None => disabled("term-ctx-open-line", "Open at this line in editor".into())
+                .into_any_element(),
+        };
 
         let menu_el = div()
             .flex()
@@ -1516,15 +1697,16 @@ impl TerminalView {
                 "term-ctx-open-editor",
                 label_open,
                 Box::new(
-                    move |this: &mut TerminalView, cx: &mut Context<TerminalView>| {
+                    move |_this: &mut TerminalView, cx: &mut Context<TerminalView>| {
                         cx.emit(TerminalEvent::OpenExternalEditor {
                             path: path_for_open.clone(),
                             line_col,
                         });
-                        let _ = this;
                     },
                 ),
             ))
+            .child(open_line)
+            .child(show_diff)
             .child(item(
                 "term-ctx-reveal",
                 "Reveal in Finder".to_string(),
@@ -1676,6 +1858,7 @@ impl Render for TerminalView {
         )
         .url_spans(self.visible_url_spans.clone())
         .path_spans(self.visible_path_spans.clone())
+        .chips(self.visible_chips.clone(), theme().text_dim)
         .origin_out(self.element_origin_x.clone(), self.element_origin_y.clone());
 
         let bell_active = self.bell_flash_start.is_some();
@@ -1714,6 +1897,12 @@ impl Render for TerminalView {
                     // Escape dismisses an open terminal context menu first.
                     if key == "escape" && this.terminal_context_menu.is_some() {
                         this.terminal_context_menu = None;
+                        cx.notify();
+                        return;
+                    }
+                    // Then the diff peek (DEV-1262). Consumed: the Esc that
+                    // closes an overlay must never reach the PTY.
+                    if key == "escape" && this.close_peek() {
                         cx.notify();
                         return;
                     }
@@ -1901,9 +2090,13 @@ impl Render for TerminalView {
                     // A press that reaches the grid supersedes any earlier one,
                     // whether or not this one ends up being reported.
                     this.left_press_forwarded = false;
-                    // Any left-click dismisses an open terminal context menu.
+                    // Any left-click dismisses an open terminal context menu,
+                    // and the diff peek.
                     if this.terminal_context_menu.is_some() {
                         this.terminal_context_menu = None;
+                        cx.notify();
+                    }
+                    if this.close_peek() {
                         cx.notify();
                     }
                     let viewport = window.viewport_size();
@@ -2034,6 +2227,16 @@ impl Render for TerminalView {
             )
             .on_mouse_move(
                 cx.listener(|this: &mut Self, event: &MouseMoveEvent, window, cx| {
+                    this.last_mouse = Some(event.position);
+                    // ⌥-hover peeks at a path (DEV-1262). Like ⌘-hover it is
+                    // Allele's, not the TUI's, so it bypasses mouse reporting.
+                    if event.modifiers.alt
+                        && !event.modifiers.platform
+                        && event.pressed_button.is_none()
+                    {
+                        this.alt_hover(event.position, cx);
+                        return;
+                    }
                     if this.mouse_reporting_active() && !event.modifiers.platform {
                         this.forward_mouse_move(event);
                         if this.hovered_url.is_some() || this.hovered_path.is_some() {
@@ -2173,13 +2376,8 @@ impl Render for TerminalView {
                     }
 
                     // Path: show context menu anchored at the click point.
-                    if let Some((_, _, _, path, line_col)) = this.path_at(cell) {
-                        this.terminal_context_menu = Some(TerminalCtxMenu {
-                            path,
-                            line_col,
-                            position: event.position,
-                        });
-                        cx.notify();
+                    if let Some(hit) = this.path_hit_at(cell) {
+                        this.open_path_menu(hit, event.position, cx);
                     } else if this.terminal_context_menu.is_some() {
                         this.terminal_context_menu = None;
                         cx.notify();
@@ -2313,8 +2511,19 @@ impl Render for TerminalView {
                         .store(true, std::sync::atomic::Ordering::Relaxed);
                 },
             ))
+            .on_modifiers_changed(cx.listener(
+                |this: &mut Self, event: &ModifiersChangedEvent, _window, cx| {
+                    // Pressing ⌥ over a path without moving opens its peek.
+                    if event.modifiers.alt && !event.modifiers.platform {
+                        if let Some(position) = this.last_mouse {
+                            this.alt_hover(position, cx);
+                        }
+                    }
+                },
+            ))
             .child(grid_element)
             .children(self.render_terminal_context_menu(cx))
+            .children(self.peek.as_ref().map(super::diff_peek::render_peek))
             .children(if self.search_active {
                 let match_count = self.search_matches.len();
                 let current = if match_count > 0 {
@@ -2511,9 +2720,12 @@ pub(crate) fn parse_line_col_suffix(token: &str) -> (&str, Option<(u32, Option<u
     // Walk from end, peeling at most two numeric segments.
     let bytes = token.as_bytes();
     let mut end = bytes.len();
-    let mut nums: Vec<(usize, u32)> = Vec::with_capacity(2);
+    // At most two `(colon position, number)` pairs, rightmost first. A fixed
+    // array, not a Vec: this runs for every path-shaped token on every render.
+    let mut nums: [(usize, u32); 2] = [(0, 0); 2];
+    let mut found = 0;
 
-    while nums.len() < 2 {
+    while found < 2 {
         // Scan backwards over digits.
         let mut digit_start = end;
         while digit_start > 0 && bytes[digit_start - 1].is_ascii_digit() {
@@ -2528,24 +2740,27 @@ pub(crate) fn parse_line_col_suffix(token: &str) -> (&str, Option<(u32, Option<u
         }
         let digits = &token[digit_start..end];
         let Ok(n) = digits.parse::<u32>() else { break };
-        nums.push((digit_start - 1, n)); // colon position
+        nums[found] = (digit_start - 1, n); // colon position
+        found += 1;
         end = digit_start - 1;
     }
 
-    if nums.is_empty() {
+    if found == 0 {
         return (token, None);
     }
-    // nums[0] is the rightmost (col if two), nums[last] is leftmost (line).
-    // SAFETY: `nums.is_empty()` was checked immediately above.
-    let path_end = nums.last().unwrap().0;
+    // nums[0] is the rightmost (col if two), nums[found-1] the leftmost (line).
+    let path_end = nums[found - 1].0;
     let path_part = &token[..path_end];
     if path_part.is_empty() {
         return (token, None);
     }
-    let line_col = match nums.len() {
+    let line_col = match found {
         1 => Some((nums[0].1, None)),
-        2 => Some((nums[1].1, Some(nums[0].1))),
-        _ => None,
+        _ => Some((nums[1].1, Some(nums[0].1))),
     };
     (path_part, line_col)
 }
+
+#[cfg(test)]
+#[path = "terminal_view_overlay_tests.rs"]
+mod overlay_tests;

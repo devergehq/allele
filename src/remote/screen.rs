@@ -98,6 +98,15 @@ const INPUT_QUEUE: usize = 64;
 /// reader stops and the link pushes back on the peer.
 const INPUT_BACKLOG: usize = 16;
 
+/// After remote input is written, the screen is polled this often instead of
+/// every `MIN_FRAME_INTERVAL`, so the echo goes out as soon as the program
+/// draws it rather than at the next 33 ms tick (DEV-1242).
+const ECHO_POLL: Duration = Duration::from_millis(4);
+
+/// How long after input the fast poll waits for the echo. A program slower
+/// than this to redraw is shown by the regular tick, as before.
+const ECHO_WINDOW: Duration = Duration::from_millis(100);
+
 /// What the client shows when the host drops its input for want of `control`.
 const NEEDS_CONTROL: &str = "typing needs control permission; grant it to this Mac in the \
                              other Mac's Settings → Machines";
@@ -438,6 +447,26 @@ impl Streamer {
             .flatten()
     }
 
+    /// Capture the screen and diff it against what the client has: the
+    /// frame to send, if anything changed. Both the tick and the echo
+    /// one-shot come through here, so neither sends a frame to a peer whose
+    /// `view` has been withdrawn.
+    async fn next_frame(
+        &self,
+        producer: &mut DiffProducer,
+    ) -> std::result::Result<Option<ScreenFrame>, Stopped> {
+        if !self.viewable() {
+            return Err(revoked());
+        }
+        let Some(cap) = self.capture().await else {
+            return Err(gone());
+        };
+        Ok(match producer.poll(std::time::Instant::now(), || cap) {
+            Poll::Frame(frame) => Some(frame),
+            Poll::Unchanged | Poll::Wait(_) => None,
+        })
+    }
+
     async fn run(self) -> Stopped {
         let PeerStream { mut send, recv } = match self.conn.open_stream().await {
             Ok(stream) => stream,
@@ -472,9 +501,15 @@ impl Streamer {
         };
         // Input on a task of its own: pacing and a paste's `Term` lock wait
         // hold up neither screen requests nor screen frames.
+        // `typed` tells the frame loop that input reached the PTY, so it can
+        // send the echo early. Refused input wrote nothing and has no echo.
+        let typed = Arc::new(Notify::new());
+        let typed_tx = Arc::clone(&typed);
         let _input = AbortOnDrop(tokio::spawn(async move {
             while let Some((text, paste)) = inputs.recv().await {
-                input.deliver(text, paste).await;
+                if input.deliver(text, paste).await {
+                    typed_tx.notify_one();
+                }
             }
         }));
         let _reader = AbortOnDrop(tokio::spawn(async move {
@@ -518,6 +553,20 @@ impl Streamer {
         let mut next_request = Instant::now();
         let mut tick = interval(MIN_FRAME_INTERVAL);
         tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        // The echo one-shot (DEV-1242). Input arms it; the first frame after
+        // that is sent at once instead of on the tick, and disarms it, so
+        // input adds at most one frame to the 30/s cap.
+        //
+        // The shot is spent on whatever changed first. When something
+        // unrelated (a spinner, a clock) draws between the input and its
+        // echo, the echo waits for the tick, as it did before DEV-1242:
+        // never later. Keeping the shot until the "real" echo would either
+        // send more than one extra frame per input, or need to tell an echo
+        // from a redraw, which a full-screen program like Claude Code (it
+        // repaints its whole input area for either) doesn't let us do.
+        let mut echo_until = Instant::now();
+        let mut echo_poll = interval(ECHO_POLL);
+        echo_poll.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             let frames: Vec<ScreenFrame> = tokio::select! {
                 _ = self.conn.closed() => return None,
@@ -568,16 +617,25 @@ impl Streamer {
                         return Some((ErrorCode::BadRequest, "unexpected frame".into()));
                     }
                 },
-                _ = tick.tick() => {
-                    if !self.viewable() {
-                        return revoked();
-                    }
-                    let Some(cap) = self.capture().await else { return gone() };
-                    match producer.poll(std::time::Instant::now(), || cap) {
-                        Poll::Frame(frame) => vec![frame],
-                        Poll::Unchanged | Poll::Wait(_) => continue,
+                _ = typed.notified() => {
+                    echo_until = Instant::now() + ECHO_WINDOW;
+                    continue;
+                }
+                _ = echo_poll.tick(), if Instant::now() < echo_until => {
+                    match self.next_frame(&mut producer).await {
+                        Ok(Some(frame)) => {
+                            echo_until = Instant::now();
+                            vec![frame]
+                        }
+                        Ok(None) => continue,
+                        Err(stop) => return stop,
                     }
                 }
+                _ = tick.tick() => match self.next_frame(&mut producer).await {
+                    Ok(Some(frame)) => vec![frame],
+                    Ok(None) => continue,
+                    Err(stop) => return stop,
+                },
             };
             for frame in frames {
                 // A slow link blocks here, and no frame is produced meanwhile:
@@ -619,8 +677,9 @@ impl Input {
             .is_some_and(|p| allows(p, Need::Control))
     }
 
-    /// Write one `input` frame to the PTY, or drop it and say why.
-    async fn deliver(&mut self, text: String, paste: bool) {
+    /// Write one `input` frame to the PTY, or drop it and say why. Whether
+    /// it was written.
+    async fn deliver(&mut self, text: String, paste: bool) -> bool {
         // Every frame is paced, refused or not, by the bytes the peer sent;
         // and before the check, so the permission read is the last thing
         // before the write.
@@ -629,11 +688,13 @@ impl Input {
         self.next = Instant::now() + pace.max(MIN_INPUT_INTERVAL);
         if text.len() > MAX_INPUT_BYTES {
             let message = format!("input over {MAX_INPUT_BYTES} bytes was not sent");
-            return self.refuse(ErrorCode::BadRequest, message);
+            self.refuse(ErrorCode::BadRequest, message);
+            return false;
         }
         if !self.controllable() {
             tracing::debug!("remote: {} input dropped: needs control", self.peer.short());
-            return self.refuse(ErrorCode::PermissionDenied, NEEDS_CONTROL.into());
+            self.refuse(ErrorCode::PermissionDenied, NEEDS_CONTROL.into());
+            return false;
         }
         let term = Arc::clone(&self.term);
         let written = if paste {
@@ -653,6 +714,7 @@ impl Input {
             let message = "the session no longer takes input".to_string();
             self.refuse(ErrorCode::SessionNotFound, message);
         }
+        written
     }
 
     fn refuse(&self, code: ErrorCode, message: String) {

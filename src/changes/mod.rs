@@ -81,7 +81,12 @@ impl AppState {
         // calls on one clone, which on a large repo costs more than the poll
         // this whole change exists to shrink. The two are guarded by different
         // fields, so neither sees the other; only this one can see both.
-        if self.right_panel.visible && self.changes.repo_dir.as_ref() == Some(&dir) {
+        //
+        // Since DEV-1262 the file list loads whether or not the panel is open
+        // (the Claude terminal decorates paths from it), so this guard now
+        // always holds once `ensure_changes_fresh` has run for `dir`; it
+        // stays for the frame where it has not.
+        if self.changes.repo_dir.as_ref() == Some(&dir) {
             return;
         }
 
@@ -109,15 +114,17 @@ impl AppState {
         .detach();
     }
 
-    /// Render-time staleness check: when the panel is visible but its data
-    /// was loaded for a different directory than the active session's clone
-    /// (session switch, first open), kick off a refresh. The guard is the
-    /// directory comparison itself — `refresh_changes` records the new
-    /// directory synchronously, so this fires at most once per change.
+    /// Render-time staleness check: when the changes data was loaded for a
+    /// different directory than the active session's clone (session switch,
+    /// first open), kick off a refresh. The guard is the directory
+    /// comparison itself — `refresh_changes` records the new directory
+    /// synchronously, so this fires at most once per change.
+    ///
+    /// Not gated on the panel being open: the Claude terminal's path chips
+    /// (DEV-1262) read the same data, and they are on screen either way.
+    /// It is one `git status` plus two `git diff --numstat` against the
+    /// active clone only, per session switch.
     pub(crate) fn ensure_changes_fresh(&mut self, cx: &mut Context<Self>) {
-        if !self.right_panel.visible {
-            return;
-        }
         let active_dir = self.active_session().and_then(|s| s.clone_path.clone());
         if self.changes.repo_dir != active_dir {
             self.refresh_changes(cx);
@@ -144,6 +151,8 @@ impl AppState {
             // Never show (or diff against) the previous repo's rows while
             // the new directory's status loads.
             self.changes.files.clear();
+            self.changes.stats.clear();
+            self.changes.index = None;
             self.changes.selected = None;
             self.changes.diff = None;
             self.changes.error = None;
@@ -171,7 +180,13 @@ impl AppState {
                     if !crate::git::is_git_repo(&dir) {
                         return None;
                     }
-                    Some(crate::git::status_changes(&dir))
+                    Some(crate::git::status_changes(&dir).map(|files| {
+                        let stats = crate::git::line_stats(&dir, &files);
+                        let index = crate::terminal::path_decor::SessionChangeIndex::build(
+                            &dir, &files, &stats,
+                        );
+                        (files, stats, std::sync::Arc::new(index))
+                    }))
                 })
                 .await;
             let _ = this.update(cx, |this: &mut Self, cx| {
@@ -183,10 +198,12 @@ impl AppState {
                     None => {
                         this.changes.is_repo = false;
                         this.changes.files.clear();
+                        this.changes.stats.clear();
+                        this.changes.index = None;
                         this.changes.selected = None;
                         this.changes.diff = None;
                     }
-                    Some(Ok(files)) => {
+                    Some(Ok((files, stats, index))) => {
                         this.changes.is_repo = true;
                         this.changes.error = None;
                         // Drop the selection if its row disappeared (e.g.
@@ -199,6 +216,8 @@ impl AppState {
                             }
                         }
                         this.changes.files = files;
+                        this.changes.stats = stats;
+                        this.changes.index = Some(index);
                         // Opening or refreshing the panel is a fresh, exact
                         // observation — fold it back into the session so the
                         // header doesn't wait up to 15s for the next poll.
@@ -229,6 +248,8 @@ impl AppState {
                     Some(Err(e)) => {
                         tracing::warn!("changes panel: git status failed: {e}");
                         this.changes.files.clear();
+                        this.changes.stats.clear();
+                        this.changes.index = None;
                         this.changes.error = Some(format!("Could not load changes: {e}"));
                         // A failed status is not an observation of "clean" —
                         // drop back to unknown rather than claiming zero.
@@ -448,6 +469,26 @@ impl AppState {
                     .text_color(theme().text_primary)
                     .whitespace_nowrap()
                     .child(file.path.clone()),
+            )
+            .children(
+                self.changes
+                    .stats
+                    .get(&(file.path.clone(), file.staged))
+                    .map(|stat| {
+                        // The same numbers the terminal's path chips sum
+                        // (DEV-1262), in the same dim register.
+                        let label = if stat.binary {
+                            "bin".to_string()
+                        } else {
+                            format!("+{} \u{2212}{}", stat.added, stat.removed)
+                        };
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(10.0))
+                            .font_family("monospace")
+                            .text_color(theme().text_dim)
+                            .child(label)
+                    }),
             )
             .on_mouse_down(
                 MouseButton::Left,

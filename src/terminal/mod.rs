@@ -1,7 +1,9 @@
+mod diff_peek;
 mod grid_element;
 pub mod grid_source;
 pub mod keymap;
 pub mod mirror;
+pub mod path_decor;
 pub mod pty_terminal;
 mod terminal_view;
 

@@ -74,6 +74,13 @@ pub(crate) struct ChangesPanelState {
     /// Changed files from `git status`, staged and unstaged entries mixed
     /// (each entry knows its side). Rebuilt wholesale on every refresh.
     pub(crate) files: Vec<crate::git::ChangedFile>,
+    /// `+N −M` per row of `files`, loaded with it (DEV-1262).
+    pub(crate) stats: crate::git::LineStats,
+    /// `files` + `stats` keyed for lookup from terminal text, so the Claude
+    /// terminal can decorate the paths it prints with this session's
+    /// changes. Rebuilt with `files`; `None` whenever `files` is not a
+    /// loaded observation of `repo_dir`. Shared, not copied, per render.
+    pub(crate) index: Option<std::sync::Arc<crate::terminal::path_decor::SessionChangeIndex>>,
     /// Selected file row: (repo-relative path, staged side).
     pub(crate) selected: Option<(String, bool)>,
     /// Diff text for the selected file, once loaded.
@@ -353,6 +360,9 @@ pub(crate) struct AppState {
     pub(crate) drawer: DrawerState,
     pub(crate) reader: ReaderState,
     pub(crate) confirming: ConfirmationState,
+    /// What closing each idle session would lose (DEV-1260). Filled by the
+    /// background poller, read by the sidebar; never computed in render.
+    pub(crate) loss_verdicts: crate::session::rest::VerdictCache,
     pub(crate) rich: RichState,
     /// Absolute path to the Allele hooks.json, passed to claude via
     /// `--settings <path>` at every spawn. `None` if install_if_missing
@@ -401,11 +411,17 @@ pub(crate) struct AppState {
     /// before session creation. Auto-dismissed after a few seconds.
     pub(crate) pull_warning: Option<String>,
     /// Transient status/result banner for session-sync actions (sync-up /
-    /// pull) and Away's summary (DEV-1157). Dismissed by the user or replaced
-    /// by the next message.
+    /// pull), Away's summary (DEV-1157), and the reason an agent-written link
+    /// was refused (DEV-1252). Dismissed by the user or replaced by the next
+    /// message.
     pub(crate) sync_notice: Option<String>,
     /// Which view the center column is currently showing.
     pub(crate) main_tab: MainTab,
+    /// Local per-tab focused-time counters (DEV-1265). Observes only.
+    pub(crate) usage: crate::usage::UsageTracker,
+    /// Whether the main window is the key window, kept current by the
+    /// activation observer in `main.rs`. Gates the usage counters.
+    pub(crate) window_focused: bool,
     /// Status text for the Browser tab panel (e.g. "Chrome is not
     /// running", "Linked to tab #…"). Updated by SyncBrowserToActiveSession
     /// and rendered by render_browser_placeholder.
@@ -694,6 +710,7 @@ impl AppState {
     /// may not have reached disk, and the process is about to stop existing —
     /// so an orderly exit pays the write rather than losing the state.
     pub(crate) fn flush_persistence_blocking(&mut self) {
+        self.usage.flush();
         if self.state_dirty {
             self.save_state();
             self.state_dirty = false;
@@ -1073,6 +1090,7 @@ pub(crate) mod fixture {
                         delete_all_archives: None,
                         armed_at: None,
                     },
+                    loss_verdicts: Default::default(),
                     rich: RichState {
                         view: None,
                         transcript_tailer: None,
@@ -1089,6 +1107,8 @@ pub(crate) mod fixture {
                     sync_notice: None,
                     pairing_alert: Default::default(),
                     main_tab: MainTab::Claude,
+                    usage: crate::usage::UsageTracker::load(None),
+                    window_focused: true,
                     browser_status: String::new(),
                     scratch_pad: None,
                     new_session_modal: None,
