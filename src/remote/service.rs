@@ -836,6 +836,9 @@ pub(crate) fn call_deadline(op: &Request) -> Duration {
         | Request::SessionsList
         | Request::SessionsStatus { .. }
         | Request::SessionsInterrupt { .. } => Duration::from_secs(30),
+        Request::DecisionsPost(_)
+        | Request::DecisionsList { .. }
+        | Request::DecisionsWithdraw { .. } => Duration::from_secs(30),
     }
 }
 

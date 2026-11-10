@@ -37,6 +37,19 @@ pub enum Request {
     SessionsDiscard { session_id: String },
     /// Stop whatever a dispatched session is currently doing.
     SessionsInterrupt { session_id: String },
+    /// Post a question for the developer; returns at once (DEV-1267).
+    DecisionsPost(crate::decisions::PostRequest),
+    /// The calling session's own questions, with any answers (DEV-1267).
+    DecisionsList {
+        #[serde(default)]
+        caller_session_id: Option<String>,
+    },
+    /// Withdraw one of the calling session's open questions (DEV-1267).
+    DecisionsWithdraw {
+        id: String,
+        #[serde(default)]
+        caller_session_id: Option<String>,
+    },
 }
 
 /// Parameters for `sessions.create`.
@@ -169,6 +182,18 @@ pub enum Response {
     Error {
         code: ErrorCode,
         message: String,
+    },
+    /// `decisions_post` (DEV-1267). Boxed for the reason `Status` is.
+    DecisionPosted {
+        decision: Box<crate::decisions::DecisionSummary>,
+    },
+    /// `decisions_list` (DEV-1267).
+    Decisions {
+        decisions: Vec<crate::decisions::DecisionSummary>,
+    },
+    /// `decisions_withdraw` (DEV-1267).
+    DecisionWithdrawn {
+        decision: Box<crate::decisions::DecisionSummary>,
     },
 }
 
@@ -623,5 +648,43 @@ mod tests {
         ] {
             assert_eq!(SessionState::from(internal), wire);
         }
+    }
+
+    /// The decision ops' wire spelling (DEV-1267). The caller id is optional on
+    /// the wire: a request without one parses and is refused by the handler.
+    #[test]
+    fn decision_ops_round_trip_over_the_wire() {
+        let post: Request = serde_json::from_str(
+            r#"{"op":"decisions_post","question":"Q?","options":["a","b"],"assumed":1}"#,
+        )
+        .expect("parses");
+        match &post {
+            Request::DecisionsPost(p) => {
+                assert_eq!(p.assumed, 1);
+                assert!(p.unblocks.is_empty());
+                assert_eq!(p.caller_session_id, None);
+            }
+            other => panic!("parsed as {other:?}"),
+        }
+        for r in [
+            post,
+            Request::DecisionsList {
+                caller_session_id: Some("c".into()),
+            },
+            Request::DecisionsWithdraw {
+                id: "d1".into(),
+                caller_session_id: None,
+            },
+        ] {
+            let line = serde_json::to_string(&r).expect("serialises");
+            assert_eq!(serde_json::from_str::<Request>(&line).expect("parses"), r);
+        }
+        assert_eq!(
+            serde_json::to_value(Request::DecisionsList {
+                caller_session_id: None
+            })
+            .unwrap()["op"],
+            "decisions_list"
+        );
     }
 }

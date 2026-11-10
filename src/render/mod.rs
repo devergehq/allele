@@ -1774,6 +1774,12 @@ impl Render for AppState {
                 main_area_idx += 1;
             }
 
+            // --- Decision strip (questions sessions posted for you, DEV-1267) ---
+            if let Some(decisions) = self.render_decisions_panel(cx) {
+                content_col = content_col.child(decisions);
+                main_area_idx += 1;
+            }
+
             if let Some(summary) = remote_view
                 .is_none()
                 .then(|| self.render_session_summary_header(active_is_resumable, cx))

@@ -262,6 +262,11 @@ re-wrote the whole file.
 - `state_dirty`
 - `settings_dirty`
 
+A third, `decisions.dirty` (set by `mark_decisions_dirty()`), covers
+`decisions.json` — the decision list (DEV-1267), behind
+`repositories::DecisionsRepository` and flushed by the same checkpoint
+and debounce.
+
 Handlers call `self.mark_state_dirty()` / `self.mark_settings_dirty()`
 after mutating state. The render method's final act is
 `self.checkpoint_persistence()` which drains the flags, writing at
