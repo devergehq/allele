@@ -104,7 +104,7 @@ fn serve() -> i32 {
     0
 }
 
-fn tool_definitions() -> Value {
+pub(crate) fn tool_definitions() -> Value {
     json!([
         {
             "name": "allele_projects_list",

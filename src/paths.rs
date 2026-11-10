@@ -264,6 +264,11 @@ pub fn keymap_file() -> Option<PathBuf> {
     allele_dir().map(|d| d.join("keymap.json"))
 }
 
+/// The generated guide for agents (DEV-1263), rewritten on every launch.
+pub fn agents_guide_file() -> Option<PathBuf> {
+    allele_dir().map(|d| d.join("AGENTS.md"))
+}
+
 pub fn crash_dir() -> Option<PathBuf> {
     allele_dir().map(|d| d.join("crash"))
 }
@@ -344,6 +349,7 @@ mod tests {
             ("workspaces_root", workspaces_root()),
             ("trash_root", trash_root()),
             ("keymap_file", keymap_file()),
+            ("agents_guide_file", agents_guide_file()),
             ("crash_dir", crash_dir()),
             ("diagnostics_dir", diagnostics_dir()),
             ("debug_dir", debug_dir()),

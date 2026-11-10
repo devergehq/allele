@@ -37,6 +37,11 @@ Changes on `master` awaiting the next tagged release.
   file in the Changes panel) and **Open at this line in editor**. All of it is drawn over
   the terminal and never typed into it; a path Claude truncated (`src/…/foo.rs`) gets
   nothing.
+- **A guide for agents, `~/.allele/AGENTS.md`**, written on every launch and generated from
+  the code: every setting with its type and default, the keymap file and every bindable
+  action, the MCP tools, and which files an agent may edit versus Allele's private
+  `state.json`. It is rewritten only when its content changes. Tests fail when a setting or
+  keymap action is missing from it.
 - **Collapsible sidebar.** Click a project header to fold its sessions and archives away;
   click a machine row, or a project heading under it, to fold that too. The MACHINES
   section can be moved above the local projects from its header. Folds and position
