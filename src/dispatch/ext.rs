@@ -22,6 +22,7 @@
 //! Capabilities exist so a desk that only meant to watch cannot start
 //! sessions by accident, and so the record says who did what.
 
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{RecvTimeoutError, Sender};
@@ -343,7 +344,35 @@ pub(crate) fn view(
             }
         }
     }
+    resolve_parents(state, &mut view.sessions);
     view
+}
+
+/// Rewrite a `parent` that holds a live session's Claude conversation id to
+/// that session's Allele id. Sessions dispatched before DEV-1268 stored the
+/// caller's conversation id, which matches no `session_id` once the parent's
+/// conversation has rotated. A parent that is already an Allele id, or that
+/// matches no live session, is left as stored.
+fn resolve_parents(state: &crate::app_state::AppState, entries: &mut [SessionEntry]) {
+    let sessions = || state.projects.iter().flat_map(|p| p.sessions.iter());
+    let ids: HashSet<&str> = sessions().map(|s| s.id.as_str()).collect();
+    let mut by_conversation: HashMap<&str, &str> = HashMap::new();
+    for s in sessions() {
+        by_conversation
+            .entry(s.claude_session_id())
+            .or_insert(s.id.as_str());
+    }
+    for entry in entries {
+        let Some(parent) = entry.parent.as_deref() else {
+            continue;
+        };
+        if ids.contains(parent) {
+            continue;
+        }
+        if let Some(id) = by_conversation.get(parent) {
+            entry.parent = Some((*id).to_string());
+        }
+    }
 }
 
 /// One live session as the contract sees it.
@@ -859,5 +888,57 @@ mod tests {
         assert_eq!(child.started_at, super::super::hub::unix_secs(started));
         assert_eq!(v.sessions[0].parent, None);
         assert_eq!(v.sessions[0].dispatched_by, None);
+    }
+
+    fn dispatched_by(id: &str) -> SessionOrigin {
+        SessionOrigin::Dispatched {
+            by_session_id: id.into(),
+            by_label: "Lead".into(),
+            depth: 1,
+        }
+    }
+
+    /// DEV-1268. A child stored before the fix holds its parent's *Claude
+    /// conversation* id, which differs from the parent's Allele id once the
+    /// conversation has rotated. The feed still reports the Allele id, so
+    /// `parent` names a `session_id` in the same snapshot and
+    /// `descendants_of` reaches the child and the child's own children.
+    #[gpui::test]
+    fn a_parent_stored_as_a_conversation_id_resolves_to_the_allele_id(cx: &mut TestAppContext) {
+        let mut p = project(&[("lead", None), ("child", None), ("grandchild", None)]);
+        p.sessions[0].claude_session_id = Some("conv-lead".into());
+        p.sessions[1].origin = dispatched_by("conv-lead");
+        p.sessions[2].origin = dispatched_by("child");
+        let fx = Fixture::with_projects(vec![p], cx);
+
+        let v = fx.update(cx, |state, _w, cx| view(state, cx, false));
+        assert_eq!(v.sessions[1].parent.as_deref(), Some("lead"));
+        assert!(v.sessions.iter().any(|e| e.session_id == "lead"));
+
+        let hub = Hub::new();
+        let sub = hub.subscribe(Some(contract::Filter {
+            descendants_of: Some("lead".into()),
+            ..contract::Filter::default()
+        }));
+        hub.publish(v, Instant::now());
+        let snapshot: Frame =
+            serde_json::from_str(&sub.frames.try_recv().expect("snapshot")).expect("frame");
+        let Frame::Snapshot { sessions, .. } = snapshot else {
+            panic!("expected a snapshot, got {snapshot:?}");
+        };
+        let mut ids: Vec<_> = sessions.iter().map(|e| e.session_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["child", "grandchild"]);
+    }
+
+    /// A caller id that matches no session is reported as sent — unchanged
+    /// from before DEV-1268.
+    #[gpui::test]
+    fn an_unknown_parent_id_is_reported_as_sent(cx: &mut TestAppContext) {
+        let mut p = project(&[("child", None)]);
+        p.sessions[0].origin = dispatched_by("conv-gone");
+        let fx = Fixture::with_projects(vec![p], cx);
+        let v = fx.update(cx, |state, _w, cx| view(state, cx, false));
+        assert_eq!(v.sessions[0].parent.as_deref(), Some("conv-gone"));
     }
 }
