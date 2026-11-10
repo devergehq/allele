@@ -446,13 +446,14 @@ impl AppState {
             )
         });
 
+        let link_session_id = allele_session_id.clone();
         // ComposeBar submits bubble up as RichViewEvent::Submit. Route
         // them into the active PTY via the same bracketed-paste path
         // the Scratch Pad uses. Nothing here spawns or talks to the
         // `claude` binary directly.
         cx.subscribe(
             &view,
-            |this: &mut Self, _v, event: &rich::RichViewEvent, cx| match event {
+            move |this: &mut Self, _v, event: &rich::RichViewEvent, cx| match event {
                 rich::RichViewEvent::Submit { text, attachments } => {
                     let paths: Vec<PathBuf> = attachments.iter().map(|a| a.path.clone()).collect();
                     this.scratch_pad_send(text.clone(), paths, cx);
@@ -495,6 +496,18 @@ impl AppState {
                     // resolving the prompt ourselves (DEV-78).
                     this.main_tab = MainTab::Claude;
                     cx.notify();
+                }
+                rich::RichViewEvent::OpenLink { url } => {
+                    // The agent wrote this link, so it is confined to the clone
+                    // of the session the view belongs to — not whichever
+                    // session happens to be active (DEV-1252).
+                    this.open_deep_link(
+                        url,
+                        reader::deeplink::LinkOrigin::Agent {
+                            session: link_session_id.clone(),
+                        },
+                        cx,
+                    );
                 }
             },
         )

@@ -5,20 +5,28 @@
 //! sibling divs. Inline elements (bold, italic, inline code, links) become
 //! `TextRun`s inside a `StyledText` line.
 //!
-//! Pure function: `render(content, streaming, font_size) -> Div`. No memoisation,
-//! no `Window` parameter — fonts are constructed inline.
+//! Pure function: `render(content, streaming, font_size, id_seed, links) -> Div`.
+//! No memoisation, no `Window` parameter — fonts are constructed inline.
+//!
+//! Links are inert unless the caller passes a [`LinkSink`]. With one, each
+//! link's text becomes clickable and hovering it shows the link's full
+//! destination, so `[Review Desk](https://evil.example)` cannot pass for a
+//! local link (DEV-1252). What a click is allowed to open is the sink's
+//! business: rich mode routes it as an agent-origin deep link.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::hash::{Hash as _, Hasher as _};
+use std::ops::Range;
 use std::rc::Rc;
 
 use crate::rich::column::{mono_width, prose_width, scroll_x};
 use crate::syntax::{self, HlLine, TokenColors};
 use crate::theme::{theme, with_alpha};
 use gpui::{
-    div, px, Div, ElementId, Font, FontFeatures, FontStyle, FontWeight, Hsla, ParentElement as _,
-    SharedString, Styled as _, StyledText, TextRun, UnderlineStyle,
+    div, px, AnyElement, App, AppContext as _, Div, ElementId, Font, FontFeatures, FontStyle,
+    FontWeight, Hsla, InteractiveText, IntoElement as _, ParentElement as _, SharedString,
+    Styled as _, StyledText, TextRun, UnderlineStyle, Window,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
@@ -157,7 +165,7 @@ fn list_marker(list_stack: &mut [Option<u64>], base_color: Hsla) -> Option<ListM
 }
 
 /// One rendered table cell: its inline text and runs, or `None` when empty.
-type TableCell = Option<(SharedString, Vec<TextRun>)>;
+type TableCell = Option<InlineText>;
 
 /// Accumulates a table's cells as pulldown-cmark walks it.
 ///
@@ -219,11 +227,78 @@ impl TableBuilder {
     }
 }
 
+/// Receives the raw destination of a clicked markdown link.
+pub type LinkSink = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
+/// One paragraph/heading/cell's finished inline content.
+struct InlineText {
+    text: SharedString,
+    runs: Vec<TextRun>,
+    /// Byte ranges of link text in `text`, each with its destination.
+    links: Vec<(Range<usize>, SharedString)>,
+}
+
+/// Per-render link state: the caller's sink (if any) and a serial so every
+/// interactive text element in the render gets its own id.
+struct LinkCtx {
+    sink: Option<LinkSink>,
+    seed: u64,
+    serial: Cell<u64>,
+}
+
+impl LinkCtx {
+    /// Build the text element for `inline`: plain `StyledText` when there is
+    /// nothing to click, otherwise an `InteractiveText` whose link ranges
+    /// call the sink and show their destination on hover.
+    fn element(&self, inline: InlineText) -> AnyElement {
+        let styled = StyledText::new(inline.text).with_runs(inline.runs);
+        let Some(sink) = self.sink.clone() else {
+            return styled.into_any_element();
+        };
+        if inline.links.is_empty() {
+            return styled.into_any_element();
+        }
+        let ix = self.serial.get();
+        self.serial.set(ix + 1);
+        let id = ElementId::Name(format!("md-links-{}-{ix}", self.seed).into());
+        let (ranges, dests): (Vec<_>, Vec<_>) = inline.links.into_iter().unzip();
+        let dests = Rc::new(dests);
+        let click_dests = dests.clone();
+        let tip_ranges = ranges.clone();
+        InteractiveText::new(id, styled)
+            .on_click(ranges, move |range_ix, window, cx| {
+                if let Some(dest) = click_dests.get(range_ix) {
+                    sink(dest, window, cx);
+                }
+            })
+            .tooltip(move |char_ix, _window, cx| {
+                let dest = link_at(&tip_ranges, &dests, char_ix)?;
+                Some(cx.new(|_| crate::SimpleTooltip { text: dest }).into())
+            })
+            .into_any_element()
+    }
+}
+
+/// The destination of the link covering byte `char_ix`, if any.
+fn link_at(
+    ranges: &[Range<usize>],
+    dests: &[SharedString],
+    char_ix: usize,
+) -> Option<SharedString> {
+    ranges
+        .iter()
+        .position(|r| r.contains(&char_ix))
+        .and_then(|i| dests.get(i).cloned())
+}
+
 /// Accumulates a single paragraph/heading's worth of inline text + runs.
 struct InlineBuilder {
     text: String,
     runs: Vec<TextRun>,
     style: InlineStyle,
+    /// The link being written, as (start byte, destination).
+    open_link: Option<(usize, SharedString)>,
+    links: Vec<(Range<usize>, SharedString)>,
 }
 
 impl InlineBuilder {
@@ -232,6 +307,22 @@ impl InlineBuilder {
             text: String::new(),
             runs: Vec::new(),
             style: InlineStyle::default(),
+            open_link: None,
+            links: Vec::new(),
+        }
+    }
+
+    fn begin_link(&mut self, dest: &str) {
+        self.style.link = true;
+        self.open_link = Some((self.text.len(), SharedString::from(dest.to_string())));
+    }
+
+    fn end_link(&mut self) {
+        self.style.link = false;
+        if let Some((start, dest)) = self.open_link.take() {
+            if self.text.len() > start {
+                self.links.push((start..self.text.len(), dest));
+            }
         }
     }
 
@@ -249,16 +340,23 @@ impl InlineBuilder {
         self.text.is_empty()
     }
 
-    fn finish(self) -> Option<(SharedString, Vec<TextRun>)> {
+    fn finish(mut self) -> Option<InlineText> {
         if self.text.is_empty() {
             return None;
         }
+        // Streaming: a link whose closing bracket has not arrived yet still
+        // covers what has been written so far.
+        self.end_link();
         debug_assert_eq!(
             self.runs.iter().map(|r| r.len).sum::<usize>(),
             self.text.len(),
             "TextRun len sum must equal text byte length"
         );
-        Some((self.text.into(), self.runs))
+        Some(InlineText {
+            text: self.text.into(),
+            runs: self.runs,
+            links: self.links,
+        })
     }
 }
 
@@ -274,20 +372,21 @@ fn flush_inline(
     list_depth: usize,
     marker: &mut Option<ListMarker>,
     font_size: f32,
+    links: &LinkCtx,
 ) -> Div {
-    let Some((text, runs)) = std::mem::replace(inline, InlineBuilder::new()).finish() else {
+    let Some(text) = std::mem::replace(inline, InlineBuilder::new()).finish() else {
         return container;
     };
+    let text = links.element(text);
     if list_depth > 0 {
         container.child(list_item_element(
             marker.take(),
             list_depth,
             text,
-            runs,
             font_size,
         ))
     } else {
-        container.child(paragraph_element(text, runs, font_size))
+        container.child(paragraph_element(text, font_size))
     }
 }
 
@@ -299,7 +398,21 @@ fn flush_inline(
 /// Fences scroll horizontally (DEV-577) and GPUI keys a scroll offset by the
 /// element's id path, so two blocks sharing a seed would share a scroll
 /// position. Callers pass something stable and unique per block.
-pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> Div {
+///
+/// `link_sink`, when given, makes links clickable and shows each link's full
+/// destination on hover. Without it links are styled but inert.
+pub fn render(
+    content: &str,
+    streaming: bool,
+    font_size: f32,
+    id_seed: u64,
+    link_sink: Option<LinkSink>,
+) -> Div {
+    let links = LinkCtx {
+        sink: link_sink,
+        seed: id_seed,
+        serial: Cell::new(0),
+    };
     let base_color = if streaming {
         theme().text_body
     } else {
@@ -352,6 +465,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
                     list_stack.len(),
                     &mut pending_marker,
                     font_size,
+                    &links,
                 );
             }
             Event::Start(Tag::Heading { level, .. }) => {
@@ -361,6 +475,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
                     list_stack.len(),
                     &mut pending_marker,
                     font_size,
+                    &links,
                 );
                 current_heading = Some(level);
                 inline.style.bold = true;
@@ -368,10 +483,9 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
             Event::End(TagEnd::Heading(_)) => {
                 let level = current_heading.take().unwrap_or(HeadingLevel::H6);
                 inline.style.bold = false;
-                if let Some((text, runs)) =
-                    std::mem::replace(&mut inline, InlineBuilder::new()).finish()
-                {
-                    container = container.child(heading_element(level, text, runs, font_size));
+                if let Some(text) = std::mem::replace(&mut inline, InlineBuilder::new()).finish() {
+                    container =
+                        container.child(heading_element(level, links.element(text), font_size));
                 }
             }
             Event::Start(Tag::CodeBlock(kind)) => {
@@ -381,6 +495,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
                     list_stack.len(),
                     &mut pending_marker,
                     font_size,
+                    &links,
                 );
                 in_code_block = true;
                 code_buffer.clear();
@@ -405,6 +520,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
                     list_stack.len(),
                     &mut pending_marker,
                     font_size,
+                    &links,
                 );
                 list_stack.push(first_number);
             }
@@ -424,6 +540,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
                     list_stack.len(),
                     &mut pending_marker,
                     font_size,
+                    &links,
                 );
                 pending_marker = None;
             }
@@ -448,8 +565,8 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
             Event::End(TagEnd::Strong) => inline.style.bold = false,
             Event::Start(Tag::Strikethrough) => inline.style.strike = true,
             Event::End(TagEnd::Strikethrough) => inline.style.strike = false,
-            Event::Start(Tag::Link { .. }) => inline.style.link = true,
-            Event::End(TagEnd::Link) => inline.style.link = false,
+            Event::Start(Tag::Link { dest_url, .. }) => inline.begin_link(&dest_url),
+            Event::End(TagEnd::Link) => inline.end_link(),
             Event::Code(s) => {
                 let was = inline.style.code;
                 inline.style.code = true;
@@ -483,6 +600,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
                     list_stack.len(),
                     &mut pending_marker,
                     font_size,
+                    &links,
                 );
                 container = container.child(
                     div()
@@ -499,12 +617,13 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
                     list_stack.len(),
                     &mut pending_marker,
                     font_size,
+                    &links,
                 );
                 table.start_table();
             }
             Event::End(TagEnd::Table) => {
                 let (header, rows) = table.finish();
-                container = container.child(table_element(header, rows, font_size));
+                container = container.child(table_element(header, rows, font_size, &links));
             }
             Event::Start(Tag::TableHead) => table.start_head(),
             Event::End(TagEnd::TableHead) => table.end_head(),
@@ -525,6 +644,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
                     list_stack.len(),
                     &mut pending_marker,
                     font_size,
+                    &links,
                 );
                 // Start a fresh body for the quote; remember the parent.
                 parents.push(std::mem::replace(&mut container, div().flex().flex_col()));
@@ -536,6 +656,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
                     list_stack.len(),
                     &mut pending_marker,
                     font_size,
+                    &links,
                 );
                 let body = std::mem::replace(&mut container, div());
                 let parent = parents.pop().unwrap_or_else(|| div().flex().flex_col());
@@ -562,6 +683,7 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
                     list_stack.len(),
                     &mut pending_marker,
                     font_size,
+                    &links,
                 );
                 container = container.child(image_element(
                     std::mem::take(&mut image_alt),
@@ -578,8 +700,8 @@ pub fn render(content: &str, streaming: bool, font_size: f32, id_seed: u64) -> D
     // Flush any trailing inline content (streaming: last paragraph may not be
     // terminated yet because the assistant is still generating).
     if !inline.is_empty() {
-        if let Some((text, runs)) = inline.finish() {
-            container = container.child(paragraph_element(text, runs, font_size));
+        if let Some(text) = inline.finish() {
+            container = container.child(paragraph_element(links.element(text), font_size));
         }
     }
 
@@ -648,7 +770,7 @@ fn image_element(alt: String, dest: String, font_size: f32) -> Div {
 
 // ── Block builders ────────────────────────────────────────────────
 
-fn paragraph_element(text: SharedString, runs: Vec<TextRun>, font_size: f32) -> Div {
+fn paragraph_element(text: AnyElement, font_size: f32) -> Div {
     // DEV-571: running text wraps at the prose measure, not the block frame.
     // Code blocks and tables deliberately keep the full frame — their width is
     // determined by their content, and clamping them loses information.
@@ -656,7 +778,7 @@ fn paragraph_element(text: SharedString, runs: Vec<TextRun>, font_size: f32) -> 
         .max_w(prose_width(font_size))
         .py(px(PARAGRAPH_GAP / 2.0))
         .text_size(px(font_size))
-        .child(StyledText::new(text).with_runs(runs))
+        .child(text)
 }
 
 /// Type size and vertical margins for a heading level, as
@@ -677,17 +799,12 @@ fn heading_spacing(level: HeadingLevel, font_size: f32) -> (f32, f32, f32) {
     }
 }
 
-fn heading_element(
-    level: HeadingLevel,
-    text: SharedString,
-    runs: Vec<TextRun>,
-    font_size: f32,
-) -> Div {
+fn heading_element(level: HeadingLevel, text: AnyElement, font_size: f32) -> Div {
     let (size, top, bottom) = heading_spacing(level, font_size);
     let text_div = div()
         .max_w(prose_width(font_size))
         .text_size(px(size))
-        .child(StyledText::new(text).with_runs(runs));
+        .child(text);
 
     // No left accent bar: DEV-29 uses a left bar to mark narrative roles
     // (decisions, outcomes), and the same token cannot mean two things in one
@@ -915,8 +1032,7 @@ fn code_block_element(code: String, lang: String, font_size: f32, id: ElementId)
 fn list_item_element(
     marker: Option<ListMarker>,
     depth: usize,
-    text: SharedString,
-    runs: Vec<TextRun>,
+    text: AnyElement,
     font_size: f32,
 ) -> Div {
     // Wide enough for "10." at the body size, so ordered lists do not shift
@@ -944,14 +1060,15 @@ fn list_item_element(
                 .flex_1()
                 .min_w_0()
                 .text_size(px(font_size))
-                .child(StyledText::new(text).with_runs(runs)),
+                .child(text),
         )
 }
 
 fn table_element(
-    header: Vec<Option<(SharedString, Vec<TextRun>)>>,
-    rows: Vec<Vec<Option<(SharedString, Vec<TextRun>)>>>,
+    header: Vec<TableCell>,
+    rows: Vec<Vec<TableCell>>,
     font_size: f32,
+    links: &LinkCtx,
 ) -> Div {
     let cell_size = font_size - 1.0;
 
@@ -981,7 +1098,7 @@ fn table_element(
             .border_b_1()
             .border_color(with_alpha(theme().text_faint, 0.45));
         for cell in header {
-            let content = if let Some((text, runs)) = cell {
+            let content = if let Some(text) = cell {
                 div()
                     .flex_1()
                     .min_w_0()
@@ -990,7 +1107,7 @@ fn table_element(
                     .text_size(px(cell_size))
                     .text_color(theme().text_secondary)
                     .font_weight(FontWeight::BOLD)
-                    .child(StyledText::new(text).with_runs(runs))
+                    .child(links.element(text))
             } else {
                 div().flex_1().min_w_0().px(px(8.0)).py(px(5.0))
             };
@@ -1006,7 +1123,7 @@ fn table_element(
             row = row.border_b_1().border_color(rule);
         }
         for cell in row_cells {
-            let content = if let Some((text, runs)) = cell {
+            let content = if let Some(text) = cell {
                 div()
                     .flex_1()
                     .min_w_0()
@@ -1014,7 +1131,7 @@ fn table_element(
                     .py(px(4.0))
                     .text_size(px(cell_size))
                     .text_color(theme().text_primary)
-                    .child(StyledText::new(text).with_runs(runs))
+                    .child(links.element(text))
             } else {
                 div().flex_1().min_w_0().px(px(8.0)).py(px(4.0))
             };
@@ -1029,6 +1146,15 @@ fn table_element(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A table cell with plain text and no links.
+    fn cell(text: &str) -> InlineText {
+        InlineText {
+            text: SharedString::from(text.to_string()),
+            runs: vec![],
+            links: vec![],
+        }
+    }
 
     /// Drive the parser with a representative sample covering every event type
     /// we handle. The debug_asserts inside `InlineBuilder::finish` fire on any
@@ -1077,8 +1203,8 @@ fn main() {
 Mid-stream **unterminated
 "#;
         // Streaming = true, then false. Both paths must not panic.
-        let _ = render(sample, true, 14.0, 0);
-        let _ = render(sample, false, 14.0, 0);
+        let _ = render(sample, true, 14.0, 0, None);
+        let _ = render(sample, false, 14.0, 0, None);
     }
 
     #[test]
@@ -1160,8 +1286,8 @@ Mid-stream **unterminated
         let plain = "```brainfuck\n+++++[->+++<]\n```\n";
         let untagged = "```\nno language tag\n```\n";
         for sample in [highlighted, plain, untagged] {
-            let _ = render(sample, false, 14.0, 0);
-            let _ = render(sample, true, 14.0, 0);
+            let _ = render(sample, false, 14.0, 0, None);
+            let _ = render(sample, true, 14.0, 0, None);
         }
     }
 
@@ -1256,8 +1382,8 @@ Mid-stream **unterminated
 prose measure and must hang under its own text\n  - nested\n    - deeper\n\n\
 1. one\n2. two\n\n- [ ] open\n- [x] done\n\n\
 - loose item\n\n  second paragraph of the same item\n";
-        let _ = render(sample, false, 14.0, 0);
-        let _ = render(sample, true, 14.0, 0);
+        let _ = render(sample, false, 14.0, 0, None);
+        let _ = render(sample, true, 14.0, 0, None);
     }
 
     #[test]
@@ -1268,12 +1394,12 @@ prose measure and must hang under its own text\n  - nested\n    - deeper\n\n\
         let mut t = TableBuilder::default();
         t.start_table();
         t.start_head();
-        t.push_cell(Some(("Element".into(), vec![])));
-        t.push_cell(Some(("Before".into(), vec![])));
+        t.push_cell(Some(cell("Element")));
+        t.push_cell(Some(cell("Before")));
         t.end_head();
         t.start_row();
-        t.push_cell(Some(("code fence".into(), vec![])));
-        t.push_cell(Some(("flat green".into(), vec![])));
+        t.push_cell(Some(cell("code fence")));
+        t.push_cell(Some(cell("flat green")));
         t.end_row();
         let (header, body) = t.finish();
         assert_eq!(header.len(), 2, "the header row must survive");
@@ -1288,7 +1414,7 @@ prose measure and must hang under its own text\n  - nested\n    - deeper\n\n\
         t.start_table();
         t.start_head();
         t.start_row();
-        t.push_cell(Some(("Element".into(), vec![])));
+        t.push_cell(Some(cell("Element")));
         t.end_row();
         t.end_head();
         let (header, body) = t.finish();
@@ -1302,7 +1428,7 @@ prose measure and must hang under its own text\n  - nested\n    - deeper\n\n\
         t.start_table();
         for _ in 0..3 {
             t.start_row();
-            t.push_cell(Some(("x".into(), vec![])));
+            t.push_cell(Some(cell("x")));
             t.end_row();
         }
         let (header, body) = t.finish();
@@ -1315,7 +1441,7 @@ prose measure and must hang under its own text\n  - nested\n    - deeper\n\n\
         let mut t = TableBuilder::default();
         t.start_table();
         t.start_head();
-        t.push_cell(Some(("stale".into(), vec![])));
+        t.push_cell(Some(cell("stale")));
         t.end_head();
         t.start_table();
         let (header, body) = t.finish();
@@ -1353,8 +1479,8 @@ prose measure and must hang under its own text\n  - nested\n    - deeper\n\n\
 
     #[test]
     fn empty_input_does_not_panic() {
-        let _ = render("", false, 14.0, 0);
-        let _ = render("", true, 14.0, 0);
+        let _ = render("", false, 14.0, 0, None);
+        let _ = render("", true, 14.0, 0, None);
     }
 
     #[test]
@@ -1364,12 +1490,68 @@ prose measure and must hang under its own text\n  - nested\n    - deeper\n\n\
             false,
             14.0,
             0,
+            None,
+        );
+    }
+
+    /// DEV-1252: a link's text range carries its full destination, which is
+    /// what the hover tooltip shows — so "[Review Desk](https://evil…)" reads
+    /// as the URL it really is.
+    #[test]
+    fn a_link_records_its_text_range_and_full_destination() {
+        let mut b = InlineBuilder::new();
+        let base = theme().text_primary;
+        b.push("See ", base);
+        b.begin_link("https://evil.example/review-desk?x=1");
+        b.push("Review Desk", base);
+        b.end_link();
+        b.push(" now.", base);
+        let text = b.finish().unwrap();
+        assert_eq!(text.links.len(), 1);
+        let range = text.links[0].0.clone();
+        assert_eq!(&text.text[range.clone()], "Review Desk");
+        let (ranges, dests): (Vec<_>, Vec<_>) = text.links.into_iter().unzip();
+        let hovered = link_at(&ranges, &dests, range.start + 3);
+        assert_eq!(
+            hovered.as_ref().map(|d| d.as_ref()),
+            Some("https://evil.example/review-desk?x=1"),
+            "hovering the link text shows the whole URL"
+        );
+        assert_eq!(
+            link_at(&ranges, &dests, 0),
+            None,
+            "plain text has no tooltip"
         );
     }
 
     #[test]
+    fn a_link_still_streaming_covers_what_has_arrived() {
+        let mut b = InlineBuilder::new();
+        b.begin_link("https://example.com");
+        b.push("partial", theme().text_primary);
+        let text = b.finish().unwrap();
+        assert_eq!(text.links.len(), 1);
+        assert_eq!(text.links[0].0, 0..7);
+    }
+
+    #[test]
+    fn links_render_with_a_sink_without_panicking() {
+        let sink: LinkSink = Rc::new(|_url, _w, _cx| {});
+        let md = "A [link](https://example.com) and [file](src/main.rs:10).\n\n\
+                  - [item](x)\n\n| a | b |\n|---|---|\n| [c](y) | d |\n\n# [H](z)\n";
+        let _ = render(md, false, 14.0, 0, Some(sink.clone()));
+        let _ = render(md, true, 14.0, 0, Some(sink));
+    }
+
+    #[test]
     fn task_list_does_not_panic() {
-        let _ = render("- [ ] open\n- [x] done\n- [ ] another\n", false, 14.0, 0);
-        let _ = render("- [ ] streaming\n- [x] done\n", true, 14.0, 0);
+        let _ = render(
+            "- [ ] open\n- [x] done\n- [ ] another\n",
+            false,
+            14.0,
+            0,
+            None,
+        );
+        let _ = render("- [ ] streaming\n- [x] done\n", true, 14.0, 0, None);
     }
 }

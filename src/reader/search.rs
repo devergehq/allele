@@ -114,7 +114,7 @@ impl AppState {
 
     /// Open the highlighted hit in the Reader at its exact file and line, via
     /// the DEV-44 deep-link protocol, and highlight the query there.
-    pub(crate) fn confirm_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(crate) fn confirm_search(&mut self, cx: &mut Context<Self>) {
         let Some((path, line, query)) = self.search.as_ref().and_then(|s| {
             s.results
                 .get(s.selected)
@@ -132,7 +132,7 @@ impl AppState {
             line: (line > 0).then_some(line),
         }
         .to_url();
-        self.open_deep_link(&url, window, cx);
+        self.open_deep_link(&url, crate::reader::deeplink::LinkOrigin::Human, cx);
         if !query.is_empty() {
             self.reader.find_query = query;
             self.reader.find_active = true;
@@ -269,11 +269,11 @@ impl AppState {
                     )
                     .on_mouse_down(
                         MouseButton::Left,
-                        cx.listener(move |this: &mut Self, _e, window, cx| {
+                        cx.listener(move |this: &mut Self, _e, _window, cx| {
                             if let Some(s) = this.search.as_mut() {
                                 s.selected = row;
                             }
-                            this.confirm_search(window, cx);
+                            this.confirm_search(cx);
                         }),
                     ),
             );
@@ -344,10 +344,10 @@ impl AppState {
                     cx.listener(|this: &mut Self, _e, _w, cx| this.close_search(cx)),
                 )
                 .on_key_down(
-                    cx.listener(|this: &mut Self, event: &KeyDownEvent, window, cx| {
+                    cx.listener(|this: &mut Self, event: &KeyDownEvent, _window, cx| {
                         match event.keystroke.key.as_str() {
                             "escape" => this.close_search(cx),
-                            "enter" => this.confirm_search(window, cx),
+                            "enter" => this.confirm_search(cx),
                             "down" => this.move_search_selection(1, cx),
                             "up" => this.move_search_selection(-1, cx),
                             _ => {}

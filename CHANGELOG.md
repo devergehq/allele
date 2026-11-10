@@ -51,6 +51,14 @@ Changes on `master` awaiting the next tagged release.
   Allele's own echo latency drops from ~21 ms mean (p99 35 ms) to under 0.3 ms. Each
   keystroke adds at most one frame; the 30 frames/s cap is otherwise unchanged.
 
+### Security
+- **Agent-written links are confined to the session's clone.** Links in rich-mode assistant
+  text are now clickable. A file or diff link the agent wrote opens only if it resolves
+  (symlinks included, checked at click time) inside that session's clone; anything else is
+  refused with the reason in the notice banner. Hovering a link shows its full destination,
+  so link text cannot disguise where it goes. `file://`, `vscode://` and other custom
+  schemes are inert. Links you open yourself are unchanged.
+
 ### Fixed
 - Answering a permission prompt from the UI (Allow, Reject, or the attention bar's Allow)
   now restarts the session's state age at the answer, instead of letting
