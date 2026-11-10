@@ -27,6 +27,8 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
     crate::session::keep_awake::spawn(cx);
     // Local tab-usage counters: sample and periodically persist (DEV-1265).
     crate::usage::spawn_poller(cx);
+    // Expire stale questions and send answers to sessions gone idle (DEV-1267).
+    crate::decisions::spawn_sweeper(cx);
 
     // Spawn the hook-event polling task. Runs for the life
     // of the app, reads ~/.allele/events/*.jsonl every

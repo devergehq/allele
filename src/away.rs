@@ -152,7 +152,7 @@ fn is_claude(state: &AppState, session: &Session) -> bool {
 
 /// The agent's child pid, if the session has a live PTY. Only the session's
 /// own terminal is consulted; drawer tabs are never typed into.
-fn live_pid(session: &Session, cx: &Context<AppState>) -> Option<u32> {
+pub(crate) fn live_pid(session: &Session, cx: &Context<AppState>) -> Option<u32> {
     let tv = session.terminal_view.as_ref()?;
     let pty = tv.read(cx).pty()?;
     if pty.exited {

@@ -16,6 +16,8 @@ mod config;
 mod conversation_picker;
 mod conversations;
 mod debug_capture;
+mod decisions;
+mod decisions_panel;
 mod dispatch;
 mod drawer;
 mod errors;
@@ -2326,6 +2328,9 @@ fn main() {
                         ),
                         remote_tabs: Default::default(),
                         capture_ui_requested: false,
+                        decisions: crate::decisions::Decisions::load(
+                            &crate::repositories::JsonFileDecisionsRepo::production(),
+                        ),
                         status_feed,
                         // Captured on the first render (see `Render`).
                         main_window: None,

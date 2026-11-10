@@ -237,6 +237,78 @@ pub(crate) fn tool_definitions() -> Value {
                 "additionalProperties": false,
             },
         },
+        {
+            "name": "allele_decisions_post",
+            "description":
+                "Post a question for the developer and keep working. Returns the question's \
+                 id at once; it never waits for the answer. Carry on with the option you \
+                 name in `assumed`. Allele lists every open question from every session in \
+                 one place in its window; when the developer clicks an option, Allele sends \
+                 the answer to this session as a normal prompt framed `[Your decision via \
+                 Allele] Q: … → A: …`, and only when this session is idle at its prompt — \
+                 never over a running turn. Use this instead of writing a decisions file or a \
+                 'Decisions for you' block. Plain text only: no markup, no links. Limits: 5 \
+                 open questions per session, 50 across all sessions; a question unanswered \
+                 for 24 hours is marked expired.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": "The question, plain text, at most 280 characters.",
+                    },
+                    "options": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 2,
+                        "maxItems": 4,
+                        "description": "2 to 4 options, each at most 80 characters.",
+                    },
+                    "assumed": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Index (from 0) of the option you are going ahead \
+                                        with until the developer answers.",
+                    },
+                    "unblocks": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "maxItems": 5,
+                        "description": "Optional: up to 5 short labels, each at most 60 \
+                                        characters, naming what the answer unblocks.",
+                    },
+                },
+                "required": ["question", "options", "assumed"],
+                "additionalProperties": false,
+            },
+        },
+        {
+            "name": "allele_decisions_list",
+            "description":
+                "This session's own questions posted with allele_decisions_post, oldest \
+                 first, each with its state (`open`, `answered`, `withdrawn`, `expired`) and, \
+                 once answered, the chosen option, any note, and whether the answer has been \
+                 sent to this session yet. Use it to fetch an answer yourself rather than wait \
+                 for the prompt.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false },
+        },
+        {
+            "name": "allele_decisions_withdraw",
+            "description":
+                "Withdraw one of this session's open questions when it no longer matters. It \
+                 leaves the developer's list and stays in the history as withdrawn.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "string",
+                        "description": "The question id returned by allele_decisions_post.",
+                    },
+                },
+                "required": ["id"],
+                "additionalProperties": false,
+            },
+        },
     ])
 }
 
@@ -291,6 +363,23 @@ fn call_tool(params: &Value) -> Result<Value, String> {
                 // which case the worker is told it has no way back rather than
                 // being handed a path that will fail at send time. See DEV-440.
                 obj.insert("caller_reply_to".into(), json!(super::address::from_env()));
+            }
+            v
+        }
+        // DEV-1267. The asking session is taken from this process's
+        // environment and written after the caller's arguments, exactly as
+        // for create: a caller cannot post as, list or withdraw for another.
+        "allele_decisions_post" | "allele_decisions_list" | "allele_decisions_withdraw" => {
+            let op = name.trim_start_matches("allele_");
+            let mut v = json!({ "op": op });
+            if let (Some(obj), Some(a)) = (v.as_object_mut(), args.as_object()) {
+                for (k, val) in a {
+                    obj.insert(k.clone(), val.clone());
+                }
+                obj.insert(
+                    "caller_session_id".into(),
+                    json!(std::env::var("CLAUDE_CODE_SESSION_ID").ok()),
+                );
             }
             v
         }
@@ -540,5 +629,29 @@ mod tests {
         let tools = serde_json::to_string(&tool_definitions()).expect("serialises");
         assert!(!tools.contains("permission_mode"));
         assert!(!tools.contains("depth"), "depth is derived, never supplied");
+    }
+
+    /// The decision tools take no session argument: the asker is always the
+    /// calling session, from the environment (DEV-1267).
+    #[test]
+    fn decision_tools_take_no_session_argument() {
+        let tools = tool_definitions();
+        for name in [
+            "allele_decisions_post",
+            "allele_decisions_list",
+            "allele_decisions_withdraw",
+        ] {
+            let tool = tools
+                .as_array()
+                .expect("array")
+                .iter()
+                .find(|t| t["name"] == name)
+                .unwrap_or_else(|| panic!("{name} is advertised"));
+            let props = tool["inputSchema"]["properties"]
+                .as_object()
+                .expect("properties");
+            assert!(!props.keys().any(|k| k.contains("session")), "{name}");
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+        }
     }
 }

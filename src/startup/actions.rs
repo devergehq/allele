@@ -177,6 +177,10 @@ pub(crate) fn register_all(cx: &mut Context<AppState>) {
             this.main_tab = MainTab::Browser;
         }
     });
+    on_state::<crate::commands::ToggleDecisionHistory>(cx, &toggle_handle, |this, _| {
+        this.decisions.show_history = !this.decisions.show_history;
+        this.decisions.collapsed = false;
+    });
     on_state::<ToggleChangesPanel>(cx, &toggle_handle, |this, _| {
         this.pending_action = Some(SidebarAction::ToggleRightSidebar.into());
     });

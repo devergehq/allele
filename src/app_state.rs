@@ -531,6 +531,9 @@ pub(crate) struct AppState {
     pub(crate) pairing_alert: crate::pairing_alert::PairingAlert,
     /// Set by the Debug menu or agent request-file watcher.
     pub(crate) capture_ui_requested: bool,
+    /// The decision list: questions sessions posted for the developer, their
+    /// answers, and the strip's view state (DEV-1267).
+    pub(crate) decisions: crate::decisions::Decisions,
 }
 
 /// How long to wait between `state.json` writes.
@@ -603,6 +606,9 @@ impl AppState {
         }
         if self.settings_dirty {
             self.flush_settings(cx);
+        }
+        if self.decisions.dirty {
+            self.flush_decisions(cx);
         }
     }
 
@@ -689,7 +695,7 @@ impl AppState {
     ///
     /// Without this, a change made in the last 500ms before the app goes idle
     /// would sit dirty until something else happened to trigger a frame.
-    fn schedule_persist_flush(&mut self, cx: &mut gpui::Context<Self>) {
+    pub(crate) fn schedule_persist_flush(&mut self, cx: &mut gpui::Context<Self>) {
         if self.persist_flush_scheduled {
             return;
         }
@@ -718,6 +724,12 @@ impl AppState {
         if self.settings_dirty {
             self.save_settings();
             self.settings_dirty = false;
+        }
+        if self.decisions.dirty && !self.decisions.save_blocked {
+            if let Err(e) = self.repos.decisions.save(&self.decisions.book) {
+                tracing::warn!("Failed to save decisions.json: {e}");
+            }
+            self.decisions.dirty = false;
         }
     }
 }
@@ -1027,6 +1039,9 @@ pub(crate) mod fixture {
             let repos = Repositories {
                 settings: settings_repo.clone(),
                 state: state_repo.clone(),
+                decisions: Arc::new(
+                    crate::repositories::fakes::InMemoryDecisionsRepository::default(),
+                ),
             };
 
             let user_settings = spec.settings;
@@ -1150,6 +1165,7 @@ pub(crate) mod fixture {
                     remote: crate::remote::RemoteService::offline(&Default::default()),
                     remote_tabs: Default::default(),
                     capture_ui_requested: false,
+                    decisions: Default::default(),
                     status_feed: Default::default(),
                 }
             });
