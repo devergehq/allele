@@ -63,6 +63,9 @@ src/
 ├── app_state.rs            # AppState struct + 5 cohesive sub-structs
 ├── actions.rs              # PendingAction + 8 family enums (command pattern)
 ├── errors.rs               # AlleleError + Result<T> alias
+├── commands.rs             # the named command table: keymap, palette, menus
+├── keymap.rs               # table defaults + ~/.allele/keymap.json overrides
+├── agent_guide.rs          # generated ~/.allele/AGENTS.md, written at launch
 │
 ├── dispatch/               # agent session dispatch over a control socket
 │   ├── mod.rs              # off-thread → foreground-with-Window primitive

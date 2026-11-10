@@ -5,8 +5,8 @@
 //! `src/text_input.rs`, extended to multiple lines.
 //!
 //! All macOS text-editing conventions are declared as GPUI actions in
-//! this file (see the `actions!` block below) and bound to keystrokes in
-//! `assets/default-keymap.json` via the loader in `src/keymap.rs`.
+//! this file (see the `actions!` block below) and bound to keystrokes by
+//! the `compose.*` rows of the command table (`src/commands.rs`).
 //!
 //! - Cursor movement: arrow keys, Option+arrow (word), Cmd+arrow (line)
 //! - Selection: Shift+variants of all movement commands
@@ -76,11 +76,11 @@ actions!(
     ]
 );
 
-/// Key context gating compose-bar bindings. Must match the `"context"`
-/// value in `assets/default-keymap.json`. The render fn applies it via
+/// Key context gating compose-bar bindings; the command table binds the
+/// `compose.*` rows in it. The render fn applies it via
 /// `div().key_context(KEY_CONTEXT)` so bindings fire only when a compose
 /// bar is focused.
-const KEY_CONTEXT: &str = "ComposeBar";
+pub(crate) const KEY_CONTEXT: &str = "ComposeBar";
 
 // ── Colours (Catppuccin Mocha) ────────────────────────────────────
 

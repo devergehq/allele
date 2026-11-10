@@ -42,6 +42,12 @@ Changes on `master` awaiting the next tagged release.
   action, the MCP tools, and which files an agent may edit versus Allele's private
   `state.json`. It is rewritten only when its content changes. Tests fail when a setting or
   keymap action is missing from it.
+- **One named command table.** Every action the keymap, the menus and the command palette
+  reach now has one stable name (`allele.toggle_sidebar`, `allele.discard_session`, …) in
+  `src/commands.rs`, with its description and default keys. The palette, the built-in key
+  bindings and the menus are all read from it, and the agent guide lists every command. The
+  palette-only commands (Go to Claude/Reader/Transcript/Browser, the changes panel, New
+  Session, Discard Session) can now be bound in `keymap.json` too.
 - **Collapsible sidebar.** Click a project header to fold its sessions and archives away;
   click a machine row, or a project heading under it, to fold that too. The MACHINES
   section can be moved above the local projects from its header. Folds and position
@@ -55,6 +61,9 @@ Changes on `master` awaiting the next tagged release.
   than a Rust enum, so Locus can rename, add or drop phases without breaking this view.
 
 ### Changed
+- A `keymap.json` binding to an unknown command no longer stops Allele from launching. The
+  binding is skipped and reported in a banner and in the log; the rest of the file applies.
+- `assets/default-keymap.json` is gone: the built-in bindings live in the command table.
 - The control socket answers a session id it has no record of with its own
   error code, **`session_not_found`**, on `sessions.status`, `sessions.discard`
   and `sessions.interrupt`. It was `bad_request`, the same code as a request

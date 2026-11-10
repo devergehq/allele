@@ -11,6 +11,7 @@ mod browser;
 mod changes;
 mod cli;
 mod clone;
+mod commands;
 mod config;
 mod conversation_picker;
 mod conversations;
@@ -2268,7 +2269,8 @@ fn main() {
                         user_settings: settings_for_window.clone(),
                         settings_window: None,
                         pull_warning: None,
-                        sync_notice: None,
+                        // An unknown keymap command is reported here, at load (DEV-1264).
+                        sync_notice: keymap::load_report(),
                         pairing_alert: Default::default(),
                         main_tab: MainTab::Claude,
                         usage: crate::usage::UsageTracker::load(crate::usage::usage_file()),

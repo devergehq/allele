@@ -4,28 +4,26 @@
 //! surface, run the other palettes, and create sessions. Commands are
 //! context-filtered (unavailable ones explain why rather than vanishing),
 //! destructive ones are labelled, and each shows its shortcut for discovery.
+//!
+//! The command rows come from the command table (`crate::commands`, DEV-1264)
+//! and run by dispatching the command's action, the same path its key binding
+//! and menu item take. Only the per-session "Switch to…" rows are built here,
+//! because they are state rather than commands.
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 
 use crate::actions::SessionCursor;
-use crate::app_state::{AppState, MainTab};
+use crate::app_state::AppState;
+use crate::commands::{self, Command};
 use crate::theme::theme;
 
-/// What a command does when run. Every variant is executable from a listener
-/// that has `(window, cx)`, so no deferred plumbing is needed.
-#[derive(Clone)]
+/// What a palette row does when run.
+#[derive(Clone, Copy)]
 enum Cmd {
-    Tab(MainTab),
-    ToggleSidebar,
-    ToggleChanges,
-    GoToFile,
-    SearchProject,
-    OpenScratchPad,
-    NewSession,
+    /// A command from the table: dispatch its action.
+    Run(&'static Command),
     SwitchSession(SessionCursor),
-    DiscardChanges,
-    Away,
 }
 
 /// A palette row: what it says, whether it can run, and what it does.
@@ -34,7 +32,7 @@ struct CommandItem {
     subtitle: Option<String>,
     /// Extra terms folded into fuzzy matching (never shown).
     keywords: String,
-    shortcut: Option<&'static str>,
+    shortcut: Option<String>,
     destructive: bool,
     /// `Some(reason)` renders the row greyed and blocks execution.
     disabled: Option<String>,
@@ -151,182 +149,26 @@ impl AppState {
 
     fn run_command(&mut self, cmd: Cmd, window: &mut Window, cx: &mut Context<Self>) {
         match cmd {
-            Cmd::Tab(tab) => self.main_tab = tab,
-            Cmd::ToggleSidebar => self.sidebar.visible = !self.sidebar.visible,
-            Cmd::ToggleChanges => self.right_panel.visible = !self.right_panel.visible,
-            Cmd::GoToFile => self.open_file_palette(window, cx),
-            Cmd::SearchProject => self.open_search(window, cx),
-            Cmd::OpenScratchPad => self.open_scratch_pad(window, cx),
-            Cmd::NewSession => {
-                if let Some(p_idx) = self.active.map(|c| c.project_idx) {
-                    self.open_new_session_modal(p_idx, window, cx);
-                }
-            }
+            // Deferred by GPUI, so the handler runs after this update ends
+            // and can borrow `AppState` itself.
+            Cmd::Run(command) => window.dispatch_action(command.action(), cx),
             Cmd::SwitchSession(cursor) => self.active = Some(cursor),
-            Cmd::Away => self.away_and_report(cx),
-            Cmd::DiscardChanges => {
-                // Open the standard discard confirmation prompt — safe; the
-                // actual discard still requires the user to confirm.
-                if let Some(cursor) = self.active {
-                    self.sidebar.visible = true;
-                    self.arm_confirmation(|c| c.discard = Some(cursor));
-                }
-            }
         }
     }
 
     /// Build the context-filtered command list for the current state.
     fn build_commands(&self) -> Vec<CommandItem> {
-        let mut cmds = Vec::new();
-        let has_session = self.active.is_some();
-
-        let mut push = |title: &str,
-                        subtitle: Option<&str>,
-                        keywords: &str,
-                        shortcut: Option<&'static str>,
-                        destructive: bool,
-                        disabled: Option<String>,
-                        cmd: Cmd| {
-            cmds.push(CommandItem {
-                title: title.to_string(),
-                subtitle: subtitle.map(|s| s.to_string()),
-                keywords: keywords.to_string(),
-                shortcut,
-                destructive,
-                disabled,
-                cmd,
-            });
-        };
-
-        // ── Surfaces ──────────────────────────────────────────────
-        push(
-            "Go to Claude",
-            Some("Main tab"),
-            "surface tab agent",
-            None,
-            false,
-            None,
-            Cmd::Tab(MainTab::Claude),
-        );
-        push(
-            "Go to Reader",
-            Some("Files & source"),
-            "surface tab files source read",
-            None,
-            false,
-            None,
-            Cmd::Tab(MainTab::Reader),
-        );
-        push(
-            "Go to Transcript",
-            Some("Session transcript"),
-            "surface tab log history",
-            Some("⌘⇧R"),
-            false,
-            None,
-            Cmd::Tab(MainTab::Transcript),
-        );
-        let browser_disabled = if self.browser_tab_available() {
-            None
-        } else {
-            Some("No linked Chrome tab for this session".to_string())
-        };
-        push(
-            "Go to Browser",
-            Some("Linked Chrome tab"),
-            "surface tab web chrome",
-            None,
-            false,
-            browser_disabled,
-            Cmd::Tab(MainTab::Browser),
-        );
-
-        // ── Panels & overlays ─────────────────────────────────────
-        push(
-            "Toggle Sidebar",
-            None,
-            "panel projects sessions hide show",
-            Some("⌘B"),
-            false,
-            None,
-            Cmd::ToggleSidebar,
-        );
-        push(
-            "Toggle Changes Panel",
-            None,
-            "panel git diff review",
-            None,
-            false,
-            None,
-            Cmd::ToggleChanges,
-        );
-        push(
-            "Go to File…",
-            Some("Fuzzy file search"),
-            "open find path cmd-p",
-            Some("⌘P"),
-            false,
-            None,
-            Cmd::GoToFile,
-        );
-        push(
-            "Search Project…",
-            Some("Content & symbols"),
-            "grep find text symbol",
-            Some("⌘⇧F"),
-            false,
-            None,
-            Cmd::SearchProject,
-        );
-        push(
-            "Open Scratch Pad",
-            None,
-            "notes compose",
-            Some("⌘K"),
-            false,
-            None,
-            Cmd::OpenScratchPad,
-        );
-
-        // ── Session lifecycle ─────────────────────────────────────
-        let new_disabled = if has_session {
-            None
-        } else {
-            Some("Select a project first".to_string())
-        };
-        push(
-            "New Session…",
-            Some("In the current project"),
-            "create add worktree",
-            None,
-            false,
-            new_disabled,
-            Cmd::NewSession,
-        );
-        let discard_disabled = if has_session {
-            None
-        } else {
-            Some("No active session".to_string())
-        };
-        push(
-            "Discard Session Changes…",
-            Some("Reset the session worktree"),
-            "delete reset revert destructive",
-            None,
-            true,
-            discard_disabled,
-            Cmd::DiscardChanges,
-        );
-
-        push(
-            "Away — Remote Control for All Sessions",
-            Some("Sends /remote-control to every live Claude session"),
-            "away remote control phone mobile lunch rc leave",
-            None,
-            false,
-            None,
-            Cmd::Away,
-        );
+        let mut cmds: Vec<CommandItem> = commands::palette_commands()
+            .map(|(command, palette)| CommandItem {
+                title: command.title.to_string(),
+                subtitle: palette.subtitle.map(str::to_string),
+                keywords: palette.keywords.to_string(),
+                shortcut: crate::keymap::shortcut_label(command.name),
+                destructive: palette.destructive,
+                disabled: (palette.unavailable)(self).map(str::to_string),
+                cmd: Cmd::Run(command),
+            })
+            .collect();
 
         // ── Switch project / session ──────────────────────────────
         for (p_idx, project) in self.projects.iter().enumerate() {
@@ -397,7 +239,7 @@ impl AppState {
             } else {
                 theme().text_ghost
             };
-            let shortcut = item.shortcut;
+            let shortcut = item.shortcut.clone();
             let run_idx = cmd_idx;
 
             list = list.child(
