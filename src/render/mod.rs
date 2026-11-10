@@ -1823,9 +1823,20 @@ impl Render for AppState {
                                 } else {
                                     0.0
                                 };
-                                tv.update(cx, |tv, _cx| {
+                                // This session's changes, for the path chips and
+                                // peek (DEV-1262) — only when they were loaded for
+                                // this session's own clone, never a neighbour's.
+                                let clone_dir =
+                                    self.active_session().and_then(|s| s.clone_path.clone());
+                                let change_index = self.changes.index.clone().filter(|i| {
+                                    clone_dir.as_deref().is_some_and(|d| {
+                                        crate::terminal::path_decor::same_dir(d, &i.repo_dir)
+                                    })
+                                });
+                                tv.update(cx, |tv, cx| {
                                     tv.bottom_inset = inset;
                                     tv.right_inset = right_inset;
+                                    tv.set_change_index(change_index, cx);
                                 });
                                 main_area = main_area.child(tv);
                             } else if self.projects.is_empty() {

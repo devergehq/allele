@@ -39,6 +39,10 @@ pub struct TerminalGridElement {
     url_spans: Vec<(usize, usize, usize)>,
     /// Persistent passive highlights for file paths in the visible viewport.
     path_spans: Vec<(usize, usize, usize)>,
+    /// `+N −M` change chips (DEV-1262), painted as text overlays in blank
+    /// cells. Overlays only: they never enter the terminal's grid.
+    chips: Vec<super::path_decor::Chip>,
+    chip_color: Hsla,
     // Shared atomic origin — updated during paint so mouse handlers can translate coords
     origin_x_out: Option<Arc<std::sync::atomic::AtomicI32>>,
     origin_y_out: Option<Arc<std::sync::atomic::AtomicI32>>,
@@ -67,6 +71,8 @@ impl TerminalGridElement {
             hovered_path: None,
             url_spans: Vec::new(),
             path_spans: Vec::new(),
+            chips: Vec::new(),
+            chip_color: hsla(0.0, 0.0, 0.5, 1.0),
             origin_x_out: None,
             origin_y_out: None,
         }
@@ -105,6 +111,12 @@ impl TerminalGridElement {
 
     pub fn url_spans(mut self, spans: Vec<(usize, usize, usize)>) -> Self {
         self.url_spans = spans;
+        self
+    }
+
+    pub fn chips(mut self, chips: Vec<super::path_decor::Chip>, color: Hsla) -> Self {
+        self.chips = chips;
+        self.chip_color = color;
         self
     }
 
@@ -459,6 +471,32 @@ impl Element for TerminalGridElement {
                 Bounds::new(point(x, y), size(w, px(1.0))),
                 hsla(170.0 / 360.0, 0.5, 0.65, 0.7),
             ));
+        }
+
+        // Paint change chips (DEV-1262) — dim text in cells the scan found
+        // blank, so they sit beside the path and never over terminal text.
+        for chip in &self.chips {
+            if chip.row >= num_rows_visible {
+                continue;
+            }
+            let shaped = window.text_system().shape_line(
+                chip.label.clone(),
+                self.font_size,
+                &[TextRun {
+                    len: chip.label.len(),
+                    font: self.make_font(false, false),
+                    color: self.chip_color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                Some(cell_w),
+            );
+            let at = point(
+                origin.x + cell_w * chip.col as f32,
+                origin.y + cell_h * chip.row as f32,
+            );
+            let _ = shaped.paint(at, cell_h, TextAlign::Left, None, window, cx);
         }
 
         // Paint URL underline on hover (brighter emphasis over the passive line)

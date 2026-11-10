@@ -115,9 +115,9 @@ const DIRECT_SAVE_ALLOWLIST: &[&str] = &["src/session_ops.rs::apply_pulled_sessi
 ///
 /// A grep for `.unwrap()` reports a far larger number, but the overwhelming
 /// majority are inside `#[cfg(test)]` modules where panicking is the point. The
-/// real production panic surface is **14** across ~8 files — notably it grew by
+/// real production panic surface is **13** across ~8 files — notably it grew by
 /// only one while the crate grew by 18k lines. Ratchet down as the audit lands.
-const MAX_PANIC_SITES: usize = 14;
+const MAX_PANIC_SITES: usize = 13;
 
 // ---------------------------------------------------------------------------
 // Helpers

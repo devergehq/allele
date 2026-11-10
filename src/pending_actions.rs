@@ -1203,6 +1203,14 @@ impl AppState {
                 self.changes.selected = Some((path.clone(), staged));
                 self.load_changes_diff(path, staged, cx);
             }
+            SidebarAction::ShowChangedFileDiff { path, staged } => {
+                if !self.right_panel.visible {
+                    self.right_panel.visible = true;
+                    self.mark_settings_dirty();
+                }
+                self.changes.selected = Some((path.clone(), staged));
+                self.load_changes_diff(path, staged, cx);
+            }
             SidebarAction::ClearChangesSelection => {
                 self.changes.selected = None;
                 self.changes.diff = None;

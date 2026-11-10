@@ -432,8 +432,10 @@ impl AppState {
         // Refresh when a tool completed (Claude PostToolUse) or the turn
         // finished (any agent's TurnComplete → ResponseReady) — both imply the
         // working tree may have changed. `new_status` is set by this point.
-        if self.right_panel.visible
-            && self.active == Some(cursor)
+        // Not gated on the panel being open: the Claude terminal's path chips
+        // read the same data (DEV-1262). Same-directory refreshes coalesce to
+        // one `git status` in flight, so a burst of tool calls costs one.
+        if self.active == Some(cursor)
             && (event.kind == "post_tool_use" || new_status == SessionStatus::ResponseReady)
         {
             self.refresh_changes(cx);

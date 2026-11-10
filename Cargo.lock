@@ -191,6 +191,7 @@ dependencies = [
  "pulldown-cmark",
  "qrcode",
  "rust-s3",
+ "rustc-hash 2.1.3",
  "rustix-openpty",
  "security-framework",
  "serde",
