@@ -36,6 +36,8 @@ use std::time::Duration;
 
 use tracing::{info, warn};
 
+use super::ext;
+use super::hub::Hub;
 use super::protocol::{ErrorCode, Request, Response};
 
 /// How long the socket thread waits for the foreground thread to answer.
@@ -104,6 +106,16 @@ pub fn spawn_listener(tx: Sender<ControlRequest>) -> bool {
 /// Split out so tests can bind a temporary socket. A test that bound the real
 /// `~/.allele/control.sock` would fight the user's running Allele for it.
 pub fn spawn_listener_at(path: PathBuf, tx: Sender<ControlRequest>) -> bool {
+    spawn_listener_with(path, tx, Hub::global())
+}
+
+/// [`spawn_listener_at`] with its own `allele.ext/1` hub, so a test's
+/// subscribers and epoch are not shared with every other test in the binary.
+pub(crate) fn spawn_listener_with(
+    path: PathBuf,
+    tx: Sender<ControlRequest>,
+    hub: &'static Hub,
+) -> bool {
     // A socket file left by a previous run would make `bind` fail with
     // EADDRINUSE even though nothing is listening. Only remove it when
     // nothing answers, so two running Alleles cannot silently steal the
@@ -142,7 +154,7 @@ pub fn spawn_listener_at(path: PathBuf, tx: Sender<ControlRequest>) -> bool {
 
     if std::thread::Builder::new()
         .name("allele-control".into())
-        .spawn(move || accept_loop(listener, tx))
+        .spawn(move || accept_loop(listener, tx, hub))
         .is_err()
     {
         return false;
@@ -152,7 +164,7 @@ pub fn spawn_listener_at(path: PathBuf, tx: Sender<ControlRequest>) -> bool {
     true
 }
 
-fn accept_loop(listener: UnixListener, tx: Sender<ControlRequest>) {
+fn accept_loop(listener: UnixListener, tx: Sender<ControlRequest>, hub: &'static Hub) {
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => {
@@ -162,7 +174,7 @@ fn accept_loop(listener: UnixListener, tx: Sender<ControlRequest>) {
                 let tx = tx.clone();
                 if let Err(e) = std::thread::Builder::new()
                     .name("allele-control-conn".into())
-                    .spawn(move || serve(stream, tx))
+                    .spawn(move || serve(stream, tx, hub))
                 {
                     warn!("control socket: could not spawn connection thread: {e}");
                 }
@@ -175,16 +187,56 @@ fn accept_loop(listener: UnixListener, tx: Sender<ControlRequest>) {
     }
 }
 
-fn serve(stream: UnixStream, tx: Sender<ControlRequest>) {
+fn serve(stream: UnixStream, tx: Sender<ControlRequest>, hub: &'static Hub) {
     let Ok(write_half) = stream.try_clone() else {
         return;
     };
     let mut out = write_half;
     let reader = BufReader::new(stream);
+    // `Some` once the client has said `hello` (DEV-1254). Until then every
+    // line takes the legacy path below, unchanged, byte for byte.
+    let mut ext: Option<ext::Connection> = None;
+
+    let reply = |out: &mut UnixStream, mut line: String| -> bool {
+        line.push('\n');
+        out.write_all(line.as_bytes()).is_ok() && out.flush().is_ok()
+    };
 
     for line in reader.lines() {
         let Ok(line) = line else { return };
         if line.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(conn) = &ext {
+            match ext::handle(conn, &line, &tx, hub) {
+                ext::Outcome::Reply(encoded) => {
+                    if !reply(&mut out, encoded) {
+                        return;
+                    }
+                }
+                ext::Outcome::Stream(subscription) => {
+                    // From here the connection only carries frames out. A
+                    // reader that stops reading must not hold this thread
+                    // forever, so writes are bounded.
+                    let _ = out.set_write_timeout(Some(ext::STREAM_WRITE_TIMEOUT));
+                    ext::stream(subscription, &mut out);
+                    return;
+                }
+            }
+            continue;
+        }
+        if ext::is_hello(&line) {
+            let encoded = match ext::hello(&line, hub) {
+                Ok((conn, encoded)) => {
+                    ext = Some(conn);
+                    encoded
+                }
+                Err(encoded) => encoded,
+            };
+            if !reply(&mut out, encoded) {
+                return;
+            }
             continue;
         }
 
@@ -307,6 +359,52 @@ mod tests {
         match call(&path, "{not json") {
             Response::Error { code, .. } => assert_eq!(code, ErrorCode::BadRequest),
             other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    /// Raw reply bytes for one line on a fresh connection.
+    fn raw_call(path: &PathBuf, line: &str) -> String {
+        let stream = UnixStream::connect(path).expect("connects");
+        let mut out = stream.try_clone().expect("clone");
+        out.write_all(line.as_bytes()).expect("write");
+        out.write_all(b"\n").expect("write");
+        let mut reply = String::new();
+        BufReader::new(stream).read_line(&mut reply).expect("read");
+        reply
+    }
+
+    /// A client that never says `hello` is the legacy tier (DEV-1254), and it
+    /// must get byte-for-byte what it got before `allele.ext/1` existed. The
+    /// literals were captured on master before ext/1 landed: an ext op sent
+    /// without `hello` is still an unknown variant, listing the six old ops
+    /// and nothing else.
+    #[test]
+    fn a_client_without_hello_gets_the_legacy_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = serve_with(&dir, |request| match request {
+            Request::ProjectsList => Response::Projects { projects: vec![] },
+            Request::SessionsStatus { session_id } => {
+                super::super::protocol::no_such_session(&session_id)
+            }
+            _ => Response::Sessions { sessions: vec![] },
+        });
+        for (line, want) in [
+            (r#"{"op":"projects_list"}"#, "{\"result\":\"projects\",\"projects\":[]}\n"),
+            (r#"{"op":"sessions_list"}"#, "{\"result\":\"sessions\",\"sessions\":[]}\n"),
+            (
+                r#"{"op":"sessions_status","session_id":"x"}"#,
+                "{\"result\":\"error\",\"code\":\"session_not_found\",\"message\":\"no session with id x\"}\n",
+            ),
+            (
+                r#"{"op":"subscribe","topics":["sessions"]}"#,
+                "{\"result\":\"error\",\"code\":\"bad_request\",\"message\":\"could not parse request: unknown variant `subscribe`, expected one of `projects_list`, `sessions_list`, `sessions_status`, `sessions_create`, `sessions_discard`, `sessions_interrupt` at line 1 column 17\"}\n",
+            ),
+            (
+                "{not json",
+                "{\"result\":\"error\",\"code\":\"bad_request\",\"message\":\"could not parse request: key must be a string at line 1 column 2\"}\n",
+            ),
+        ] {
+            assert_eq!(raw_call(&path, line), want, "for {line}");
         }
     }
 

@@ -14,6 +14,17 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- **`allele.ext/1`, first rung: a live session feed on the control socket.** A client
+  that sends `hello` gets the contract versions, an epoch, its granted capabilities
+  (`observe`; `dispatch` too for Allele's own MCP server) and the dispatch limits.
+  `subscribe{topics:["sessions"]}` then streams a snapshot followed by deltas
+  (`session.added`, `session.status_changed`, `session.removed`, `dispatch.refused`,
+  `limits_changed`) with gap-free `seq`, optionally filtered by `group`,
+  `descendants_of` or `session_ids`. A client that falls behind is dropped with
+  `lagged` and cannot slow the UI. Session entries gain `input`, `turn`, `parent`,
+  `dispatched_by` and `started_at`, which `allele_sessions_status` now returns too.
+  The wire types and golden fixtures live in the new `allele-contract` crate. Clients
+  that never send `hello` get the same bytes as before.
 - **Remote tabs show how they are connected.** Beside "Live", the header reads
   `direct · 4 ms` or `via relay · 900 ms` and follows iroh's path switches live; a relayed
   link is in the warning colour. Every path change is logged with the peer, path kind and RTT.

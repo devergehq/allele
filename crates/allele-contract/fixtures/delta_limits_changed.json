@@ -1,0 +1,10 @@
+{
+  "frame": "delta",
+  "seq": 5,
+  "event": "limits_changed",
+  "dispatch_limits": {
+    "max_depth": 1,
+    "max_sessions": 20,
+    "live_dispatched": 0
+  }
+}

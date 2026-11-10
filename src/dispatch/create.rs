@@ -259,6 +259,24 @@ fn begin(
     let limits = state.user_settings.dispatch;
     let live = admission::live_dispatched_count(state);
     let depth = admission::admit(&caller_origin, live, &limits).map_err(|code| {
+        // Announced on the `allele.ext/1` stream, because a refusal leaves no
+        // trace in any session's state for a subscriber to notice (DEV-1254).
+        let (wire, limit) = match code {
+            ErrorCode::DepthLimitExceeded => (
+                allele_contract::ErrorCode::DepthLimitExceeded,
+                u64::from(limits.max_depth),
+            ),
+            _ => (
+                allele_contract::ErrorCode::CapacityExceeded,
+                limits.max_sessions as u64,
+            ),
+        };
+        crate::dispatch::hub::Hub::global().dispatch_refused(
+            request.caller_session_id.clone(),
+            wire,
+            caller_origin.depth().saturating_add(1),
+            limit,
+        );
         let message = match code {
             ErrorCode::DepthLimitExceeded => depth_limit_message(caller_origin.depth(), &limits),
             _ => format!(

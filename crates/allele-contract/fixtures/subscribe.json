@@ -1,0 +1,9 @@
+{
+  "op": "subscribe",
+  "topics": [
+    "sessions"
+  ],
+  "filter": {
+    "group": "review"
+  }
+}

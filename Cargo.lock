@@ -174,6 +174,7 @@ version = "0.7.2"
 dependencies = [
  "age",
  "alacritty_terminal",
+ "allele-contract",
  "anyhow",
  "async-trait",
  "cocoa 0.26.0",
@@ -217,6 +218,14 @@ dependencies = [
  "uuid",
  "walkdir",
  "which 7.0.3",
+]
+
+[[package]]
+name = "allele-contract"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

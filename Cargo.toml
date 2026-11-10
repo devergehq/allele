@@ -4,6 +4,12 @@ version = "0.7.2"
 edition = "2021"
 description = "Claude Code session manager — APFS clone management for parallel variant workflows"
 
+# `allele-contract` holds the `allele.ext/1` wire types (DEV-1254). A member so
+# `cargo test` and `cargo clippy` at the root cover it too.
+[workspace]
+members = [".", "crates/allele-contract"]
+default-members = [".", "crates/allele-contract"]
+
 [[bin]]
 name = "Allele"
 path = "src/main.rs"
@@ -40,6 +46,9 @@ which = "7"
 
 # Grapheme-aware text segmentation for the Settings text input
 unicode-segmentation = "1"
+
+# The allele.ext/1 wire types (DEV-1254): the only contract extensions see.
+allele-contract = { path = "crates/allele-contract" }
 
 # State management
 serde = { version = "1", features = ["derive"] }

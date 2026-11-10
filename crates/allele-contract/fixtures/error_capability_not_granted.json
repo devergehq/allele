@@ -1,0 +1,5 @@
+{
+  "result": "error",
+  "code": "capability_not_granted",
+  "message": "subscribe needs the observe capability, which this connection was not granted"
+}

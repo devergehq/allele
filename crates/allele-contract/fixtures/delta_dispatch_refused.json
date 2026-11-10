@@ -1,0 +1,11 @@
+{
+  "frame": "delta",
+  "seq": 4,
+  "event": "dispatch.refused",
+  "caller": "7f3c2a10-0000-4000-8000-000000000002",
+  "code": "depth_limit_exceeded",
+  "depth": 2,
+  "limit": 1,
+  "at": 1794269000,
+  "count": 1
+}

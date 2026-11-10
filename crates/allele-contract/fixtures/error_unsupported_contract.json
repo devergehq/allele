@@ -1,0 +1,5 @@
+{
+  "result": "error",
+  "code": "unsupported_contract",
+  "message": "this Allele serves allele.ext/1; the client asked for allele.ext/2"
+}

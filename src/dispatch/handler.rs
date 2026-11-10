@@ -126,6 +126,9 @@ fn sessions_discard(
         was_state: SessionState::from(session.status),
     };
 
+    // A diff sees the session vanish but not why; say why (DEV-1254).
+    crate::dispatch::hub::Hub::global().note_discarded(session_id);
+
     state.remove_session(
         crate::actions::SessionCursor {
             project_idx,
