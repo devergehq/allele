@@ -12,6 +12,7 @@
 use gpui::Context;
 
 use crate::app_state::AppState;
+use crate::session::rest;
 use crate::transcript::session_is_resumable;
 use crate::{debug_capture, git, hooks, interrupted};
 
@@ -122,38 +123,44 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
             // status runs across an await during which the
             // user can reorder or remove sessions, which would
             // land a result on the wrong session's row.
-            let Ok((targets, resumable_targets)) = this.update(cx, |this: &mut AppState, cx| {
-                // Idle-drawer parking rides this tick rather than
-                // adding a loop of its own: the threshold is
-                // minutes, so 15s is ample resolution, and one
-                // timer is one thing to reason about (DEV-445).
-                this.reap_idle_drawers(cx);
+            let Ok((targets, resumable_targets, verdict_jobs)) =
+                this.update(cx, |this: &mut AppState, cx| {
+                    // Idle-drawer parking rides this tick rather than
+                    // adding a loop of its own: the threshold is
+                    // minutes, so 15s is ample resolution, and one
+                    // timer is one thing to reason about (DEV-445).
+                    this.reap_idle_drawers(cx);
 
-                // Only the session the user is actually looking at (DEV-684).
-                //
-                // This used to be every clone with a `clone_path`. On a tree of
-                // 83 clones that measured 153s per pass against a nominal 15s
-                // interval — a 91% duty cycle, permanently, whether or not any
-                // session was active. The cost scaled with the number of
-                // registered clones, not with anything the user was doing.
-                //
-                // Nothing needs the breadth any more: the dirty dot that wanted
-                // a flag per session went with it (decided as DEV-686 D2,
-                // removed here in DEV-684), and the only
-                // remaining consumer is the active session's "{n} changed"
-                // header. The changes drawer folds its own observation back via
-                // `record_workspace_change_count`, so this tick only covers the
-                // case where the drawer was never opened.
-                let t: Vec<_> = this
-                    .active_session()
-                    .and_then(|s| s.clone_path.clone())
-                    .into_iter()
-                    .collect();
-                (t, this.resumable_targets())
-            }) else {
+                    // Only the session the user is actually looking at (DEV-684).
+                    //
+                    // This used to be every clone with a `clone_path`. On a tree of
+                    // 83 clones that measured 153s per pass against a nominal 15s
+                    // interval — a 91% duty cycle, permanently, whether or not any
+                    // session was active. The cost scaled with the number of
+                    // registered clones, not with anything the user was doing.
+                    //
+                    // Nothing needs the breadth any more: the dirty dot that wanted
+                    // a flag per session went with it (decided as DEV-686 D2,
+                    // removed here in DEV-684), and the only
+                    // remaining consumer is the active session's "{n} changed"
+                    // header. The changes drawer folds its own observation back via
+                    // `record_workspace_change_count`, so this tick only covers the
+                    // case where the drawer was never opened.
+                    let t: Vec<_> = this
+                        .active_session()
+                        .and_then(|s| s.clone_path.clone())
+                        .into_iter()
+                        .collect();
+                    // Loss verdicts (DEV-1260) ride the same tick: only idle
+                    // sessions without a verdict for their current `last_active`
+                    // are listed, so once the sidebar has settled this is empty
+                    // and costs no git at all.
+                    (t, this.resumable_targets(), this.loss_verdict_jobs())
+                })
+            else {
                 break; // AppState dropped — app is exiting
             };
-            if targets.is_empty() && resumable_targets.is_empty() {
+            if targets.is_empty() && resumable_targets.is_empty() && verdict_jobs.is_empty() {
                 continue;
             }
 
@@ -164,7 +171,7 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
             // ~/.claude/projects — so they share one timer and
             // one background hop rather than each growing a
             // loop of their own.
-            let (results, resumable) = cx
+            let (results, resumable, verdicts) = cx
                 .background_executor()
                 .spawn(async move {
                     let results = targets
@@ -181,7 +188,14 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                             (id, ok)
                         })
                         .collect::<Vec<_>>();
-                    (results, resumable)
+                    let verdicts = verdict_jobs
+                        .into_iter()
+                        .map(|job| {
+                            let verdict = rest::compute(&job);
+                            (job, verdict)
+                        })
+                        .collect::<Vec<_>>();
+                    (results, resumable, verdicts)
                 })
                 .await;
 
@@ -202,6 +216,17 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
                     }
                     for (id, ok) in resumable {
                         if this.record_resumable(&id, ok) {
+                            changed = true;
+                        }
+                    }
+                    for (job, verdict) in verdicts {
+                        // Stored against the `last_active` it was computed
+                        // for: if the session woke up mid-pass, the entry is
+                        // already stale and the next idle tick redoes it.
+                        if this
+                            .loss_verdicts
+                            .store(&job.session_id, job.last_active, verdict)
+                        {
                             changed = true;
                         }
                     }

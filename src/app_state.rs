@@ -353,6 +353,9 @@ pub(crate) struct AppState {
     pub(crate) drawer: DrawerState,
     pub(crate) reader: ReaderState,
     pub(crate) confirming: ConfirmationState,
+    /// What closing each idle session would lose (DEV-1260). Filled by the
+    /// background poller, read by the sidebar; never computed in render.
+    pub(crate) loss_verdicts: crate::session::rest::VerdictCache,
     pub(crate) rich: RichState,
     /// Absolute path to the Allele hooks.json, passed to claude via
     /// `--settings <path>` at every spawn. `None` if install_if_missing
@@ -1074,6 +1077,7 @@ pub(crate) mod fixture {
                         delete_all_archives: None,
                         armed_at: None,
                     },
+                    loss_verdicts: Default::default(),
                     rich: RichState {
                         view: None,
                         transcript_tailer: None,

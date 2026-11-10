@@ -16,6 +16,7 @@ use crate::actions::{
 };
 use crate::app_state::{AppState, GroupRename};
 use crate::project::Project;
+use crate::session::rest::{self, LossVerdict};
 use crate::session::{AttentionKind, SessionStatus};
 use crate::sidebar::groups::{self, GroupCounts, GroupHeader};
 use crate::sidebar::machines;
@@ -552,6 +553,86 @@ fn render_group_name(name: &str) -> AnyElement {
     .into_any_element()
 }
 
+/// The "Put N to rest" strip (DEV-1260): one click archives every idle
+/// session that holds nothing unique. No confirm step, because there is
+/// nothing to lose, and each one can be restored from its project's ARCHIVES.
+fn render_rest_strip(count: usize, cx: &mut Context<AppState>) -> AnyElement {
+    let noun = if count == 1 { "session" } else { "sessions" };
+    div()
+        .px(px(12.0))
+        .py(px(4.0))
+        .flex()
+        .flex_row()
+        .items_center()
+        .justify_between()
+        .gap(px(8.0))
+        .child(
+            div()
+                .min_w(px(0.0))
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_size(px(11.0))
+                .text_color(theme().text_dim)
+                .child(format!("{count} idle {noun} hold nothing unique")),
+        )
+        .child(
+            div()
+                .id("put-to-rest")
+                .flex_shrink_0()
+                .cursor_pointer()
+                .px(px(8.0))
+                .py(px(2.0))
+                .min_h(px(DENSE_CONTROL_MIN_HEIGHT))
+                .rounded(px(6.0))
+                .text_size(px(11.0))
+                .text_color(theme().accent)
+                .hover(|s| s.bg(theme().bg_raised))
+                .child(format!("Put {count} to rest"))
+                .tooltip(move |_window, cx| {
+                    cx.new(|_| SimpleTooltip {
+                        text: "Archive every idle session whose work is all on its base \
+                               branch. Restore any of them from ARCHIVES."
+                            .into(),
+                    })
+                    .into()
+                })
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this: &mut AppState, _event, _window, cx| {
+                        cx.stop_propagation();
+                        this.pending_action = Some(SessionAction::PutToRest.into());
+                        cx.notify();
+                    }),
+                ),
+        )
+        .into_any_element()
+}
+
+/// Colour of a verdict line: loss in the warning colour so it reads as the
+/// decision it is, a missing workspace as broken, the rest quiet.
+fn verdict_color(verdict: &LossVerdict) -> Hsla {
+    match verdict {
+        LossVerdict::NothingUnique => theme().text_dim,
+        LossVerdict::Loses { .. } => theme().warning,
+        LossVerdict::WorkspaceMissing => theme().danger,
+        LossVerdict::Unknown => theme().text_faint,
+    }
+}
+
+/// The discard prompt's copy, naming what would be lost when it is known.
+fn discard_prompt(verdict: Option<&LossVerdict>) -> String {
+    match verdict {
+        Some(v) if v.would_lose_work() => {
+            format!("Discard this workspace? It holds {}.", v.label())
+        }
+        Some(LossVerdict::WorkspaceMissing) => {
+            "Remove this session? Its workspace is already gone.".into()
+        }
+        _ => "Discard this workspace? Uncommitted work is lost.".into(),
+    }
+}
+
 pub(crate) fn build_sidebar_items(
     state: &mut AppState,
     _window: &mut Window,
@@ -577,6 +658,19 @@ pub(crate) fn build_sidebar_items(
     // Cloned up front: the walk below holds an immutable borrow of `state`,
     // and the handle is created lazily by `StartGroupRename` rather than here.
     let group_rename_focus = state.group_headers.rename_focus.clone();
+    // One clock for the whole pass, so every row's fade and verdict agree.
+    let rest_now = std::time::SystemTime::now();
+    let rest_after = state.user_settings.rest_after();
+
+    // Pure iteration over cached verdicts: no git runs here (DEV-1260).
+    if !filtering {
+        let resting =
+            rest::rest_candidates(&state.projects, &state.loss_verdicts, rest_now, rest_after)
+                .len();
+        if resting > 0 {
+            sidebar_items.push(render_rest_strip(resting, cx));
+        }
+    }
 
     for (p_idx, project) in state.projects.iter().enumerate() {
         let project_name = project.name.clone();
@@ -1246,6 +1340,16 @@ pub(crate) fn build_sidebar_items(
                 session_idx: s_idx,
             };
             let is_confirming_discard = state.confirming.discard == Some(session_cursor);
+            // What closing this session would lose, once it has been idle long
+            // enough to be judged; the row dims further the longer it idles.
+            let loss_verdict =
+                rest::shown_verdict(session, project, &state.loss_verdicts, rest_now, rest_after)
+                    .cloned();
+            let row_opacity = if is_active || is_confirming_discard {
+                1.0
+            } else {
+                rest::fade(rest::idle_for(session.last_active, rest_now), rest_after)
+            };
 
             let label_color = if is_suspended {
                 theme().text_faint // greyed out for Suspended
@@ -1309,6 +1413,7 @@ pub(crate) fn build_sidebar_items(
                 .pl(px(24.0))
                 .pr(px(12.0))
                 .py(px(5.0))
+                .opacity(row_opacity)
                 .bg(row_bg)
                 .hover(|s| s.bg(theme().bg_raised))
                 .cursor_pointer()
@@ -1422,6 +1527,18 @@ pub(crate) fn build_sidebar_items(
                         .flex_col()
                         .gap(px(1.0))
                         .child(label_row);
+                    if let Some(ref verdict) = loss_verdict {
+                        info_col = info_col.child(
+                            div()
+                                .pl(px(16.0))
+                                .text_size(px(11.0))
+                                .text_color(verdict_color(verdict))
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(verdict.label()),
+                        );
+                    }
                     if let Some(ref status) = session_startup_status {
                         info_col = info_col.child(
                             div()
@@ -1599,7 +1716,7 @@ pub(crate) fn build_sidebar_items(
             if is_confirming_discard {
                 sidebar_items.push(confirm_strip(
                     format!("discard-{p_idx}-{s_idx}"),
-                    "Discard this workspace? Uncommitted work is lost.",
+                    discard_prompt(loss_verdict.as_ref()),
                     "Discard",
                     px_indent::SESSION,
                     move |this, cx| {

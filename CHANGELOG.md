@@ -20,6 +20,12 @@ Changes on `master` awaiting the next tagged release.
 - **A log file that survives a normal launch.** `tracing` output now also goes to
   `~/.allele/logs/allele.log` (owner-only, rotated at 5 MiB, four old files kept), so
   logs from an app started with `open` or from Finder are no longer lost.
+- **Rest by loss.** Once a session has been idle for a day (`rest_after_hours` in
+  settings.json, `0` turns it off), its row says what closing it would lose:
+  `nothing unique`, `N commits not on <base>`, `N changed files`, or `workspace missing`.
+  Commits are judged with `git cherry` against the project's configured base branch, so
+  squash-merged work counts as landed. Idle rows fade with age. **Put N to rest** archives
+  every `nothing unique` session in one click, and each can be restored from ARCHIVES.
 - **Collapsible sidebar.** Click a project header to fold its sessions and archives away;
   click a machine row, or a project heading under it, to fold that too. The MACHINES
   section can be moved above the local projects from its header. Folds and position

@@ -88,6 +88,10 @@ pub enum SessionAction {
     },
     /// Cancel an in-flight discard confirmation.
     CancelDiscard,
+    /// Archive every idle session whose verdict is "nothing unique"
+    /// (DEV-1260). Not confirmation-gated: each one goes to an archive ref
+    /// it can be restored from, and none of them holds unique work.
+    PutToRest,
     /// Away: request Claude Code's remote control from every live Claude
     /// session, queueing those it is not yet safe to type into (DEV-1157).
     RequestRemoteControlAll,

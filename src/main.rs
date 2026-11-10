@@ -2242,6 +2242,7 @@ fn main() {
                             delete_all_archives: None,
                             armed_at: None,
                         },
+                        loss_verdicts: Default::default(),
                         rich: RichState {
                             view: None,
                             transcript_tailer: None,

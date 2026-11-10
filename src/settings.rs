@@ -160,6 +160,11 @@ pub struct Settings {
     #[serde(default)]
     pub drawer_park_idle_mins: u64,
 
+    /// Hours without activity before a session's row shows what closing it
+    /// would lose and starts to fade (DEV-1260). `0` turns that off.
+    #[serde(default = "default_rest_after_hours")]
+    pub rest_after_hours: u64,
+
     // --- right sidebar --------------------------------------------------------
     #[serde(default)]
     pub right_sidebar_visible: bool,
@@ -397,6 +402,10 @@ fn default_drawer_height() -> f32 {
 fn default_right_sidebar_width() -> f32 {
     300.0
 }
+fn default_rest_after_hours() -> u64 {
+    24
+}
+
 fn default_true() -> bool {
     true
 }
@@ -488,10 +497,18 @@ impl Settings {
     }
 }
 
+impl Settings {
+    /// Idle time after which a session is judged for rest, or zero when off.
+    pub fn rest_after(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.rest_after_hours.saturating_mul(60 * 60))
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             drawer_park_idle_mins: 0,
+            rest_after_hours: default_rest_after_hours(),
             sidebar_width: default_sidebar_width(),
             sidebar_visible: true,
             font_size: default_font_size(),

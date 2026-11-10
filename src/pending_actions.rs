@@ -217,19 +217,31 @@ impl AppState {
                 project_idx,
                 session_idx,
             } => {
-                // Arm the inline confirmation gate. The sidebar row will
-                // render Confirm/Cancel buttons on the next frame.
-                self.arm_confirmation(|c| {
-                    c.discard = Some(SessionCursor {
-                        project_idx,
-                        session_idx,
-                    })
-                });
-                cx.notify();
+                let cursor = SessionCursor {
+                    project_idx,
+                    session_idx,
+                };
+                // Nothing to lose, nothing to confirm (DEV-1260): the work is
+                // all on the base branch, and the archive ref keeps it anyway.
+                if self
+                    .loss_verdict(cursor)
+                    .is_some_and(|v| v.is_nothing_unique())
+                {
+                    self.confirming.discard = None;
+                    self.remove_session(cursor, window, cx);
+                } else {
+                    // Arm the inline confirmation gate. The sidebar row will
+                    // render Confirm/Cancel buttons on the next frame.
+                    self.arm_confirmation(|c| c.discard = Some(cursor));
+                    cx.notify();
+                }
             }
             SessionAction::CancelDiscard => {
                 self.confirming.discard = None;
                 cx.notify();
+            }
+            SessionAction::PutToRest => {
+                self.put_to_rest(window, cx);
             }
             SessionAction::DiscardSession {
                 project_idx,
