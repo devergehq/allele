@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use std::path::PathBuf;
 
+use crate::decisions::DecisionBook;
 use crate::errors::{AlleleError, Result};
 use crate::remote::PeerList;
 use crate::settings::Settings;
@@ -129,30 +130,11 @@ impl PeersRepository for JsonFilePeersRepo {
 
     fn save(&self, peers: &PeerList) -> Result<()> {
         let path = self.path()?;
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         let json = serde_json::to_vec_pretty(peers)
             .map_err(|e| AlleleError::Remote(format!("could not encode the peer list: {e}")))?;
-        // Write a sibling then rename over, so a crash never leaves a torn
-        // file. The sibling is *created* 0600 rather than chmod-ed after, so
-        // there is no moment at which it is readable by others.
-        let tmp = path.with_extension("json.tmp");
-        let _ = std::fs::remove_file(&tmp);
-        {
-            use std::io::Write;
-            let mut opts = std::fs::OpenOptions::new();
-            opts.write(true).create_new(true);
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::OpenOptionsExt;
-                opts.mode(0o600);
-            }
-            let mut f = opts.open(&tmp)?;
-            f.write_all(&json)?;
-            f.sync_all()?;
-        }
-        std::fs::rename(&tmp, path)?;
+        // Written via a 0600 sibling renamed over, so a crash never leaves a
+        // torn file and there is no moment at which it is readable by others.
+        write_owner_only(path, &json)?;
         tighten_permissions(path);
         Ok(())
     }
@@ -179,11 +161,118 @@ fn tighten_permissions(path: &std::path::Path) {
     }
 }
 
+/// The decision list, `~/.allele/decisions.json` (DEV-1267).
+///
+/// Private to Allele: no other tool is meant to read it. Written through the
+/// dirty-flag coordinator like `state.json`.
+pub(crate) trait DecisionsRepository: Send + Sync {
+    /// The stored book; empty when the file does not exist. A corrupt file is
+    /// an **error**, and is moved aside first so the next save does not
+    /// overwrite the only copy.
+    fn load(&self) -> Result<DecisionBook>;
+    fn save(&self, book: &DecisionBook) -> Result<()>;
+    /// Whether the file is there, for deciding after a failed load whether
+    /// saving would overwrite something.
+    fn exists(&self) -> bool;
+}
+
+/// Production decisions backend — `decisions.json`, written atomically and
+/// owner-only.
+pub(crate) struct JsonFileDecisionsRepo {
+    path: Option<PathBuf>,
+}
+
+impl JsonFileDecisionsRepo {
+    pub(crate) fn production() -> Self {
+        Self {
+            path: crate::paths::decisions_file(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn at(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn path(&self) -> Result<&PathBuf> {
+        self.path
+            .as_ref()
+            .ok_or_else(|| AlleleError::State("no home directory for decisions.json".into()))
+    }
+}
+
+impl DecisionsRepository for JsonFileDecisionsRepo {
+    fn load(&self) -> Result<DecisionBook> {
+        let path = self.path()?;
+        let text = match std::fs::read_to_string(path) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(DecisionBook::default())
+            }
+            Err(e) => return Err(e.into()),
+        };
+        serde_json::from_str(&text).map_err(|e| {
+            let aside = path.with_extension("json.corrupt");
+            let _ = std::fs::rename(path, &aside);
+            AlleleError::State(format!(
+                "{} is not a valid decision list ({e}); moved to {}",
+                path.display(),
+                aside.display()
+            ))
+        })
+    }
+
+    fn save(&self, book: &DecisionBook) -> Result<()> {
+        let path = self.path()?;
+        let json = serde_json::to_vec_pretty(book)
+            .map_err(|e| AlleleError::State(format!("could not encode decisions: {e}")))?;
+        write_owner_only(path, &json)
+    }
+
+    fn exists(&self) -> bool {
+        self.path.as_ref().is_some_and(|p| p.exists())
+    }
+}
+
+/// Write `bytes` to `path` via a 0600 sibling renamed over it, so a crash never
+/// leaves a torn file and the file is never readable by others.
+fn write_owner_only(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    // A sibling unique to this write, so two writers (a background flush and
+    // the quit-time save) never remove or collide on each other's file.
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = path.with_extension(format!("json.{}.{seq}.tmp", std::process::id()));
+    let _ = std::fs::remove_file(&tmp);
+    let written = (|| -> Result<()> {
+        use std::io::Write;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if written.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    written
+}
+
 /// Bundle of every repository `AppState` needs. Arc-cloned into background
 /// tasks so they can write without borrowing `AppState`.
 pub(crate) struct Repositories {
     pub(crate) settings: Arc<dyn SettingsRepository>,
     pub(crate) state: Arc<dyn StateRepository>,
+    pub(crate) decisions: Arc<dyn DecisionsRepository>,
 }
 
 impl Repositories {
@@ -193,6 +282,7 @@ impl Repositories {
         Self {
             settings: Arc::new(JsonFileSettingsRepo),
             state: Arc::new(JsonFileStateRepo),
+            decisions: Arc::new(JsonFileDecisionsRepo::production()),
         }
     }
 }
@@ -302,6 +392,34 @@ pub(crate) mod fakes {
             Ok(())
         }
     }
+
+    /// In-memory decisions backend for tests. Clones share one store.
+    #[derive(Clone, Default)]
+    pub(crate) struct InMemoryDecisionsRepository {
+        inner: Arc<Mutex<DecisionBook>>,
+    }
+
+    impl InMemoryDecisionsRepository {
+        #[allow(dead_code)]
+        pub(crate) fn snapshot(&self) -> DecisionBook {
+            self.inner.lock().unwrap().clone()
+        }
+    }
+
+    impl DecisionsRepository for InMemoryDecisionsRepository {
+        fn load(&self) -> Result<DecisionBook> {
+            Ok(self.inner.lock().unwrap().clone())
+        }
+
+        fn save(&self, book: &DecisionBook) -> Result<()> {
+            *self.inner.lock().unwrap() = book.clone();
+            Ok(())
+        }
+
+        fn exists(&self) -> bool {
+            true
+        }
+    }
 }
 
 #[cfg(test)]
@@ -406,5 +524,55 @@ mod tests {
         let path = dir.path().join("peers.json");
         std::fs::write(&path, "{ not json").unwrap();
         assert!(JsonFilePeersRepo::at(path).load().is_err());
+    }
+    #[test]
+    fn decisions_json_round_trips_and_a_missing_file_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = JsonFileDecisionsRepo::at(dir.path().join("decisions.json"));
+        assert_eq!(repo.load().unwrap(), DecisionBook::default());
+        let mut book = DecisionBook::default();
+        let post = crate::decisions::validate(&crate::decisions::PostRequest {
+            question: "Which?".into(),
+            options: vec!["A".into(), "B".into()],
+            assumed: 0,
+            unblocks: vec![],
+            caller_session_id: None,
+        })
+        .unwrap();
+        book.post("s1", "Session", post, 1).unwrap();
+        repo.save(&book).unwrap();
+        assert_eq!(repo.load().unwrap(), book);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decisions_json_is_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("decisions.json");
+        JsonFileDecisionsRepo::at(path.clone())
+            .save(&DecisionBook::default())
+            .unwrap();
+        assert_eq!(mode_of(&path), 0o600);
+    }
+
+    #[test]
+    fn a_corrupt_decisions_json_is_moved_aside_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("decisions.json");
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(JsonFileDecisionsRepo::at(path.clone()).load().is_err());
+        assert!(!path.exists());
+        assert!(path.with_extension("json.corrupt").exists());
+    }
+
+    /// A file that exists but cannot be read is never written over (DEV-1267).
+    #[test]
+    fn an_unreadable_decisions_json_blocks_saving() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should be: exists, but cannot be read.
+        let path = dir.path().join("decisions.json");
+        std::fs::create_dir(&path).unwrap();
+        let loaded = crate::decisions::Decisions::load(&JsonFileDecisionsRepo::at(path));
+        assert!(loaded.save_blocked);
     }
 }

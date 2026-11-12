@@ -180,6 +180,12 @@ pub(crate) fn handle(
         Request::SessionsCreate(_)
         | Request::SessionsDiscard { .. }
         | Request::SessionsInterrupt { .. } => Capability::Dispatch,
+        // DEV-1267 adds no capability of its own. The decision ops name a
+        // session by its id, so they go behind the grant only Allele's own
+        // MCP server holds rather than behind `observe`.
+        Request::DecisionsPost(_)
+        | Request::DecisionsList { .. }
+        | Request::DecisionsWithdraw { .. } => Capability::Dispatch,
     };
     if !conn.has(needs) {
         return Outcome::Reply(not_granted(needs));

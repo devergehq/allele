@@ -390,6 +390,7 @@ pub(crate) fn render(paths: &GuidePaths) -> String {
         ("workspaces/", "Session workspaces (APFS clones). Discard a session from the app or with `allele_sessions_discard`; never `rm` one."),
         ("trash/", "Discarded workspaces awaiting cleanup."),
         ("peers.json", "Paired machines."),
+        ("decisions.json", "Questions sessions posted for the developer, and the answers. Use the `allele_decisions_*` tools below, not this file."),
         ("sync-ledger.json", "Session-sync bookkeeping."),
         ("hooks.json", "Claude Code hook settings; rewritten on every launch."),
         ("bin/", "Hook receiver scripts; rewritten on every launch."),
@@ -508,7 +509,7 @@ pub(crate) fn render(paths: &GuidePaths) -> String {
     out.push_str(
         "\n## MCP tools\n\nAllele serves these tools to the sessions it starts (server name \
          `allele`). They are the supported way for an agent to list, create, inspect, interrupt \
-         and discard sessions.\n",
+         and discard sessions, and to ask the developer a question.\n",
     );
     if let Value::Array(tools) = crate::dispatch::mcp::tool_definitions() {
         for tool in &tools {

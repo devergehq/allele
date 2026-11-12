@@ -81,6 +81,10 @@ pub fn need(op: &Request) -> Need {
         Request::SessionsCreate(_)
         | Request::SessionsInterrupt { .. }
         | Request::SessionsDiscard { .. } => Need::Control,
+        // A paired machine has no session here to ask as; `localise` strips
+        // the caller, so these are refused whatever the grant (DEV-1267).
+        Request::DecisionsList { .. } => Need::View,
+        Request::DecisionsPost(_) | Request::DecisionsWithdraw { .. } => Need::Control,
     }
 }
 
@@ -100,6 +104,9 @@ pub fn op_name(op: &Request) -> &'static str {
         Request::SessionsCreate(_) => "sessions_create",
         Request::SessionsInterrupt { .. } => "sessions_interrupt",
         Request::SessionsDiscard { .. } => "sessions_discard",
+        Request::DecisionsPost(_) => "decisions_post",
+        Request::DecisionsList { .. } => "decisions_list",
+        Request::DecisionsWithdraw { .. } => "decisions_withdraw",
     }
 }
 
@@ -115,6 +122,17 @@ fn localise(op: Request) -> Request {
             req.caller_reply_to = None;
             Request::SessionsCreate(req)
         }
+        Request::DecisionsPost(mut req) => {
+            req.caller_session_id = None;
+            Request::DecisionsPost(req)
+        }
+        Request::DecisionsList { .. } => Request::DecisionsList {
+            caller_session_id: None,
+        },
+        Request::DecisionsWithdraw { id, .. } => Request::DecisionsWithdraw {
+            id,
+            caller_session_id: None,
+        },
         other => other,
     }
 }

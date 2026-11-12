@@ -41,7 +41,8 @@ gpui::actions!(
         GoToBrowserTab,
         ToggleChangesPanel,
         NewSessionAction,
-        DiscardSessionAction
+        DiscardSessionAction,
+        ToggleDecisionHistory
     ]
 );
 
@@ -200,6 +201,9 @@ pub(crate) const COMMANDS: &[Command] = &[
     app!("allele.new_session", NewSessionAction, "New Session…", [],
         "Open the new-session dialog for the active session's project.",
         palette(Some("In the current project"), "create add clone", needs_project)),
+    app!("allele.toggle_decision_history", ToggleDecisionHistory, "Show/Hide Decision History", [],
+        "Show or hide answered, withdrawn and expired questions in the decision strip, even when none are open.",
+        palette(None, "decisions questions answers history asked", always)),
     app!("allele.cycle_attention", CycleAttentionSession, "Next Session Needing Attention", ["cmd-shift-a"],
         "Jump to the next session that needs your attention.",
         palette(None, "attention waiting awaiting input next jump", always)),

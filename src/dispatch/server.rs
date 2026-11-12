@@ -376,8 +376,9 @@ mod tests {
     /// A client that never says `hello` is the legacy tier (DEV-1254), and it
     /// must get byte-for-byte what it got before `allele.ext/1` existed. The
     /// literals were captured on master before ext/1 landed: an ext op sent
-    /// without `hello` is still an unknown variant, listing the six old ops
-    /// and nothing else.
+    /// without `hello` is still an unknown variant. The list of ops in that
+    /// message grows when a legacy op is added — DEV-1267's three decision ops
+    /// — and nothing else in it changes.
     #[test]
     fn a_client_without_hello_gets_the_legacy_bytes() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -397,7 +398,7 @@ mod tests {
             ),
             (
                 r#"{"op":"subscribe","topics":["sessions"]}"#,
-                "{\"result\":\"error\",\"code\":\"bad_request\",\"message\":\"could not parse request: unknown variant `subscribe`, expected one of `projects_list`, `sessions_list`, `sessions_status`, `sessions_create`, `sessions_discard`, `sessions_interrupt` at line 1 column 17\"}\n",
+                "{\"result\":\"error\",\"code\":\"bad_request\",\"message\":\"could not parse request: unknown variant `subscribe`, expected one of `projects_list`, `sessions_list`, `sessions_status`, `sessions_create`, `sessions_discard`, `sessions_interrupt`, `decisions_post`, `decisions_list`, `decisions_withdraw` at line 1 column 17\"}\n",
             ),
             (
                 "{not json",

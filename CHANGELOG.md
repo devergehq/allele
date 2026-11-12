@@ -25,6 +25,17 @@ Changes on `master` awaiting the next tagged release.
   `dispatched_by` and `started_at`, which `allele_sessions_status` now returns too.
   The wire types and golden fixtures live in the new `allele-contract` crate. Clients
   that never send `hello` get the same bytes as before.
+- **One decision list.** A session can ask the developer a question with the new MCP tool
+  `allele_decisions_post` (2–4 options, the one it is assuming, what it unblocks) and keep
+  working. Every open question from every session appears oldest first in a strip under the
+  attention bar, with its count in the strip's header. Click an option to answer, with an
+  optional note. Allele types the answer into the asking session as
+  `[Your decision via Allele] Q: … → A: …`, and only when that session is idle at its prompt:
+  never over a running turn. `allele_decisions_list` and `allele_decisions_withdraw` let a
+  session read its answers or drop a question. Limits are 5 open questions per session and
+  50 in all, and a question expires after 24 hours. Answered questions stay in a History
+  view (**Show/Hide Decision History** in the command palette). Stored in
+  `~/.allele/decisions.json`.
 - **Remote tabs show how they are connected.** Beside "Live", the header reads
   `direct · 4 ms` or `via relay · 900 ms` and follows iroh's path switches live; a relayed
   link is in the warning colour. Every path change is logged with the peer, path kind and RTT.

@@ -38,6 +38,16 @@ pub fn handle(
             code: ErrorCode::Internal,
             message: "this op must be routed to dispatch::create or dispatch::manage".to_string(),
         },
+        // DEV-1267. Posting returns at once: the session carries on with the
+        // option it assumed, and the answer comes back when it is next idle.
+        Request::DecisionsPost(req) => state.decisions_post(req, cx),
+        Request::DecisionsList { caller_session_id } => {
+            state.decisions_list(caller_session_id.as_deref())
+        }
+        Request::DecisionsWithdraw {
+            id,
+            caller_session_id,
+        } => state.decisions_withdraw(&id, caller_session_id.as_deref(), cx),
     }
 }
 

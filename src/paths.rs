@@ -246,6 +246,11 @@ pub fn peers_file() -> Option<PathBuf> {
     allele_dir().map(|d| d.join("peers.json"))
 }
 
+/// The decision list (DEV-1267). Private to Allele.
+pub fn decisions_file() -> Option<PathBuf> {
+    allele_dir().map(|d| d.join("decisions.json"))
+}
+
 pub fn state_file() -> Option<PathBuf> {
     allele_dir().map(|d| d.join("state.json"))
 }
