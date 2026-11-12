@@ -113,6 +113,11 @@ Changes on `master` awaiting the next tagged release.
   schemes are inert. Links you open yourself are unchanged.
 
 ### Fixed
+- A dispatched session's `parent` in the session feed and `allele_sessions_status` is now
+  its parent's Allele session id, even when the parent's Claude conversation id has
+  rotated away from it. Before, `parent` could name an id that matched no `session_id`,
+  so `descendants_of` skipped the child. Sessions dispatched before the fix are resolved
+  when the feed is built. (DEV-1268)
 - Answering a permission prompt from the UI (Allow, Reject, or the attention bar's Allow)
   now restarts the session's state age at the answer, instead of letting
   `allele_sessions_status.state_age_secs` keep counting from when it became blocked.
