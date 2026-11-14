@@ -2271,8 +2271,10 @@ fn main() {
                         user_settings: settings_for_window.clone(),
                         settings_window: None,
                         pull_warning: None,
-                        // An unknown keymap command is reported here, at load (DEV-1264).
-                        sync_notice: keymap::load_report(),
+                        // An unknown keymap command is reported here, at load (DEV-1264),
+                        // and so is a settings.json that did not parse (DEV-428) —
+                        // that one first, since it can look like lost projects.
+                        sync_notice: settings::load_report().or_else(keymap::load_report),
                         pairing_alert: Default::default(),
                         main_tab: MainTab::Claude,
                         usage: crate::usage::UsageTracker::load(crate::usage::usage_file()),
