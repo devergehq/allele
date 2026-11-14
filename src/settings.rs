@@ -206,8 +206,10 @@ pub struct Settings {
     /// a clone is created. Catches stale runtime artifacts the parent left in
     /// the source tree — Overmind/Foreman sockets, server pid files, etc. —
     /// that would otherwise trip the child session when it tries to start
-    /// those same processes. Users can add or remove entries via the Settings
-    /// window.
+    /// those same processes. The same list is removed from a workspace when
+    /// it is discarded into `~/.allele/trash`, so trash never holds
+    /// rebuildable build output such as `target/` (DEV-1190). Users can add
+    /// or remove entries via the Settings window.
     #[serde(default = "default_session_cleanup_paths")]
     pub session_cleanup_paths: Vec<String>,
 

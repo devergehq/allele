@@ -113,6 +113,11 @@ Changes on `master` awaiting the next tagged release.
   schemes are inert. Links you open yourself are unchanged.
 
 ### Fixed
+- Discarded sessions no longer keep their build output in `~/.allele/trash` (DEV-1190).
+  Each path in `session_cleanup_paths` (which includes `target`, `.next`, `.nuxt` and
+  `.turbo` by default) is now also removed from a workspace when it moves to trash, so one
+  setting governs both directions. Source, untracked files and git data are kept. Entries
+  already in trash are left as they are.
 - Answering a permission prompt from the UI (Allow, Reject, or the attention bar's Allow)
   now restarts the session's state age at the answer, instead of letting
   `allele_sessions_status.state_age_secs` keep counting from when it became blocked.
