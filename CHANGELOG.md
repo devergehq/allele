@@ -113,6 +113,10 @@ Changes on `master` awaiting the next tagged release.
   schemes are inert. Links you open yourself are unchanged.
 
 ### Fixed
+- A dispatched session finishing provisioning no longer takes the keyboard from the
+  session you are typing in. DEV-425 stopped dispatch moving the sidebar selection; its
+  new terminal (and its drawer terminals) still grabbed focus. Sessions you start by hand
+  take focus as before. (DEV-677)
 - Answering a permission prompt from the UI (Allow, Reject, or the attention bar's Allow)
   now restarts the session's state age at the answer, instead of letting
   `allele_sessions_status.state_age_secs` keep counting from when it became blocked.

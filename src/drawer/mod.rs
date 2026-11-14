@@ -20,7 +20,7 @@ use crate::actions::{DrawerAction, SessionCursor, SettingsAction};
 use crate::app_state::{AppState, DRAWER_MIN_HEIGHT, MAIN_AREA_MIN_HEIGHT};
 use crate::session::DrawerTab;
 use crate::terminal::{
-    clamp_font_size, ShellCommand, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE,
+    clamp_font_size, InitialFocus, ShellCommand, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE,
 };
 use crate::SimpleTooltip;
 
@@ -41,6 +41,7 @@ impl AppState {
         name: Option<String>,
         command: Option<ShellCommand>,
         replay: Option<String>,
+        initial_focus: InitialFocus,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -94,6 +95,7 @@ impl AppState {
                 working_dir,
                 initial_font_size,
                 extra_env,
+                initial_focus,
             )
         });
         cx.subscribe(
@@ -222,10 +224,18 @@ impl AppState {
         }
 
         if needs_default {
-            self.spawn_drawer_tab(cursor, None, None, None, window, cx);
+            self.spawn_drawer_tab(cursor, None, None, None, InitialFocus::Take, window, cx);
         } else if !parked.is_empty() {
             for tab in parked {
-                self.spawn_drawer_tab(cursor, Some(tab.name), None, tab.replay, window, cx);
+                self.spawn_drawer_tab(
+                    cursor,
+                    Some(tab.name),
+                    None,
+                    tab.replay,
+                    InitialFocus::Take,
+                    window,
+                    cx,
+                );
             }
             if let Some(session) = self
                 .projects
