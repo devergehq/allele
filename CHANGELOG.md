@@ -120,6 +120,10 @@ Changes on `master` awaiting the next tagged release.
   way the file is kept: Allele copies it beside itself as `settings.json.unreadable-<time>`,
   logs the field or line the parser names, shows it in the main window's notice, and
   refuses to save settings for the rest of the run, so nothing is written over it.
+- Pasting into a local session (Cmd+V, or a brief Allele delivers) can no longer press
+  Enter by itself. Bracketed-paste markers inside the pasted text are now removed before
+  the text is wrapped, as remote pastes already did, so a copied `ESC[201~` followed by a
+  newline stays pasted text instead of submitting a prompt or approving a permission prompt.
 - Answering a permission prompt from the UI (Allow, Reject, or the attention bar's Allow)
   now restarts the session's state age at the answer, instead of letting
   `allele_sessions_status.state_age_secs` keep counting from when it became blocked.

@@ -1975,13 +1975,10 @@ impl Render for TerminalView {
                                                 .contains(
                                                 alacritty_terminal::term::TermMode::BRACKETED_PASTE,
                                             );
-                                            if use_bracketed {
-                                                terminal.write(b"\x1b[200~");
-                                                terminal.write(text.as_bytes());
-                                                terminal.write(b"\x1b[201~");
-                                            } else {
-                                                terminal.write(text.as_bytes());
-                                            }
+                                            terminal.write(&clipboard_paste_bytes(
+                                                &text,
+                                                use_bracketed,
+                                            ));
                                         }
                                     }
                                 }
@@ -2761,6 +2758,54 @@ pub(crate) fn parse_line_col_suffix(token: &str) -> (&str, Option<(u32, Option<u
     (path_part, line_col)
 }
 
+/// The bytes Cmd+V writes for clipboard `text`, as one buffer.
+///
+/// Goes through [`keymap::paste_bytes`], which removes any bracketed-paste
+/// marker already inside the clipboard text before wrapping it: a copied
+/// `ESC [ 201 ~` would otherwise end the paste early and the newline after
+/// it would be typed as Enter (DEV-1195).
+fn clipboard_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
+    keymap::paste_bytes(text, bracketed)
+}
+
 #[cfg(test)]
 #[path = "terminal_view_overlay_tests.rs"]
 mod overlay_tests;
+
+#[cfg(test)]
+mod paste_tests {
+    // Not `super::*`: that brings in `gpui::test`, which shadows `#[test]`.
+    use super::{clipboard_paste_bytes, keymap};
+
+    #[test]
+    fn a_plain_clipboard_paste_is_wrapped_once() {
+        assert_eq!(
+            clipboard_paste_bytes("one\ntwo", true),
+            b"\x1b[200~one\ntwo\x1b[201~".to_vec()
+        );
+        assert_eq!(clipboard_paste_bytes("one\ntwo", false), b"one\ntwo");
+    }
+
+    /// The DEV-1195 case: clipboard text carrying an end marker and a
+    /// newline must arrive as one paste, with the newline still inside it,
+    /// so it is pasted text rather than an Enter.
+    #[test]
+    fn a_copied_end_marker_cannot_end_the_paste_and_press_enter() {
+        let clipboard = "look\x1b[201~\nyes\r";
+        let bytes = clipboard_paste_bytes(clipboard, true);
+        assert_eq!(bytes, b"\x1b[200~look\nyes\r\x1b[201~".to_vec());
+        // Exactly one end marker, and it is the last thing written.
+        let ends = bytes
+            .windows(keymap::PASTE_END.len())
+            .filter(|w| *w == keymap::PASTE_END)
+            .count();
+        assert_eq!(ends, 1);
+        assert!(bytes.ends_with(keymap::PASTE_END));
+    }
+
+    #[test]
+    fn markers_are_stripped_when_the_program_did_not_ask_for_bracketing() {
+        let bytes = clipboard_paste_bytes("a\x1b[200~b\x1b[201~c", false);
+        assert_eq!(bytes, b"abc".to_vec());
+    }
+}
