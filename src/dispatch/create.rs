@@ -299,13 +299,15 @@ fn begin(
     };
 
     let name = unique_name(state, request.name.trim());
-    let by_label = request
+    let caller = request
         .caller_session_id
         .as_deref()
-        .and_then(|id| find_session_label(state, id))
+        .and_then(|id| find_session(state, id));
+    let by_label = caller
+        .map(|s| s.label.clone())
         .unwrap_or_else(|| "an agent".to_string());
     let origin = SessionOrigin::Dispatched {
-        by_session_id: request.caller_session_id.clone().unwrap_or_default(),
+        by_session_id: by_session_id(caller, request.caller_session_id.as_deref()),
         by_label,
         depth,
     };
@@ -425,22 +427,29 @@ fn unique_name_among(taken: &std::collections::HashSet<String>, requested: &str)
     format!("{requested} {}", uuid::Uuid::new_v4())
 }
 
-fn find_session_origin(state: &AppState, session_id: &str) -> Option<SessionOrigin> {
+/// The live session a caller id names. The MCP server sends the caller's
+/// Claude conversation id, which equals its Allele id only until the
+/// conversation rotates, so either is accepted.
+fn find_session<'a>(state: &'a AppState, session_id: &str) -> Option<&'a crate::session::Session> {
     state
         .projects
         .iter()
         .flat_map(|p| p.sessions.iter())
         .find(|s| s.id == session_id || s.claude_session_id() == session_id)
-        .map(|s| s.origin.clone())
 }
 
-fn find_session_label(state: &AppState, session_id: &str) -> Option<String> {
-    state
-        .projects
-        .iter()
-        .flat_map(|p| p.sessions.iter())
-        .find(|s| s.id == session_id || s.claude_session_id() == session_id)
-        .map(|s| s.label.clone())
+fn find_session_origin(state: &AppState, session_id: &str) -> Option<SessionOrigin> {
+    find_session(state, session_id).map(|s| s.origin.clone())
+}
+
+/// What a dispatched session records as its parent: the caller's Allele id
+/// when the caller is a known session, so the feed's `parent` names a
+/// `session_id` (DEV-1268). An unknown caller is kept as sent.
+fn by_session_id(caller: Option<&crate::session::Session>, sent: Option<&str>) -> String {
+    caller
+        .map(|s| s.id.clone())
+        .or_else(|| sent.map(String::from))
+        .unwrap_or_default()
 }
 
 fn observe(state: &AppState, session_id: &str, cx: &gpui::App) -> Option<Observed> {
@@ -508,6 +517,56 @@ fn depth_limit_message(caller_depth: u8, limits: &admission::DispatchLimits) -> 
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    // ── What a dispatched session records as its parent (DEV-1268) ─────
+
+    use crate::app_state::fixture::Fixture;
+    use crate::project::Project;
+    use crate::session::Session;
+    use gpui::TestAppContext;
+
+    /// A project holding one session `lead` whose conversation has rotated
+    /// to `conv-lead`, as it does after `/clear` or a resume.
+    fn rotated_lead() -> Project {
+        let mut p = Project::new("alpha".to_string(), std::path::PathBuf::from("/tmp/alpha"));
+        let now = std::time::SystemTime::now();
+        let mut lead = Session::suspended_from_persisted(
+            "lead".into(),
+            "Lead".into(),
+            now,
+            now,
+            Duration::ZERO,
+            None,
+        );
+        lead.claude_session_id = Some("conv-lead".into());
+        p.sessions.push(lead);
+        p
+    }
+
+    fn recorded(fx: &Fixture, cx: &mut TestAppContext, sent: Option<&str>) -> String {
+        fx.update(cx, |state, _w, _cx| {
+            by_session_id(sent.and_then(|id| find_session(state, id)), sent)
+        })
+    }
+
+    /// The MCP server sends the caller's conversation id; the child must
+    /// record the caller's Allele id, which is what the feed's `session_id`
+    /// carries.
+    #[gpui::test]
+    fn a_caller_known_by_its_conversation_id_is_recorded_by_its_allele_id(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![rotated_lead()], cx);
+        assert_eq!(recorded(&fx, cx, Some("conv-lead")), "lead");
+        assert_eq!(recorded(&fx, cx, Some("lead")), "lead");
+    }
+
+    /// Unchanged from before DEV-1268: an id that names no session is kept
+    /// as sent, and no caller at all records nothing.
+    #[gpui::test]
+    fn an_unknown_or_absent_caller_is_recorded_as_sent(cx: &mut TestAppContext) {
+        let fx = Fixture::with_projects(vec![rotated_lead()], cx);
+        assert_eq!(recorded(&fx, cx, Some("conv-gone")), "conv-gone");
+        assert_eq!(recorded(&fx, cx, None), "");
+    }
 
     fn taken(names: &[&str]) -> HashSet<String> {
         names.iter().map(|n| n.to_string()).collect()
