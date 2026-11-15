@@ -283,6 +283,19 @@ impl SettingsWindowState {
         s.agents.sync_inputs(cx);
         s
     }
+
+    /// Rebuild every section from the app's `user_settings`, keeping the
+    /// selected section and the search text. Called when `settings.json` was
+    /// reloaded after an outside edit (DEV-1278), so the window neither shows
+    /// nor, on its next edit, pushes back the values from before it.
+    pub(crate) fn reload_from_app(&mut self, cx: &mut Context<Self>) {
+        let selected = self.selected;
+        let search = self.settings_search_input.clone();
+        *self = Self::new(cx, self.app.clone());
+        self.selected = selected;
+        self.settings_search_input = search;
+        cx.notify();
+    }
 }
 
 impl Render for SettingsWindowState {

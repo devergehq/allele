@@ -54,6 +54,7 @@ mod scratch_pad;
 mod session;
 mod session_ops;
 mod settings;
+mod settings_reload;
 mod settings_window;
 mod shell_env;
 mod sidebar;
