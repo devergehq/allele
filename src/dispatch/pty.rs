@@ -13,6 +13,7 @@ use gpui::{Context, Entity};
 use tracing::{info, warn};
 
 use crate::app_state::AppState;
+use crate::terminal::keymap::paste_bytes;
 use crate::terminal::TerminalView;
 
 /// Escape — the keystroke that stops what an agent is doing.
@@ -180,15 +181,12 @@ fn accepts_bracketed_paste(terminal: &crate::terminal::pty_terminal::PtyTerminal
 /// Unbracketed is not a degraded copy of bracketed — it is the correct thing
 /// to send to a terminal that has not enabled the mode, because there the
 /// markers are not markers, just escape bytes landing in the input.
+///
+/// Built by [`paste_bytes`], which first removes any marker inside the
+/// payload: a brief carrying `ESC [ 201 ~` would otherwise end the paste
+/// early and type what follows as keys, Enter included (DEV-1195).
 fn paste_sequence(payload: &str, bracketed: bool) -> Vec<u8> {
-    if !bracketed {
-        return payload.as_bytes().to_vec();
-    }
-    let mut out = Vec::with_capacity(payload.len() + 12);
-    out.extend_from_slice(b"\x1b[200~");
-    out.extend_from_slice(payload.as_bytes());
-    out.extend_from_slice(b"\x1b[201~");
-    out
+    paste_bytes(payload, bracketed)
 }
 
 /// Write to the view's PTY if it still has one. False means the terminal or
@@ -285,6 +283,20 @@ mod tests {
             paste_sequence("do the thing", true),
             b"\x1b[200~do the thing\x1b[201~"
         );
+    }
+
+    /// DEV-1195: a payload carrying an end marker and an Enter must stay one
+    /// paste. The marker is removed and the Enter stays inside the paste,
+    /// where it is text, not a submit.
+    #[test]
+    fn an_embedded_end_marker_cannot_end_the_paste_and_submit() {
+        let payload = "brief\x1b[201~\r";
+        let bytes = paste_sequence(payload, true);
+        assert_eq!(bytes, b"\x1b[200~brief\r\x1b[201~".to_vec());
+        let ends = bytes.windows(6).filter(|w| *w == b"\x1b[201~").count();
+        assert_eq!(ends, 1);
+        assert!(bytes.ends_with(b"\x1b[201~"));
+        assert_eq!(paste_sequence(payload, false), b"brief\r".to_vec());
     }
 
     /// The brief has to arrive byte-for-byte either way — a delivery surface

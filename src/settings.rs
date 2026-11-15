@@ -564,20 +564,110 @@ impl Settings {
         crate::paths::settings_file()
     }
 
-    /// Load settings from disk. Returns default if file doesn't exist or is invalid.
+    /// Load settings from disk. Returns default if the file doesn't exist.
+    ///
+    /// A file that exists but does not parse is never silently replaced — see
+    /// [`Settings::load_from`] (DEV-428).
     pub fn load() -> Self {
         let Some(path) = Self::path() else {
             let mut s = Self::default();
             s.ensure_agents_seeded();
             return s;
         };
-        let mut s: Self = match std::fs::read_to_string(&path) {
-            Ok(contents) => serde_json::from_str(&contents).unwrap_or_default(),
-            Err(_) => Self::default(),
-        };
+        let (mut s, problem) = Self::load_from(&path);
+        if let Some(problem) = problem {
+            let _ = LOAD_REPORT.set(problem.summary());
+        }
         s.ensure_agents_seeded();
         s.ensure_cleanup_paths_updated();
         s
+    }
+
+    /// Read `path`, keeping as much of it as can be read.
+    ///
+    /// This used to be `from_str(..).unwrap_or_default()`: one bad value — a
+    /// `"kind": "Generic"` where the parser wants `"generic"` — threw away the
+    /// whole file, every registered project with it, and said nothing. The
+    /// next save then wrote those defaults over the file (DEV-428).
+    ///
+    /// Now, when the file does not parse:
+    /// - a value of the wrong type or an unknown variant costs that one value
+    ///   its default, and a malformed project or agent entry costs that entry;
+    ///   everything else is kept. JSON that is not JSON at all loads defaults.
+    /// - the file is copied beside itself, as `settings.json.unreadable-<unix
+    ///   seconds>`, before anything else can happen to it;
+    /// - saves to `path` are refused for the rest of the run, so neither the
+    ///   repaired settings nor the defaults are written over it — and a fix the
+    ///   developer makes by hand while Allele runs is not clobbered either.
+    ///
+    /// Takes the path so tests can point it at a temp directory.
+    pub fn load_from(path: &std::path::Path) -> (Self, Option<LoadProblem>) {
+        let contents = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            // Missing is the first-run case. Unreadable for another reason
+            // (permissions, not UTF-8) is not, and must not be saved over.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Self::default(), None),
+            Err(e) => {
+                let problem = LoadProblem {
+                    error: format!("could not be read: {e}"),
+                    dropped: Vec::new(),
+                    defaults: true,
+                    copy: None,
+                };
+                tracing::error!("settings.json {} — running with defaults", problem.error);
+                block_saves(path);
+                return (Self::default(), Some(problem));
+            }
+        };
+        let strict_error = match serde_json::from_str::<Self>(&contents) {
+            Ok(s) => return (s, None),
+            Err(e) => e,
+        };
+        // serde_json's error names the line and column.
+        let mut problem = LoadProblem {
+            error: strict_error.to_string(),
+            dropped: Vec::new(),
+            defaults: false,
+            copy: None,
+        };
+        let settings = match serde_json::from_str::<serde_json::Value>(&contents) {
+            Ok(value) => match repair(value) {
+                Ok((settings, dropped)) => {
+                    problem.dropped = dropped;
+                    settings
+                }
+                Err(()) => {
+                    problem.defaults = true;
+                    Self::default()
+                }
+            },
+            Err(_) => {
+                problem.defaults = true;
+                Self::default()
+            }
+        };
+        // Copy once per run: `load` is called more than once, and a second
+        // copy of the same bytes says nothing new.
+        if block_saves(path) {
+            problem.copy = keep_copy(path, &contents);
+        }
+        tracing::error!(
+            "settings.json did not parse ({}). {}. Dropped: [{}]. The file is left as it is{}, \
+             and Allele will not save settings until it is fixed and Allele restarted.",
+            problem.error,
+            if problem.defaults {
+                "Running with defaults"
+            } else {
+                "Kept everything else"
+            },
+            problem.dropped.join("; "),
+            problem
+                .copy
+                .as_ref()
+                .map(|c| format!("; a copy is at {}", c.display()))
+                .unwrap_or_default(),
+        );
+        (settings, Some(problem))
     }
 
     /// Append any recommended cleanup paths that are missing from the
@@ -632,6 +722,12 @@ impl Settings {
     /// against a temp directory. `Self::path()` is the user's real config, and
     /// a test that wrote there would overwrite their settings.
     pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
+        if saves_blocked(path) {
+            return Err(std::io::Error::other(
+                "settings.json could not be read at launch, so it will not be overwritten \
+                 (fix the file and restart Allele)",
+            ));
+        }
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -642,6 +738,169 @@ impl Settings {
         std::fs::write(&tmp, json)?;
         std::fs::rename(&tmp, path)?;
         Ok(())
+    }
+}
+
+/// What went wrong reading `settings.json`, for the log and the startup notice.
+#[derive(Debug, Clone)]
+pub struct LoadProblem {
+    /// The parser's own message, with the line and column it names.
+    pub error: String,
+    /// Each value that was dropped to let the rest load: its path in the file
+    /// (`agents[0].kind`) and why.
+    pub dropped: Vec<String>,
+    /// Nothing could be kept; the app is running on defaults.
+    pub defaults: bool,
+    /// Where the untouched copy of the file was put, if it was.
+    pub copy: Option<PathBuf>,
+}
+
+impl LoadProblem {
+    /// One line for the main window's notice.
+    pub fn summary(&self) -> String {
+        let what = if self.defaults {
+            format!(
+                "settings.json could not be read ({}), so Allele is running with defaults",
+                self.error
+            )
+        } else {
+            let first = self.dropped.first().map(String::as_str).unwrap_or("");
+            let more = match self.dropped.len() {
+                0 | 1 => String::new(),
+                n => format!(" and {} more", n - 1),
+            };
+            format!(
+                "settings.json has a value Allele could not read ({first}{more}); it was ignored"
+            )
+        };
+        format!(
+            "Settings: {what}. Your file is unchanged and settings will not be saved until it is \
+             fixed and Allele restarted — see the log."
+        )
+    }
+}
+
+/// Set once by [`Settings::load`] when the real settings file did not parse;
+/// read by the main window at startup (the same route as the keymap's).
+static LOAD_REPORT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// The startup notice for a settings file that did not parse, if it did not.
+pub(crate) fn load_report() -> Option<String> {
+    LOAD_REPORT.get().cloned()
+}
+
+/// Paths whose file did not parse this run. Saving to them is refused. Keyed
+/// by path, not a single flag, so tests on temp files cannot affect each other.
+static BLOCKED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
+
+/// Refuse saves to `path` for the rest of the run. True the first time.
+fn block_saves(path: &std::path::Path) -> bool {
+    BLOCKED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(path.to_path_buf())
+}
+
+fn saves_blocked(path: &std::path::Path) -> bool {
+    BLOCKED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .contains(path)
+}
+
+/// Copy the unreadable file's bytes beside it. Never overwrites an existing
+/// copy (`create_new`).
+fn keep_copy(path: &std::path::Path, contents: &str) -> Option<PathBuf> {
+    use std::io::Write;
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let name = path.file_name()?.to_string_lossy().into_owned();
+    let copy = path.with_file_name(format!("{name}.unreadable-{secs}"));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&copy)
+        .and_then(|mut f| f.write_all(contents.as_bytes()));
+    match written {
+        Ok(()) => Some(copy),
+        Err(e) => {
+            tracing::error!(
+                "could not keep a copy of settings.json at {}: {e}",
+                copy.display()
+            );
+            None
+        }
+    }
+}
+
+/// How many values [`repair`] will drop before giving up on the file.
+const MAX_DROPPED: usize = 32;
+
+/// Deserialize `value`, dropping whatever the parser names until it loads.
+///
+/// `serde_path_to_error` gives the path of the failure. For a bad value
+/// (`agents[0].kind`) that path is the value itself: removing it lets the field
+/// take its default. For a missing required field the path is the entry that
+/// lacks it (`projects[2]`): removing that drops the one entry. `Err` when the
+/// failure is the document itself, or when too much would have to go.
+fn repair(mut value: serde_json::Value) -> Result<(Settings, Vec<String>), ()> {
+    use serde_path_to_error::Segment;
+    let mut dropped = Vec::new();
+    loop {
+        let err = match serde_path_to_error::deserialize::<_, Settings>(&value) {
+            Ok(s) => return Ok((s, dropped)),
+            Err(e) => e,
+        };
+        if dropped.len() >= MAX_DROPPED {
+            return Err(());
+        }
+        // Only map keys and array indices can be removed; stop the path at
+        // anything else and remove the container there.
+        let mut segments: Vec<&Segment> = Vec::new();
+        for seg in err.path().iter() {
+            match seg {
+                Segment::Seq { .. } | Segment::Map { .. } => segments.push(seg),
+                _ => break,
+            }
+        }
+        let Some((last, parents)) = segments.split_last() else {
+            return Err(());
+        };
+        let mut node = &mut value;
+        for seg in parents {
+            node = match seg {
+                Segment::Seq { index } => node.get_mut(*index).ok_or(())?,
+                Segment::Map { key } => node.get_mut(key.as_str()).ok_or(())?,
+                _ => return Err(()),
+            };
+        }
+        let removed = match (last, node) {
+            (Segment::Seq { index }, serde_json::Value::Array(a)) if *index < a.len() => {
+                a.remove(*index);
+                true
+            }
+            (Segment::Map { key }, serde_json::Value::Object(o)) => o.remove(key).is_some(),
+            _ => false,
+        };
+        if !removed {
+            return Err(());
+        }
+        let shown: Vec<String> = segments
+            .iter()
+            .map(|s| match s {
+                Segment::Seq { index } => format!("[{index}]"),
+                Segment::Map { key } => format!(".{key}"),
+                _ => String::new(),
+            })
+            .collect();
+        let shown = shown.concat();
+        dropped.push(format!(
+            "{}: {}",
+            shown.trim_start_matches('.'),
+            err.inner()
+        ));
     }
 }
 
@@ -879,5 +1138,151 @@ mod tests {
         let back: ProjectSettings = serde_json::from_str(&json).expect("should deserialize");
         assert_eq!(back.env, original.env);
         assert_eq!(back.path_prepend, original.path_prepend);
+    }
+
+    // --- DEV-428: a settings file that does not parse --------------------------
+
+    /// A fresh temp dir per test, so the per-path save block and the copies
+    /// never cross between tests. Never the user's real settings file.
+    fn temp_settings(tag: &str, contents: &str) -> (PathBuf, PathBuf) {
+        let dir =
+            std::env::temp_dir().join(format!("allele-settings-428-{}-{tag}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("settings.json");
+        std::fs::write(&path, contents).expect("seed");
+        (dir, path)
+    }
+
+    fn copies(dir: &std::path::Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .expect("read dir")
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().starts_with("settings.json.unreadable-"))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    /// The ticket's own case: `"Generic"` where the parser wants `"generic"`.
+    const BAD_AGENT_KIND: &str = r#"{
+        "font_size": 17.0,
+        "projects": [
+            { "id": "p1", "name": "alpha", "source_path": "/tmp/alpha" },
+            { "id": "p2", "name": "beta", "source_path": "/tmp/beta" }
+        ],
+        "agents": [
+            { "id": "mine", "kind": "Generic", "display_name": "Mine", "path": "/bin/true" }
+        ]
+    }"#;
+
+    #[test]
+    fn one_bad_enum_value_keeps_every_project() {
+        let (dir, path) = temp_settings("enum", BAD_AGENT_KIND);
+        let (s, problem) = Settings::load_from(&path);
+
+        let names: Vec<&str> = s.projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "beta"]);
+        assert_eq!(s.font_size, 17.0, "unrelated settings survive");
+        // Only the bad field took its default; the agent entry itself survives.
+        assert_eq!(s.agents.len(), 1);
+        assert_eq!(s.agents[0].id, "mine");
+        assert_eq!(s.agents[0].path.as_deref(), Some("/bin/true"));
+        assert_eq!(s.agents[0].kind, AgentKind::Generic);
+
+        let problem = problem.expect("reported");
+        assert!(!problem.defaults);
+        assert_eq!(problem.dropped.len(), 1);
+        assert!(
+            problem.dropped[0].starts_with("agents[0].kind: unknown variant `Generic`"),
+            "names the field: {:?}",
+            problem.dropped
+        );
+        assert!(
+            problem.error.contains("line"),
+            "names the line: {}",
+            problem.error
+        );
+        assert!(problem.summary().starts_with("Settings: "));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_project_missing_a_required_field_costs_only_that_project() {
+        let (dir, path) = temp_settings(
+            "project",
+            r#"{ "projects": [
+                { "id": "p1", "name": "alpha", "source_path": "/tmp/alpha" },
+                { "id": "p2", "source_path": "/tmp/nameless" },
+                { "id": "p3", "name": "gamma", "source_path": "/tmp/gamma" }
+            ] }"#,
+        );
+        let (s, problem) = Settings::load_from(&path);
+        let names: Vec<&str> = s.projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["alpha", "gamma"]);
+        let problem = problem.expect("reported");
+        assert!(
+            problem.dropped[0].starts_with("projects[1]:"),
+            "{:?}",
+            problem.dropped
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_unparseable_file_is_copied_and_never_overwritten() {
+        let original = "{ \"projects\": [ { \"id\": \"p1\", ";
+        let (dir, path) = temp_settings("syntax", original);
+        let (s, problem) = Settings::load_from(&path);
+
+        assert!(s.projects.is_empty(), "defaults in memory");
+        let problem = problem.expect("reported");
+        assert!(problem.defaults);
+        assert!(problem.error.contains("line 1"), "{}", problem.error);
+
+        // The copy is made, beside the file, byte for byte.
+        let found = copies(&dir);
+        assert_eq!(found.len(), 1);
+        assert_eq!(problem.copy.as_ref(), Some(&found[0]));
+        assert_eq!(std::fs::read_to_string(&found[0]).unwrap(), original);
+
+        // A later save is refused and the file is untouched.
+        assert!(s.save_to(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+
+        // Loading again in the same run makes no second copy.
+        let _ = Settings::load_from(&path);
+        assert_eq!(copies(&dir).len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_repaired_file_is_not_written_back_either() {
+        let (dir, path) = temp_settings("repaired", BAD_AGENT_KIND);
+        let (s, _) = Settings::load_from(&path);
+        assert!(s.save_to(&path).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), BAD_AGENT_KIND);
+        assert_eq!(copies(&dir).len(), 1);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_good_or_missing_file_is_not_reported() {
+        let (dir, path) = temp_settings("good", "{}");
+        let (s, problem) = Settings::load_from(&path);
+        assert!(problem.is_none());
+        s.save_to(&path).expect("saves still work");
+        assert!(copies(&dir).is_empty());
+
+        let (_, problem) = Settings::load_from(&dir.join("absent.json"));
+        assert!(problem.is_none());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
