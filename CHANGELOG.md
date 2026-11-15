@@ -117,6 +117,17 @@ Changes on `master` awaiting the next tagged release.
   session you are typing in. DEV-425 stopped dispatch moving the sidebar selection; its
   new terminal (and its drawer terminals) still grabbed focus. Sessions you start by hand
   take focus as before. (DEV-677)
+- **One bad value in `settings.json` no longer discards every registered project
+  (DEV-428).** A value Allele cannot read — say `"kind": "Generic"` for `"generic"` —
+  now costs that one value its default (a malformed project entry costs that entry)
+  instead of the whole file; JSON that does not parse at all still loads defaults. Either
+  way the file is kept: Allele copies it beside itself as `settings.json.unreadable-<time>`,
+  logs the field or line the parser names, shows it in the main window's notice, and
+  refuses to save settings for the rest of the run, so nothing is written over it.
+- Pasting into a local session (Cmd+V, or a brief Allele delivers) can no longer press
+  Enter by itself. Bracketed-paste markers inside the pasted text are now removed before
+  the text is wrapped, as remote pastes already did, so a copied `ESC[201~` followed by a
+  newline stays pasted text instead of submitting a prompt or approving a permission prompt.
 - Answering a permission prompt from the UI (Allow, Reject, or the attention bar's Allow)
   now restarts the session's state age at the answer, instead of letting
   `allele_sessions_status.state_age_secs` keep counting from when it became blocked.
