@@ -118,6 +118,10 @@ Changes on `master` awaiting the next tagged release.
   `.turbo` by default) is now also removed from a workspace when it moves to trash, so one
   setting governs both directions. Source, untracked files and git data are kept. Entries
   already in trash are left as they are.
+- A dispatched session finishing provisioning no longer takes the keyboard from the
+  session you are typing in. DEV-425 stopped dispatch moving the sidebar selection; its
+  new terminal (and its drawer terminals) still grabbed focus. Sessions you start by hand
+  take focus as before. (DEV-677)
 - **One bad value in `settings.json` no longer discards every registered project
   (DEV-428).** A value Allele cannot read — say `"kind": "Generic"` for `"generic"` —
   now costs that one value its default (a malformed project entry costs that entry)

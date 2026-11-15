@@ -16,7 +16,7 @@ use crate::actions::{
 use crate::app_state::{AppState, GroupRename};
 use crate::project::Project;
 use crate::session::{Session, SessionStatus};
-use crate::terminal::{clamp_font_size, TerminalView};
+use crate::terminal::{clamp_font_size, InitialFocus, TerminalView};
 use crate::{browser, git};
 
 impl AppState {
@@ -351,10 +351,17 @@ impl AppState {
                 {
                     session.operation_error = None;
                 }
-                self.apply_project_config(cursor, window, cx);
+                self.apply_project_config(cursor, InitialFocus::Take, window, cx);
             }
             SessionAction::SpawnStartupTerminals(cursor) => {
-                if let Some((_, cfg, port, clone_path)) = self.pending_startup.take() {
+                if let Some((_, cfg, port, clone_path, initial_focus)) = self.pending_startup.take()
+                {
+                    // A dispatched session's startup finishing is not a reason
+                    // to move the keyboard either, including the refocus every
+                    // other action ends with (DEV-677).
+                    if initial_focus == InitialFocus::Leave {
+                        *skip_refocus = true;
+                    }
                     // Re-check rather than trusting the earlier gate: a startup
                     // command can run for minutes, and the session can be
                     // switched to lightweight from the Edit modal while it is
@@ -371,6 +378,7 @@ impl AppState {
                             &cfg,
                             port,
                             &clone_path,
+                            initial_focus,
                             window,
                             cx,
                         );
@@ -865,7 +873,7 @@ impl AppState {
             DrawerAction::NewDrawerTab => {
                 *skip_refocus = true;
                 if let Some(cursor) = self.active {
-                    self.spawn_drawer_tab(cursor, None, None, None, window, cx);
+                    self.spawn_drawer_tab(cursor, None, None, None, InitialFocus::Take, window, cx);
                     if let Some(session) = self
                         .projects
                         .get_mut(cursor.project_idx)

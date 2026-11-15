@@ -19,7 +19,9 @@ use crate::session::{
     OPERATION_RESULT_TTL,
 };
 use crate::state::ArchivedSession;
-use crate::terminal::{clamp_font_size, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE};
+use crate::terminal::{
+    clamp_font_size, InitialFocus, TerminalEvent, TerminalView, DEFAULT_FONT_SIZE,
+};
 use crate::{agents, browser, clone, config, conversations, git, project, settings};
 
 /// Subtitle for a freshly created session, given whether the APFS clone took.
@@ -300,6 +302,7 @@ impl AppState {
                         Some(clone_path.clone()),
                         initial_font_size,
                         agent_env,
+                        InitialFocus::Take,
                     )
                 });
 
@@ -419,7 +422,7 @@ impl AppState {
                     session_idx,
                 };
                 this.active = Some(cursor);
-                this.apply_project_config(cursor, window, cx);
+                this.apply_project_config(cursor, InitialFocus::Take, window, cx);
                 this.mark_state_dirty();
                 Self::schedule_operation_result_repaint(cx);
                 cx.notify();
@@ -720,6 +723,16 @@ impl AppState {
                 let inherited_path = std::env::var("PATH").ok();
                 let agent_env =
                     project_env.materialise(None, &clone_path, inherited_path.as_deref());
+                // Decided before the view is built, because building it is what
+                // takes the keyboard (DEV-677). Dispatch parks the origin
+                // synchronously when the create call returns, long before the
+                // clone lands here, so it is already readable. DEV-425 made
+                // the same call for the sidebar selection further down.
+                let initial_focus = InitialFocus::unless_dispatched(
+                    this.pending_dispatch_origins
+                        .get(&session_id)
+                        .is_some_and(|origin| origin.is_dispatched()),
+                );
                 let initial_font_size = this.user_settings.font_size;
                 let terminal_view = cx.new(|cx| {
                     TerminalView::new(
@@ -729,6 +742,7 @@ impl AppState {
                         Some(clone_path.clone()),
                         initial_font_size,
                         agent_env,
+                        initial_focus,
                     )
                 });
 
@@ -880,7 +894,7 @@ impl AppState {
                 if !dispatched {
                     this.active = Some(cursor);
                 }
-                this.apply_project_config(cursor, window, cx);
+                this.apply_project_config(cursor, initial_focus, window, cx);
                 this.mark_state_dirty();
                 Self::schedule_operation_result_repaint(cx);
 
@@ -1345,6 +1359,7 @@ impl AppState {
                 Some(clone_path.clone()),
                 initial_font_size,
                 agent_env,
+                InitialFocus::Take,
             )
         });
 
@@ -1471,7 +1486,7 @@ impl AppState {
             self.pending_action = Some(SessionAction::FocusActive.into());
         }
 
-        self.apply_project_config(cursor, window, cx);
+        self.apply_project_config(cursor, InitialFocus::Take, window, cx);
         self.mark_state_dirty();
         cx.notify();
     }

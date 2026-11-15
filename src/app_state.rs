@@ -489,8 +489,13 @@ pub(crate) struct AppState {
     /// Transient storage for a startup command that finished on a non-window
     /// context. The `SpawnStartupTerminals` action picks this up in the
     /// next render tick where `window` is available.
-    pub(crate) pending_startup:
-        Option<(SessionCursor, config::ProjectConfig, Option<u16>, PathBuf)>,
+    pub(crate) pending_startup: Option<(
+        SessionCursor,
+        config::ProjectConfig,
+        Option<u16>,
+        PathBuf,
+        crate::terminal::InitialFocus,
+    )>,
     /// Transient status line for the base-infra (Traefik) lifecycle, shown
     /// in the Settings → Infrastructure pane. e.g. "Starting…", "Running",
     /// or an error message.
