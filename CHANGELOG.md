@@ -113,6 +113,11 @@ Changes on `master` awaiting the next tagged release.
   schemes are inert. Links you open yourself are unchanged.
 
 ### Fixed
+- A dispatched session's `parent` in the session feed and `allele_sessions_status` is now
+  its parent's Allele session id, even when the parent's Claude conversation id has
+  rotated away from it. Before, `parent` could name an id that matched no `session_id`,
+  so `descendants_of` skipped the child. Sessions dispatched before the fix are resolved
+  when the feed is built. (DEV-1268)
 - A dispatched session finishing provisioning no longer takes the keyboard from the
   session you are typing in. DEV-425 stopped dispatch moving the sidebar selection; its
   new terminal (and its drawer terminals) still grabbed focus. Sessions you start by hand
