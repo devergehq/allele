@@ -231,6 +231,33 @@ pub struct TerminalView {
     keymap: KeymapConfig,
 }
 
+/// Whether a newly built terminal takes keyboard focus (DEV-677).
+///
+/// The constructor used to decide this itself, and always took it. That is
+/// right for a terminal a person just asked for, and wrong for one an agent
+/// asked for: a dispatched session finishing provisioning would pull the
+/// keyboard out of whatever the person was typing in, mid-word, while the
+/// sidebar selection stayed put (DEV-425 kept the selection). Every caller now
+/// states which it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InitialFocus {
+    /// A person asked for this terminal: put the keyboard in it.
+    Take,
+    /// Nobody here asked for it: leave the keyboard where it is.
+    Leave,
+}
+
+impl InitialFocus {
+    /// `Leave` for a session an agent started, `Take` for one a person did.
+    pub fn unless_dispatched(dispatched: bool) -> Self {
+        if dispatched {
+            Self::Leave
+        } else {
+            Self::Take
+        }
+    }
+}
+
 impl TerminalView {
     /// Access the underlying PTY terminal, if the session is still running.
     /// Used by external callers (e.g. the Scratch Pad) that need to write
@@ -241,7 +268,8 @@ impl TerminalView {
 
     /// Create a terminal view running a specific command, or default shell if None
     /// `extra_env` carries the project's declared environment (DEV-485) —
-    /// empty for terminals that belong to no project.
+    /// empty for terminals that belong to no project. `initial_focus` says
+    /// whether the new terminal takes the keyboard — see [`InitialFocus`].
     pub fn new(
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -249,6 +277,7 @@ impl TerminalView {
         working_dir: Option<PathBuf>,
         initial_font_size: f32,
         extra_env: Vec<(String, String)>,
+        initial_focus: InitialFocus,
     ) -> Self {
         let focus_handle = cx.focus_handle();
         let font_size = clamp_font_size(initial_font_size);
@@ -334,8 +363,9 @@ impl TerminalView {
                 }
             };
 
-        // Auto-focus this terminal on creation
-        focus_handle.focus(window, cx);
+        if initial_focus == InitialFocus::Take {
+            focus_handle.focus(window, cx);
+        }
 
         // Poll for PTY events on a timer and re-render.
         //
@@ -2771,6 +2801,10 @@ fn clipboard_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 #[cfg(test)]
 #[path = "terminal_view_overlay_tests.rs"]
 mod overlay_tests;
+
+#[cfg(test)]
+#[path = "terminal_view_focus_tests.rs"]
+mod focus_tests;
 
 #[cfg(test)]
 mod paste_tests {
