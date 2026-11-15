@@ -370,7 +370,7 @@ pub(crate) fn render(paths: &GuidePaths) -> String {
     out.push_str("| Path | What | When it takes effect |\n|---|---|---|\n");
     let _ = writeln!(
         out,
-        "| `{settings}` | User settings (see [Settings](#settings)). | Next launch. **Quit Allele first**: the running app rewrites the whole file from memory whenever a setting changes, which discards hand edits. |"
+        "| `{settings}` | User settings (see [Settings](#settings)). | As soon as the file is saved: the running app reloads it. Save the whole file in one write. Changing a project's `source_path`, or removing a project, applies only while that project has no sessions; otherwise Allele keeps it and logs why. |"
     );
     let _ = writeln!(
         out,

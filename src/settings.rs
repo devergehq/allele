@@ -606,21 +606,30 @@ impl Settings {
             Ok(c) => c,
             // Missing is the first-run case. Unreadable for another reason
             // (permissions, not UTF-8) is not, and must not be saved over.
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Self::default(), None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                remember(path, Known::Absent);
+                return (Self::default(), None);
+            }
             Err(e) => {
-                let problem = LoadProblem {
-                    error: format!("could not be read: {e}"),
-                    dropped: Vec::new(),
-                    defaults: true,
-                    copy: None,
-                };
+                let problem = unreadable(path, &e);
                 tracing::error!("settings.json {} — running with defaults", problem.error);
-                block_saves(path);
                 return (Self::default(), Some(problem));
             }
         };
-        let strict_error = match serde_json::from_str::<Self>(&contents) {
-            Ok(s) => return (s, None),
+        remember(path, Known::Bytes(contents.clone().into_bytes()));
+        Self::from_contents(path, &contents)
+    }
+
+    /// Parse `contents`, read from `path`, as [`Settings::load_from`] does.
+    ///
+    /// A clean parse lifts a save block that an earlier bad read put on `path`:
+    /// the file is fixed, so writing to it is safe again (DEV-1278).
+    fn from_contents(path: &std::path::Path, contents: &str) -> (Self, Option<LoadProblem>) {
+        let strict_error = match serde_json::from_str::<Self>(contents) {
+            Ok(s) => {
+                unblock_saves(path);
+                return (s, None);
+            }
             Err(e) => e,
         };
         // serde_json's error names the line and column.
@@ -630,7 +639,7 @@ impl Settings {
             defaults: false,
             copy: None,
         };
-        let settings = match serde_json::from_str::<serde_json::Value>(&contents) {
+        let settings = match serde_json::from_str::<serde_json::Value>(contents) {
             Ok(value) => match repair(value) {
                 Ok((settings, dropped)) => {
                     problem.dropped = dropped;
@@ -646,14 +655,16 @@ impl Settings {
                 Self::default()
             }
         };
-        // Copy once per run: `load` is called more than once, and a second
-        // copy of the same bytes says nothing new.
-        if block_saves(path) {
-            problem.copy = keep_copy(path, &contents);
+        block_saves(path);
+        // One copy per distinct bad file: reading the same bytes again says
+        // nothing new, but a second bad edit made while Allele runs is a
+        // different file, and is kept too (DEV-1278).
+        if first_bad_read(path, contents) {
+            problem.copy = keep_copy(path, contents);
         }
         tracing::error!(
             "settings.json did not parse ({}). {}. Dropped: [{}]. The file is left as it is{}, \
-             and Allele will not save settings until it is fixed and Allele restarted.",
+             and Allele will not save settings until it is fixed.",
             problem.error,
             if problem.defaults {
                 "Running with defaults"
@@ -721,23 +732,155 @@ impl Settings {
     /// Takes the path rather than resolving it, so the write can be exercised
     /// against a temp directory. `Self::path()` is the user's real config, and
     /// a test that wrote there would overwrite their settings.
+    ///
+    /// Refused when the file on disk is no longer what Allele last read or
+    /// wrote there: something else edited it, so the values this save would
+    /// write are older than that edit. The edit wins and the watcher reloads it
+    /// (DEV-1278). The check and the rename are not one atomic step, so an edit
+    /// landing in the instant between them is still lost.
     pub fn save_to(&self, path: &std::path::Path) -> std::io::Result<()> {
         if saves_blocked(path) {
             return Err(std::io::Error::other(
-                "settings.json could not be read at launch, so it will not be overwritten \
-                 (fix the file and restart Allele)",
+                "settings.json could not be read, so it will not be overwritten (fix the file; \
+                 Allele reloads it when it changes)",
             ));
-        }
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
         }
         let json = serde_json::to_string_pretty(self)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
+        // Held across the check and the write, so a reload comparing the file
+        // with what Allele wrote never sees one without the other.
+        let mut known = KNOWN.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(last) = known.get(path) {
+            let on_disk = match std::fs::read(path) {
+                Ok(bytes) => Some(bytes),
+                // Deleted: nothing to protect, so the settings are written back.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            };
+            let changed = match (last, &on_disk) {
+                (_, None) => false,
+                (Known::Absent, Some(_)) => true,
+                (Known::Bytes(b), Some(d)) => b != d,
+            };
+            if changed {
+                return Err(std::io::Error::other(
+                    "settings.json was changed outside Allele since Allele last read it; that \
+                     edit wins and is being reloaded, so this save was dropped",
+                ));
+            }
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, json)?;
+        std::fs::write(&tmp, &json)?;
         std::fs::rename(&tmp, path)?;
+        known.insert(path.to_path_buf(), Known::Bytes(json.into_bytes()));
         Ok(())
+    }
+
+    /// Re-read `path` after the watcher saw it change (DEV-1278).
+    ///
+    /// Uses the launch loader, so a bad value costs only itself and a bad file
+    /// is copied aside and not saved over. Two things differ from launch. A
+    /// file holding what Allele last read or wrote is [`Reload::Unchanged`]:
+    /// that is Allele's own save. And a file with nothing usable in it keeps
+    /// the running settings instead of replacing them with defaults, since an
+    /// editor can leave a half-written file for a moment.
+    ///
+    /// Does not record the bytes as read. The caller does that with
+    /// [`Settings::adopt`] once the values are applied, so a save made from the
+    /// old values in between is still refused.
+    pub fn reload_from(path: &std::path::Path) -> Reload {
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Reload::Missing,
+            Err(e) => return Reload::Unusable(unreadable(path, &e)),
+        };
+        let same = matches!(
+            KNOWN.lock().unwrap_or_else(|p| p.into_inner()).get(path),
+            Some(Known::Bytes(b)) if *b == bytes
+        );
+        // A blocked file that reads the same may be the one that was bad at
+        // launch; parse it, so putting the old bytes back lifts the block.
+        if same && !saves_blocked(path) {
+            return Reload::Unchanged;
+        }
+        let contents = match String::from_utf8(bytes) {
+            Ok(c) => c,
+            Err(e) => {
+                let e = std::io::Error::new(std::io::ErrorKind::InvalidData, e);
+                return Reload::Unusable(unreadable(path, &e));
+            }
+        };
+        let (mut settings, problem) = Self::from_contents(path, &contents);
+        if let Some(problem) = problem.as_ref().filter(|p| p.defaults) {
+            return Reload::Unusable(problem.clone());
+        }
+        settings.ensure_agents_seeded();
+        settings.ensure_cleanup_paths_updated();
+        Reload::Changed {
+            settings: Box::new(settings),
+            problem,
+            bytes: contents.into_bytes(),
+        }
+    }
+
+    /// Record `bytes` as what the running settings now reflect for `path`, so
+    /// saves to it are allowed again and a reload of the same bytes is a no-op.
+    pub fn adopt(path: &std::path::Path, bytes: Vec<u8>) {
+        remember(path, Known::Bytes(bytes));
+    }
+}
+
+/// What [`Settings::reload_from`] found.
+#[derive(Debug)]
+pub enum Reload {
+    /// The file holds what Allele last read or wrote: its own save, or a touch.
+    Unchanged,
+    /// The file is gone, perhaps for a moment while an editor replaces it. The
+    /// running settings are kept, and the next save writes them back.
+    Missing,
+    /// The file changed but nothing in it could be used. The running settings
+    /// are kept, and saves to the file are refused until it is fixed.
+    Unusable(LoadProblem),
+    /// The file changed and loaded. `problem` is set when values were dropped
+    /// to load it; saves are then refused, as at launch.
+    Changed {
+        settings: Box<Settings>,
+        problem: Option<LoadProblem>,
+        /// The bytes read, for [`Settings::adopt`] once the values are applied.
+        bytes: Vec<u8>,
+    },
+}
+
+/// What Allele last read from or wrote to a settings path. Kept per path, so
+/// tests on temp files never see each other's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Known {
+    /// The file did not exist.
+    Absent,
+    Bytes(Vec<u8>),
+}
+
+static KNOWN: std::sync::Mutex<BTreeMap<PathBuf, Known>> = std::sync::Mutex::new(BTreeMap::new());
+
+fn remember(path: &std::path::Path, known: Known) {
+    KNOWN
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(path.to_path_buf(), known);
+}
+
+/// The report for a file that exists but cannot be read at all. Blocks saves.
+fn unreadable(path: &std::path::Path, e: &std::io::Error) -> LoadProblem {
+    block_saves(path);
+    LoadProblem {
+        error: format!("could not be read: {e}"),
+        dropped: Vec::new(),
+        defaults: true,
+        copy: None,
     }
 }
 
@@ -775,7 +918,7 @@ impl LoadProblem {
         };
         format!(
             "Settings: {what}. Your file is unchanged and settings will not be saved until it is \
-             fixed and Allele restarted — see the log."
+             fixed — Allele reloads it when it changes; see the log."
         )
     }
 }
@@ -789,16 +932,44 @@ pub(crate) fn load_report() -> Option<String> {
     LOAD_REPORT.get().cloned()
 }
 
-/// Paths whose file did not parse this run. Saving to them is refused. Keyed
-/// by path, not a single flag, so tests on temp files cannot affect each other.
+/// The notice text [`LoadProblem::summary`] starts with, so a reload that finds
+/// the file fixed can clear a notice it raised and leave any other alone.
+pub(crate) const NOTICE_PREFIX: &str = "Settings: ";
+
+/// Paths whose file does not parse. Saving to them is refused until a read of
+/// the file parses again. Keyed by path, not a single flag, so tests on temp
+/// files cannot affect each other.
 static BLOCKED: std::sync::Mutex<BTreeSet<PathBuf>> = std::sync::Mutex::new(BTreeSet::new());
 
-/// Refuse saves to `path` for the rest of the run. True the first time.
-fn block_saves(path: &std::path::Path) -> bool {
+/// Refuse saves to `path` until the file is read clean again.
+fn block_saves(path: &std::path::Path) {
     BLOCKED
         .lock()
         .unwrap_or_else(|p| p.into_inner())
-        .insert(path.to_path_buf())
+        .insert(path.to_path_buf());
+}
+
+fn unblock_saves(path: &std::path::Path) {
+    let lifted = BLOCKED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(path);
+    if lifted {
+        tracing::info!("settings.json reads cleanly again; saving it is allowed");
+    }
+}
+
+/// The last bad contents copied aside, per path.
+static COPIED: std::sync::Mutex<BTreeMap<PathBuf, String>> = std::sync::Mutex::new(BTreeMap::new());
+
+/// True when `contents` is not the bad file last copied aside for `path`.
+fn first_bad_read(path: &std::path::Path, contents: &str) -> bool {
+    let mut copied = COPIED.lock().unwrap_or_else(|p| p.into_inner());
+    if copied.get(path).is_some_and(|c| c == contents) {
+        return false;
+    }
+    copied.insert(path.to_path_buf(), contents.to_string());
+    true
 }
 
 fn saves_blocked(path: &std::path::Path) -> bool {
@@ -817,22 +988,34 @@ fn keep_copy(path: &std::path::Path, contents: &str) -> Option<PathBuf> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let name = path.file_name()?.to_string_lossy().into_owned();
-    let copy = path.with_file_name(format!("{name}.unreadable-{secs}"));
-    let written = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&copy)
-        .and_then(|mut f| f.write_all(contents.as_bytes()));
-    match written {
-        Ok(()) => Some(copy),
-        Err(e) => {
-            tracing::error!(
-                "could not keep a copy of settings.json at {}: {e}",
-                copy.display()
-            );
-            None
+    // A second bad edit in the same second gets `-2`, not a refused copy.
+    let mut last_error = None;
+    for n in 1..=16u32 {
+        let copy = if n == 1 {
+            path.with_file_name(format!("{name}.unreadable-{secs}"))
+        } else {
+            path.with_file_name(format!("{name}.unreadable-{secs}-{n}"))
+        };
+        let written = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&copy)
+            .and_then(|mut f| f.write_all(contents.as_bytes()));
+        match written {
+            Ok(()) => return Some(copy),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last_error = Some(e),
+            Err(e) => {
+                last_error = Some(e);
+                break;
+            }
         }
     }
+    tracing::error!(
+        "could not keep a copy of settings.json beside {}: {}",
+        path.display(),
+        last_error.map(|e| e.to_string()).unwrap_or_default()
+    );
+    None
 }
 
 /// How many values [`repair`] will drop before giving up on the file.
