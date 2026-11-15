@@ -235,8 +235,8 @@ pub const PASTE_END: &[u8] = b"\x1b[201~";
 /// Any marker already inside `text` is removed first. Otherwise a pasted
 /// `ESC [ 201 ~` would end the paste early and the rest would be read as
 /// typed keys — including an Enter that submits, or approves a permission
-/// prompt. Used for remote pastes (DEV-1166), whose text came from another
-/// machine's clipboard.
+/// prompt. Every paste into a PTY goes through here: remote pastes
+/// (DEV-1166), local Cmd+V and dispatched briefs (DEV-1195).
 pub fn paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
     let mut out = Vec::with_capacity(text.len() + PASTE_START.len() + PASTE_END.len());
     if bracketed {
