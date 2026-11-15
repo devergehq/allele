@@ -1075,6 +1075,7 @@ impl AppState {
     fn apply_project_config(
         &mut self,
         cursor: SessionCursor,
+        initial_focus: terminal::InitialFocus,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1372,14 +1373,22 @@ impl AppState {
                     {
                         session.startup_status = None;
                     }
-                    this.pending_startup = Some((cursor, cfg, port, clone_path));
+                    this.pending_startup = Some((cursor, cfg, port, clone_path, initial_focus));
                     this.pending_action = Some(SessionAction::SpawnStartupTerminals(cursor).into());
                     cx.notify();
                 });
             })
             .detach();
         } else {
-            self.spawn_terminals_and_preview(cursor, &cfg, port, &clone_path, window, cx);
+            self.spawn_terminals_and_preview(
+                cursor,
+                &cfg,
+                port,
+                &clone_path,
+                initial_focus,
+                window,
+                cx,
+            );
         }
     }
 
@@ -1393,6 +1402,7 @@ impl AppState {
         cfg: &config::ProjectConfig,
         port: Option<u16>,
         clone_path: &Path,
+        initial_focus: terminal::InitialFocus,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1423,6 +1433,7 @@ impl AppState {
                 Some(term.label.clone()),
                 None,
                 Some(substituted),
+                initial_focus,
                 window,
                 cx,
             );

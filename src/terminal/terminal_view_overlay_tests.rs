@@ -12,7 +12,7 @@
 
 // Named imports, not `super::*`: the glob would bring in `gpui::test`,
 // which shadows `#[test]` inside `#[gpui::test]`'s expansion and recurses.
-use super::{PeekBody, ShellCommand, TerminalEvent, TerminalView};
+use super::{InitialFocus, PeekBody, ShellCommand, TerminalEvent, TerminalView};
 use crate::terminal::path_decor::SessionChangeIndex;
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use gpui::{
@@ -92,6 +92,7 @@ fn run(cx: &mut TestAppContext) -> Result<(), String> {
             Some(wd),
             13.0,
             Vec::new(),
+            InitialFocus::Take,
         )
     });
 
