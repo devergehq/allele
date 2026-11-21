@@ -29,6 +29,8 @@ pub(crate) fn spawn_all(cx: &mut Context<AppState>) {
     crate::usage::spawn_poller(cx);
     // Expire stale questions and send answers to sessions gone idle (DEV-1267).
     crate::decisions::spawn_sweeper(cx);
+    // Reload settings.json when something other than Allele edits it (DEV-1278).
+    crate::settings_reload::spawn(cx);
 
     // Spawn the hook-event polling task. Runs for the life
     // of the app, reads ~/.allele/events/*.jsonl every

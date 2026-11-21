@@ -118,10 +118,24 @@ Changes on `master` awaiting the next tagged release.
   `.turbo` by default) is now also removed from a workspace when it moves to trash, so one
   setting governs both directions. Source, untracked files and git data are kept. Entries
   already in trash are left as they are.
+- A dispatched session's `parent` in the session feed and `allele_sessions_status` is now
+  its parent's Allele session id, even when the parent's Claude conversation id has
+  rotated away from it. Before, `parent` could name an id that matched no `session_id`,
+  so `descendants_of` skipped the child. Sessions dispatched before the fix are resolved
+  when the feed is built. (DEV-1268)
 - A dispatched session finishing provisioning no longer takes the keyboard from the
   session you are typing in. DEV-425 stopped dispatch moving the sidebar selection; its
   new terminal (and its drawer terminals) still grabbed focus. Sessions you start by hand
   take focus as before. (DEV-677)
+- **Editing `settings.json` while Allele runs now sticks.** Allele watches the file and
+  reloads it when something else changes it, including an editor's write-then-rename, so
+  a hand or agent edit takes effect without a restart instead of being undone by the next
+  save. The dispatch limits apply to the next `allele_sessions_create`. A save from older
+  in-memory values is refused instead of overwriting the edit, and an unsaved change made
+  in Allele at the same moment loses to the file. A bad value reloads the same way as at
+  launch: only that value takes its default and the file is copied aside. Fixing the file
+  now lifts the save block without a restart. Removing a project, or changing its
+  `source_path`, applies only while it has no sessions (DEV-1278).
 - **One bad value in `settings.json` no longer discards every registered project
   (DEV-428).** A value Allele cannot read — say `"kind": "Generic"` for `"generic"` —
   now costs that one value its default (a malformed project entry costs that entry)
