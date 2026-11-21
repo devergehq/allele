@@ -357,6 +357,8 @@ pub(crate) struct AppState {
     pub(crate) sidebar: SidebarState,
     pub(crate) right_panel: RightPanelState,
     pub(crate) changes: ChangesPanelState,
+    /// The catch-up strip's per-session state (DEV-1353).
+    pub(crate) catch_up: crate::catch_up::CatchUpState,
     pub(crate) drawer: DrawerState,
     pub(crate) reader: ReaderState,
     pub(crate) confirming: ConfirmationState,
@@ -1077,6 +1079,7 @@ pub(crate) mod fixture {
                         resizing: false,
                     },
                     changes: ChangesPanelState::default(),
+                    catch_up: Default::default(),
                     drawer: DrawerState {
                         height: user_settings.drawer_height.max(DRAWER_MIN_HEIGHT),
                         resizing: false,

@@ -332,6 +332,7 @@ mod tests {
             tool_name: None,
             tool_input_summary: None,
             message: None,
+            request: None,
         });
         s.status = SessionStatus::Running;
         assert_eq!(entries_from_projects(&projects)[0].attention, None);

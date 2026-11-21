@@ -8,6 +8,7 @@ mod attention_bar;
 mod away;
 mod base_infra;
 mod browser;
+mod catch_up;
 mod changes;
 mod cli;
 mod clone;
@@ -398,6 +399,30 @@ impl AppState {
         });
     }
 
+    /// Answer the active session's permission prompt: Enter grants it once,
+    /// Esc declines — Claude Code's permission prompt treats Esc as "No"
+    /// (DEV-78). The one path for every Allow/Deny button: the permission
+    /// card (DEV-34) and the catch-up strip (DEV-1353).
+    pub(crate) fn answer_active_permission(&mut self, allow: bool, cx: &mut Context<Self>) {
+        if let Some(cursor) = self.active {
+            if let Some(session) = self
+                .projects
+                .get_mut(cursor.project_idx)
+                .and_then(|p| p.sessions.get_mut(cursor.session_idx))
+            {
+                if let Some(ref tv) = session.terminal_view {
+                    tv.read(cx).send_input(if allow {
+                        b"\r".as_slice()
+                    } else {
+                        b"\x1b".as_slice()
+                    });
+                }
+                session.resolve_permission_prompt();
+            }
+        }
+        cx.notify();
+    }
+
     /// Build the RichView + TranscriptTailer for the active session,
     /// rebuilding when the active session changes. Returns the entity
     /// to render, or `None` when there is no active session.
@@ -465,36 +490,10 @@ impl AppState {
                     this.scratch_pad_send(text.clone(), paths, cx);
                 }
                 rich::RichViewEvent::AllowPermission => {
-                    if let Some(cursor) = this.active {
-                        if let Some(session) = this
-                            .projects
-                            .get_mut(cursor.project_idx)
-                            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
-                        {
-                            if let Some(ref tv) = session.terminal_view {
-                                tv.read(cx).send_input(b"\r");
-                            }
-                            session.resolve_permission_prompt();
-                        }
-                    }
-                    cx.notify();
+                    this.answer_active_permission(true, cx);
                 }
                 rich::RichViewEvent::RejectPermission => {
-                    // Decline the tool call by sending Escape to the PTY —
-                    // Claude Code's permission prompt treats Esc as "No" (DEV-78).
-                    if let Some(cursor) = this.active {
-                        if let Some(session) = this
-                            .projects
-                            .get_mut(cursor.project_idx)
-                            .and_then(|p| p.sessions.get_mut(cursor.session_idx))
-                        {
-                            if let Some(ref tv) = session.terminal_view {
-                                tv.read(cx).send_input(b"\x1b");
-                            }
-                            session.resolve_permission_prompt();
-                        }
-                    }
-                    cx.notify();
+                    this.answer_active_permission(false, cx);
                 }
                 rich::RichViewEvent::OpenTerminal => {
                     // Hand the prompt to the raw terminal so the user can
@@ -2013,6 +2012,10 @@ fn main() {
                         .with_conversation_choice_explicit(persisted.conversation_choice_explicit);
                         session.pinned = persisted.pinned;
                         session.comment = persisted.comment.clone();
+                        session.viewed = catch_up::ViewedMark {
+                            at: persisted.last_viewed_at,
+                            tree: persisted.viewed_tree.clone(),
+                        };
                         // Interned rather than assigned, so a group present on a
                         // session but missing from the stored order — a
                         // hand-edited file, or one written by a build that
@@ -2239,6 +2242,7 @@ fn main() {
                             resizing: false,
                         },
                         changes: ChangesPanelState::default(),
+                        catch_up: Default::default(),
                         drawer: DrawerState {
                             height: settings_for_window.drawer_height.max(DRAWER_MIN_HEIGHT),
                             resizing: false,

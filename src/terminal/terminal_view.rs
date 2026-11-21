@@ -70,6 +70,9 @@ pub enum TerminalEvent {
         /// Which side's row to select.
         staged: bool,
     },
+    /// A key that folds the catch-up strip (DEV-1353): Esc, which is then
+    /// swallowed, or the first key typed into the terminal, which is not.
+    FoldCatchUp,
     /// User pressed Enter in this terminal. Used to clear stale
     /// AwaitingInput status when the user approves a permission prompt
     /// directly in the terminal instead of clicking the attention bar.
@@ -214,6 +217,10 @@ pub struct TerminalView {
     /// panel + its resize handle). Same contract as `bottom_inset`: set by
     /// the parent before render so PTY resize accounts for hidden space.
     pub right_inset: f32,
+    /// Whether the catch-up strip above this terminal is open (DEV-1353).
+    /// Set by the parent each render, like the insets. While it is, Esc folds
+    /// it instead of reaching the PTY, and the first key typed folds it too.
+    pub catch_up_open: bool,
     // Resize debounce — record desired size + timestamp, only commit
     // the resize to the PTY once the size has been stable for RESIZE_DEBOUNCE_MS.
     pending_resize: Option<(TermSize, Instant)>,
@@ -352,6 +359,7 @@ impl TerminalView {
                         last_mouse: None,
                         bottom_inset: 0.0,
                         right_inset: 0.0,
+                        catch_up_open: false,
                         pending_resize: None,
                         remote_fit: false,
                         bell_flash_start: None,
@@ -558,6 +566,7 @@ impl TerminalView {
             last_mouse: None,
             bottom_inset: 0.0,
             right_inset: 0.0,
+            catch_up_open: false,
             pending_resize: None,
             remote_fit: false,
             bell_flash_start: None,
@@ -1937,6 +1946,15 @@ impl Render for TerminalView {
                         return;
                     }
 
+                    // Esc folds an open catch-up strip and types nothing
+                    // (DEV-1353). After the terminal's own overlays, which are
+                    // nearer the user's attention.
+                    if key == "escape" && this.catch_up_open && !mods.platform && !mods.control {
+                        this.catch_up_open = false;
+                        cx.emit(TerminalEvent::FoldCatchUp);
+                        return;
+                    }
+
                     // Handle search mode input
                     if this.search_active {
                         match key {
@@ -2104,6 +2122,11 @@ impl Render for TerminalView {
                     let key_char = event.keystroke.key_char.as_deref();
                     if let Some(bytes) = this.keymap.resolve(key, mods, key_char) {
                         terminal.write(&bytes);
+                        // The first key typed goes in and folds the strip.
+                        if this.catch_up_open {
+                            this.catch_up_open = false;
+                            cx.emit(TerminalEvent::FoldCatchUp);
+                        }
                         if key == "enter" {
                             cx.emit(TerminalEvent::EnterPressed);
                         }
@@ -2801,6 +2824,10 @@ fn clipboard_paste_bytes(text: &str, bracketed: bool) -> Vec<u8> {
 #[cfg(test)]
 #[path = "terminal_view_overlay_tests.rs"]
 mod overlay_tests;
+
+#[cfg(test)]
+#[path = "terminal_view_catch_up_tests.rs"]
+mod catch_up_tests;
 
 #[cfg(test)]
 #[path = "terminal_view_focus_tests.rs"]

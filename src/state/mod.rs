@@ -134,6 +134,14 @@ pub struct PersistedSession {
     /// written before dispatch existed was started by a human.
     #[serde(default)]
     pub origin: crate::session::SessionOrigin,
+    /// When you last looked at this session, on this Mac (DEV-1353).
+    /// Absent in files written before it existed, which reads as "never
+    /// looked": the catch-up strip then stays folded rather than guessing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_viewed_at: Option<SystemTime>,
+    /// The work tree, as a git tree id, when you last looked (DEV-1353).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewed_tree: Option<String>,
 }
 
 impl PersistedSession {
@@ -241,6 +249,8 @@ impl PersistedSession {
             skip_orchestration: !session.orchestration.runs_startup(),
             orchestration: Some(session.orchestration),
             origin: session.origin.clone(),
+            last_viewed_at: session.viewed.at,
+            viewed_tree: session.viewed.tree.clone(),
         }
     }
 }

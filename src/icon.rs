@@ -14,10 +14,12 @@ pub mod name {
     pub const CHECK: &str = "check";
     pub const CHEVRON_DOWN: &str = "chevron-down";
     pub const CHEVRON_RIGHT: &str = "chevron-right";
+    pub const CHEVRON_UP: &str = "chevron-up";
     pub const CIRCLE: &str = "circle";
     pub const CIRCLE_FILL: &str = "circle-fill";
     pub const CLOUD_DOWNLOAD: &str = "cloud-download";
     pub const CLOUD_UPLOAD: &str = "cloud-upload";
+    pub const CORNER_DOWN_RIGHT: &str = "corner-down-right";
     pub const FILE_TEXT: &str = "file-text";
     pub const FILTER: &str = "filter";
     pub const HELIX: &str = "helix";
@@ -31,6 +33,7 @@ pub mod name {
     pub const PIN: &str = "pin";
     pub const PLUS: &str = "plus";
     pub const SETTINGS: &str = "settings";
+    pub const SQUARE_TERMINAL: &str = "square-terminal";
     pub const STAR_FILL: &str = "star-fill";
     pub const TRASH: &str = "trash";
     pub const X: &str = "x";
