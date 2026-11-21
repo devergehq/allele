@@ -1665,6 +1665,7 @@ impl AppState {
         if let Some(clone_path) = clone_path {
             let project_idx = cursor.project_idx;
             let placeholder_id_for_task = placeholder_id.clone();
+            let rebuildable_for_task = self.user_settings.session_cleanup_paths.clone();
             cx.spawn(async move |this, cx| {
                 let delete_result = cx
                     .background_executor()
@@ -1716,7 +1717,7 @@ impl AppState {
                         ) {
                             warn!("archive_session failed for {session_id_for_task}: {e}");
                         }
-                        clone::trash_clone(&clone_path).map(|_| ())
+                        clone::trash_clone(&clone_path, &rebuildable_for_task).map(|_| ())
                     })
                     .await;
 

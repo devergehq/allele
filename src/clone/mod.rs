@@ -431,9 +431,43 @@ pub fn trash_base() -> crate::errors::Result<PathBuf> {
 /// that collisions are impossible and the original provenance is legible
 /// when a user pokes around in `~/.allele/trash/`.
 ///
+/// After the move, each `rebuildable` path (the `session_cleanup_paths`
+/// setting — `target/`, `.next/` and the like) is removed from the new
+/// trash entry on a background thread, so a discarded Cargo workspace does
+/// not keep 5–10 GB of build output in trash (DEV-1190). The rename stays
+/// the only work the caller waits for. Nothing else is removed, and no
+/// entry already in trash is touched.
+///
 /// Safety: refuses to operate on any path outside
 /// `~/.allele/workspaces/`.
-pub fn trash_clone(clone_path: &Path) -> crate::errors::Result<PathBuf> {
+pub fn trash_clone(clone_path: &Path, rebuildable: &[String]) -> crate::errors::Result<PathBuf> {
+    let workspace_base = crate::paths::workspaces_root()
+        .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
+    let dest = move_into_trash(clone_path, &workspace_base, &trash_base()?)?;
+
+    if rebuildable.iter().any(|p| !p.trim().is_empty()) {
+        let entry = dest.clone();
+        let paths = rebuildable.to_vec();
+        if let Err(e) = std::thread::Builder::new()
+            .name("allele-trash-strip".to_string())
+            .spawn(move || strip_rebuildable(&entry, &paths))
+        {
+            warn!(
+                "trash_clone: could not start strip of {}: {e}",
+                dest.display()
+            );
+        }
+    }
+    Ok(dest)
+}
+
+/// Rename `clone_path` (which must sit under `workspace_base`) into
+/// `trash_dir` under a collision-free name. Returns the new entry's path.
+fn move_into_trash(
+    clone_path: &Path,
+    workspace_base: &Path,
+    trash_dir: &Path,
+) -> crate::errors::Result<PathBuf> {
     if !clone_path.exists() {
         return Err(AlleleError::Clone(format!(
             "trash_clone: path does not exist: {}",
@@ -441,17 +475,12 @@ pub fn trash_clone(clone_path: &Path) -> crate::errors::Result<PathBuf> {
         )));
     }
 
-    let workspace_base = crate::paths::workspaces_root()
-        .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
-
-    if !clone_path.starts_with(&workspace_base) {
+    if !clone_path.starts_with(workspace_base) {
         return Err(AlleleError::Clone(format!(
             "Refusing to trash path outside workspace directory: {}",
             clone_path.display()
         )));
     }
-
-    let trash_dir = trash_base()?;
 
     let project_name = clone_path
         .parent()
@@ -490,6 +519,44 @@ pub fn trash_clone(clone_path: &Path) -> crate::errors::Result<PathBuf> {
         }
     })?;
     Ok(dest)
+}
+
+/// Remove each `rebuildable` path from a fresh trash `entry`.
+///
+/// Entries are relative to the workspace root, as in
+/// [`cleanup_stale_runtime`], which does the removal and already refuses
+/// absolute paths and `..`. On top of that, an entry is skipped when any
+/// directory above it inside `entry` is a symlink: removing
+/// `tmp/pids/server.pid` through a linked `tmp` would delete something
+/// outside the trash entry, which a discard must never do. A link that is
+/// itself the listed entry is removed as a link, never followed.
+pub fn strip_rebuildable(entry: &Path, rebuildable: &[String]) {
+    let safe: Vec<String> = rebuildable
+        .iter()
+        .filter(|p| {
+            let rel = Path::new(p.trim());
+            let mut ancestor = entry.to_path_buf();
+            let parents: Vec<_> = rel.components().collect();
+            for c in parents.iter().take(parents.len().saturating_sub(1)) {
+                ancestor.push(c);
+                if fs::symlink_metadata(&ancestor).is_ok_and(|m| m.file_type().is_symlink()) {
+                    warn!(
+                        "strip_rebuildable: skipping '{}' — {} is a symlink",
+                        p.trim(),
+                        ancestor.display()
+                    );
+                    return false;
+                }
+            }
+            true
+        })
+        .cloned()
+        .collect();
+    cleanup_stale_runtime(entry, &safe);
+    info!(
+        "strip_rebuildable: cleared rebuildable paths from {}",
+        entry.display()
+    );
 }
 
 /// Delete trash entries older than `ttl_days`. Returns the number of entries
@@ -578,10 +645,14 @@ fn resolve_session_id_for_orphan(clone_path: &Path) -> Option<String> {
 /// to preserve the orphan's session work in canonical. Archive failure
 /// is logged and non-blocking — the clone is trashed regardless.
 ///
+/// `rebuildable` is the `session_cleanup_paths` setting, stripped from
+/// each trashed orphan as in [`trash_clone`].
+///
 /// Returns the number of clones that were trashed.
 pub fn sweep_orphans(
     referenced: &HashSet<PathBuf>,
     project_sources: &HashMap<String, PathBuf>,
+    rebuildable: &[String],
 ) -> crate::errors::Result<usize> {
     let workspace_base = crate::paths::workspaces_root()
         .ok_or_else(|| AlleleError::Clone("Could not determine home directory".to_string()))?;
@@ -640,7 +711,7 @@ pub fn sweep_orphans(
                 }
             }
 
-            match trash_clone(&clone_path) {
+            match trash_clone(&clone_path, rebuildable) {
                 Ok(dest) => {
                     info!(
                         "Orphan sweep: trashed {} → {}",
@@ -928,5 +999,105 @@ mod tests {
         assert!(clone.join("tmp").exists());
 
         fs::remove_dir_all(&clone).ok();
+    }
+
+    /// A discarded workspace with `target/` and an untracked source file
+    /// lands in trash with the file and without `target/` (DEV-1190).
+    #[test]
+    fn trashed_workspace_keeps_source_and_drops_listed_build_output() {
+        let base = unique_tmp("trash-strip");
+        let workspaces = base.join("workspaces");
+        let trash = base.join("trash");
+        fs::create_dir_all(&trash).unwrap();
+        let clone = workspaces.join("proj").join("abcd1234");
+        fs::create_dir_all(clone.join("target/debug/deps")).unwrap();
+        fs::write(clone.join("target/debug/deps/big.rlib"), b"build").unwrap();
+        fs::create_dir_all(clone.join("src")).unwrap();
+        fs::write(clone.join("src/new_module.rs"), b"// untracked work").unwrap();
+        fs::create_dir_all(clone.join(".git")).unwrap();
+        fs::write(clone.join(".git/HEAD"), b"ref: refs/heads/x").unwrap();
+
+        // An entry already in trash, from an earlier discard.
+        let older = trash.join("proj-old-1");
+        fs::create_dir_all(older.join("target")).unwrap();
+        fs::write(older.join("target/keep"), b"old").unwrap();
+
+        let entry = move_into_trash(&clone, &workspaces, &trash).unwrap();
+        strip_rebuildable(&entry, &["target".to_string(), ".next".to_string()]);
+
+        assert!(!clone.exists(), "workspace moved out of workspaces/");
+        assert!(entry.starts_with(&trash));
+        assert_eq!(
+            fs::read(entry.join("src/new_module.rs")).unwrap(),
+            b"// untracked work"
+        );
+        assert!(entry.join(".git/HEAD").exists(), "git data kept");
+        assert!(
+            !entry.join("target").exists(),
+            "listed build output dropped"
+        );
+        assert!(
+            older.join("target/keep").exists(),
+            "existing trash entries are never touched"
+        );
+
+        remove_tree_paced(&base).unwrap();
+    }
+
+    /// A folder that is not on the list survives the strip, even one that
+    /// looks like build output.
+    #[test]
+    fn trash_strip_keeps_paths_not_on_the_list() {
+        let entry = unique_tmp("trash-strip-unlisted");
+        fs::create_dir_all(entry.join("node_modules/pkg")).unwrap();
+        fs::write(entry.join("node_modules/pkg/index.js"), b"1").unwrap();
+        fs::create_dir_all(entry.join("build")).unwrap();
+        fs::write(entry.join("build/out"), b"1").unwrap();
+        fs::create_dir_all(entry.join("target")).unwrap();
+
+        strip_rebuildable(&entry, &["target".to_string()]);
+
+        assert!(!entry.join("target").exists());
+        assert!(entry.join("node_modules/pkg/index.js").exists());
+        assert!(entry.join("build/out").exists());
+
+        remove_tree_paced(&entry).unwrap();
+    }
+
+    /// A listed path reached through a symlinked directory is skipped, so
+    /// the strip can never delete outside the trash entry.
+    #[test]
+    fn trash_strip_does_not_follow_a_symlinked_ancestor() {
+        let entry = unique_tmp("trash-strip-link");
+        let outside = unique_tmp("trash-strip-link-outside");
+        fs::create_dir_all(outside.join("pids")).unwrap();
+        fs::write(outside.join("pids/server.pid"), b"keep me").unwrap();
+        std::os::unix::fs::symlink(&outside, entry.join("tmp")).unwrap();
+
+        strip_rebuildable(&entry, &["tmp/pids/server.pid".to_string()]);
+
+        assert!(outside.join("pids/server.pid").exists());
+        assert!(fs::symlink_metadata(entry.join("tmp")).is_ok());
+
+        remove_tree_paced(&entry).unwrap();
+        remove_tree_paced(&outside).unwrap();
+    }
+
+    /// A listed entry that is itself a symlink is removed as a link; what
+    /// it points at is left alone.
+    #[test]
+    fn trash_strip_removes_a_listed_link_without_following_it() {
+        let entry = unique_tmp("trash-strip-leaf-link");
+        let outside = unique_tmp("trash-strip-leaf-link-outside");
+        fs::write(outside.join("artifact"), b"keep me").unwrap();
+        std::os::unix::fs::symlink(&outside, entry.join("target")).unwrap();
+
+        strip_rebuildable(&entry, &["target".to_string()]);
+
+        assert!(fs::symlink_metadata(entry.join("target")).is_err());
+        assert!(outside.join("artifact").exists());
+
+        remove_tree_paced(&entry).unwrap();
+        remove_tree_paced(&outside).unwrap();
     }
 }

@@ -1576,11 +1576,12 @@ impl AppState {
         // of delete so this completes near-instantly. The trash purge at
         // startup handles actual deletion asynchronously.
         if !clone_paths.is_empty() {
+            let rebuildable = self.user_settings.session_cleanup_paths.clone();
             cx.spawn(async move |_this, cx| {
                 cx.background_executor()
                     .spawn(async move {
                         for path in clone_paths {
-                            if let Err(e) = clone::trash_clone(&path) {
+                            if let Err(e) = clone::trash_clone(&path, &rebuildable) {
                                 warn!("Failed to trash clone at {}: {e}", path.display());
                             }
                         }
@@ -1811,8 +1812,9 @@ fn main() {
             .iter()
             .map(|p| p.source_path.clone())
             .collect();
+        let rebuildable = loaded_settings.session_cleanup_paths.clone();
         std::thread::spawn(move || {
-            match clone::sweep_orphans(&referenced, &project_sources) {
+            match clone::sweep_orphans(&referenced, &project_sources, &rebuildable) {
                 Ok(0) => {}
                 Ok(n) => info!("Orphan sweep trashed {n} unreferenced clone(s)"),
                 Err(e) => warn!("Orphan sweep failed: {e}"),

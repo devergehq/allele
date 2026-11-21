@@ -113,6 +113,11 @@ Changes on `master` awaiting the next tagged release.
   schemes are inert. Links you open yourself are unchanged.
 
 ### Fixed
+- Discarded sessions no longer keep their build output in `~/.allele/trash` (DEV-1190).
+  Each path in `session_cleanup_paths` (which includes `target`, `.next`, `.nuxt` and
+  `.turbo` by default) is now also removed from a workspace when it moves to trash, so one
+  setting governs both directions. Source, untracked files and git data are kept. Entries
+  already in trash are left as they are.
 - A dispatched session's `parent` in the session feed and `allele_sessions_status` is now
   its parent's Allele session id, even when the parent's Claude conversation id has
   rotated away from it. Before, `parent` could name an id that matched no `session_id`,

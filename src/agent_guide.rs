@@ -103,7 +103,7 @@ pub(crate) const SETTINGS: &[SettingDoc] = &[
     doc(
         "session_cleanup_paths",
         "string[]",
-        "Paths, relative to a new session's clone, deleted right after cloning (stale sockets, pid files, path-dependent build caches).",
+        "Paths, relative to a session's clone, deleted right after cloning (stale sockets, pid files, path-dependent build caches) and again when a discarded workspace moves to trash, so trash keeps no rebuildable build output.",
     ),
     doc(
         "git_pull_before_new_session",
