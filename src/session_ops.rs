@@ -396,6 +396,9 @@ impl AppState {
                                 );
                                 cx.notify();
                             }
+                            TerminalEvent::FoldCatchUp => {
+                                this.fold_catch_up(cx);
+                            }
                             TerminalEvent::EnterPressed => {
                                 this.handle_terminal_enter(&_tv, cx);
                             }
@@ -834,6 +837,9 @@ impl AppState {
                                     .into(),
                                 );
                                 cx.notify();
+                            }
+                            TerminalEvent::FoldCatchUp => {
+                                this.fold_catch_up(cx);
                             }
                             TerminalEvent::EnterPressed => {
                                 this.handle_terminal_enter(&_tv, cx);
@@ -1450,6 +1456,9 @@ impl AppState {
                             .into(),
                         );
                         cx.notify();
+                    }
+                    TerminalEvent::FoldCatchUp => {
+                        this.fold_catch_up(cx);
                     }
                     TerminalEvent::EnterPressed => {
                         this.handle_terminal_enter(&_tv, cx);

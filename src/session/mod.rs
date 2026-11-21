@@ -265,6 +265,11 @@ pub struct AttentionContext {
     pub tool_input_summary: Option<String>,
     /// Notification message text from Claude Code.
     pub message: Option<String>,
+    /// The prompt normalised the way the permission card reads it (DEV-34):
+    /// purpose and the raw target (the whole command, not its description).
+    /// `None` when the tool's input was not seen. The catch-up strip draws
+    /// its permission row from this (DEV-1353).
+    pub request: Option<crate::rich::permissions::PermissionRequest>,
 }
 
 impl AttentionContext {
@@ -614,6 +619,11 @@ pub struct Session {
     /// Not persisted: a rehydrated session has no live drawer to park, so the
     /// only honest starting value is its rehydration time.
     pub last_focused_at: SystemTime,
+    /// When you last looked at this session, and its work tree then
+    /// (DEV-1353). Persisted; the catch-up strip measures "away" and "what
+    /// changed since you looked" from it. Unlike `last_focused_at` this
+    /// survives a relaunch, and it is not touched by drawer parking.
+    pub viewed: crate::catch_up::ViewedMark,
     /// Set when the drawer was parked to reclaim memory, as opposed to simply
     /// never having been opened. Drives the sidebar's parked marker, so
     /// "we killed your dev server" reads differently from "you never
@@ -793,6 +803,7 @@ impl Session {
             parked_drawer_tabs: Vec::new(),
             drawer_parked_at: None,
             last_focused_at: SystemTime::now(),
+            viewed: Default::default(),
             drawer_visible: false,
             auto_naming_fired: false,
             allocated_port: None,
@@ -856,6 +867,7 @@ impl Session {
             parked_drawer_tabs: Vec::new(),
             drawer_parked_at: None,
             last_focused_at: SystemTime::now(),
+            viewed: Default::default(),
             drawer_visible: false,
             auto_naming_fired: false,
             allocated_port: None,
@@ -1632,6 +1644,7 @@ mod tests {
             tool_name: None,
             tool_input_summary: None,
             message: m.map(str::to_string),
+            request: None,
         };
         assert_eq!(
             ctx(Some("Claude is waiting for your input")).informative_message(),

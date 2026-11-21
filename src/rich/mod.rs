@@ -47,7 +47,7 @@ mod reader;
 // Permission & decision model (DEV-34): request cards, actions, decision log.
 // Consumed by the permission card UI + hook wiring; allow dead_code until then.
 #[allow(dead_code)]
-mod permissions;
+pub(crate) mod permissions;
 // Unified composer model (DEV-30): shared submission/validation/history policy
 // for the Narrative compose bar and Scratch Pad. Both widgets migrate onto this
 // in follow-up wiring; allow dead_code until then.

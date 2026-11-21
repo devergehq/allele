@@ -14,6 +14,16 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- **A catch-up strip when you switch back into a session (DEV-1353).** Between the tabs
+  and the terminal, never over it: your last prompt with one line of Claude's reply,
+  the files changed since you last looked (with +/− counts), and what the session wants
+  now — nothing, still working, a permission (Allow once / Deny / Answer in terminal,
+  through the permission card's own path), or a menu only the terminal can answer
+  (plan approval), with Open the terminal. It opens by itself after an absence of
+  10 minutes or more and otherwise stays folded to one line. The first key typed goes
+  to the terminal and folds it; Esc folds it without typing; **Catch-up** in the session
+  header opens it again. Allele now records when you last viewed each session, and the
+  work tree at that moment, in `state.json` (`last_viewed_at`, `viewed_tree`).
 - **`allele.ext/1`, first rung: a live session feed on the control socket.** A client
   that sends `hello` gets the contract versions, an epoch, its granted capabilities
   (`observe`; `dispatch` too for Allele's own MCP server) and the dispatch limits.

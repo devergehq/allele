@@ -14,6 +14,7 @@
 //! mixing it with a 2,000-line relocation would make both unreviewable. The
 //! file-size ratchet in `tests/architecture.rs` is what forces that follow-up.
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use tracing::warn;
 
@@ -120,6 +121,29 @@ impl AppState {
                                 .text_color(theme().text_secondary)
                                 .child(format!("{state} · {changed}")),
                         )
+                        // Brings a folded catch-up strip back (DEV-1353).
+                        .when(self.catch_up_status() == Some(false), |row| {
+                            row.child(
+                                div()
+                                    .id("session-header-catch-up")
+                                    .cursor_pointer()
+                                    .px(px(8.0))
+                                    .py(px(2.0))
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(theme().border_default)
+                                    .text_size(px(11.0))
+                                    .text_color(theme().text_secondary)
+                                    .hover(|s| s.bg(theme().bg_hover))
+                                    .child("Catch-up")
+                                    .on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(|this: &mut Self, _e, _w, cx| {
+                                            this.open_catch_up(cx);
+                                        }),
+                                    ),
+                            )
+                        })
                         .child(
                             div()
                                 .id("session-header-action")
@@ -1442,6 +1466,9 @@ impl Render for AppState {
         // Same check for the header's changed count, which is on screen
         // whether or not the panel is (DEV-684). Guarded inside.
         self.ensure_active_changes_observed(cx);
+        // Last-viewed bookkeeping and the catch-up strip's open/fold decision
+        // on a session switch (DEV-1353). Guarded inside.
+        self.track_catch_up(cx);
 
         let sidebar_w = self.sidebar.width;
         let sidebar_visible = self.sidebar.visible;
@@ -1795,6 +1822,18 @@ impl Render for AppState {
                 main_area_idx += 1;
             }
 
+            // --- Catch-up strip (DEV-1353): above the terminal, never over
+            // it. The main area below is flex_1, so the terminal gives up rows.
+            let catch_up_open = remote_view.is_none() && self.catch_up_status() == Some(true);
+            if let Some(strip) = remote_view
+                .is_none()
+                .then(|| self.render_catch_up_strip(cx))
+                .flatten()
+            {
+                content_col = content_col.child(strip);
+                main_area_idx += 1;
+            }
+
             // --- Main terminal area (flex_1, takes remaining space) ---
             {
                 let mut main_area = div()
@@ -1842,6 +1881,7 @@ impl Render for AppState {
                                 tv.update(cx, |tv, cx| {
                                     tv.bottom_inset = inset;
                                     tv.right_inset = right_inset;
+                                    tv.catch_up_open = catch_up_open;
                                     tv.set_change_index(change_index, cx);
                                 });
                                 main_area = main_area.child(tv);

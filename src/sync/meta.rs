@@ -187,6 +187,10 @@ impl SessionBundleMeta {
             skip_orchestration: self.skip_orchestration,
             orchestration: Some(self.orchestration()),
             origin: self.origin.clone(),
+            // When you last looked is this Mac's own record (DEV-1353);
+            // another Mac's would make the strip's "away" mean nothing here.
+            last_viewed_at: None,
+            viewed_tree: None,
         }
     }
 
@@ -284,6 +288,8 @@ mod tests {
             skip_orchestration: true,
             orchestration: Some(crate::session::Orchestration::Nothing),
             origin: crate::session::SessionOrigin::Human,
+            last_viewed_at: None,
+            viewed_tree: None,
         }
     }
 

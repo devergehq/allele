@@ -154,6 +154,19 @@ impl AppState {
             cx,
         );
 
+        // The catch-up strip's prompt line and change summary follow the
+        // displayed session as it works (DEV-1353) — on every event, not only
+        // on status transitions, since a tool finishing mid-turn changes files
+        // without changing status. Coalesced inside.
+        if self.active
+            == Some(crate::actions::SessionCursor {
+                project_idx: p_idx,
+                session_idx: s_idx,
+            })
+        {
+            self.refresh_active_catch_up(cx);
+        }
+
         // Resolve the adapter for this session's agent BEFORE taking a mutable
         // borrow of the session. Sessions with no recorded agent (legacy)
         // default to Claude, preserving prior behaviour.
@@ -247,17 +260,20 @@ impl AppState {
             let message = event.payload.as_ref().and_then(|p| p.message.clone());
             let inline_tool = event.payload.as_ref().and_then(|p| p.tool_name.clone());
 
-            let (tool_name, tool_summary) = if let Some(name) = inline_tool {
-                let summary = summarise_tool_input(
-                    &name,
-                    event.payload.as_ref().and_then(|p| p.tool_input.as_ref()),
-                );
-                (Some(name), summary)
+            let (tool_name, tool_summary, request) = if let Some(name) = inline_tool {
+                let input = event.payload.as_ref().and_then(|p| p.tool_input.as_ref());
+                let summary = summarise_tool_input(&name, input);
+                let request =
+                    input.map(|i| crate::rich::permissions::PermissionRequest::from_tool(&name, i));
+                (Some(name), summary, request)
             } else if let Some(ctx) = session.last_pre_tool_use.take() {
                 let summary = summarise_tool_input(&ctx.tool_name, ctx.tool_input.as_ref());
-                (Some(ctx.tool_name), summary)
+                let request = ctx.tool_input.as_ref().map(|i| {
+                    crate::rich::permissions::PermissionRequest::from_tool(&ctx.tool_name, i)
+                });
+                (Some(ctx.tool_name), summary, request)
             } else {
-                (None, None)
+                (None, None, None)
             };
 
             // Classify here, not at render time: `last_pre_tool_use.take()`
@@ -270,6 +286,7 @@ impl AppState {
                 tool_name,
                 tool_input_summary: tool_summary,
                 message,
+                request,
             });
         }
 

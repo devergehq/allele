@@ -27,6 +27,8 @@ use tracing::warn;
 
 use crate::errors::AlleleError;
 
+pub mod snapshot;
+
 /// Build a `git` command with the standard Allele environment — inline
 /// identity flags so commits work even when the user has no global git
 /// identity configured, `GIT_CONFIG_NOSYSTEM=1` so `/etc/gitconfig` is

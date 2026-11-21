@@ -156,6 +156,8 @@ mod tests {
             skip_orchestration: false,
             orchestration: None,
             origin: Default::default(),
+            last_viewed_at: None,
+            viewed_tree: None,
         }
     }
 
