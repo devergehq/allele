@@ -123,6 +123,13 @@ Changes on `master` awaiting the next tagged release.
   schemes are inert. Links you open yourself are unchanged.
 
 ### Fixed
+- **A finished session no longer holds its terminal open (DEV-1377).** A session whose
+  agent exited kept one `/dev/ptmx` descriptor for as long as it stayed in the sidebar,
+  so a long-running Allele slowly exhausted macOS's machine-wide terminal limit
+  (`kern.tty.ptmx_max`, 511 by default) and every new session then failed. The
+  descriptor is now released the moment the process exits. If the limit is ever hit,
+  the error now says "machine terminal limit reached" instead of "Device not
+  configured (os error 6)".
 - A dispatched session's `parent` in the session feed and `allele_sessions_status` is now
   its parent's Allele session id, even when the parent's Claude conversation id has
   rotated away from it. Before, `parent` could name an id that matched no `session_id`,

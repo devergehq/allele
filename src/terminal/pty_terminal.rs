@@ -147,6 +147,11 @@ pub struct PtyTerminal {
     /// Released before the event loop shuts the PTY down: the kernel delivers
     /// SIGHUP when the *last* descriptor to the master closes, and SIGHUP is
     /// what does most of the killing here. Holding this open would suppress it.
+    ///
+    /// Also released the moment the child exits (see `drain_events`). A
+    /// finished session keeps its `PtyTerminal` alive to show its last screen,
+    /// and holding this until drop leaked one `/dev/ptmx` per ended session
+    /// until the machine-wide `kern.tty.ptmx_max` was exhausted (DEV-1377).
     master: Option<std::fs::File>,
     /// Cleanup callbacks to run when this terminal is dropped. Fired in
     /// LIFO order (defer semantics) before the kill path, so hooks can
@@ -197,6 +202,79 @@ fn pty_env(extra_env: Vec<(String, String)>, allele_home: Option<&str>) -> HashM
     }
 
     env
+}
+
+/// Turn a PTY-open failure into something a person can act on.
+///
+/// macOS caps pseudo-terminals machine-wide at `kern.tty.ptmx_max` (511 by
+/// default) and reports hitting it as ENXIO from `/dev/ptmx`, which reads as
+/// "Device not configured". That says nothing about the cause, which is
+/// almost always too many terminals held open somewhere on the machine
+/// (DEV-1377). Any other error passes through unchanged.
+fn pty_open_error(err: std::io::Error) -> anyhow::Error {
+    if err.raw_os_error() != Some(libc::ENXIO) {
+        return err.into();
+    }
+    let limit = ptmx_max().map(|n| format!(" ({n})")).unwrap_or_default();
+    let held = open_ptmx_count()
+        .map(|n| format!(" Allele holds {n} of them."))
+        .unwrap_or_default();
+    warn!("PTY creation hit the machine terminal limit{limit}:{held} ({err})");
+    anyhow::anyhow!(
+        "machine terminal limit reached{limit} — this Mac has no pseudo-terminals left.{held} \
+         Close terminals or sessions you no longer need, then try again."
+    )
+}
+
+/// `kern.tty.ptmx_max`: the machine-wide cap on open PTYs.
+#[cfg(target_os = "macos")]
+fn ptmx_max() -> Option<i32> {
+    let mut value: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let name = c"kern.tty.ptmx_max";
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            (&mut value as *mut libc::c_int).cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    (rc == 0).then_some(value)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn ptmx_max() -> Option<i32> {
+    None
+}
+
+/// How many PTY master descriptors (`/dev/ptmx`) this process holds open.
+///
+/// Each live terminal accounts for two: alacritty's master and our duplicate
+/// of it. A finished terminal should account for none. Used to explain a
+/// terminal-limit failure, and by the DEV-1377 regression test.
+#[cfg(target_os = "macos")]
+pub fn open_ptmx_count() -> Option<usize> {
+    let max_fd = unsafe { libc::getdtablesize() };
+    if max_fd <= 0 {
+        return None;
+    }
+    let mut buf = [0u8; libc::MAXPATHLEN as usize];
+    let count = (0..max_fd)
+        .filter(|&fd| {
+            let rc = unsafe { libc::fcntl(fd, libc::F_GETPATH, buf.as_mut_ptr()) };
+            rc == 0
+                && std::ffi::CStr::from_bytes_until_nul(&buf)
+                    .is_ok_and(|path| path.to_bytes() == b"/dev/ptmx")
+        })
+        .count();
+    Some(count)
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_ptmx_count() -> Option<usize> {
+    None
 }
 
 /// Lines of scrollback every PTY terminal keeps. A screen mirror needs it too
@@ -261,7 +339,7 @@ impl PtyTerminal {
 
         // Spawn the PTY
         let window_id = 0;
-        let pty = tty::new(&pty_options, size.into(), window_id)?;
+        let pty = tty::new(&pty_options, size.into(), window_id).map_err(pty_open_error)?;
 
         // Capture what we need before the event loop takes ownership of the Pty.
         #[cfg(unix)]
@@ -361,11 +439,14 @@ impl PtyTerminal {
         while let Ok(event) = self.events_rx.try_recv() {
             had_events = true;
             match event {
-                AlacEvent::ChildExit(_status) => {
+                AlacEvent::ChildExit(_) | AlacEvent::Exit => {
                     self.exited = true;
-                }
-                AlacEvent::Exit => {
-                    self.exited = true;
+                    // The event loop has already closed its own master on the
+                    // way out; ours is now the only thing holding the PTY open.
+                    // A finished session keeps its terminal for the final
+                    // screen, often for days, so release it now rather than at
+                    // drop (DEV-1377).
+                    self.master = None;
                 }
                 AlacEvent::Bell => {
                     self.bell_pending = true;
@@ -601,5 +682,163 @@ mod tests {
     #[test]
     fn nothing_known_means_nothing_signalled() {
         assert!(target_groups(None, None).is_empty());
+    }
+
+    /// DEV-1377: macOS reports an exhausted `kern.tty.ptmx_max` as ENXIO,
+    /// "Device not configured". The UI has to say what actually happened.
+    #[test]
+    fn enxio_names_the_machine_terminal_limit() {
+        let msg = super::pty_open_error(std::io::Error::from_raw_os_error(libc::ENXIO)).to_string();
+        assert!(msg.contains("machine terminal limit reached"), "{msg}");
+        assert!(!msg.contains("Device not configured"), "{msg}");
+    }
+
+    /// Only the limit is reworded; any other failure keeps its own message.
+    #[test]
+    fn other_pty_errors_pass_through() {
+        let msg =
+            super::pty_open_error(std::io::Error::from_raw_os_error(libc::EACCES)).to_string();
+        assert!(msg.contains("Permission denied"), "{msg}");
+    }
+}
+
+/// DEV-1377: every way a terminal ends must hand its `/dev/ptmx` descriptors
+/// back. The leak that prompted this held one per *finished* session, because
+/// a finished session keeps its terminal to show the last screen; 509 of them
+/// exhausted `kern.tty.ptmx_max` and no new session could start.
+///
+/// The count is per process, and other tests in this binary open PTYs of their
+/// own on parallel threads, so the real work runs in a child process of its
+/// own: the outer test re-executes this test binary with only the inner test
+/// selected and one thread.
+#[cfg(all(test, target_os = "macos"))]
+mod ptmx_leak_tests {
+    use super::{open_ptmx_count, PtyTerminal, ShellCommand, TermSize};
+    use std::time::{Duration, Instant};
+
+    const CHILD_ENV: &str = "ALLELE_DEV1377_ISOLATED";
+    const INNER: &str = "terminal::pty_terminal::ptmx_leak_tests::cycle_terminals_in_isolation";
+    /// At least the twenty the ticket asks for, per scenario.
+    const CYCLES: usize = 20;
+    /// Descriptors one live terminal holds: alacritty's master and our dup.
+    const PER_LIVE: usize = 2;
+
+    #[test]
+    fn ended_terminals_release_every_ptmx() {
+        let exe = std::env::current_exe().expect("test binary path");
+        let out = std::process::Command::new(exe)
+            .args([
+                INNER,
+                "--exact",
+                "--ignored",
+                "--test-threads=1",
+                "--nocapture",
+            ])
+            .env(CHILD_ENV, "1")
+            .output()
+            .expect("re-run the test binary");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success(),
+            "isolated PTY cycle failed\n--- stdout\n{stdout}\n--- stderr\n{stderr}"
+        );
+        // A filter that matched nothing also exits 0; make sure it ran.
+        assert!(
+            stdout.contains("1 passed"),
+            "isolated PTY cycle did not run\n{stdout}"
+        );
+    }
+
+    #[test]
+    #[ignore = "run in its own process by ended_terminals_release_every_ptmx"]
+    fn cycle_terminals_in_isolation() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            return;
+        }
+        let baseline = count();
+
+        // 1. The child exits on its own and the terminal is kept, as a Done
+        //    session keeps it. This is the path that leaked.
+        let mut finished: Vec<PtyTerminal> = (0..CYCLES).map(|_| spawn("exit 0")).collect();
+        settle("finished children reported", || {
+            finished.iter_mut().all(|t| {
+                t.drain_events();
+                t.exited
+            })
+        });
+        settle_count("exited terminals still held", baseline);
+        drop(finished);
+        settle_count("exited terminals dropped", baseline);
+
+        // 2. Discard: a running terminal is dropped.
+        let live: Vec<PtyTerminal> = (0..CYCLES).map(|_| spawn("sleep 60")).collect();
+        assert_eq!(
+            count(),
+            baseline + CYCLES * PER_LIVE,
+            "the counter must see live terminals, or the other checks prove nothing"
+        );
+        drop(live);
+        settle_count("live terminals discarded", baseline);
+
+        // 3. Respawn: one slot whose terminal is replaced, as resume does.
+        let mut slot = spawn("sleep 60");
+        for _ in 0..CYCLES {
+            slot = spawn("sleep 60");
+            settle_count("terminal replaced", baseline + PER_LIVE);
+        }
+        drop(slot);
+        settle_count("replacement discarded", baseline);
+
+        // 4. A screen mirror (DEV-1165) that outlives its terminal holds none.
+        let mut mirrors = Vec::new();
+        for _ in 0..CYCLES {
+            let terminal = spawn("sleep 60");
+            mirrors.push(terminal.mirror_handle());
+            drop(terminal);
+        }
+        settle_count("mirrored terminals discarded", baseline);
+        drop(mirrors);
+    }
+
+    fn spawn(script: &str) -> PtyTerminal {
+        PtyTerminal::spawn(
+            TermSize::default(),
+            Some(ShellCommand::with_args_env(
+                "/bin/sh",
+                vec!["-c".into(), script.into()],
+                Vec::new(),
+            )),
+            Some(std::env::temp_dir()),
+            Vec::new(),
+        )
+        .expect("spawn a PTY")
+    }
+
+    fn count() -> usize {
+        open_ptmx_count().expect("count /dev/ptmx descriptors")
+    }
+
+    /// Closing is asynchronous: the event loop thread drops alacritty's master
+    /// after it has waited on the child.
+    fn settle_count(what: &str, expected: usize) {
+        let mut last = count();
+        settle(what, || {
+            last = count();
+            last == expected
+        });
+        assert_eq!(last, expected, "{what}");
+    }
+
+    fn settle(what: &str, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !done() {
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting: {what} (open /dev/ptmx: {})",
+                count()
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
     }
 }
