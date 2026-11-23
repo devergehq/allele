@@ -19,9 +19,10 @@ Changes on `master` awaiting the next tagged release.
   behind a new `prompt` capability that any client may ask for. It types the prompt
   into a session that has finished its turn, then waits up to 30 s to see the session
   start on it (`prompted`, or `prompt_delivery_unconfirmed`). It refuses, and types
-  nothing, when the session is working, still starting up, or has not started on text
-  Allele already typed into it (`session_busy`), when it is `awaiting_input` of any
-  kind (`session_awaiting_person`), when it has no agent process or input editor
+  nothing, when the session is working, still starting up, or was typed into moments
+  ago (`session_busy`, which clears by itself), when only a person can clear it —
+  `awaiting_input` of any kind, a startup dialog, or text left unsent
+  (`session_awaiting_person`), when it has no agent process or input editor
   (`session_not_live`), or when a person started it (`not_dispatched`). Prompts are 1
   to 4,000 characters, carry no control characters but newline and tab, and may not
   start with `/`, `!` or `#`. Allele keeps no queue: retry on `session_busy`.

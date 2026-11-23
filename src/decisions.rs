@@ -506,13 +506,22 @@ pub(crate) struct SessionView {
 /// the agent's hook reports the turn it just started. A second sweep in that
 /// gap must not type again, so after a send the session is held until its
 /// status has changed since.
+///
+/// **The idle nudge is not a change that proves anything** once Allele has
+/// typed into the session (DEV-1382). From `Idle` the nudge is a real
+/// transition, so it moves `status_since` past the send — and it is exactly
+/// what text left unsent in the input box produces a minute later. So the
+/// nudge counts as idle only for a session Allele has never typed into this
+/// run; after any send it is held until the session leaves it.
 pub(crate) fn target(session: Option<SessionView>, last_sent: Option<SystemTime>) -> Target {
     let Some(s) = session else {
         return Target::Gone;
     };
     let idle = match s.status {
         SessionStatus::ResponseReady | SessionStatus::Idle => true,
-        SessionStatus::AwaitingInput => s.attention == Some(crate::session::AttentionKind::Idle),
+        SessionStatus::AwaitingInput => {
+            s.attention == Some(crate::session::AttentionKind::Idle) && last_sent.is_none()
+        }
         SessionStatus::Running | SessionStatus::Suspended | SessionStatus::Done => false,
     };
     let settled = last_sent.is_none_or(|sent| s.status_since > sent);
@@ -1120,6 +1129,20 @@ mod tests {
             ..view(SessionStatus::AwaitingInput, SystemTime::now()).unwrap()
         });
         assert_eq!(target(nudged, None), Target::Deliver);
+    }
+
+    /// DEV-1382: from `Idle`, the nudge moves `status_since` past a send
+    /// without anything being sent, and it is what text left unsent in the
+    /// input box looks like a minute later. After any send, the nudge is held
+    /// rather than pasted on top of that text.
+    #[test]
+    fn the_idle_nudge_after_a_send_is_held() {
+        let sent = SystemTime::now() - Duration::from_secs(90);
+        let nudged = Some(SessionView {
+            attention: Some(AttentionKind::Idle),
+            ..view(SessionStatus::AwaitingInput, SystemTime::now()).unwrap()
+        });
+        assert_eq!(target(nudged, Some(sent)), Target::Hold);
     }
 
     #[test]

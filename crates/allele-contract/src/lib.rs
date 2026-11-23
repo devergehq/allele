@@ -64,13 +64,14 @@ pub enum Request {
 ///
 /// | The session | Answer |
 /// |---|---|
-/// | working, still starting up, or not yet started on text Allele typed | [`ErrorCode::SessionBusy`] |
-/// | `awaiting_input` of any kind, or a plan or question menu | [`ErrorCode::SessionAwaitingPerson`] |
+/// | working, still starting up, or moments after Allele typed into it | [`ErrorCode::SessionBusy`] |
+/// | `awaiting_input` of any kind, a menu, unheard from past start-up, or text left unsent | [`ErrorCode::SessionAwaitingPerson`] |
 /// | suspended, done, or no agent input editor to paste into | [`ErrorCode::SessionNotLive`] |
 /// | started by a person | [`ErrorCode::NotDispatched`] |
 ///
-/// Allele does not queue a refused prompt. Retry on `session_busy`; give up on
-/// the rest.
+/// Allele does not queue a refused prompt. `session_busy` clears by itself
+/// within about two minutes: retry. Everything else needs a person or never
+/// clears: fall back.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SessionsPrompt {
@@ -284,12 +285,13 @@ pub enum ErrorCode {
     PermissionDenied,
     BadRequest,
     Internal,
-    /// `sessions_prompt`: the session is working, still starting up, or has not
-    /// yet started on text Allele typed into it. Try again later.
+    /// `sessions_prompt`: the session is working, still starting up, or was
+    /// typed into moments ago. Clears by itself; try again later.
     SessionBusy,
-    /// `sessions_prompt`: the session is `awaiting_input` (a permission prompt,
-    /// a menu, or an idle notice Allele cannot tell apart from one). Enter
-    /// there could choose an option, so nothing is typed.
+    /// `sessions_prompt`: only a person can clear what the session is waiting
+    /// on — `awaiting_input` of any kind (a permission prompt, a menu, or an
+    /// idle notice Allele cannot tell apart from one), a startup dialog, or
+    /// text typed earlier and left unsent. Nothing is typed.
     SessionAwaitingPerson,
     /// `sessions_prompt`: no agent process, or no input editor accepting a
     /// paste, to type into.

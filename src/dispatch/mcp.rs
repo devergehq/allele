@@ -225,11 +225,12 @@ pub(crate) fn tool_definitions() -> Value {
             "description":
                 "Type a prompt into a dispatched allele session that has finished its turn, \
                  and submit it. Waits until the session starts on it. Refuses rather than \
-                 types when the session is working, still starting, or has not started on \
-                 text already typed (session_busy: try again later), when it is \
-                 awaiting_input of any kind (session_awaiting_person: a person has to \
-                 answer it first), when it has no agent process (session_not_live), or when \
-                 a human started it (not_dispatched). Allele never queues a refused prompt.",
+                 types when the session is working, still starting, or was typed into \
+                 moments ago (session_busy: clears by itself, try again), when only a person \
+                 can clear it — awaiting_input of any kind, a startup dialog, or text left \
+                 unsent (session_awaiting_person: fall back), when it has no agent process \
+                 (session_not_live), or when a human started it (not_dispatched). Allele \
+                 never queues a refused prompt.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

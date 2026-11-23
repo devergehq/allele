@@ -40,6 +40,12 @@ const POLL: Duration = Duration::from_millis(100);
 /// bracketed-paste wait inside [`pty::deliver`] (10 s at most) fits inside it.
 const PROMPT_CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// How long a session may go unheard from before `sessions_prompt` stops
+/// calling it "still starting" and says a person is needed. The same budget
+/// creation gives a cold agent to boot; past it, the agent is almost certainly
+/// sitting on a startup dialog that only a person can dismiss.
+const STARTUP_GRACE: Duration = super::create::PROMPT_CONFIRM_TIMEOUT;
+
 /// Look a session up and check it is ours to manage.
 ///
 /// Returns the session, or the response to send back.
@@ -228,11 +234,20 @@ struct Terminal {
 /// answer or an earlier `sessions_prompt` (`decisions.last_sent`). Until the
 /// session's status has moved since, that text may still be sitting in the
 /// input box, and a second paste would be submitted with it as one message.
+///
+/// **`session_busy` means it will clear by itself; `session_awaiting_person`
+/// means it will not.** An unheard session and unsent text are both "busy"
+/// only for as long as the ordinary case takes — [`STARTUP_GRACE`] to boot,
+/// [`PROMPT_CONFIRM_TIMEOUT`] to start on a paste. Past that, only a person
+/// dismissing a dialog or pressing Enter clears them, and a caller following
+/// the ticket's table should stop retrying and fall back.
 fn gate(
     session: &Session,
     terminal: Terminal,
     last_typed: Option<SystemTime>,
+    now: SystemTime,
 ) -> Result<(), Response> {
+    let older_than = |t: SystemTime, d: Duration| now.duration_since(t).is_ok_and(|age| age > d);
     let name = &session.label;
     let refuse = |code: ErrorCode, message: String| Err(Response::Error { code, message });
     let awaiting = |what: &str| {
@@ -287,21 +302,32 @@ fn gate(
         SessionStatus::Idle | SessionStatus::ResponseReady => {}
     }
     if !terminal.heard {
+        if older_than(session.status_since, STARTUP_GRACE) {
+            return awaiting(
+                "a startup dialog, most likely — Allele has not heard from its agent in over \
+                 two minutes",
+            );
+        }
         return refuse(
             ErrorCode::SessionBusy,
             format!(
                 "session {name:?} has not finished starting — Allele has not heard from its \
-                 agent yet, and it may be on a startup dialog; try again shortly"
+                 agent yet; try again shortly"
             ),
         );
     }
-    if last_typed.is_some_and(|sent| session.status_since <= sent) {
+    if let Some(sent) = last_typed.filter(|sent| session.status_since <= *sent) {
+        if older_than(sent, PROMPT_CONFIRM_TIMEOUT) {
+            return awaiting(
+                "Enter: text Allele typed into it earlier never started, and is most likely \
+                 sitting unsent in its input box",
+            );
+        }
         return refuse(
             ErrorCode::SessionBusy,
             format!(
-                "Allele typed into session {name:?} and has not seen it start on that yet; \
-                 try again once it has. If it never does, the text is sitting unsent in its \
-                 input box and a person has to press Enter"
+                "Allele typed into session {name:?} moments ago and has not seen it start on \
+                 that yet; try again shortly"
             ),
         );
     }
@@ -413,7 +439,7 @@ async fn prompt_session(
                 .unwrap_or(false),
         };
         let last_typed = state.decisions.last_sent.get(&session_id).copied();
-        gate(session, terminal, last_typed)?;
+        gate(session, terminal, last_typed, SystemTime::now())?;
         let before = Seen::of(session);
         let name = session.label.clone();
         let Some(view) = view else {
@@ -474,8 +500,8 @@ async fn prompt_session(
         message: format!(
             "the prompt was typed into session {name:?}, but Allele did not see it start \
              within {}s. It is most likely sitting unsent in the input box; Enter in that \
-             session will send it. Further prompts are refused with session_busy until it \
-             does, so it cannot arrive twice",
+             session will send it. Until it does, further prompts are refused and answers \
+             from the decision list are held, so it cannot arrive twice",
             PROMPT_CONFIRM_TIMEOUT.as_secs()
         ),
     }
@@ -562,7 +588,7 @@ mod tests {
     }
 
     fn gate_ready(s: &Session) -> Option<ErrorCode> {
-        code(gate(s, READY, None))
+        code(gate(s, READY, None, SystemTime::now()))
     }
 
     #[test]
@@ -582,7 +608,7 @@ mod tests {
         };
         for status in [SessionStatus::Idle, SessionStatus::ResponseReady] {
             assert_eq!(
-                code(gate(&session(status), unheard, None)),
+                code(gate(&session(status), unheard, None, SystemTime::now())),
                 Some(ErrorCode::SessionBusy),
                 "{status:?}"
             );
@@ -642,7 +668,12 @@ mod tests {
             accepts_paste: false,
         };
         assert_eq!(
-            code(gate(&session(SessionStatus::ResponseReady), dead, None)),
+            code(gate(
+                &session(SessionStatus::ResponseReady),
+                dead,
+                None,
+                SystemTime::now()
+            )),
             Some(ErrorCode::SessionNotLive)
         );
     }
@@ -656,7 +687,12 @@ mod tests {
             ..READY
         };
         assert_eq!(
-            code(gate(&session(SessionStatus::ResponseReady), plain, None)),
+            code(gate(
+                &session(SessionStatus::ResponseReady),
+                plain,
+                None,
+                SystemTime::now()
+            )),
             Some(ErrorCode::SessionNotLive)
         );
     }
@@ -667,18 +703,49 @@ mod tests {
     #[test]
     fn text_typed_and_not_yet_started_on_holds_the_session() {
         let s = session(SessionStatus::ResponseReady);
-        let after_status = s.status_since + Duration::from_secs(90);
+        let sent = s.status_since + Duration::from_secs(90);
+        let soon = sent + Duration::from_secs(5);
         assert_eq!(
-            code(gate(&s, READY, Some(after_status))),
+            code(gate(&s, READY, Some(sent), soon)),
             Some(ErrorCode::SessionBusy)
         );
         assert_eq!(
-            code(gate(&s, READY, Some(s.status_since))),
+            code(gate(&s, READY, Some(s.status_since), s.status_since)),
             Some(ErrorCode::SessionBusy),
             "a send in the same instant is not settled"
         );
         let before_status = s.status_since - Duration::from_secs(1);
-        assert_eq!(code(gate(&s, READY, Some(before_status))), None);
+        assert_eq!(code(gate(&s, READY, Some(before_status), soon)), None);
+    }
+
+    /// N2 of the self-review: past the confirmation window, unsent text clears
+    /// only when a person presses Enter. `session_busy` would have a caller
+    /// retry forever; `session_awaiting_person` tells it to fall back.
+    #[test]
+    fn text_unsent_past_the_confirmation_window_needs_a_person() {
+        let s = session(SessionStatus::ResponseReady);
+        let sent = s.status_since + Duration::from_secs(1);
+        let later = sent + PROMPT_CONFIRM_TIMEOUT + Duration::from_secs(1);
+        assert_eq!(
+            code(gate(&s, READY, Some(sent), later)),
+            Some(ErrorCode::SessionAwaitingPerson)
+        );
+    }
+
+    /// N2: a session unheard from for longer than an agent takes to boot is
+    /// on a startup dialog, which only a person can dismiss.
+    #[test]
+    fn a_session_unheard_from_past_startup_needs_a_person() {
+        let unheard = Terminal {
+            heard: false,
+            ..READY
+        };
+        let s = session(SessionStatus::Idle);
+        let later = s.status_since + STARTUP_GRACE + Duration::from_secs(1);
+        assert_eq!(
+            code(gate(&s, unheard, None, later)),
+            Some(ErrorCode::SessionAwaitingPerson)
+        );
     }
 
     #[test]

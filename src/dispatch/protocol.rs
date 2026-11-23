@@ -413,13 +413,13 @@ pub enum ErrorCode {
     /// Malformed request, unknown project field, etc.
     BadRequest,
     Internal,
-    /// `sessions_prompt`: the session is working, still starting up, or has not
-    /// yet started on text Allele typed into it (DEV-1382). The caller
+    /// `sessions_prompt`: the session is working, still starting up, or was
+    /// typed into moments ago (DEV-1382). Clears by itself, so the caller
     /// retries; Allele keeps no queue of its own, for the reason DEV-430 gave.
     SessionBusy,
-    /// `sessions_prompt`: the session is `awaiting_input` of any kind, or a
-    /// menu is open. Enter there can select an option, so nothing is typed
-    /// (DEV-1382).
+    /// `sessions_prompt`: only a person can clear what the session is waiting
+    /// on — `awaiting_input` of any kind, a menu, a startup dialog, or text
+    /// typed earlier and left unsent (DEV-1382). Nothing is typed.
     SessionAwaitingPerson,
     /// `sessions_prompt`: suspended, done, or no agent input editor accepting a
     /// paste (DEV-1382).
