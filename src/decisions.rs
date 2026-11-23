@@ -610,7 +610,9 @@ pub(crate) struct Decisions {
     /// `decisions.json` exists but could not be read at launch. Nothing is
     /// written over it, so a passing read error cannot cost the history.
     pub save_blocked: bool,
-    /// When an answer was last typed into each session. In memory only: after
+    /// When Allele last typed into each session: an answer from here, or a
+    /// `sessions_prompt` (DEV-1382), which records its sends here so that
+    /// neither pastes on top of the other's unsent text. In memory only: after
     /// a restart every session is past its last send.
     pub last_sent: HashMap<String, SystemTime>,
 }

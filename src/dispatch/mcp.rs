@@ -225,19 +225,21 @@ pub(crate) fn tool_definitions() -> Value {
             "description":
                 "Type a prompt into a dispatched allele session that has finished its turn, \
                  and submit it. Waits until the session starts on it. Refuses rather than \
-                 types when the session is working (session_busy: try again later), when a \
-                 permission prompt or a plan or question menu is open (session_awaiting_person: \
-                 a person has to answer it first), when it has no agent process \
-                 (session_not_live), or when a human started it (not_dispatched). Allele \
-                 never queues a refused prompt.",
+                 types when the session is working, still starting, or has not started on \
+                 text already typed (session_busy: try again later), when it is \
+                 awaiting_input of any kind (session_awaiting_person: a person has to \
+                 answer it first), when it has no agent process (session_not_live), or when \
+                 a human started it (not_dispatched). Allele never queues a refused prompt.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "session_id": { "type": "string", "description": "The allele session id." },
                     "prompt": {
                         "type": "string",
-                        "description": "What to type. 1 to 4,000 characters; point at an \
-                                        artifact rather than pasting a long brief.",
+                        "description": "What to type. 1 to 4,000 characters, no control \
+                                        characters but newline and tab, not starting with \
+                                        /, ! or #. Point at an artifact rather than pasting \
+                                        a long brief.",
                     },
                 },
                 "required": ["session_id", "prompt"],

@@ -13,7 +13,6 @@
 //! through [`pty::deliver`] like every other delivery, and refuses wherever an
 //! Enter could answer something a person was meant to.
 
-use std::sync::Mutex;
 use std::time::{Duration, SystemTime};
 
 use gpui::{AsyncApp, WeakEntity};
@@ -149,37 +148,14 @@ pub(crate) fn spawn_prompt(
     .detach();
 }
 
-/// Sessions a prompt is being delivered to right now.
-///
-/// Status alone cannot refuse a second prompt: a session still reads
-/// `response_ready` until Claude reports the turn the first one started, and a
-/// second paste in that gap would land in the same input box and submit both
-/// as one message.
-static IN_FLIGHT: Mutex<Vec<String>> = Mutex::new(Vec::new());
-
-/// Holds a session's place in [`IN_FLIGHT`] until the prompt is confirmed or
-/// given up on, whichever way the task ends.
-struct InFlight(String);
-
-impl InFlight {
-    fn take(session_id: &str) -> Option<Self> {
-        let mut busy = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-        if busy.iter().any(|id| id == session_id) {
-            return None;
-        }
-        busy.push(session_id.to_string());
-        Some(InFlight(session_id.to_string()))
-    }
-}
-
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        let mut busy = IN_FLIGHT.lock().unwrap_or_else(|e| e.into_inner());
-        busy.retain(|id| id != &self.0);
-    }
-}
-
 /// What is wrong with a prompt before any session is looked at.
+///
+/// Control characters other than newline and tab are refused: inside a
+/// bracketed paste they are noise, and outside one ESC, arrows and `\r` are
+/// keystrokes that move through and select in a menu. A leading `/`, `!` or
+/// `#` is refused because Claude Code reads it as a slash command, bash mode
+/// or memory, none of which starts a turn Allele can confirm — and `!` runs a
+/// shell command without a permission prompt.
 fn check_prompt(prompt: &str) -> Result<(), Response> {
     let refuse = |message: String| {
         Err(Response::Error {
@@ -187,7 +163,8 @@ fn check_prompt(prompt: &str) -> Result<(), Response> {
             message,
         })
     };
-    if prompt.trim().is_empty() {
+    let text = prompt.trim_start();
+    if text.trim_end().is_empty() {
         return refuse("prompt is empty".to_string());
     }
     let chars = prompt.chars().count();
@@ -197,31 +174,77 @@ fn check_prompt(prompt: &str) -> Result<(), Response> {
             allele_contract::PROMPT_MAX_CHARS
         ));
     }
+    if let Some(c) = prompt
+        .chars()
+        .find(|c| c.is_control() && *c != '\n' && *c != '\t')
+    {
+        return refuse(format!(
+            "prompt contains the control character U+{:04X}; only newline and tab are allowed",
+            c as u32
+        ));
+    }
+    if let Some(lead) = text.chars().next().filter(|c| matches!(c, '/' | '!' | '#')) {
+        return refuse(format!(
+            "prompt starts with {lead:?}, which Claude Code reads as a command, bash mode or \
+             memory rather than a message; start it with text"
+        ));
+    }
     Ok(())
+}
+
+/// What the gate needs to know about a session's terminal and its agent
+/// process, which the session record does not hold.
+#[derive(Debug, Clone, Copy)]
+struct Terminal {
+    /// A PTY with an agent process that has not exited.
+    live: bool,
+    /// Allele has had a hook event from that process. Until then `idle` is
+    /// only the value a session starts with, and the agent may be on a
+    /// startup dialog where Enter picks an option (`away::decide`).
+    heard: bool,
+    /// The terminal has bracketed paste on, so the prompt goes in as one
+    /// paste rather than as keystrokes — and without `pty::deliver`'s 10 s
+    /// wait for the mode, which would leave this gate's answer stale.
+    accepts_paste: bool,
 }
 
 /// Whether Allele may type into `session` now. Decided before anything is
 /// written, so every refusal leaves the terminal untouched.
 ///
+/// **Every `awaiting_input` is refused**, including Claude's sixty-second
+/// idle nudge. That state is where permission prompts and menus show, the
+/// nudge is told apart from them by its notification text alone, and a later
+/// notification rewrites the kind without a status change. After a finished
+/// turn the nudge is absorbed and the session stays `response_ready`, so the
+/// strict reading costs only sessions whose turn never completed.
+///
 /// The menu check reads [`crate::catch_up::gather::wants_from_session`], the
-/// source the catch-up strip draws "only the terminal can answer this" from.
-/// Two rules sit on top of it, both refusing where it would say "nothing":
+/// source the catch-up strip draws "only the terminal can answer this" from,
+/// and a blocking attention context on any status refuses too: it cannot
+/// outlive `awaiting_input` today, so that costs nothing until a new status
+/// path forgets to clear one.
 ///
-/// - `awaiting_input` with no attention context. The catch-up strip reads
-///   that as nothing blocked; here it means Allele cannot tell what is on
-///   screen, and a guess that is wrong types Enter into a menu.
-/// - A blocking attention context on any status. It cannot outlive
-///   `awaiting_input` today, so this costs nothing until a new status path
-///   forgets to clear it.
-///
-/// Claude's sixty-second idle nudge (`awaiting_input`, kind `Idle`) is
-/// deliverable: the input box is still what has focus. After a finished turn
-/// the nudge is absorbed (`absorbs_idle_nudge`), so it shows here only where
-/// no turn-complete came first. `away.rs` and `decisions::target` make the
-/// same call.
-fn gate(session: &Session, has_terminal: bool) -> Result<(), Response> {
+/// `last_typed` is when Allele last typed into this session — a decision's
+/// answer or an earlier `sessions_prompt` (`decisions.last_sent`). Until the
+/// session's status has moved since, that text may still be sitting in the
+/// input box, and a second paste would be submitted with it as one message.
+fn gate(
+    session: &Session,
+    terminal: Terminal,
+    last_typed: Option<SystemTime>,
+) -> Result<(), Response> {
     let name = &session.label;
     let refuse = |code: ErrorCode, message: String| Err(Response::Error { code, message });
+    let awaiting = |what: &str| {
+        refuse(
+            ErrorCode::SessionAwaitingPerson,
+            format!(
+                "session {name:?} is waiting on {what}; Enter there would answer it, so \
+                 nothing was typed"
+            ),
+        )
+    };
+    let wants = crate::catch_up::gather::wants_from_session(session);
     match session.status {
         SessionStatus::Suspended | SessionStatus::Done => {
             return refuse(
@@ -232,10 +255,10 @@ fn gate(session: &Session, has_terminal: bool) -> Result<(), Response> {
                 ),
             )
         }
-        _ if !has_terminal => {
+        _ if !terminal.live => {
             return refuse(
                 ErrorCode::SessionNotLive,
-                format!("session {name:?} has no terminal attached to type into"),
+                format!("session {name:?} has no live agent process to type into"),
             )
         }
         SessionStatus::Running => {
@@ -244,34 +267,47 @@ fn gate(session: &Session, has_terminal: bool) -> Result<(), Response> {
                 format!("session {name:?} is running; try again once it finishes"),
             )
         }
-        SessionStatus::AwaitingInput if session.attention_context.is_none() => {
-            return refuse(
-                ErrorCode::SessionAwaitingPerson,
-                format!(
-                    "session {name:?} is waiting for input and Allele cannot tell on \
-                     what; nothing was typed"
+        SessionStatus::AwaitingInput => {
+            return match (&wants, session.attention_context.as_ref().map(|c| c.kind)) {
+                (WantsNow::Permission { .. }, _) => awaiting("a permission prompt"),
+                (
+                    WantsNow::TerminalOnly {
+                        ask: TerminalAsk::Plan,
+                    },
+                    _,
+                ) => awaiting("a plan approval menu"),
+                (WantsNow::TerminalOnly { .. }, _) => awaiting("a question menu"),
+                (_, Some(AttentionKind::Idle)) => awaiting(
+                    "input (Claude's idle notice, which Allele cannot tell apart from a \
+                     prompt with certainty)",
                 ),
-            )
+                _ => awaiting("input, and Allele cannot tell on what"),
+            }
         }
-        _ => {}
+        SessionStatus::Idle | SessionStatus::ResponseReady => {}
     }
-    let awaiting = |what: &str| {
-        refuse(
-            ErrorCode::SessionAwaitingPerson,
+    if !terminal.heard {
+        return refuse(
+            ErrorCode::SessionBusy,
             format!(
-                "session {name:?} is waiting on {what}; Enter there would answer it, so \
-                 nothing was typed"
+                "session {name:?} has not finished starting — Allele has not heard from its \
+                 agent yet, and it may be on a startup dialog; try again shortly"
             ),
-        )
-    };
-    match crate::catch_up::gather::wants_from_session(session) {
+        );
+    }
+    if last_typed.is_some_and(|sent| session.status_since <= sent) {
+        return refuse(
+            ErrorCode::SessionBusy,
+            format!(
+                "Allele typed into session {name:?} and has not seen it start on that yet; \
+                 try again once it has. If it never does, the text is sitting unsent in its \
+                 input box and a person has to press Enter"
+            ),
+        );
+    }
+    match wants {
         WantsNow::Permission { .. } => return awaiting("a permission prompt"),
-        WantsNow::TerminalOnly {
-            ask: TerminalAsk::Plan,
-        } => return awaiting("a plan approval menu"),
-        WantsNow::TerminalOnly {
-            ask: TerminalAsk::Question,
-        } => return awaiting("a question menu"),
+        WantsNow::TerminalOnly { .. } => return awaiting("a menu"),
         WantsNow::Working { .. } => {
             return refuse(
                 ErrorCode::SessionBusy,
@@ -286,6 +322,15 @@ fn gate(session: &Session, has_terminal: bool) -> Result<(), Response> {
         .is_some_and(|c| c.kind.is_blocking())
     {
         return awaiting("a prompt");
+    }
+    if !terminal.accepts_paste {
+        return refuse(
+            ErrorCode::SessionNotLive,
+            format!(
+                "session {name:?}'s terminal is not accepting a paste, so there is no agent \
+                 input editor to type into"
+            ),
+        );
     }
     Ok(())
 }
@@ -325,6 +370,11 @@ impl Seen {
 /// because a quick turn can go `response_ready` → `running` →
 /// `response_ready` between two looks. An idle nudge is not evidence: it is
 /// what an unsent prompt sitting in the input box produces a minute later.
+///
+/// **Known limit:** Allele does not record which text a turn started on, so a
+/// turn the agent starts by itself inside the window (a background task
+/// finishing, say) also reads as confirmation. The `prompted` answer means
+/// "the session started a turn after the paste", not "it read this text".
 fn landed(before: Seen, after: Seen) -> bool {
     let moved =
         after.turn > before.turn || after.status != before.status || after.since > before.since;
@@ -346,34 +396,43 @@ async fn prompt_session(
         return response;
     }
 
-    // Gate and paste in one foreground update, so nothing can change the
-    // session between deciding it is safe and handing the bytes to delivery.
+    // Gate, record and paste in one foreground update, so nothing can change
+    // the session between deciding it is safe and handing the bytes over.
+    // With bracketed paste already on, `pty::deliver` writes on its first
+    // tick rather than after its 10 s wait for the mode.
     let delivered = update_in_main_window(this, cx, |state, _w, cx| {
         let session = claim(state, &session_id)?;
+        let pid = crate::away::live_pid(session, cx);
         let view = session.terminal_view.clone();
-        let has_terminal = view.as_ref().is_some_and(|v| v.read(cx).pty().is_some());
-        gate(session, has_terminal)?;
-        let Some(guard) = InFlight::take(&session_id) else {
-            return Err(Response::Error {
-                code: ErrorCode::SessionBusy,
-                message: format!(
-                    "session {:?} is already being prompted; try again once it has started",
-                    session.label
-                ),
-            });
+        let terminal = Terminal {
+            live: pid.is_some(),
+            heard: pid.is_some() && session.remote_control.heard_from_pid == pid,
+            accepts_paste: view
+                .as_ref()
+                .and_then(|v| v.read(cx).pty().map(pty::accepts_bracketed_paste))
+                .unwrap_or(false),
         };
+        let last_typed = state.decisions.last_sent.get(&session_id).copied();
+        gate(session, terminal, last_typed)?;
         let before = Seen::of(session);
         let name = session.label.clone();
         let Some(view) = view else {
             return Err(internal("terminal vanished while being checked".into()));
         };
+        // Shared with the decision sweep, so neither types on top of the
+        // other's unsent text, and a second prompt is refused until this one
+        // has visibly started — however long that takes.
+        state
+            .decisions
+            .last_sent
+            .insert(session_id.clone(), SystemTime::now());
         // No Enter retries. Creation can re-send Enter because nobody is at a
         // new session yet; here a retry that lands after the prompt has
         // started could answer the permission prompt it raised.
         pty::deliver(&view, prompt, &[], cx);
-        Ok((name, before, guard))
+        Ok((name, before))
     });
-    let (name, before, _guard) = match delivered {
+    let (name, before) = match delivered {
         Ok(Ok(v)) => v,
         Ok(Err(response)) => return response,
         Err(e) => return internal(e.to_string()),
@@ -415,7 +474,8 @@ async fn prompt_session(
         message: format!(
             "the prompt was typed into session {name:?}, but Allele did not see it start \
              within {}s. It is most likely sitting unsent in the input box; Enter in that \
-             session will send it. Do not send it again, or it will arrive twice",
+             session will send it. Further prompts are refused with session_busy until it \
+             does, so it cannot arrive twice",
             PROMPT_CONFIRM_TIMEOUT.as_secs()
         ),
     }
@@ -454,6 +514,13 @@ mod tests {
     // ── sessions_prompt (DEV-1382) ──
 
     use crate::session::{AttentionContext, SessionOrigin};
+
+    /// A live Claude at its prompt: process up, heard from, bracketed paste on.
+    const READY: Terminal = Terminal {
+        live: true,
+        heard: true,
+        accepts_paste: true,
+    };
 
     fn session(status: SessionStatus) -> Session {
         let now = SystemTime::now();
@@ -494,59 +561,61 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_finished_turn_or_a_fresh_session_takes_a_prompt() {
-        assert_eq!(
-            code(gate(&session(SessionStatus::ResponseReady), true)),
-            None
-        );
-        assert_eq!(code(gate(&session(SessionStatus::Idle), true)), None);
+    fn gate_ready(s: &Session) -> Option<ErrorCode> {
+        code(gate(s, READY, None))
     }
 
-    /// Claude's sixty-second idle nudge leaves the input box focused. After a
-    /// finished turn it is absorbed and the session stays `response_ready`;
-    /// it shows as `awaiting_input` only where no turn-complete came first (an
-    /// interrupted turn, say), and refusing there would strand the session
-    /// until a person typed.
     #[test]
-    fn the_idle_nudge_takes_a_prompt() {
-        let s = waiting_on(None, AttentionKind::Idle);
-        assert_eq!(code(gate(&s, true)), None);
+    fn a_finished_turn_or_a_fresh_session_takes_a_prompt() {
+        assert_eq!(gate_ready(&session(SessionStatus::ResponseReady)), None);
+        assert_eq!(gate_ready(&session(SessionStatus::Idle)), None);
+    }
+
+    /// F1 of the self-review: before the agent's first hook, `idle` is only
+    /// the value a session starts with, and it may be on a startup dialog
+    /// (MCP approval, trust, onboarding) where Enter picks an option.
+    #[test]
+    fn a_session_not_yet_heard_from_is_busy() {
+        let unheard = Terminal {
+            heard: false,
+            ..READY
+        };
+        for status in [SessionStatus::Idle, SessionStatus::ResponseReady] {
+            assert_eq!(
+                code(gate(&session(status), unheard, None)),
+                Some(ErrorCode::SessionBusy),
+                "{status:?}"
+            );
+        }
+    }
+
+    /// The idle nudge is told apart from a permission prompt by its text
+    /// alone, and a later notification can relabel an open prompt. So every
+    /// `awaiting_input` is refused, as the ticket's acceptance criteria say.
+    #[test]
+    fn every_awaiting_input_waits_for_a_person() {
+        for s in [
+            waiting_on(None, AttentionKind::Idle),
+            waiting_on(Some("Bash"), AttentionKind::Permission),
+            waiting_on(Some("ExitPlanMode"), AttentionKind::Question),
+            waiting_on(Some("AskUserQuestion"), AttentionKind::Question),
+            session(SessionStatus::AwaitingInput),
+        ] {
+            assert_eq!(
+                gate_ready(&s),
+                Some(ErrorCode::SessionAwaitingPerson),
+                "{:?}",
+                s.attention_context.as_ref().map(|c| c.kind)
+            );
+        }
     }
 
     #[test]
     fn a_working_session_is_busy() {
         assert_eq!(
-            code(gate(&session(SessionStatus::Running), true)),
+            gate_ready(&session(SessionStatus::Running)),
             Some(ErrorCode::SessionBusy)
         );
-    }
-
-    #[test]
-    fn a_permission_prompt_waits_for_a_person() {
-        let s = waiting_on(Some("Bash"), AttentionKind::Permission);
-        assert_eq!(code(gate(&s, true)), Some(ErrorCode::SessionAwaitingPerson));
-    }
-
-    #[test]
-    fn a_plan_or_question_menu_waits_for_a_person() {
-        for tool in ["ExitPlanMode", "AskUserQuestion"] {
-            let s = waiting_on(Some(tool), AttentionKind::Question);
-            assert_eq!(
-                code(gate(&s, true)),
-                Some(ErrorCode::SessionAwaitingPerson),
-                "{tool}"
-            );
-        }
-    }
-
-    /// The catch-up strip reads no context as "nothing blocked". Here that
-    /// would be a guess, and a wrong guess types Enter into a menu.
-    #[test]
-    fn waiting_on_something_unreadable_is_refused() {
-        let s = session(SessionStatus::AwaitingInput);
-        assert!(s.attention_context.is_none());
-        assert_eq!(code(gate(&s, true)), Some(ErrorCode::SessionAwaitingPerson));
     }
 
     /// A blocking context outside `awaiting_input` cannot happen today; if a
@@ -555,22 +624,61 @@ mod tests {
     fn a_menu_left_open_on_a_finished_turn_is_refused() {
         let mut s = waiting_on(Some("AskUserQuestion"), AttentionKind::Question);
         s.status = SessionStatus::ResponseReady;
-        assert_eq!(code(gate(&s, true)), Some(ErrorCode::SessionAwaitingPerson));
+        assert_eq!(gate_ready(&s), Some(ErrorCode::SessionAwaitingPerson));
     }
 
     #[test]
     fn a_session_with_no_process_is_not_live() {
         for status in [SessionStatus::Suspended, SessionStatus::Done] {
             assert_eq!(
-                code(gate(&session(status), true)),
+                gate_ready(&session(status)),
                 Some(ErrorCode::SessionNotLive),
                 "{status:?}"
             );
         }
+        let dead = Terminal {
+            live: false,
+            heard: false,
+            accepts_paste: false,
+        };
         assert_eq!(
-            code(gate(&session(SessionStatus::ResponseReady), false)),
+            code(gate(&session(SessionStatus::ResponseReady), dead, None)),
             Some(ErrorCode::SessionNotLive)
         );
+    }
+
+    /// F4: without bracketed paste the prompt would go in as keystrokes, and
+    /// only after `pty::deliver`'s 10 s wait — by when this answer is stale.
+    #[test]
+    fn a_terminal_not_accepting_a_paste_is_refused() {
+        let plain = Terminal {
+            accepts_paste: false,
+            ..READY
+        };
+        assert_eq!(
+            code(gate(&session(SessionStatus::ResponseReady), plain, None)),
+            Some(ErrorCode::SessionNotLive)
+        );
+    }
+
+    /// F2: text Allele typed — a decision's answer or an earlier prompt — may
+    /// still be in the input box until the session's status moves. Pasting
+    /// again would submit both as one message, however long ago it was sent.
+    #[test]
+    fn text_typed_and_not_yet_started_on_holds_the_session() {
+        let s = session(SessionStatus::ResponseReady);
+        let after_status = s.status_since + Duration::from_secs(90);
+        assert_eq!(
+            code(gate(&s, READY, Some(after_status))),
+            Some(ErrorCode::SessionBusy)
+        );
+        assert_eq!(
+            code(gate(&s, READY, Some(s.status_since))),
+            Some(ErrorCode::SessionBusy),
+            "a send in the same instant is not settled"
+        );
+        let before_status = s.status_since - Duration::from_secs(1);
+        assert_eq!(code(gate(&s, READY, Some(before_status))), None);
     }
 
     #[test]
@@ -595,16 +703,31 @@ mod tests {
         assert_eq!(max, 4_000);
     }
 
-    /// Two prompts in flight to one session would land in the same input box
-    /// and submit as one message, so the second is refused until the first
-    /// is settled either way.
+    /// F4: ESC, arrows, `\r` and Ctrl-C would be keystrokes in a menu.
     #[test]
-    fn a_second_prompt_in_flight_is_refused_until_the_first_settles() {
-        let first = InFlight::take("dev-1382-inflight").expect("free");
-        assert!(InFlight::take("dev-1382-inflight").is_none());
-        assert!(InFlight::take("dev-1382-other").is_some());
-        drop(first);
-        assert!(InFlight::take("dev-1382-inflight").is_some());
+    fn control_characters_other_than_newline_and_tab_are_refused() {
+        assert_eq!(code(check_prompt("line one\nline two\tok")), None);
+        for bad in ["\u{1b}[B\r", "go\r", "stop\u{3}", "x\u{7f}", "x\u{9b}"] {
+            assert_eq!(
+                code(check_prompt(bad)),
+                Some(ErrorCode::BadRequest),
+                "{bad:?}"
+            );
+        }
+    }
+
+    /// F5: a leading `/`, `!` or `#` is a command, bash mode or memory to
+    /// Claude Code — none a message, and `!` skips the permission prompt.
+    #[test]
+    fn a_prompt_that_claude_code_would_read_as_a_mode_is_refused() {
+        for bad in ["/exit", "!rm -rf target", "# remember this", "  /clear"] {
+            assert_eq!(
+                code(check_prompt(bad)),
+                Some(ErrorCode::BadRequest),
+                "{bad:?}"
+            );
+        }
+        assert_eq!(code(check_prompt("Review Desk: see /tmp/q41")), None);
     }
 
     fn seen(status: SessionStatus, turn: u64, since: SystemTime) -> Seen {

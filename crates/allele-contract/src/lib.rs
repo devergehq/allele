@@ -64,9 +64,9 @@ pub enum Request {
 ///
 /// | The session | Answer |
 /// |---|---|
-/// | working, or already being prompted | [`ErrorCode::SessionBusy`] |
-/// | on a permission prompt or a plan or question menu | [`ErrorCode::SessionAwaitingPerson`] |
-/// | suspended, done, or without a terminal | [`ErrorCode::SessionNotLive`] |
+/// | working, still starting up, or not yet started on text Allele typed | [`ErrorCode::SessionBusy`] |
+/// | `awaiting_input` of any kind, or a plan or question menu | [`ErrorCode::SessionAwaitingPerson`] |
+/// | suspended, done, or no agent input editor to paste into | [`ErrorCode::SessionNotLive`] |
 /// | started by a person | [`ErrorCode::NotDispatched`] |
 ///
 /// Allele does not queue a refused prompt. Retry on `session_busy`; give up on
@@ -75,7 +75,10 @@ pub enum Request {
 #[serde(default)]
 pub struct SessionsPrompt {
     pub session_id: String,
-    /// What to type. Not empty, and at most [`PROMPT_MAX_CHARS`] characters.
+    /// What to type. Not empty, at most [`PROMPT_MAX_CHARS`] characters, no
+    /// control characters but newline and tab, and not starting with `/`, `!`
+    /// or `#` (Claude Code's command, bash and memory modes). Otherwise
+    /// [`ErrorCode::BadRequest`].
     pub prompt: String,
 }
 
@@ -281,13 +284,15 @@ pub enum ErrorCode {
     PermissionDenied,
     BadRequest,
     Internal,
-    /// `sessions_prompt`: the session is working, or another prompt to it is
-    /// still being delivered. Try again once it finishes.
+    /// `sessions_prompt`: the session is working, still starting up, or has not
+    /// yet started on text Allele typed into it. Try again later.
     SessionBusy,
-    /// `sessions_prompt`: a permission prompt or a menu is waiting for a
-    /// person. Enter there would choose an option, so nothing is typed.
+    /// `sessions_prompt`: the session is `awaiting_input` (a permission prompt,
+    /// a menu, or an idle notice Allele cannot tell apart from one). Enter
+    /// there could choose an option, so nothing is typed.
     SessionAwaitingPerson,
-    /// `sessions_prompt`: no agent process to type into.
+    /// `sessions_prompt`: no agent process, or no input editor accepting a
+    /// paste, to type into.
     SessionNotLive,
     #[serde(other)]
     Unknown,

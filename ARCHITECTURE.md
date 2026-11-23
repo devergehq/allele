@@ -501,10 +501,12 @@ golden JSON fixtures that must round-trip (DEV-1254). `state.json` and
   `allele-mcp` is also granted `dispatch`.
 - **`sessions_prompt` types; it never answers (DEV-1382).** It is a legacy op
   as well, gated on ext/1 by `prompt`. `dispatch::manage::gate` decides before
-  anything is written, reading the catch-up strip's `wants_from_session`, and
-  refuses a running session (`session_busy`), any permission prompt or menu,
-  including one it cannot read (`session_awaiting_person`), and a session with
-  no process (`session_not_live`). Delivery is `pty::deliver` with no Enter
+  anything is written, reading the catch-up strip's `wants_from_session`. It
+  refuses a running session, one not yet heard from, or one that has not
+  started on text Allele typed (`decisions.last_sent`, shared with the decision
+  sweep) with `session_busy`; every `awaiting_input` with
+  `session_awaiting_person`; and a session with no process or no bracketed
+  paste with `session_not_live`. Delivery is `pty::deliver` with no Enter
   retries, because a retry that lands after the turn starts could grant the
   permission prompt the turn raised.
 
