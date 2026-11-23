@@ -54,6 +54,7 @@ agent binaries) is never redirected — a sandbox drives your real agent.
 To drive Allele from an agent, call the MCP tools rather than the shell:
   allele_projects_list      allele_sessions_create     allele_sessions_list
   allele_sessions_status    allele_sessions_interrupt  allele_sessions_discard
+  allele_sessions_prompt
 
 `allele sessions status <id>` is not a command. Before this guard existed it
 opened a second copy of the app, which shares ~/.allele/state.json with the

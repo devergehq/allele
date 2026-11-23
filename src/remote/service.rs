@@ -832,6 +832,8 @@ pub(crate) fn call_deadline(op: &Request) -> Duration {
     match op {
         Request::SessionsCreate(_) => Duration::from_secs(330),
         Request::SessionsDiscard { .. } => Duration::from_secs(120),
+        // The host waits up to 30 s to see the session start on it.
+        Request::SessionsPrompt { .. } => Duration::from_secs(60),
         Request::ProjectsList
         | Request::SessionsList
         | Request::SessionsStatus { .. }

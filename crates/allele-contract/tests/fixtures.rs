@@ -138,6 +138,48 @@ fn error_replies_round_trip() {
     }
 }
 
+/// DEV-1382: the op, its success, and the three refusals it adds.
+#[test]
+fn sessions_prompt_round_trips() {
+    let req: Request = round_trip("sessions_prompt");
+    let Request::SessionsPrompt(SessionsPrompt { session_id, prompt }) = req else {
+        panic!("not a sessions_prompt")
+    };
+    assert!(!session_id.is_empty());
+    assert!(!prompt.is_empty() && prompt.chars().count() <= PROMPT_MAX_CHARS);
+
+    let reply: Reply = round_trip("prompted");
+    let Reply::Prompted { session } = reply else {
+        panic!("not prompted")
+    };
+    assert_eq!(session.was_state, State::ResponseReady);
+    assert_eq!(session.now_state, State::Running);
+
+    for (name, code) in [
+        ("error_session_busy", ErrorCode::SessionBusy),
+        (
+            "error_session_awaiting_person",
+            ErrorCode::SessionAwaitingPerson,
+        ),
+        ("error_session_not_live", ErrorCode::SessionNotLive),
+    ] {
+        let reply: Reply = round_trip(name);
+        assert!(
+            matches!(reply, Reply::Error(ErrorReply { code: c, .. }) if c == code),
+            "{name}"
+        );
+    }
+}
+
+/// A client asks for `prompt` by that name.
+#[test]
+fn the_prompt_capability_is_spelled_prompt() {
+    assert_eq!(
+        serde_json::to_string(&Capability::Prompt).expect("encodes"),
+        "\"prompt\""
+    );
+}
+
 #[test]
 fn an_archived_status_round_trips() {
     let reply: Reply = round_trip("status_archived");

@@ -131,6 +131,10 @@ fn spawn_control_loop(
                         manage::spawn_interrupt(session_id, reply, this.clone(), cx);
                         continue;
                     }
+                    protocol::Request::SessionsPrompt { session_id, prompt } => {
+                        manage::spawn_prompt(session_id, prompt, reply, this.clone(), cx);
+                        continue;
+                    }
                     _ => {}
                 }
                 let response = update_in_main_window(&this, cx, |state, window, cx| {

@@ -168,7 +168,9 @@ pub(crate) fn deliver(
 /// It is **not** a sign that anything is listening: Claude Code sets this
 /// ~0.5s after launch, when it puts the terminal in raw mode, long before its
 /// input editor exists (DEV-604).
-fn accepts_bracketed_paste(terminal: &crate::terminal::pty_terminal::PtyTerminal) -> bool {
+pub(super) fn accepts_bracketed_paste(
+    terminal: &crate::terminal::pty_terminal::PtyTerminal,
+) -> bool {
     terminal
         .term
         .lock()

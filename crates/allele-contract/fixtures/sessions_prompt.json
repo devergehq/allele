@@ -1,0 +1,5 @@
+{
+  "op": "sessions_prompt",
+  "session_id": "9f2c41d0-6b1e-4c8a-9a51-3f7e2d1c0b84",
+  "prompt": "Review Desk: a question is waiting on review 41. Read it with `review-desk question 41`."
+}

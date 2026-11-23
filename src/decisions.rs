@@ -494,6 +494,19 @@ pub(crate) struct SessionView {
     /// The kind of attention the session is in, when it is `AwaitingInput`.
     pub attention: Option<crate::session::AttentionKind>,
     pub status_since: SystemTime,
+    /// The session's turn count (`Session::turn`).
+    pub turn: u64,
+}
+
+/// When Allele last typed into a session, and the session's turn count at
+/// that moment (DEV-1382).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Sent {
+    pub at: SystemTime,
+    /// A later turn proves the session started on something since. Sends
+    /// only go to `idle` or `response_ready`, and starting a turn from either
+    /// moves the count.
+    pub turn: u64,
 }
 
 /// The delivery rule. **Never types over a running turn**: only a session
@@ -506,16 +519,26 @@ pub(crate) struct SessionView {
 /// the agent's hook reports the turn it just started. A second sweep in that
 /// gap must not type again, so after a send the session is held until its
 /// status has changed since.
-pub(crate) fn target(session: Option<SessionView>, last_sent: Option<SystemTime>) -> Target {
+///
+/// **The idle nudge is not a change that proves anything** about a send
+/// (DEV-1382). From `Idle` the nudge is a real transition, so it moves
+/// `status_since` past the send — and it is exactly what text left unsent in
+/// the input box produces a minute later. So after a send the nudge counts as
+/// idle only once the turn count has moved past the send's, which is proof
+/// the session started on something.
+pub(crate) fn target(session: Option<SessionView>, last_sent: Option<Sent>) -> Target {
     let Some(s) = session else {
         return Target::Gone;
     };
     let idle = match s.status {
         SessionStatus::ResponseReady | SessionStatus::Idle => true,
-        SessionStatus::AwaitingInput => s.attention == Some(crate::session::AttentionKind::Idle),
+        SessionStatus::AwaitingInput => {
+            s.attention == Some(crate::session::AttentionKind::Idle)
+                && last_sent.is_none_or(|sent| s.turn > sent.turn)
+        }
         SessionStatus::Running | SessionStatus::Suspended | SessionStatus::Done => false,
     };
-    let settled = last_sent.is_none_or(|sent| s.status_since > sent);
+    let settled = last_sent.is_none_or(|sent| s.status_since > sent.at);
     if idle && s.heard && settled {
         Target::Deliver
     } else {
@@ -610,9 +633,11 @@ pub(crate) struct Decisions {
     /// `decisions.json` exists but could not be read at launch. Nothing is
     /// written over it, so a passing read error cannot cost the history.
     pub save_blocked: bool,
-    /// When an answer was last typed into each session. In memory only: after
+    /// When Allele last typed into each session: an answer from here, or a
+    /// `sessions_prompt` (DEV-1382), which records its sends here so that
+    /// neither pastes on top of the other's unsent text. In memory only: after
     /// a restart every session is past its last send.
-    pub last_sent: HashMap<String, SystemTime>,
+    pub last_sent: HashMap<String, Sent>,
 }
 
 impl Decisions {
@@ -779,6 +804,7 @@ impl AppState {
                     heard: pid.is_some() && s.remote_control.heard_from_pid == pid,
                     attention: s.attention_context.as_ref().map(|c| c.kind),
                     status_since: s.status_since,
+                    turn: s.turn,
                 }
             });
             match target(view, self.decisions.last_sent.get(&session_id).copied()) {
@@ -796,10 +822,15 @@ impl AppState {
                     ) else {
                         continue;
                     };
+                    let turn = session.map(|s| s.turn).unwrap_or_default();
                     crate::dispatch::pty::deliver(&tv, text, &[], cx);
-                    self.decisions
-                        .last_sent
-                        .insert(session_id.clone(), SystemTime::now());
+                    self.decisions.last_sent.insert(
+                        session_id.clone(),
+                        Sent {
+                            at: SystemTime::now(),
+                            turn,
+                        },
+                    );
                     self.decisions
                         .book
                         .settle(&session_id, Delivery::Sent { at: now });
@@ -1067,7 +1098,12 @@ mod tests {
             heard: true,
             attention: None,
             status_since: since,
+            turn: 0,
         })
+    }
+
+    fn sent(at: SystemTime) -> Sent {
+        Sent { at, turn: 0 }
     }
 
     #[test]
@@ -1120,6 +1156,35 @@ mod tests {
         assert_eq!(target(nudged, None), Target::Deliver);
     }
 
+    /// DEV-1382: from `Idle`, the nudge moves `status_since` past a send
+    /// without anything being sent, and it is what text left unsent in the
+    /// input box looks like a minute later. After any send, the nudge is held
+    /// rather than pasted on top of that text.
+    #[test]
+    fn the_idle_nudge_after_a_send_is_held() {
+        let sent = SystemTime::now() - Duration::from_secs(90);
+        let nudged = Some(SessionView {
+            attention: Some(AttentionKind::Idle),
+            ..view(SessionStatus::AwaitingInput, SystemTime::now()).unwrap()
+        });
+        assert_eq!(target(nudged, Some(self::sent(sent))), Target::Hold);
+    }
+
+    /// Round 3 of the DEV-1382 self-review: holding the nudge for good after
+    /// any send would strand every later answer to a session that was once
+    /// answered. A turn started since the send proves it was read.
+    #[test]
+    fn the_idle_nudge_after_a_started_send_counts_as_idle() {
+        let at = SystemTime::now() - Duration::from_secs(600);
+        let nudged = Some(SessionView {
+            attention: Some(AttentionKind::Idle),
+            turn: 4,
+            ..view(SessionStatus::AwaitingInput, SystemTime::now()).unwrap()
+        });
+        assert_eq!(target(nudged, Some(Sent { at, turn: 3 })), Target::Deliver);
+        assert_eq!(target(nudged, Some(Sent { at, turn: 4 })), Target::Hold);
+    }
+
     #[test]
     fn a_gone_session_is_gone() {
         assert_eq!(target(None, None), Target::Gone);
@@ -1132,13 +1197,19 @@ mod tests {
         let idle_since = SystemTime::now() - Duration::from_secs(30);
         let sent = SystemTime::now() - Duration::from_secs(1);
         assert_eq!(
-            target(view(SessionStatus::ResponseReady, idle_since), Some(sent)),
+            target(
+                view(SessionStatus::ResponseReady, idle_since),
+                Some(self::sent(sent))
+            ),
             Target::Hold
         );
         // It ran a turn and is idle again.
         let idle_again = SystemTime::now();
         assert_eq!(
-            target(view(SessionStatus::ResponseReady, idle_again), Some(sent)),
+            target(
+                view(SessionStatus::ResponseReady, idle_again),
+                Some(self::sent(sent))
+            ),
             Target::Deliver
         );
     }
