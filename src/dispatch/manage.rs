@@ -215,8 +215,9 @@ fn check_prompt(prompt: &str) -> Result<(), Response> {
 ///   forgets to clear it.
 ///
 /// Claude's sixty-second idle nudge (`awaiting_input`, kind `Idle`) is
-/// deliverable: the input box is still what has focus, and every session left
-/// alone for a minute reaches it. `away.rs` and `decisions::target` make the
+/// deliverable: the input box is still what has focus. After a finished turn
+/// the nudge is absorbed (`absorbs_idle_nudge`), so it shows here only where
+/// no turn-complete came first. `away.rs` and `decisions::target` make the
 /// same call.
 fn gate(session: &Session, has_terminal: bool) -> Result<(), Response> {
     let name = &session.label;
@@ -502,9 +503,11 @@ mod tests {
         assert_eq!(code(gate(&session(SessionStatus::Idle), true)), None);
     }
 
-    /// Claude's sixty-second idle nudge leaves the input box focused. Refusing
-    /// it would refuse every session left alone for a minute — the case
-    /// DEV-1382 was written for.
+    /// Claude's sixty-second idle nudge leaves the input box focused. After a
+    /// finished turn it is absorbed and the session stays `response_ready`;
+    /// it shows as `awaiting_input` only where no turn-complete came first (an
+    /// interrupted turn, say), and refusing there would strand the session
+    /// until a person typed.
     #[test]
     fn the_idle_nudge_takes_a_prompt() {
         let s = waiting_on(None, AttentionKind::Idle);
