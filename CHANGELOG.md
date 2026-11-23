@@ -14,6 +14,16 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 Changes on `master` awaiting the next tagged release.
 
 ### Added
+- **`sessions_prompt`: hand a dispatched session its next prompt (DEV-1382).** On the
+  control socket and as the MCP tool `allele_sessions_prompt`, and on `allele.ext/1`
+  behind a new `prompt` capability that any client may ask for. It types the prompt
+  into a session that has finished its turn, then waits up to 30 s to see the session
+  start on it (`prompted`, or `prompt_delivery_unconfirmed`). It refuses, and types
+  nothing, when the session is working or already being prompted (`session_busy`),
+  when a permission prompt or a plan or question menu is open
+  (`session_awaiting_person`), when it has no agent process (`session_not_live`), or
+  when a person started it (`not_dispatched`). Prompts are 1 to 4,000 characters.
+  Allele keeps no queue: retry on `session_busy`.
 - **A catch-up strip when you switch back into a session (DEV-1353).** Between the tabs
   and the terminal, never over it: your last prompt with one line of Claude's reply,
   the files changed since you last looked (with +/− counts), and what the session wants

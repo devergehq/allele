@@ -51,7 +51,38 @@ pub const BUILTIN_MCP_CLIENT_ID: &str = "allele-mcp";
 pub enum Request {
     Hello(Hello),
     Subscribe(Subscribe),
+    /// Needs [`Capability::Prompt`]. Also served on the legacy tier, with the
+    /// same shape (DEV-1382).
+    SessionsPrompt(SessionsPrompt),
 }
+
+/// `{"op":"sessions_prompt","session_id":"…","prompt":"…"}`: type `prompt`
+/// into a dispatched session and submit it (DEV-1382).
+///
+/// Delivered only to a session that is between turns with nothing on screen
+/// for a person to answer. Every other case is refused, and nothing is typed:
+///
+/// | The session | Answer |
+/// |---|---|
+/// | working, or already being prompted | [`ErrorCode::SessionBusy`] |
+/// | on a permission prompt or a plan or question menu | [`ErrorCode::SessionAwaitingPerson`] |
+/// | suspended, done, or without a terminal | [`ErrorCode::SessionNotLive`] |
+/// | started by a person | [`ErrorCode::NotDispatched`] |
+///
+/// Allele does not queue a refused prompt. Retry on `session_busy`; give up on
+/// the rest.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SessionsPrompt {
+    pub session_id: String,
+    /// What to type. Not empty, and at most [`PROMPT_MAX_CHARS`] characters.
+    pub prompt: String,
+}
+
+/// The longest `sessions_prompt.prompt` Allele accepts, in characters.
+/// Longer is refused with [`ErrorCode::BadRequest`]: point at an artifact
+/// instead of pasting it.
+pub const PROMPT_MAX_CHARS: usize = 4_000;
 
 /// `{"op":"hello", ...}`: the first line of an `ext/1` connection.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -80,8 +111,9 @@ pub struct ClientInfo {
 /// What a connection may do. Ops outside the granted set are answered with
 /// [`ErrorCode::CapabilityNotGranted`].
 ///
-/// Only `observe` and `dispatch` are granted in this rung. The others are
-/// named so a client can ask for them today and be told no.
+/// `observe` and `prompt` are granted to any client that asks; `dispatch`
+/// only to Allele's own MCP server. The others are named so a client can ask
+/// for them today and be told no.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum Capability {
@@ -100,6 +132,10 @@ pub enum Capability {
     /// `sessions_create`, `sessions_discard`, `sessions_interrupt`. Granted
     /// only to [`BUILTIN_MCP_CLIENT_ID`] until manifests exist.
     Dispatch,
+    /// `sessions_prompt` (DEV-1382). Granted to any client that asks: the
+    /// legacy tier already serves `sessions_interrupt` with no `hello` at all,
+    /// and a list of client ids would be a list of claims.
+    Prompt,
     #[serde(other)]
     Unknown,
 }
@@ -156,7 +192,7 @@ pub struct Filter {
 ///
 /// Replies to the legacy ops that are not reshaped (`projects`, `created`,
 /// `discarded`, `interrupted`) keep their legacy bodies and are not modelled
-/// here.
+/// here. `prompted` is the same on both tiers.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum Reply {
@@ -170,7 +206,25 @@ pub enum Reply {
     Status {
         session: SessionEntry,
     },
+    /// `sessions_prompt` delivered, and Allele saw the session start on it.
+    Prompted {
+        session: PromptedSession,
+    },
     Error(ErrorReply),
+}
+
+/// What `sessions_prompt` answers on success.
+///
+/// `now_state` is the first state Allele saw after the session left
+/// `was_state` — usually `running`, or `response_ready` for a turn that
+/// finished between two looks.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PromptedSession {
+    pub session_id: String,
+    pub name: String,
+    pub was_state: State,
+    pub now_state: State,
 }
 
 /// The answer to [`Hello`].
@@ -227,6 +281,14 @@ pub enum ErrorCode {
     PermissionDenied,
     BadRequest,
     Internal,
+    /// `sessions_prompt`: the session is working, or another prompt to it is
+    /// still being delivered. Try again once it finishes.
+    SessionBusy,
+    /// `sessions_prompt`: a permission prompt or a menu is waiting for a
+    /// person. Enter there would choose an option, so nothing is typed.
+    SessionAwaitingPerson,
+    /// `sessions_prompt`: no agent process to type into.
+    SessionNotLive,
     #[serde(other)]
     Unknown,
 }

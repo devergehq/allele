@@ -80,6 +80,7 @@ pub fn need(op: &Request) -> Need {
         }
         Request::SessionsCreate(_)
         | Request::SessionsInterrupt { .. }
+        | Request::SessionsPrompt { .. }
         | Request::SessionsDiscard { .. } => Need::Control,
         // A paired machine has no session here to ask as; `localise` strips
         // the caller, so these are refused whatever the grant (DEV-1267).
@@ -103,6 +104,7 @@ pub fn op_name(op: &Request) -> &'static str {
         Request::SessionsStatus { .. } => "sessions_status",
         Request::SessionsCreate(_) => "sessions_create",
         Request::SessionsInterrupt { .. } => "sessions_interrupt",
+        Request::SessionsPrompt { .. } => "sessions_prompt",
         Request::SessionsDiscard { .. } => "sessions_discard",
         Request::DecisionsPost(_) => "decisions_post",
         Request::DecisionsList { .. } => "decisions_list",
@@ -715,6 +717,11 @@ mod tests {
         let control = [
             Request::SessionsInterrupt {
                 session_id: "s".into(),
+            },
+            // DEV-1382: typing into a session changes it.
+            Request::SessionsPrompt {
+                session_id: "s".into(),
+                prompt: "p".into(),
             },
             Request::SessionsDiscard {
                 session_id: "s".into(),

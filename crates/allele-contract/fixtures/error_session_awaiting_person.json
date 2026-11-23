@@ -1,0 +1,5 @@
+{
+  "result": "error",
+  "code": "session_awaiting_person",
+  "message": "session \"Review acme/portal#514\" is waiting on a permission prompt; Enter there would answer it, so nothing was typed"
+}

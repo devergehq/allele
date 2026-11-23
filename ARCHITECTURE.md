@@ -497,8 +497,16 @@ golden JSON fixtures that must round-trip (DEV-1254). `state.json` and
   queue fed with `try_send`. A full queue drops the subscriber with `lagged`.
   Socket writes happen on the connection's own thread, under a write timeout.
 - **Capabilities contain accidents and are not security.** Until manifests
-  exist, every client is granted `observe` at most, and `allele-mcp` is also
-  granted `dispatch`.
+  exist, every client is granted `observe` and `prompt` at most, and
+  `allele-mcp` is also granted `dispatch`.
+- **`sessions_prompt` types; it never answers (DEV-1382).** It is a legacy op
+  as well, gated on ext/1 by `prompt`. `dispatch::manage::gate` decides before
+  anything is written, reading the catch-up strip's `wants_from_session`, and
+  refuses a running session (`session_busy`), any permission prompt or menu,
+  including one it cannot read (`session_awaiting_person`), and a session with
+  no process (`session_not_live`). Delivery is `pty::deliver` with no Enter
+  retries, because a retry that lands after the turn starts could grant the
+  permission prompt the turn raised.
 
 ## 5. Extension recipes
 

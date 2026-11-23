@@ -1,0 +1,9 @@
+{
+  "result": "prompted",
+  "session": {
+    "session_id": "9f2c41d0-6b1e-4c8a-9a51-3f7e2d1c0b84",
+    "name": "Review acme/portal#514",
+    "was_state": "response_ready",
+    "now_state": "running"
+  }
+}
