@@ -87,12 +87,23 @@ pub(crate) fn is_hello(line: &str) -> bool {
 }
 
 /// What a client id may be granted. No manifests exist yet, so this is
-/// `observe` for everyone, plus `dispatch` for Allele's own MCP server.
+/// `observe` and `prompt` for everyone, plus `dispatch` for Allele's own MCP
+/// server.
+///
+/// `prompt` goes to anyone who asks (DEV-1382). The legacy tier already serves
+/// `sessions_interrupt` to any connection without a `hello`, `client.id` is a
+/// claim, and the op refuses a session a person started or has to answer
+/// first. A list of ids allowed to prompt would add ceremony and no
+/// protection.
 fn grantable(client_id: &str) -> &'static [Capability] {
     if client_id == BUILTIN_MCP_CLIENT_ID {
-        &[Capability::Observe, Capability::Dispatch]
+        &[
+            Capability::Observe,
+            Capability::Dispatch,
+            Capability::Prompt,
+        ]
     } else {
-        &[Capability::Observe]
+        &[Capability::Observe, Capability::Prompt]
     }
 }
 
@@ -180,6 +191,7 @@ pub(crate) fn handle(
         Request::SessionsCreate(_)
         | Request::SessionsDiscard { .. }
         | Request::SessionsInterrupt { .. } => Capability::Dispatch,
+        Request::SessionsPrompt { .. } => Capability::Prompt,
         // DEV-1267 adds no capability of its own. The decision ops name a
         // session by its id, so they go behind the grant only Allele's own
         // MCP server holds rather than behind `observe`.
@@ -643,6 +655,33 @@ mod tests {
         assert_eq!(reply["code"], "capability_not_granted");
     }
 
+    /// DEV-1382: `prompt` is granted to any client that asks, unlike
+    /// `dispatch`, and a granted connection reaches the op.
+    #[test]
+    fn any_client_that_asks_for_prompt_gets_it() {
+        let rig = rig();
+        let mut c = Client::connect(&rig);
+        let reply = c.hello("review-desk", r#"["observe","prompt","dispatch"]"#);
+        assert_eq!(reply["granted"], serde_json::json!(["observe", "prompt"]));
+        let reply = c.call(r#"{"op":"sessions_prompt","session_id":"s","prompt":"hi"}"#);
+        assert_ne!(reply["code"], "capability_not_granted", "{reply}");
+    }
+
+    /// DEV-1382: a connection that did not ask for `prompt` cannot prompt —
+    /// not even Allele's own MCP server, whose `dispatch` does not imply it.
+    #[test]
+    fn prompting_without_prompt_is_not_granted() {
+        let rig = rig();
+        let mut c = Client::connect(&rig);
+        c.hello(BUILTIN_MCP_CLIENT_ID, r#"["observe","dispatch"]"#);
+        let reply = c.call(r#"{"op":"sessions_prompt","session_id":"s","prompt":"hi"}"#);
+        assert_eq!(reply["code"], "capability_not_granted");
+        assert!(reply["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("\"prompt\""));
+    }
+
     #[test]
     fn activity_is_not_served_and_says_so() {
         let rig = rig();
@@ -764,6 +803,9 @@ mod tests {
             Legacy::PermissionDenied,
             Legacy::BadRequest,
             Legacy::Internal,
+            Legacy::SessionBusy,
+            Legacy::SessionAwaitingPerson,
+            Legacy::SessionNotLive,
         ] {
             let wire = serde_json::to_value(code).expect("encodes");
             let parsed: contract::ErrorCode = serde_json::from_value(wire).expect("parses");

@@ -221,6 +221,33 @@ pub(crate) fn tool_definitions() -> Value {
             },
         },
         {
+            "name": "allele_sessions_prompt",
+            "description":
+                "Type a prompt into a dispatched allele session that has finished its turn, \
+                 and submit it. Waits until the session starts on it. Refuses rather than \
+                 types when the session is working, still starting, or was typed into \
+                 moments ago (session_busy: clears by itself, try again), when only a person \
+                 can clear it — awaiting_input of any kind, a startup dialog, or text left \
+                 unsent (session_awaiting_person: fall back), when it has no agent process \
+                 (session_not_live), or when a human started it (not_dispatched). Allele \
+                 never queues a refused prompt.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "The allele session id." },
+                    "prompt": {
+                        "type": "string",
+                        "description": "What to type. 1 to 4,000 characters, no control \
+                                        characters but newline and tab, not starting with \
+                                        /, ! or #. Point at an artifact rather than pasting \
+                                        a long brief.",
+                    },
+                },
+                "required": ["session_id", "prompt"],
+                "additionalProperties": false,
+            },
+        },
+        {
             "name": "allele_sessions_interrupt",
             "description":
                 "Stop what a dispatched allele session is currently doing — the equivalent of \
@@ -330,6 +357,11 @@ fn call_tool(params: &Value) -> Result<Value, String> {
             "op": "sessions_interrupt",
             "session_id": args.get("session_id").and_then(Value::as_str).unwrap_or_default(),
         }),
+        "allele_sessions_prompt" => json!({
+            "op": "sessions_prompt",
+            "session_id": args.get("session_id").and_then(Value::as_str).unwrap_or_default(),
+            "prompt": args.get("prompt").and_then(Value::as_str).unwrap_or_default(),
+        }),
         "allele_sessions_discard" => json!({
             "op": "sessions_discard",
             "session_id": args.get("session_id").and_then(Value::as_str).unwrap_or_default(),
@@ -406,7 +438,9 @@ fn hello_line() -> Value {
         "op": "hello",
         "contract": allele_contract::CONTRACT,
         "client": { "id": allele_contract::BUILTIN_MCP_CLIENT_ID, "version": env!("CARGO_PKG_VERSION") },
-        "capabilities": ["observe", "dispatch"],
+        // `prompt` for `allele_sessions_prompt` (DEV-1382). An Allele that
+        // predates it parses the unknown name and simply does not grant it.
+        "capabilities": ["observe", "dispatch", "prompt"],
     })
 }
 
@@ -544,6 +578,7 @@ mod tests {
                 "allele_sessions_status"
                 | "allele_sessions_discard"
                 | "allele_sessions_interrupt" => json!({ "session_id": "x" }),
+                "allele_sessions_prompt" => json!({ "session_id": "x", "prompt": "go" }),
                 "allele_sessions_create" => {
                     json!({ "project": "p", "name": "n", "prompt": "go" })
                 }

@@ -1,0 +1,5 @@
+{
+  "result": "error",
+  "code": "session_not_live",
+  "message": "session \"Review acme/portal#514\" is suspended; there is no agent process to type into"
+}

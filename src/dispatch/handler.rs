@@ -34,7 +34,9 @@ pub fn handle(
         // which takes seconds, so they answer on the socket's reply channel
         // directly rather than blocking the drain. See `dispatch::create`
         // and `dispatch::manage`.
-        Request::SessionsCreate(_) | Request::SessionsInterrupt { .. } => Response::Error {
+        Request::SessionsCreate(_)
+        | Request::SessionsInterrupt { .. }
+        | Request::SessionsPrompt { .. } => Response::Error {
             code: ErrorCode::Internal,
             message: "this op must be routed to dispatch::create or dispatch::manage".to_string(),
         },

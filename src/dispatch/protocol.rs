@@ -37,6 +37,10 @@ pub enum Request {
     SessionsDiscard { session_id: String },
     /// Stop whatever a dispatched session is currently doing.
     SessionsInterrupt { session_id: String },
+    /// Type a prompt into a dispatched session that is between turns, and
+    /// submit it (DEV-1382). See `allele_contract::SessionsPrompt` for when it
+    /// refuses.
+    SessionsPrompt { session_id: String, prompt: String },
     /// Post a question for the developer; returns at once (DEV-1267).
     DecisionsPost(crate::decisions::PostRequest),
     /// The calling session's own questions, with any answers (DEV-1267).
@@ -177,6 +181,11 @@ pub enum Response {
         session: DiscardedSession,
     },
     Interrupted {
+        session: InterruptedSession,
+    },
+    /// `sessions_prompt` (DEV-1382). The same states-on-both-sides shape as
+    /// `interrupted`.
+    Prompted {
         session: InterruptedSession,
     },
     Error {
@@ -404,6 +413,17 @@ pub enum ErrorCode {
     /// Malformed request, unknown project field, etc.
     BadRequest,
     Internal,
+    /// `sessions_prompt`: the session is working, still starting up, or was
+    /// typed into moments ago (DEV-1382). Clears by itself, so the caller
+    /// retries; Allele keeps no queue of its own, for the reason DEV-430 gave.
+    SessionBusy,
+    /// `sessions_prompt`: only a person can clear what the session is waiting
+    /// on — `awaiting_input` of any kind, a menu, a startup dialog, or text
+    /// typed earlier and left unsent (DEV-1382). Nothing is typed.
+    SessionAwaitingPerson,
+    /// `sessions_prompt`: suspended, done, or no agent input editor accepting a
+    /// paste (DEV-1382).
+    SessionNotLive,
 }
 
 /// The answer to any op naming a session Allele has no record of.
@@ -462,6 +482,33 @@ mod tests {
         let line = serde_json::to_string(&r).expect("serialises");
         assert_eq!(line, r#"{"op":"sessions_discard","session_id":"b1413d28"}"#);
         assert_eq!(serde_json::from_str::<Request>(&line).expect("parses"), r);
+    }
+
+    /// DEV-1382: the spelling Review Desk is written against.
+    #[test]
+    fn prompt_round_trips_over_the_wire() {
+        let r = Request::SessionsPrompt {
+            session_id: "s1".into(),
+            prompt: "a question is waiting".into(),
+        };
+        let line = serde_json::to_string(&r).expect("serialises");
+        assert_eq!(
+            line,
+            r#"{"op":"sessions_prompt","session_id":"s1","prompt":"a question is waiting"}"#
+        );
+        assert_eq!(serde_json::from_str::<Request>(&line).expect("parses"), r);
+
+        let answer = Response::Prompted {
+            session: InterruptedSession {
+                session_id: "s1".into(),
+                name: "Review".into(),
+                was_state: SessionState::ResponseReady,
+                now_state: SessionState::Running,
+            },
+        };
+        let encoded = serde_json::to_value(&answer).expect("serialises");
+        assert_eq!(encoded["result"], "prompted");
+        assert_eq!(encoded["session"]["was_state"], "response_ready");
     }
 
     #[test]
