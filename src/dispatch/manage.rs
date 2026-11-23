@@ -276,6 +276,24 @@ fn gate(
                 format!("session {name:?} has no live agent process to type into"),
             )
         }
+        _ => {}
+    }
+    if !terminal.heard {
+        if older_than(session.status_since, STARTUP_GRACE) {
+            return awaiting(
+                "a startup dialog, most likely — Allele has not heard from its agent in over \
+                 two minutes",
+            );
+        }
+        return refuse(
+            ErrorCode::SessionBusy,
+            format!(
+                "session {name:?} has not finished starting — Allele has not heard from its \
+                 agent yet; try again shortly"
+            ),
+        );
+    }
+    match session.status {
         SessionStatus::Running => {
             return refuse(
                 ErrorCode::SessionBusy,
@@ -300,21 +318,8 @@ fn gate(
             }
         }
         SessionStatus::Idle | SessionStatus::ResponseReady => {}
-    }
-    if !terminal.heard {
-        if older_than(session.status_since, STARTUP_GRACE) {
-            return awaiting(
-                "a startup dialog, most likely — Allele has not heard from its agent in over \
-                 two minutes",
-            );
-        }
-        return refuse(
-            ErrorCode::SessionBusy,
-            format!(
-                "session {name:?} has not finished starting — Allele has not heard from its \
-                 agent yet; try again shortly"
-            ),
-        );
+        // Refused above, before the heard check.
+        SessionStatus::Suspended | SessionStatus::Done => {}
     }
     if let Some(sent) = last_typed.filter(|sent| session.status_since <= *sent) {
         if older_than(sent, PROMPT_CONFIRM_TIMEOUT) {
@@ -438,7 +443,7 @@ async fn prompt_session(
                 .and_then(|v| v.read(cx).pty().map(pty::accepts_bracketed_paste))
                 .unwrap_or(false),
         };
-        let last_typed = state.decisions.last_sent.get(&session_id).copied();
+        let last_typed = state.decisions.last_sent.get(&session_id).map(|s| s.at);
         gate(session, terminal, last_typed, SystemTime::now())?;
         let before = Seen::of(session);
         let name = session.label.clone();
@@ -448,10 +453,13 @@ async fn prompt_session(
         // Shared with the decision sweep, so neither types on top of the
         // other's unsent text, and a second prompt is refused until this one
         // has visibly started — however long that takes.
-        state
-            .decisions
-            .last_sent
-            .insert(session_id.clone(), SystemTime::now());
+        state.decisions.last_sent.insert(
+            session_id.clone(),
+            crate::decisions::Sent {
+                at: SystemTime::now(),
+                turn: before.turn,
+            },
+        );
         // No Enter retries. Creation can re-send Enter because nobody is at a
         // new session yet; here a retry that lands after the prompt has
         // started could answer the permission prompt it raised.
@@ -734,6 +742,27 @@ mod tests {
 
     /// N2: a session unheard from for longer than an agent takes to boot is
     /// on a startup dialog, which only a person can dismiss.
+    /// Round 3, R2: a resumed session reads `running` before its agent's first
+    /// hook, so the heard check has to come before the status arms or a
+    /// resume stuck on a dialog would answer `session_busy` for good.
+    #[test]
+    fn a_resumed_session_on_a_dialog_needs_a_person_too() {
+        let unheard = Terminal {
+            heard: false,
+            ..READY
+        };
+        let s = session(SessionStatus::Running);
+        let later = s.status_since + STARTUP_GRACE + Duration::from_secs(1);
+        assert_eq!(
+            code(gate(&s, unheard, None, later)),
+            Some(ErrorCode::SessionAwaitingPerson)
+        );
+        assert_eq!(
+            code(gate(&s, unheard, None, s.status_since)),
+            Some(ErrorCode::SessionBusy)
+        );
+    }
+
     #[test]
     fn a_session_unheard_from_past_startup_needs_a_person() {
         let unheard = Terminal {
