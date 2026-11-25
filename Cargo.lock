@@ -170,7 +170,7 @@ dependencies = [
 
 [[package]]
 name = "allele"
-version = "0.7.2"
+version = "0.8.0"
 dependencies = [
  "age",
  "alacritty_terminal",

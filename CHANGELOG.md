@@ -13,6 +13,8 @@ features and possibly breaking changes, `PATCH` bumps are fixes only.
 
 Changes on `master` awaiting the next tagged release.
 
+## [0.8.0] - 2026-11-26
+
 ### Added
 - **`sessions_prompt`: hand a dispatched session its next prompt (DEV-1382).** On the
   control socket and as the MCP tool `allele_sessions_prompt`, and on `allele.ext/1`
@@ -126,14 +128,6 @@ Changes on `master` awaiting the next tagged release.
   Allele's own echo latency drops from ~21 ms mean (p99 35 ms) to under 0.3 ms. Each
   keystroke adds at most one frame; the 30 frames/s cap is otherwise unchanged.
 
-### Security
-- **Agent-written links are confined to the session's clone.** Links in rich-mode assistant
-  text are now clickable. A file or diff link the agent wrote opens only if it resolves
-  (symlinks included, checked at click time) inside that session's clone; anything else is
-  refused with the reason in the notice banner. Hovering a link shows its full destination,
-  so link text cannot disguise where it goes. `file://`, `vscode://` and other custom
-  schemes are inert. Links you open yourself are unchanged.
-
 ### Fixed
 - **A finished session no longer holds its terminal open (DEV-1377).** A session whose
   agent exited kept one `/dev/ptmx` descriptor for as long as it stayed in the sidebar,
@@ -192,6 +186,14 @@ Changes on `master` awaiting the next tagged release.
 - Agent configuration changed in the Settings window was never marked for
   persistence, so it could be lost on quit unless some unrelated change happened to
   write `settings.json` first.
+
+### Security
+- **Agent-written links are confined to the session's clone.** Links in rich-mode assistant
+  text are now clickable. A file or diff link the agent wrote opens only if it resolves
+  (symlinks included, checked at click time) inside that session's clone; anything else is
+  refused with the reason in the notice banner. Hovering a link shows its full destination,
+  so link text cannot disguise where it goes. `file://`, `vscode://` and other custom
+  schemes are inert. Links you open yourself are unchanged.
 
 ## [0.7.2] - 2026-10-13
 
@@ -649,7 +651,8 @@ merge batch. Core proof-of-concept complete and runnable.
   browser with merge/delete actions.
 - Per-session drawer terminal panel and auto-naming of sessions from the first prompt.
 
-[Unreleased]: https://github.com/devergehq/allele/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/devergehq/allele/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/devergehq/allele/compare/v0.7.2...v0.8.0
 [0.7.2]: https://github.com/devergehq/allele/compare/v0.7.1...v0.7.2
 [0.7.1]: https://github.com/devergehq/allele/compare/v0.7.0...v0.7.1
 [0.7.0]: https://github.com/devergehq/allele/compare/v0.6.0...v0.7.0
